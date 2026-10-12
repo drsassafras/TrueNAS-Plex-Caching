@@ -1,123 +1,65 @@
-# TrueNAS-Plex-Caching
+# Plex Cache for TrueNAS
 
-**Superspeed your HDD-based Plex server!**
+**Superspeed your HDD-based Plex server.**
 
-This project is a collection of scripts designed to dramatically improve Plex performance on **TrueNAS SCALE** systems that primarily use **HDD storage**. With intelligent preloading and caching, your Plex library can feel almost as fast as if it were entirely stored on SSDs—without the cost.
+Plex Cache is a small app for TrueNAS that keeps the parts of your Plex library you're about to watch in ZFS's caches — RAM (ARC) and SSD (L2ARC) — so playback starts, seeks and moves to the next episode at cache speed instead of waiting for hard drives.
 
----
+Everything is set up in a web UI: what to cache, how much, and when. Health checks tell you whether your system is set up to benefit, and which features to turn on.
 
-## What This Does
+It replaces the old scripts in [`legacy/`](legacy/). Tautulli isn't needed any more.
 
-These scripts optimize how Plex reads media by leveraging:
+## Features
 
-- **System RAM**
-- **ZFS ARC**
-- **ZFS L2ARC (optional but recommended)**
+| Feature | What it does | Needs |
+|---|---|---|
+| **Library warm-up** | On a schedule, reads the first few seconds of every movie, episode and track so they sit in L2ARC. Press play on anything and it starts from SSD. | An SSD added to the media pool as a cache (L2ARC) device |
+| **Now-playing preload** | When someone presses play, reads ahead of them so skipping and scrubbing come from cache. | Works best with `primarycache=all` on the media dataset |
+| **Next-episode prefetch** | While an episode plays, reads the start of the next one — using Plex's own episode order, so it crosses seasons and works with any folder layout. | Nothing extra |
 
-The goal is to eliminate HDD seek latency during:
-- Initial playback
-- Skipping forward/backward
-- Episode transitions
+The UI also shows:
 
----
+- **Health**: Plex connection, whether each library's files are actually readable by the app, the media dataset and pool, L2ARC devices and size, dataset cache settings (with the exact command to fix them), and measured disk speed.
+- **Activity**: what's playing and what's being cached for it, every warm-up run with its hit rate and how much L2ARC grew, and a live event log.
+- **Space estimate**: move the "seconds to cache" sliders and see instantly how much L2ARC that needs. If it won't fit, seconds are reduced automatically.
 
-## Scripts Overview
+## Install on TrueNAS
 
-### 1. `preload_current_media.sh`
+TrueNAS doesn't support third-party app catalogs since 24.10, so this installs as a custom app.
 
-**Works even with zero SSDs**
+1. **Create a dataset for settings**, e.g. `tank/apps/plex-cache`, and give the `apps` user (568) read/write access.
+2. **Find your Plex app's media mounts.** In Apps → Plex → Edit, note each *host path* and the *mount path* inside the container (for example `/mnt/tank/plexfiles` → `/data`).
+3. **Apps → Discover Apps → ⋮ → Install via YAML**, name it `plex-cache`, and paste [`compose.yaml`](compose.yaml). Change the lines marked `CHANGE ME`:
+   - the settings dataset → `/config`
+   - each media host path → **the same mount path Plex uses**, read-only. Add a line per mount if Plex has several.
+4. Open `http://<your-nas-ip>:8642`.
+5. In **Settings**, enter your Plex address (your NAS IP with port 32400 — not 127.0.0.1) and choose **Sign in with Plex**. Optionally add a TrueNAS API key (user menu → API Keys) so Health can see your cache devices and dataset settings. The app only reads from the API.
+6. Check **Health**, then switch features on in **Features**.
 
-- Triggered by **Tautulli** when playback starts
-- Waits for Plex to finish its initial buffering
-- Reads the *entire currently playing file* into memory/L2ARC
-- Makes skip-ahead and rewind operations instant
-- Ideal for HDD-only systems
+Coming from the scripts? **Settings → Import plex-l2arc.conf** carries your values over. Then remove the Tautulli script notifications and the cron job.
 
-This ensures that once playback has started, all seeking happens at RAM or SSD speed instead of HDD speed.
+## How it works
 
----
+Plex doesn't read a whole file at once — it buffers a little ahead of playback and reads more as needed. The disk delays you feel are seeks: starting a title, skipping, moving to the next episode. Plex Cache reads those parts *before* Plex asks for them, so ZFS already has them in RAM or on SSD.
 
-### 2. Next-Episode Preload Script (TV)
+- Bitrates come from Plex per file (or are calculated from size and duration when Plex has none), so a 4K remux gets more bytes cached than a 720p episode for the same number of seconds.
+- Background work is paced (by default 10% of disk time) and pauses while several streams are playing. "Run now" runs at full speed.
+- A read counts as "already cached" when it runs at least 4× faster than your measured disk speed. Unreadable files are reported, never counted as hits.
+- L2ARC fills gradually and is evicted over time, which is why warm-up runs on a schedule. Size your L2ARC larger than the estimate so cached data lasts longer — even a modest SSD helps.
 
-- Preloads the *next episode* while the current one is playing
-- Ensures smooth episode transitions
-- Eliminates delays when skipping intros or credits
-- Especially useful without L2ARC, but still helpful with it
+## Requirements
 
----
+- TrueNAS SCALE / Community Edition 24.10 or later (Docker-based apps)
+- Plex Media Server reachable from the NAS
+- For Library warm-up: at least one cache (L2ARC) device on the media pool, and `secondarycache=all` on the media dataset
 
-### 3. Library-Wide L2ARC Preloader (SSD Required)
+The app is pure Python with no third-party dependencies. It runs as the `apps` user with all capabilities dropped and media mounted read-only.
 
-To take things even further, this script:
+## Development
 
-- Requires **at least one SSD configured as L2ARC**
-- Preloads the *initial playback segments* of your entire Plex library
-- Allows Plex to start playback at SSD speed for most media
-- Keeps frequently accessed content hot in cache
+```sh
+python3 -m unittest tests.test_plexcache -v   # tests use fake Plex and TrueNAS servers
+python3 tests/demo.py                          # UI demo at http://127.0.0.1:8642 with sample data
+docker build -t plex-cache .
+```
 
----
-
-## Why This Works
-
-Plex does **not** read entire media files at once. Instead, it:
-- Buffers a limited window ahead of playback
-- Reads more data only when needed
-
-These scripts take advantage of that behavior by ensuring:
-- The data Plex is most likely to need is already cached
-- Disk I/O happens *before* Plex asks for it
-- HDD latency is avoided during user interaction
-
-In many cases, playback and seeking are served directly from **RAM**, which can be even faster than SSDs.
-
----
-
-## Result
-
-Your Plex experience becomes:
-
-- ⚡ Instant playback
-- ⏩ Smooth seeking and skipping
-- 📺 Seamless episode transitions
-- 💰 SSD-like performance at HDD prices
-
----
-
-## Important Notes on L2ARC Sizing
-
-The L2ARC preload script reports how much cache space it *needs*, but:
-
-- That number includes **reserved space**
-- Cached data will naturally be evicted over time as the system is used
-- This is why the preload script runs **periodically**
-
-### Recommendations
-
-- Size your L2ARC **larger than the reported requirement**
-- Smaller L2ARC caches will evict preloaded data faster
-- Even a modest SSD is far cheaper than storing your entire library on SSDs
-
-Buy whatever SSD size you can afford—every bit helps.
-
----
-
-## Setup & Configuration
-
-Each script includes detailed setup instructions at the **top of the file**, including:
-
-- Path translation configuration
-- Tautulli trigger setup
-- Recommended ZFS dataset settings
-
-⚠️ **Be sure to read the script headers carefully before running them.**
-
----
-
-## Final Thoughts
-
-With these scripts:
-- You keep the storage density and low cost of HDDs
-- You gain near-SSD (or better) playback performance
-- You let ZFS and RAM do what they do best
-
-Enjoy your newly supercharged Plex server! 🚀
+Configuration lives in `$PLEXCACHE_CONFIG/settings.json` (default `/config`). `PLEX_URL`, `PLEX_TOKEN`, `TRUENAS_URL` and `TRUENAS_API_KEY` environment variables seed it on first start.

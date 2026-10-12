@@ -1,0 +1,6 @@
+.git
+.github
+legacy
+tests
+**/__pycache__
+*.pyc

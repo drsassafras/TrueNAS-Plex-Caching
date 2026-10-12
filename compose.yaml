@@ -1,0 +1,27 @@
+# Plex Cache for TrueNAS — paste into Apps → Discover Apps → ⋮ → Install via YAML.
+#
+# Before installing, change the three paths marked CHANGE ME:
+#   1. A dataset for the app's settings (owned by user "apps", 568).
+#   2. Your media dataset(s), mounted at the SAME path your Plex app uses
+#      inside its container. Plex's own app settings show these mounts.
+#      Add one line per mount if Plex has several (Movies, TV, Music...).
+#
+# Everything else (Plex address, sign-in, TrueNAS API key, features) is set
+# in the web UI at http://<your-nas-ip>:8642 after it starts.
+services:
+  plex-cache:
+    image: ghcr.io/drsassafras/plex-cache:latest
+    container_name: plex-cache
+    restart: unless-stopped
+    user: "568:568"
+    ports:
+      - "8642:8642"
+    environment:
+      TZ: America/Toronto            # your time zone, so schedules run at local time
+    volumes:
+      - /mnt/tank/apps/plex-cache:/config        # CHANGE ME: settings and history
+      - /mnt/tank/plexfiles:/data:ro             # CHANGE ME: media, same container path as Plex
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
