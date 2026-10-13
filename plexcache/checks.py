@@ -19,6 +19,14 @@ def _fmt_bytes(n: float | None) -> str:
     return f"{n:.0f} B"
 
 
+def fmt_ratio(r: float) -> str:
+    """Hit ratios cluster near 100%, so show a decimal there instead of rounding up."""
+    pct = r * 100
+    if pct >= 99.95:
+        return "over 99.9%"
+    return f"{pct:.1f}%" if pct >= 90 else f"{pct:.0f}%"
+
+
 def item(status: str, title: str, detail: str = "", fix: str = "", fix_cmd: str = "") -> dict:
     return {"status": status, "title": title, "detail": detail, "fix": fix, "fix_cmd": fix_cmd}
 
@@ -94,9 +102,58 @@ def check_media(app) -> dict:
     items = []
     if not rows:
         items.append(item("info", "No libraries checked yet", "Connect Plex first."))
+    else:
+        items.extend(_mount_summary(app))
     return {"id": "media", "title": "Media access",
             "hint": "For each library, a real file is opened through this app's mounts. Mount your media at the same path Plex uses.",
             "items": items, "table": rows}
+
+
+def _top_folder(path: str) -> str:
+    parts = [p for p in path.split("/") if p]
+    return "/" + parts[0] if parts else "/"
+
+
+def _mount_summary(app) -> list[dict]:
+    """Explain mount problems once, at the level of the folders Plex mounts.
+
+    Plex's libraries usually live under a few top-level container folders
+    (/data, /media, /music...). Each of those must exist here with content.
+    An empty folder almost always means the host path in the app's YAML
+    doesn't exist: Docker silently creates an empty directory for it.
+    """
+    roots: dict[str, str] = {}
+    for lib in app.libraries:
+        if lib["kind"] and not lib["excluded"]:
+            for loc in lib["locations"]:
+                root = _top_folder(loc)
+                roots.setdefault(root, app.map_path(root))
+    missing, empty, ok = [], [], []
+    for plex_root, local in sorted(roots.items()):
+        if not os.path.isdir(local):
+            missing.append(local)
+            continue
+        try:
+            has_content = any(True for _ in os.scandir(local))
+        except OSError:
+            has_content = True  # unreadable: the per-library rows explain it
+        (ok if has_content else empty).append(local)
+    if not missing and not empty:
+        return []
+    needed = ", ".join(sorted(roots))
+    detail_bits = []
+    if empty:
+        detail_bits.append(f"{', '.join(empty)} {'is' if len(empty) == 1 else 'are'} mounted but empty. "
+                           "That usually means the host path in the app's YAML doesn't exist — "
+                           "Docker quietly creates an empty folder instead of failing.")
+    if missing:
+        detail_bits.append(f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} not mounted at all.")
+    lines = "\n".join(f"- /mnt/POOL/DATASET:{r}:ro" for r in sorted(roots))
+    return [item("warn", f"Plex uses {len(roots)} media folder{'s' if len(roots) != 1 else ''}: {needed}",
+                 " ".join(detail_bits),
+                 "In TrueNAS open Apps → Plex → Edit → Storage and note each host path and its mount path. "
+                 "Then edit this app's YAML so its volumes list has the same pairs, read-only:",
+                 lines)]
 
 
 def check_zfs(app) -> dict:
@@ -117,8 +174,13 @@ def check_zfs(app) -> dict:
 
     arc = z.get("arc")
     if arc:
-        ratio = f" · {arc['arc_hit_ratio'] * 100:.0f}% hit rate since boot" if arc["arc_hit_ratio"] is not None else ""
-        items.append(item("pass", "ARC (RAM cache)", f"{_fmt_bytes(arc['arc_size'])} in use of {_fmt_bytes(arc['arc_max'])} max{ratio}"))
+        ratio = ""
+        if arc["arc_hit_ratio"] is not None:
+            ratio = f" · {fmt_ratio(arc['arc_hit_ratio'])} of reads served from RAM since boot"
+        items.append(item("pass", "ARC (RAM cache, whole NAS)",
+                          f"{_fmt_bytes(arc['arc_size'])} in use of {_fmt_bytes(arc['arc_max'])} max{ratio}. "
+                          "This covers everything ZFS caches on this NAS — other apps, shares and metadata — "
+                          "not only Plex, so it's high even before any library is connected."))
     else:
         items.append(item("warn", "Can't read ZFS statistics",
                           "/proc/spl/kstat/zfs/arcstats isn't readable here, so cache hit and L2ARC growth figures are unavailable."))
@@ -169,9 +231,14 @@ def check_zfs(app) -> dict:
             "hint": "Read from ZFS statistics and the TrueNAS API. Nothing is changed without you.", "items": items}
 
 
-def check_disk(app) -> dict:
+def check_disk(app, readable: bool = True) -> dict:
     g = app.settings.section("general")
     items = []
+    if not readable:
+        items.append(item("info", "Can't measure yet",
+                          f"Benchmarking reads parts of a few real media files, and none are readable from this app yet. "
+                          f"Fix Media access first. Until then a guess of {g['hdd_mb_per_sec']} MB/s is used."))
+        return {"id": "disk", "title": "Disk speed", "hint": "Used to tell cache hits from disk reads.", "items": items}
     if g["hdd_measured_at"]:
         items.append(item("pass", f"Measured {g['hdd_mb_per_sec']} MB/s uncached",
                           f"Median of a few files per library · measured {g['hdd_measured_at'].replace('T', ' ')}"))
@@ -232,7 +299,9 @@ def recommendations(app) -> list[dict]:
 
 
 def run_all(app) -> dict:
-    groups = [check_plex(app), check_media(app), check_zfs(app), check_disk(app)]
+    media = check_media(app)
+    readable = any(r["status"] == "pass" and r["count"] for r in media["table"])
+    groups = [check_plex(app), media, check_zfs(app), check_disk(app, readable)]
     eff = check_effectiveness(app)
     if eff:
         groups.append(eff)

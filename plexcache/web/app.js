@@ -151,7 +151,7 @@
           '</div><div class="det">' + esc(it.detail) + "</div>";
         if (it.fix || it.fix_cmd) {
           out += '<div class="fix">' + esc(it.fix);
-          if (it.fix_cmd) out += '<div class="cmd"><code>' + esc(it.fix_cmd) + '</code><button class="btn" data-copy="' + esc(it.fix_cmd) + '">Copy</button></div>';
+          if (it.fix_cmd) out += '<div class="cmd"><code style="white-space:pre-wrap">' + esc(it.fix_cmd) + '</code><button class="btn" data-copy="' + esc(it.fix_cmd) + '">Copy</button></div>';
           out += "</div>";
         }
         out += "</div>";
@@ -369,7 +369,8 @@
     }
     if (arc) {
       var hr = arc.arc_hit_ratio == null ? null : arc.arc_hit_ratio * 100;
-      out += '<div class="card tile"><div class="muted" style="font-size:13px">ARC (RAM cache) hit rate since boot</div><div class="big">' + (hr == null ? "—" : hr.toFixed(0) + "%") +
+      var hrText = hr == null ? "—" : (hr >= 99.95 ? ">99.9%" : hr.toFixed(hr >= 90 ? 1 : 0) + "%");
+      out += '<div class="card tile"><div class="muted" style="font-size:13px">ARC (RAM cache) hit rate since boot, whole NAS</div><div class="big">' + hrText +
         '</div><div class="meter"><div style="width:' + (hr || 0).toFixed(1) + '%;background:var(--c-tv)"></div></div><div class="muted" style="font-size:13px">' + esc(fmtBytes(arc.arc_size)) + " in use</div></div>";
     }
     var wk = a.week || {};
