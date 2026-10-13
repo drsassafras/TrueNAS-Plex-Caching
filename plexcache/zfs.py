@@ -34,12 +34,44 @@ def arc_summary(stats: dict | None) -> dict | None:
     return {
         "arc_size": stats.get("size", 0),
         "arc_max": stats.get("c_max", 0),
+        # Free RAM as ZFS sees it (whole NAS); ARC can grow into it.
+        "memory_free": stats.get("memory_free_bytes"),
         "arc_hit_ratio": hits / (hits + misses) if hits + misses else None,
         "l2_size": stats.get("l2_size", 0),  # logical bytes cached
         "l2_asize": stats.get("l2_asize", 0),  # bytes used on the devices
         "l2_hit_ratio": l2_hits / (l2_hits + l2_misses) if l2_hits + l2_misses else None,
         "l2_present": stats.get("l2_size", 0) > 0 or (l2_hits + l2_misses) > 0,
     }
+
+
+def meminfo() -> dict:
+    """/proc/meminfo in bytes ({"MemTotal": ..., "MemAvailable": ...}); empty if unreadable."""
+    out = {}
+    try:
+        with open(os.path.join(PROC, "meminfo"), encoding="ascii") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    out[parts[0].rstrip(":")] = int(parts[1]) * (1024 if len(parts) > 2 else 1)
+    except OSError:
+        pass
+    return out
+
+
+def disk_busy_ms() -> dict:
+    """Milliseconds each whole disk has spent busy since boot ({"sda": 123456}).
+
+    From /proc/diskstats (field 13, "time spent doing I/Os"); empty if unreadable."""
+    out = {}
+    try:
+        with open(os.path.join(PROC, "diskstats"), encoding="ascii") as fh:
+            for line in fh:
+                f = line.split()
+                if len(f) >= 13 and f[12].isdigit():
+                    out[f[2]] = int(f[12])
+    except OSError:
+        pass
+    return out
 
 
 def module_param(name: str) -> str | None:

@@ -4,7 +4,8 @@
   --ok-bg:#DDEFE3; --ok:#155C37; --warn-bg:#FBE8CF; --warn:#7F4205; --bad-bg:#F8D9D6; --bad:#8A1C14;
   --info-bg:#E7EAE6; --info:#4C544F; --run-bg:#D8E9F4; --run:#14476B;
   --guide-bg:#F1F5F3; --guide-line:#D6E2DD; --note-bg:#FDF4E7; --note-line:#F1D9B4; --note-ink:#5E3404;
-  --code-bg:#F6F7F5; --c-movie:#0F5E57; --c-tv:#5FA79B; --c-audio:#B9772A; --c-res:#9AA39E; --track:#E7EAE6;
+  --code-bg:#F6F7F5; --c-movie:#0F5E57; --c-tv:#5FA79B; --c-audio:#B9772A; --c-res:#9AA39E; --c-idx:#6E5BA8; --track:#E7EAE6;
+  --chart-a:#008F7E; --chart-b:#C2651A;
   --sans:"IBM Plex Sans","Segoe UI",system-ui,-apple-system,sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
   color-scheme:light;
@@ -16,7 +17,8 @@
     --ok-bg:#16382A; --ok:#8FD9AE; --warn-bg:#3D2A12; --warn:#F2C08A; --bad-bg:#3E1B18; --bad:#F2A49C;
     --info-bg:#262C29; --info:#B3BBB6; --run-bg:#14304A; --run:#9BC8EE;
     --guide-bg:#18231F; --guide-line:#2A3A34; --note-bg:#2E2414; --note-line:#4A3A20; --note-ink:#F2D3A6;
-    --code-bg:#151A18; --c-movie:#3FA596; --c-tv:#8CC9BE; --c-audio:#D9A15A; --c-res:#6B746F; --track:#2A302D;
+    --code-bg:#151A18; --c-movie:#3FA596; --c-tv:#8CC9BE; --c-audio:#D9A15A; --c-res:#6B746F; --c-idx:#A797D8; --track:#2A302D;
+    --chart-a:#159C8A; --chart-b:#CF7A2A;
     color-scheme:dark;
   }
 }
@@ -25,7 +27,8 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font
 a{color:var(--accent)}
 .shell{display:flex;flex-wrap:wrap;min-height:100vh}
 .side{flex:1 1 220px;max-width:260px;background:var(--side);color:#E7EAE6;padding:28px 18px;display:flex;flex-direction:column;gap:6px}
-.brand{font-weight:700;font-size:17px;padding:0 10px 22px}
+.brand{font-weight:700;font-size:17px;padding:0 10px 22px;display:flex;align-items:center;gap:12px}
+.brand img{flex:none;border-radius:8px}
 .brand small{display:block;font-weight:400;font-size:12px;color:#A3ABA6;margin-top:4px}
 .nav{display:flex;align-items:center;gap:10px;padding:11px 12px;border-radius:8px;color:var(--side-ink);text-decoration:none;min-height:44px}
 .nav:hover{background:#2A302D;color:#fff}
@@ -36,6 +39,7 @@ a{color:var(--accent)}
 @media (max-width:720px){
   .side{max-width:none;flex-direction:row;flex-wrap:wrap;padding:12px;gap:4px}
   .brand{width:100%;padding:4px 10px 8px}
+  .brand img{width:28px;height:28px}
   .main{padding:20px 16px 48px}
 }
 h1{font-size:30px;margin:0;font-weight:700;letter-spacing:-.3px}
@@ -124,3 +128,68 @@ summary{cursor:pointer;font-weight:600;color:var(--accent);min-height:32px;displ
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 :focus-visible{outline:3px solid #6FB8AE;outline-offset:2px}
 .main:focus,.main:focus-visible{outline:none}
+
+/* Status lights (Settings) and summary banners */
+.lights{display:grid;gap:10px;margin:4px 0 6px;padding:14px 16px;background:var(--code-bg);border:1px solid var(--line);border-radius:10px}
+.lightrow{display:flex;gap:12px;align-items:flex-start}
+.light{flex:none;width:12px;height:12px;border-radius:50%;margin-top:5px;background:var(--c-res);box-shadow:0 0 0 3px var(--track)}
+.l-ok{background:#2E9E5B;box-shadow:0 0 0 3px var(--ok-bg)}
+.l-warn{background:#E0942F;box-shadow:0 0 0 3px var(--warn-bg)}
+.l-fail{background:#D2493D;box-shadow:0 0 0 3px var(--bad-bg)}
+.l-off{background:#A3ABA6}
+.l-testing{background:#6B8FB5;box-shadow:0 0 0 3px var(--run-bg);animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion: reduce){.l-testing{animation:none}}
+.banner{display:flex;gap:12px;align-items:center;padding:14px 18px;border-radius:10px;margin-bottom:20px;font-weight:600;border:1px solid var(--line)}
+.banner .light{margin-top:0}
+.bn-ok{background:var(--ok-bg);color:var(--ok);border-color:transparent}
+.bn-warn{background:var(--warn-bg);color:var(--warn);border-color:transparent}
+.bn-fail{background:var(--bad-bg);color:var(--bad);border-color:transparent}
+.bn-testing{background:var(--run-bg);color:var(--run);border-color:transparent}
+.explain{margin-top:16px;font-size:14px;color:var(--soft);background:var(--guide-bg);border:1px solid var(--guide-line);border-radius:10px;padding:12px 14px}
+.sw:disabled{opacity:.45;cursor:not-allowed}
+#mappings select,#mappings input[type=text]{font:inherit;font-size:14px;width:100%;min-height:40px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:var(--panel);color:var(--ink);margin-top:8px}
+#disk-speed input[data-speed]{font:inherit;font-size:14px;width:110px;min-height:40px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:var(--panel);color:var(--ink);margin-right:6px}
+#mappings td{min-width:120px}
+#mappings td:last-child{min-width:280px}
+/* Secret fields are text inputs (so browsers don't treat them as passwords) masked here. */
+input.secret{-webkit-text-security:disc;font-family:var(--mono)}
+.cmd code{user-select:all}
+#mappings .tick{display:inline-flex;align-items:center;min-height:32px}
+#mappings .tick input{width:20px;height:20px;accent-color:var(--accent)}
+#mappings td:first-child{min-width:56px}
+#mappings tr.excl td{color:var(--muted)}
+.chkblk{margin:0 0 10px}.chkblk .chk{margin:0}.chkblk .help{margin:2px 0 0 28px;font-size:13px;color:var(--muted)}
+#mappings td[rowspan]{vertical-align:top}#mappings tr.cont td{border-top:1px dashed var(--line)}
+/* Activity report */
+.rtiles{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.rtile{border-top:4px solid var(--line)}
+.rtile.r-ok{border-top-color:var(--ok)}.rtile.r-ok .big{color:var(--ok)}
+.rtile.r-warn{border-top-color:var(--warn)}.rtile.r-warn .big{color:var(--warn)}
+.rtile.r-fail{border-top-color:var(--bad)}.rtile.r-fail .big{color:var(--bad)}
+.rtile .big small{font-size:15px;color:var(--muted);font-weight:500}
+.cols2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px}
+/* Activity: period switch, metric explanations, the Over-time chart */
+.seg{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;background:var(--track);border-radius:10px;margin-bottom:18px}
+.seg button{font:inherit;font-size:14px;font-weight:600;border:0;background:transparent;color:var(--soft);border-radius:8px;padding:0 14px;min-height:36px;cursor:pointer}
+.seg button[aria-selected=true]{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.seg.small{margin:0}.seg.small button{font-size:13px;min-height:32px;padding:0 10px}
+.chartcard .head{flex-wrap:wrap;gap:10px}
+.chartwrap{position:relative;margin-top:14px}
+.chart{width:100%;height:auto;display:block;overflow:visible}
+.chart .grid{stroke:var(--line);stroke-width:1}
+.chart .axis{fill:var(--muted);font-size:11px;font-family:var(--sans)}
+.chart .s0{fill:var(--chart-a)}.chart .s1{fill:var(--chart-b)}
+.chart .hit{fill:transparent}.chart .hit:hover{fill:var(--ink);fill-opacity:.05}
+.legend i.k0{background:var(--chart-a)}.legend i.k1{background:var(--chart-b)}
+.chart-tip{position:absolute;z-index:5;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;line-height:1.5;pointer-events:none;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.12)}
+/* Info buttons: a small "i" that opens a bubble with the longer explanation */
+.info{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin:0 0 0 6px;padding:0;border-radius:50%;border:1px solid var(--muted);background:transparent;color:var(--muted);font:700 11px/1 var(--sans);cursor:pointer;vertical-align:1px;position:relative;flex:none}
+.info::before{content:"";position:absolute;inset:-13px}  /* a 44px touch target around the 18px mark */
+.info:hover,.info[aria-expanded=true]{border-color:var(--accent);color:var(--accent);background:var(--guide-bg)}
+.info:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+h2 .info{vertical-align:2px}
+.infopop{position:absolute;z-index:50;max-width:min(340px,calc(100vw - 32px));background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px;font-weight:400;line-height:1.5;box-shadow:0 6px 20px rgba(0,0,0,.16);text-transform:none;letter-spacing:0}
+.infopop[hidden]{display:none}
+.infopop .mono{font-family:var(--mono);font-size:12px}
+.chk > .info{align-self:center;margin-left:-12px}  /* sit next to the checkbox's label, not a full gap away */

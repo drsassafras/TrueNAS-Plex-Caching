@@ -10,9 +10,8 @@ import re
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .config import SettingsError, parse_legacy_conf
+from .config import SettingsError
 from .plex import PlexError, check_pin, create_pin
-from .truenas import TrueNASError
 
 log = logging.getLogger("plexcache")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
@@ -80,6 +79,7 @@ def make_handler(app):
             self.do_GET()
 
         def do_GET(self):
+            app.note_host(self.headers.get("Host"))
             path = self.path.split("?", 1)[0]
             if path in PAGES:
                 return self._file(os.path.join(WEB_DIR, "index.html"))
@@ -105,11 +105,12 @@ def make_handler(app):
                 if token:
                     app.settings.update({"plex": {"token": token}})
                     app.activity.event("settings", "signed in with Plex")
-                    app.run_checks_async(rescan=True)
+                    app.test_connections_async(then_checks=True, rescan=True)
                 return self._json({"done": bool(token)})
             return self._error("not found", 404)
 
         def do_POST(self):
+            app.note_host(self.headers.get("Host"))
             path = self.path.split("?", 1)[0]
             try:
                 body = self._body()
@@ -117,11 +118,22 @@ def make_handler(app):
                 return self._error(str(e), 415 if "json" in str(e) else 400)
             try:
                 if path == "/api/settings":
+                    for feature in ("warmup", "nowplaying", "nextepisode"):
+                        sec = body.get(feature)
+                        if isinstance(sec, dict) and sec.get("enabled") is True:
+                            ok, why = app.feature_available(feature)
+                            if not ok:
+                                raise SettingsError(why)
                     app.settings.update(body)
-                    rescan = any(k in body for k in ("plex", "truenas")) or any(
-                        k in body.get("general", {}) for k in ("excluded_libraries", "path_map"))
-                    app.run_checks_async(rescan=rescan)
+                    # Re-run the checks this setting affects, so the page shows whether it worked.
+                    if any(k in body for k in ("plex", "truenas")):
+                        app.test_connections_async(then_checks=True, rescan="plex" in body)
+                    else:
+                        app.run_checks_async(rescan="excluded_libraries" in body.get("general", {}))
                     return self._json({"settings": app.settings.public()})
+                if path == "/api/test":
+                    app.test_connections_async(then_checks=True, rescan=True)
+                    return self._json({"started": True})
                 if path == "/api/checks":
                     app.run_checks_async(rescan=bool(body.get("rescan", True)))
                     return self._json({"started": True})
@@ -133,33 +145,11 @@ def make_handler(app):
                 if path == "/api/warmup/stop":
                     app.stop_warmup()
                     return self._json({"stopping": True})
-                if path == "/api/test/plex":
-                    try:
-                        info = app.plex(timeout=10).ping()
-                        return self._json({"ok": True, "message": f"Connected to “{info['name']}” in {info['ms']} ms"})
-                    except PlexError as e:
-                        return self._json({"ok": False, "message": str(e)})
-                if path == "/api/test/truenas":
-                    try:
-                        with app.truenas() as tn:
-                            v = tn.version()
-                        app.run_checks_async()
-                        return self._json({"ok": True, "message": f"Connected{(' to ' + v) if v else ''}"})
-                    except TrueNASError as e:
-                        return self._json({"ok": False, "message": str(e)})
                 if path == "/api/plex/pin":
                     try:
                         return self._json(create_pin(app.settings.section("general")["client_id"]))
                     except PlexError as e:
                         return self._error(str(e), 502)
-                if path == "/api/import":
-                    patch, notes = parse_legacy_conf(str(body.get("text", "")))
-                    if patch:
-                        app.settings.update(patch)
-                        app.activity.event("settings", "imported plex-l2arc.conf")
-                        app.run_checks_async(rescan=True)
-                    return self._json({"imported": sorted(f"{s}.{k}" for s, v in patch.items() for k in v), "notes": notes,
-                                       "settings": app.settings.public()})
             except SettingsError as e:
                 return self._error(str(e), 400)
             return self._error("not found", 404)

@@ -33,6 +33,7 @@ class MediaFile:
     size: int
     kind: str  # movie | tv | audio
     library: str = ""
+    library_key: str = ""
 
 
 @dataclass
@@ -63,6 +64,7 @@ class Session:
     local: bool
     transcoding: bool
     credits_start_ms: int | None
+    library_key: str = ""
 
     @property
     def progress(self) -> float:
@@ -108,14 +110,15 @@ class PlexClient:
         self._ctx.verify_mode = ssl.CERT_NONE
 
     # ------------------------------------------------------------------ http
-    def _request(self, path: str, params: dict | None = None, headers: dict | None = None) -> bytes:
+    def _request(self, path: str, params: dict | None = None, headers: dict | None = None,
+                 auth: bool = True) -> bytes:
         query = urllib.parse.urlencode(params or {})
         url = f"{self.url}{path}" + (f"?{query}" if query else "")
         req = urllib.request.Request(url)
         req.add_header("Accept", "application/xml")
         req.add_header("X-Plex-Product", PRODUCT)
         req.add_header("X-Plex-Version", __version__)
-        if self.token:
+        if self.token and auth:
             req.add_header("X-Plex-Token", self.token)
         for k, v in (headers or {}).items():
             req.add_header(k, v)
@@ -123,6 +126,7 @@ class PlexClient:
             with urllib.request.urlopen(req, timeout=self.timeout, context=self._ctx) as resp:
                 return resp.read()
         except urllib.error.HTTPError as e:
+            e.close()  # it holds the connection open
             if e.code == 401:
                 raise PlexError("Plex rejected the token (401 Unauthorized)") from None
             raise PlexError(f"Plex returned HTTP {e.code} for {path}") from None
@@ -139,6 +143,19 @@ class PlexClient:
             raise PlexError(f"Plex returned something that isn't XML for {path}") from None
 
     # --------------------------------------------------------------- server
+    def identity(self) -> dict:
+        """Is a Plex server answering here? Works without a token."""
+        start = time.monotonic()
+        body = self._request("/identity", auth=False)
+        ms = int((time.monotonic() - start) * 1000)
+        try:
+            root = ET.fromstring(body)
+        except ET.ParseError:
+            raise PlexError(f"Something answered at {self.url}, but it isn't Plex") from None
+        if not root.get("machineIdentifier"):
+            raise PlexError(f"Something answered at {self.url}, but it isn't Plex")
+        return {"version": root.get("version", ""), "machine_id": root.get("machineIdentifier", ""), "ms": ms}
+
     def ping(self) -> dict:
         start = time.monotonic()
         root = self.get("/")
@@ -187,7 +204,7 @@ class PlexClient:
                     for part in media.findall("Part"):
                         path = part.get("file")
                         if path:
-                            out.append(MediaFile(path, media_kbps(media, part), _int(part.get("size")), lib.kind, lib.title))
+                            out.append(MediaFile(path, media_kbps(media, part), _int(part.get("size")), lib.kind, lib.title, lib.key))
             total = _int(root.get("totalSize"), -1)
             start += len(items)
             if not items or len(items) < size or (total >= 0 and start >= total):
@@ -237,6 +254,7 @@ class PlexClient:
                     local=(player.get("local") == "1") if player is not None else True,
                     transcoding=item.find("TranscodeSession") is not None,
                     credits_start_ms=credits,
+                    library_key=item.get("librarySectionID", ""),
                 )
             )
         return out
@@ -286,6 +304,7 @@ def _plextv(method: str, path: str, client_id: str, data: bytes | None = None) -
         with urllib.request.urlopen(req, timeout=20) as resp:
             return json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
+        e.close()
         raise PlexError(f"plex.tv returned HTTP {e.code}") from None
     except (urllib.error.URLError, OSError) as e:
         raise PlexError(f"Can't reach plex.tv: {e}") from None

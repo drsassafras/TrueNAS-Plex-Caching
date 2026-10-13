@@ -56,6 +56,9 @@ class WebSocket:
             except ssl.SSLError as e:
                 raw.close()
                 raise WebSocketError(f"TLS failed: {e.reason or e}") from None
+            except OSError as e:  # e.g. timed out: something listens there but never answers TLS
+                raw.close()
+                raise WebSocketError(f"TLS failed: {e}") from None
         self.sock = raw
         self._buf = b""
         key = base64.b64encode(os.urandom(16)).decode()
@@ -65,8 +68,12 @@ class WebSocket:
             f"Host: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         )
-        self.sock.sendall(req.encode())
-        head = self._read_until(b"\r\n\r\n").decode("latin-1")
+        try:
+            self.sock.sendall(req.encode())
+            head = self._read_until(b"\r\n\r\n").decode("latin-1")
+        except (OSError, WebSocketError) as e:
+            self.close()
+            raise WebSocketError(f"websocket handshake failed: {e}") from None
         status = head.split("\r\n", 1)[0]
         if " 101 " not in status + " ":
             self.close()

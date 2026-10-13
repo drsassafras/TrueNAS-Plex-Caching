@@ -8,6 +8,9 @@
 #
 # Everything else (Plex address, sign-in, TrueNAS API key, features) is set
 # in the web UI at http://<your-nas-ip>:8642 after it starts.
+#
+# x-portals adds a "Web UI" button in TrueNAS. TrueNAS only reads it when the
+# app is first installed, so add it then (not by editing later).
 services:
   plex-cache:
     image: ghcr.io/drsassafras/plex-cache:latest
@@ -25,3 +28,10 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+
+x-portals:
+  - name: Web UI
+    scheme: http
+    host: 192.168.1.10                       # CHANGE ME: your NAS's IP
+    port: 8642
+    path: /

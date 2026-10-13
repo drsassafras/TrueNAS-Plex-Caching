@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# Local run settings (contain your Plex token and TrueNAS API key)
+.dev-config/
+.DS_Store
+.tnsync

@@ -11,6 +11,7 @@ import random
 import time
 from dataclasses import dataclass, field
 
+from .layout import tail_ranges
 from .reader import MiB, Pacer, Stopped, is_cache_hit, read_range
 
 GB = 1000 ** 3
@@ -48,7 +49,11 @@ class LibraryStats:
         return {"count": self.count, "avg_kbps": self.avg_kbps, "scanned_at": self.scanned_at}
 
 
-def plan(stats: LibraryStats, w: dict, l2_total: int | None) -> dict:
+# Index (and other end-of-file parts) per file, until a run has measured your library.
+DEFAULT_INDEX = {"movie": 512 * 1024, "tv": 256 * 1024, "audio": 0}
+
+
+def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | None = None) -> dict:
     """How much L2ARC the settings need, and what seconds to actually use.
 
     If the L2ARC (minus the reserve) can't hold the maximum, seconds are
@@ -60,9 +65,12 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None) -> dict:
         per_sec = stats.avg_kbps[k] * 125 * stats.count[k]
         mx[k] = per_sec * w[f"{k}_sec"] * (100 + pad[k]) / 100
         mn[k] = per_sec * w[f"{k}_min_sec"] * (100 + pad[k]) / 100
+    # The index etc. at the end of each file: a fixed amount whatever the seconds.
+    idx_avg = dict(DEFAULT_INDEX, **(index_avg or {}))
+    index = {k: (stats.count[k] * idx_avg[k] if w.get("cache_index", True) else 0) for k in KINDS}
     reserve = w["reserve_gb"] * GB
-    need_max = sum(mx.values())
-    need_min = sum(mn.values())
+    need_max = sum(mx.values()) + sum(index.values())
+    need_min = sum(mn.values()) + sum(index.values())
     seconds = {k: float(w[f"{k}_sec"]) for k in KINDS}
     status, note = "unknown", "L2ARC size unknown — add a TrueNAS API key in Settings to size this."
     if l2_total is not None:
@@ -90,6 +98,8 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None) -> dict:
         "need_min": need_min,
         "need_by_kind": mx,
         "planned_by_kind": used,
+        "index_by_kind": index,
+        "index_measured": bool(index_avg),
         "reserve": reserve,
         "l2_total": l2_total,
         "seconds": seconds,
@@ -101,13 +111,15 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None) -> dict:
 class WarmupRun:
     """One warm-up pass over the library."""
 
-    def __init__(self, files, seconds: dict, pacing_percent: float, hdd_mb_per_sec: float,
-                 stop, pause=None, arcstats=None):
+    def __init__(self, files, seconds: dict, pacing_percent: float, hdd_mb_per_sec,
+                 stop, pause=None, arcstats=None, cache_index: bool = True):
+        """``hdd_mb_per_sec`` is the uncached disk speed: a number, or a function
+        giving it for a file (datasets on different disks read at different speeds)."""
         self.files = list(files)
         random.shuffle(self.files)  # spread reads across the disks
         self.seconds = seconds
         self.pacer = Pacer(pacing_percent, stop, pause)
-        self.hdd = hdd_mb_per_sec
+        self.hdd = hdd_mb_per_sec if callable(hdd_mb_per_sec) else (lambda f, v=hdd_mb_per_sec: v)
         self.arcstats = arcstats or (lambda: None)
         self.done = 0
         self.bytes = 0
@@ -116,13 +128,41 @@ class WarmupRun:
         self.started = time.time()
         self.finished: float | None = None
         self.result = "running"
+        self.paused: str | None = None  # why it's waiting, while it is
+        self.cache_index = cache_index
+        # What was found at the ends of files, per kind
+        self.index = {k: {"files": 0, "bytes": 0, "largest": 0, "mp4_at_end": 0} for k in KINDS}
 
     @property
     def total(self) -> int:
         return len(self.files)
 
     def progress(self) -> dict:
-        return {"done": self.done, "total": self.total, "bytes": self.bytes, "started": self.started}
+        return {"done": self.done, "total": self.total, "bytes": self.bytes, "started": self.started,
+                "paused": self.paused}
+
+    def _read_tail(self, f, head: int) -> float:
+        """Read the index and anything else a player reads at the end of ``f``. Returns seconds taken."""
+        ranges, info = tail_ranges(f.path, f.size, head)
+        if not ranges:
+            return 0.0
+        st = self.index[f.kind]
+        took = 0.0
+        got = 0
+        for off, length in ranges:
+            res = read_range(f.path, off, length)
+            if res.error:
+                break
+            got += res.bytes
+            took += res.seconds
+        if got:
+            st["files"] += 1
+            st["bytes"] += got
+            st["largest"] = max(st["largest"], got)
+            if info.get("index_at") == "end":
+                st["mp4_at_end"] += 1
+            self.bytes += got
+        return took
 
     def run(self) -> dict:
         before = self.arcstats() or {}
@@ -141,11 +181,14 @@ class WarmupRun:
                     continue
                 self.bytes += res.bytes
                 k["bytes"] += res.bytes
-                if is_cache_hit(res, self.hdd):
+                if is_cache_hit(res, self.hdd(f)):
                     k["hits"] += 1
                 else:
                     k["reads"] += 1
-                self.pacer.after(res.seconds)
+                took = res.seconds
+                if self.cache_index:
+                    took += self._read_tail(f, n)
+                self.pacer.after(took)
             self.result = "ok"
         except Stopped:
             self.result = "stopped"
@@ -157,6 +200,7 @@ class WarmupRun:
         if self.result == "ok" and errors and errors >= max(1, self.done // 2):
             self.result = "errors"
         return {
+            "index": self.index if self.cache_index else None,
             "started": self.started,
             "finished": self.finished,
             "files": self.done,

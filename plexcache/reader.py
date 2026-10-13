@@ -39,6 +39,7 @@ class Pacer:
         self.percent = max(1.0, min(100.0, float(percent)))
         self.stop = stop or threading.Event()
         self.pause = pause  # callable -> bool: True while we should hold off
+        self.before_wait = None  # optional callable: an idle gap is about to start
 
     def check(self) -> None:
         if self.stop.is_set():
@@ -49,17 +50,20 @@ class Pacer:
 
     def after(self, seconds: float) -> None:
         if self.percent < 100 and seconds > 0:
+            if self.before_wait:
+                self.before_wait()
             if self.stop.wait(seconds * (100 - self.percent) / self.percent):
                 raise Stopped()
         self.check()
 
 
 def read_range(path: str, offset: int, length: int, pacer: Pacer | None = None, chunk: int = CHUNK,
-               progress=None) -> ReadResult:
+               progress=None, on_group=None) -> ReadResult:
     """Read ``length`` bytes from ``offset`` and throw them away.
 
     Pacing is applied per chunk group (~32 MiB) so long reads yield to other
-    I/O. Errors are reported, never counted as cache hits.
+    I/O. Errors are reported, never counted as cache hits. ``on_group(bytes, seconds)``
+    is told how long each group took, so the caller can tell cached parts from disk reads.
     """
     total, spent = 0, 0.0
     buf = bytearray(chunk)
@@ -88,12 +92,18 @@ def read_range(path: str, offset: int, length: int, pacer: Pacer | None = None, 
             group_bytes += n
             if progress:
                 progress(n)
-            if pacer and group_bytes >= 32 * MiB:
+            if (pacer or on_group) and group_bytes >= 32 * MiB:
                 took = time.monotonic() - group_start
                 spent += took
-                pacer.after(took)
+                if on_group:
+                    on_group(group_bytes, took)
+                if pacer:
+                    pacer.after(took)
                 group_start, group_bytes = time.monotonic(), 0
-        spent += time.monotonic() - group_start
+        took = time.monotonic() - group_start
+        spent += took
+        if on_group and group_bytes:
+            on_group(group_bytes, took)
     finally:
         os.close(fd)
     return ReadResult(total, spent)

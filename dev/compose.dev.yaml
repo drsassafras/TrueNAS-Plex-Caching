@@ -1,0 +1,45 @@
+# Plex Cache — TEST copy for trying changes on the NAS before pushing.
+#
+# Runs the published image, but with the code replaced by whatever `tnsync`
+# last copied to /mnt/ssd/AppConfigs/plex-cache-dev/src/plexcache.
+# It has its own port (8643) and its own settings, so it never touches the
+# real plex-cache app.
+#
+# Set up once (TrueNAS shell, as truenas_admin):
+#   sudo mkdir -p /mnt/ssd/AppConfigs/plex-cache-dev/src /mnt/ssd/AppConfigs/plex-cache-dev/config
+#   sudo chown truenas_admin /mnt/ssd/AppConfigs/plex-cache-dev/src
+#   sudo chown 568:568 /mnt/ssd/AppConfigs/plex-cache-dev/config
+# Then run `tnsync local -N` on your Mac BEFORE installing this app, so the code
+# folder exists (otherwise Docker creates an empty one and the app won't start).
+# Install: Apps → Discover Apps → ⋮ → Install via YAML, name it plex-cache-dev.
+#
+# Make the media lines match your real plex-cache app (and Plex).
+services:
+  plex-cache-dev:
+    image: ghcr.io/drsassafras/plex-cache:latest
+    restart: unless-stopped
+    user: "568:568"
+    ports:
+      - "8643:8642"
+    environment:
+      TZ: America/Toronto
+      PLEXCACHE_DEBUG: "1"
+    volumes:
+      - /mnt/ssd/AppConfigs/plex-cache-dev/config:/config
+      - /mnt/ssd/AppConfigs/plex-cache-dev/src/plexcache:/app/plexcache:ro
+      - /mnt/tank/plexfiles:/data:ro      # CHANGE ME: same as your real app
+      # - /mnt/tank/…:/media:ro
+      # - /mnt/tank/…:/music:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+# Adds a "Web UI" button in TrueNAS. Only read when the app is first installed,
+# and must sit at the top level (not under services). Uses your NAS's real IP.
+x-portals:
+  - name: Web UI
+    scheme: http
+    host: 192.168.50.222
+    port: 8643
+    path: /

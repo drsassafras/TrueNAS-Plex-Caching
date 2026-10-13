@@ -25,7 +25,13 @@ DEFAULTS: dict = {
         "poll_seconds": 5,
         "hdd_mb_per_sec": 150,
         "hdd_measured_at": None,
-        "pause_when_streams": 3,
+        # Measured uncached read speed per dataset (or mount, when it isn't ZFS):
+        # {"tank/media": {"mb_s": 210, "measured_at": "2026-10-13T12:47:29"}}.
+        # hdd_mb_per_sec is used for anything not measured yet.
+        "disk_speeds": {},
+        # RAM kept out of reach of Now-playing and Next-episode, for TrueNAS,
+        # other apps and ZFS itself. Their limits are shares of what's left.
+        "ram_reserve_gb": 4,
         "debug": False,
         "excluded_libraries": [],
         # Optional rewrites when Plex sees media at a different path than
@@ -49,21 +55,34 @@ DEFAULTS: dict = {
         "reserve_gb": 100,
         "padding_video": 5,
         "padding_audio": 15,
+        # Also cache what a player reads at the end of a file when it opens it
+        # (the MKV/MP4 index, tags, attachments).
+        "cache_index": True,
+        # When to pause (it carries on from where it was afterwards).
+        "pause_buffering": True,   # a player reports buffering (and for a few minutes after)
+        "pause_preload": True,     # Now-playing or Next-episode is reading
+        "pause_scrub": True,       # a scrub or resilver is running on a media pool
+        "pause_disk_busy": 50,     # pool disks this % busy with other work (0 = off)
+        "finish_by_enabled": False,
+        "finish_by": "07:00",      # pause at this time until the next scheduled start
     },
     "nowplaying": {
         "enabled": False,
-        "mode": "minutes",  # minutes | whole | size
-        "minutes": 10,
-        "size_gb": 10,
-        "delay_sec": 0,  # 0 = automatic
+        # Reads the whole file if it fits in the limit, otherwise as much as fits,
+        # from the play position forward.
+        "ram_percent": 60,  # share of the usable RAM cache (all streams together)
+        "delay_sec": 0,  # 0 = automatic: after Plex's start-up buffer
+        "buffer_direct_sec": 10,  # playback Plex buffers before we start (direct play)
+        "buffer_transcode_sec": 60,  # ... and when transcoding
+        "min_delay_sec": 5,
         "max_streams": 2,
-        "min_kbps": 0,
         "pacing_percent": 50,
     },
     "nextepisode": {
         "enabled": True,
-        "start_at": "50",  # "0", "50", "75" (percent) or "credits"
-        "max_gb": 2,
+        # default | after_nowplaying | "80" | "90" (percent through the episode)
+        "start_at": "default",
+        "ram_percent": 20,  # share of the usable RAM cache
         "pacing_percent": 50,
     },
 }
@@ -72,7 +91,7 @@ DEFAULTS: dict = {
 LIMITS = {
     ("general", "poll_seconds"): (2, 120),
     ("general", "hdd_mb_per_sec"): (10, 5000),
-    ("general", "pause_when_streams"): (0, 50),
+    ("general", "ram_reserve_gb"): (0, 4096),
     ("warmup", "weekday"): (0, 6),
     ("warmup", "every_hours"): (1, 168),
     ("warmup", "pacing_percent"): (1, 100),
@@ -85,19 +104,20 @@ LIMITS = {
     ("warmup", "reserve_gb"): (0, 100000),
     ("warmup", "padding_video"): (0, 100),
     ("warmup", "padding_audio"): (0, 100),
-    ("nowplaying", "minutes"): (1, 600),
-    ("nowplaying", "size_gb"): (1, 1000),
+    ("warmup", "pause_disk_busy"): (0, 100),
+    ("nowplaying", "ram_percent"): (1, 90),
     ("nowplaying", "delay_sec"): (0, 600),
+    ("nowplaying", "buffer_direct_sec"): (0, 600),
+    ("nowplaying", "buffer_transcode_sec"): (0, 600),
+    ("nowplaying", "min_delay_sec"): (0, 600),
     ("nowplaying", "max_streams"): (1, 20),
-    ("nowplaying", "min_kbps"): (0, 200000),
     ("nowplaying", "pacing_percent"): (1, 100),
-    ("nextepisode", "max_gb"): (0, 200),
+    ("nextepisode", "ram_percent"): (1, 90),
     ("nextepisode", "pacing_percent"): (1, 100),
 }
 CHOICES = {
     ("warmup", "schedule"): ("daily", "weekly", "hours", "manual"),
-    ("nowplaying", "mode"): ("minutes", "whole", "size"),
-    ("nextepisode", "start_at"): ("0", "50", "75", "credits"),
+    ("nextepisode", "start_at"): ("default", "after_nowplaying", "80", "90"),
 }
 
 
@@ -115,8 +135,40 @@ def _merge(base: dict, extra: dict) -> dict:
     return out
 
 
+PLEX_DEFAULT_PORT = 32400
+
+
+def normalize_url(section: str, value: str) -> str:
+    """Fill in what people usually leave out.
+
+    Plex: ``192.168.1.10`` -> ``http://192.168.1.10:32400`` (port added for http only).
+    TrueNAS: ``192.168.1.10`` -> ``https://192.168.1.10`` (API keys need https).
+    """
+    value = value.strip().rstrip("/")
+    if not value:
+        return ""
+    if not re.match(r"^https?://", value, re.I):
+        value = ("https://" if section == "truenas" else "http://") + value
+    if section == "plex" and value.lower().startswith("http://"):
+        # (an https:// address is usually a reverse proxy on 443, so leave it alone)
+        scheme, rest = value.split("://", 1)
+        hostport = rest.split("/", 1)[0]
+        has_port = re.search(r":\d+$", hostport) and not hostport.endswith("]")
+        if not has_port:
+            value = f"{scheme}://{hostport}:{PLEX_DEFAULT_PORT}" + (rest[len(hostport):] if "/" in rest else "")
+    return value
+
+
 def _coerce(section: str, key: str, value, current):
     """Coerce an incoming value to the type of the current one and validate it."""
+    if key == "pause_disk_busy":
+        try:
+            num = int(float(value))
+        except (TypeError, ValueError):
+            num = -1
+        if num not in (0, 40, 50, 60):
+            raise SettingsError("warmup.pause_disk_busy must be 0, 40, 50 or 60")
+        return num
     if (section, key) in CHOICES:
         value = str(value)
         if value not in CHOICES[(section, key)]:
@@ -135,20 +187,33 @@ def _coerce(section: str, key: str, value, current):
         if lo is not None and not (lo <= num <= hi):
             raise SettingsError(f"{section}.{key} must be between {lo} and {hi}")
         return int(num) if isinstance(current, int) and num == int(num) else num
-    if key == "time":
+    if key in ("time", "finish_by"):
         value = str(value)
         if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
             raise SettingsError("time must look like 03:00")
         return value
-    if key in ("url",):
-        value = str(value).strip().rstrip("/")
-        if value and not re.match(r"^https?://", value):
-            value = "http://" + value
-        return value
+    if key == "url":
+        return normalize_url(section, str(value))
     if key == "excluded_libraries":
         if not isinstance(value, list):
             raise SettingsError("excluded_libraries must be a list")
         return [str(x) for x in value]
+    if key == "disk_speeds":
+        if not isinstance(value, dict):
+            raise SettingsError("disk_speeds must be an object")
+        out = {}
+        for name, row in value.items():
+            if row is None:
+                continue  # null removes a dataset's measurement
+            try:
+                mb = float(row.get("mb_s"))
+            except (TypeError, ValueError, AttributeError):
+                raise SettingsError("disk speed must be a number") from None
+            if not 10 <= mb <= 20000:
+                raise SettingsError("disk speed must be between 10 and 20000 MB/s")
+            at = row.get("measured_at")
+            out[str(name)] = {"mb_s": int(mb), "measured_at": str(at) if at else None}
+        return out
     if key == "path_map":
         if not isinstance(value, list):
             raise SettingsError("path_map must be a list")
@@ -173,6 +238,15 @@ class Settings:
         os.makedirs(config_dir, exist_ok=True)
         self._data = self._load()
         changed = False
+        for sec, values in DEFAULTS.items():
+            for key in [k for k in self._data.get(sec, {}) if k not in values]:
+                del self._data[sec][key]  # settings retired in a later version
+                changed = True
+        # Retired choices from earlier versions fall back to the default.
+        for (sec, key), allowed in CHOICES.items():
+            if self._data[sec][key] not in allowed:
+                self._data[sec][key] = DEFAULTS[sec][key]
+                changed = True
         if not self._data["general"]["client_id"]:
             self._data["general"]["client_id"] = str(uuid.uuid4())
             changed = True
@@ -247,6 +321,8 @@ class Settings:
             for kind in ("movie", "tv", "audio"):
                 if w[f"{kind}_min_sec"] > w[f"{kind}_sec"]:
                     w[f"{kind}_min_sec"] = w[f"{kind}_sec"]
+            if new["nowplaying"]["ram_percent"] + new["nextepisode"]["ram_percent"] > 100:
+                raise SettingsError("Now-playing and Next-episode limits together can't be more than 100%")
             self._data = new
             self._save()
             return copy.deepcopy(self._data)
@@ -257,61 +333,3 @@ class Settings:
             data[sec][key] = ""
         data["general"]["client_id"] = ""
         return data
-
-
-# --------------------------------------------------------------------------
-# Import from the old bash scripts' plex-l2arc.conf
-# --------------------------------------------------------------------------
-
-_LEGACY_MAP = {
-    "PRELOAD_PACING_PERCENT": ("warmup", "pacing_percent"),
-    "RESERVED_L2ARC_GB": ("warmup", "reserve_gb"),
-    "MOVIE_PRELOAD_MIN_SEC": ("warmup", "movie_min_sec"),
-    "MOVIE_PRELOAD_MAX_SEC": ("warmup", "movie_sec"),
-    "TV_PRELOAD_MIN_SEC": ("warmup", "tv_min_sec"),
-    "TV_PRELOAD_MAX_SEC": ("warmup", "tv_sec"),
-    "AUDIO_PRELOAD_MIN_SEC": ("warmup", "audio_min_sec"),
-    "AUDIO_PRELOAD_MAX_SEC": ("warmup", "audio_sec"),
-    "PADDING_VIDEO": ("warmup", "padding_video"),
-    "PADDING_AUDIO": ("warmup", "padding_audio"),
-    "HDD_MB_PER_SEC": ("general", "hdd_mb_per_sec"),
-    "PLEX_TOKEN": ("plex", "token"),
-}
-
-
-def parse_legacy_conf(text: str) -> tuple[dict, list[str]]:
-    """Turn a plex-l2arc.conf into a settings patch.
-
-    The file is parsed as plain ``KEY="value"`` lines; it is never executed.
-    Returns ``(patch, notes)``.
-    """
-    values: dict[str, str] = {}
-    for line in text.splitlines():
-        m = re.match(r"""^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^\s#]*))""", line)
-        if m:
-            values[m.group(1)] = next(g for g in m.groups()[1:] if g is not None)
-    patch: dict = {}
-    notes: list[str] = []
-    for name, (sec, key) in _LEGACY_MAP.items():
-        if name in values and values[name] != "":
-            patch.setdefault(sec, {})[key] = values[name]
-    host = values.get("PLEX_HOST")
-    if host:
-        proto = values.get("PLEX_PROTOCOL", "http") or "http"
-        port = values.get("PLEX_PORT", "32400") or "32400"
-        patch.setdefault("plex", {})["url"] = f"{proto}://{host}:{port}"
-        if host in ("127.0.0.1", "localhost"):
-            notes.append(
-                "Plex address was 127.0.0.1. Inside this app that means the app itself — "
-                "change it to your NAS's IP address."
-            )
-    if values.get("PLEX_PATH_PREFIX") or values.get("TRUENAS_PATH_PREFIX"):
-        notes.append(
-            "Path prefixes are not needed any more: mount your media in this app at the same "
-            "path Plex uses (Health checks it). Use Settings → Path rewrites only if you can't."
-        )
-    if "PRELOAD_PACING_PERCENT_CONSOLE" in values:
-        notes.append("Console pacing is now the “Run now” button, which runs at full speed.")
-    if not patch:
-        notes.append("No recognised settings were found in that file.")
-    return patch, notes
