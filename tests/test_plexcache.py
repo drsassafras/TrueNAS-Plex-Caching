@@ -263,6 +263,49 @@ class ReaderAndPlanTests(unittest.TestCase):
         self.assertEqual(r["l2_growth"], 0)
 
 
+class MountSummaryTests(unittest.TestCase):
+    """The first real install mounted an empty /data and nothing at /media or /music."""
+
+    def _app(self, mapping):
+        from plexcache import checks
+
+        class Stub:
+            libraries = [
+                {"kind": "movie", "excluded": False, "locations": ["/data/3D Movies", "/media/Movies"]},
+                {"kind": "audio", "excluded": False, "locations": ["/music/BettysMusic"]},
+                {"kind": None, "excluded": False, "locations": ["/photos"]},
+            ]
+
+            def map_path(self, p):
+                for k, v in mapping.items():
+                    if p == k or p.startswith(k + "/"):
+                        return v + p[len(k):]
+                return p
+        return checks, Stub()
+
+    def test_empty_and_missing_mounts(self):
+        empty = tempfile.mkdtemp(dir=TMP)
+        checks, app = self._app({"/data": empty, "/media": os.path.join(TMP, "nope"), "/music": os.path.join(TMP, "nope2")})
+        out = checks._mount_summary(app)
+        self.assertEqual(len(out), 1)
+        self.assertIn("3 media folders", out[0]["title"])
+        self.assertIn("mounted but empty", out[0]["detail"])
+        self.assertIn("not mounted at all", out[0]["detail"])
+        self.assertIn(":/media:ro", out[0]["fix_cmd"])
+
+    def test_all_good(self):
+        full = tempfile.mkdtemp(dir=TMP)
+        open(os.path.join(full, "x"), "w").close()
+        checks, app = self._app({"/data": full, "/media": full, "/music": full})
+        self.assertEqual(checks._mount_summary(app), [])
+
+    def test_ratio_format(self):
+        from plexcache.checks import fmt_ratio
+        self.assertEqual(fmt_ratio(0.99962), "over 99.9%")
+        self.assertEqual(fmt_ratio(0.9962), "99.6%")
+        self.assertEqual(fmt_ratio(0.5), "50%")
+
+
 class SchedulerTests(unittest.TestCase):
     def test_daily_and_weekly(self):
         w = dict(config.DEFAULTS["warmup"], schedule="daily", time="03:00")
