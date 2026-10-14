@@ -15,6 +15,7 @@ from . import __version__, checks, config, mapping, report, zfs
 from .activity import Activity
 from .auth import Auth
 from .homeassistant import HomeAssistantBridge
+from .i18n import Fixed, M, join, msg
 from .updates import UpdateChecker
 from .config import PLEX_DEFAULT_PORT, Settings
 from .pauses import WarmupPauses
@@ -71,15 +72,15 @@ def _is_local_name(host: str) -> bool:
     return "." not in h or h.endswith(LOCAL_SUFFIXES)
 
 
-KIND_LABEL = {"movie": "movies", "tv": "TV episodes", "audio": "audio files"}
+KIND_LABEL = {"movie": M("movies"), "tv": M("TV episodes"), "audio": M("audio files")}
 
 
-def index_summary(result: dict) -> str:
-    """e.g. "indexes cached: 6,809 TV episodes 0.2 GB (largest 1.1 MB); 412 MP4s keep theirs at the end"."""
+def index_summary(result: dict) -> M:
+    """e.g. "end-of-file indexes — movies: 3 of 3 had one at the end, 0.2 GB (largest 2.0 MB)"."""
     def size(n):
         if n >= 1e8:
-            return f"{n / 1e9:.1f} GB"
-        return f"{n / 1e6:.1f} MB" if n >= 1e6 else f"{n / 1e3:.0f} KB"
+            return M("{n} GB", n=Fixed(n / 1e9, 1))
+        return M("{n} MB", n=Fixed(n / 1e6, 1)) if n >= 1e6 else M("{n} KB", n=Fixed(n / 1e3, 0))
     bits, mp4 = [], 0
     for kind, st in result["index"].items():
         files = (result.get("by_kind") or {}).get(kind, {}).get("files", 0)
@@ -87,13 +88,17 @@ def index_summary(result: dict) -> str:
             continue
         mp4 += st["mp4_at_end"]
         if st["files"]:
-            bits.append(f"{KIND_LABEL[kind]}: {st['files']:,} of {files:,} had one at the end, "
-                        f"{size(st['bytes'])} (largest {size(st['largest'])})")
+            bits.append(M("{kind}: {n} of {files} had one at the end, {size} (largest {largest})", kind=KIND_LABEL[kind],
+                          n=st["files"], files=files, size=size(st["bytes"]), largest=size(st["largest"])))
         else:
-            bits.append(f"{KIND_LABEL[kind]}: none at the end")
-    text = "end-of-file indexes — " + "; ".join(bits)
+            bits.append(M("{kind}: none at the end", kind=KIND_LABEL[kind]))
+    joined = bits[0]
+    for b in bits[1:]:
+        joined = M("{a}; {b}", a=joined, b=b)
+    text = M("end-of-file indexes — {list}", list=joined)
     if mp4:
-        text += f". {mp4:,} MP4 file{'s' if mp4 != 1 else ''} keep their index at the end (no “fast start”)"
+        text = M("{text}. {n} MP4 files keep their index at the end (no “fast start”)",
+                 one="{text}. {n} MP4 file keeps its index at the end (no “fast start”)", text=text, n=mp4)
     return text
 
 
@@ -238,7 +243,7 @@ class App:
                 self.scan_error = None
         except PlexError as e:
             with self.lock:
-                self.scan_error = str(e)
+                self.scan_error = msg(e)
         finally:
             with self.lock:
                 self.scanning = False
@@ -251,70 +256,74 @@ class App:
         # Plex: is a server there (no token needed), then is the token accepted?
         p = s["plex"]
         if not p["url"]:
-            res["plex_server"] = {"status": "warn", "text": "Plex server address needed",
-                                  "detail": "Enter your Plex server's address, e.g. your NAS's IP. "
-                                            f"Port {PLEX_DEFAULT_PORT} is used if you leave it off."}
+            res["plex_server"] = {"status": "warn", "text": M("Plex server address needed"),
+                                  "detail": M("Enter your Plex server's address, e.g. your NAS's IP. "
+                                              "Port {port} is used if you leave it off.", port=str(PLEX_DEFAULT_PORT))}
         else:
             try:
                 ident = PlexClient(p["url"], "", timeout=8).identity()
-                res["plex_server"] = {"status": "ok", "text": "Plex server found",
-                                      "detail": f"Plex Media Server {ident['version']} at {p['url']} ({ident['ms']} ms)"}
+                res["plex_server"] = {"status": "ok", "text": M("Plex server found"),
+                                      "detail": M("Plex Media Server {version} at {url} ({ms} ms)",
+                                                  version=ident["version"], url=p["url"], ms=ident["ms"])}
             except PlexError as e:
-                hint = " Use your NAS's IP, not 127.0.0.1 — inside this app that means the app itself." \
-                    if "127.0.0.1" in p["url"] or "localhost" in p["url"] else ""
-                res["plex_server"] = {"status": "fail", "text": "No Plex server found", "detail": str(e) + "." + hint}
+                if "127.0.0.1" in p["url"] or "localhost" in p["url"]:
+                    detail = M("{why}. Use your NAS's IP, not 127.0.0.1 — inside this app that means the app itself.", why=msg(e))
+                else:
+                    detail = M("{why}.", why=msg(e))
+                res["plex_server"] = {"status": "fail", "text": M("No Plex server found"), "detail": detail}
         if res["plex_server"]["status"] != "ok":
-            res["plex_token"] = {"status": "off", "text": "Plex sign-in: waiting for the server",
-                                 "detail": "Sign-in is checked once the server is found."}
+            res["plex_token"] = {"status": "off", "text": M("Plex sign-in: waiting for the server"),
+                                 "detail": M("Sign-in is checked once the server is found.")}
         elif not p["token"]:
             # Without a token Plex shares nothing, so no feature can work: a failure, not a warning.
-            res["plex_token"] = {"status": "fail", "text": "Plex sign-in needed",
-                                 "detail": "Nothing works until you sign in: Plex only shares your libraries and "
-                                           "what's playing with apps that have a token for your account."}
+            res["plex_token"] = {"status": "fail", "text": M("Plex sign-in needed"),
+                                 "detail": M("Nothing works until you sign in: Plex only shares your libraries and "
+                                             "what's playing with apps that have a token for your account.")}
         else:
             try:
                 info = self.plex(timeout=10).ping()
                 n = len(self.plex(timeout=10).libraries())
-                res["plex_token"] = {"status": "ok", "text": "Signed in to Plex",
-                                     "detail": f"Token accepted by “{info['name']}” · {n} libraries visible"}
+                res["plex_token"] = {"status": "ok", "text": M("Signed in to Plex"),
+                                     "detail": M("Token accepted by “{name}” · {n} libraries visible",
+                                                 one="Token accepted by “{name}” · {n} library visible", name=info["name"], n=n)}
             except PlexError as e:
                 bad = "token" in str(e).lower()
-                res["plex_token"] = {"status": "fail", "text": "Plex token rejected" if bad else "Couldn't check Plex sign-in",
-                                     "detail": ("Plex no longer accepts the saved token. Sign in again."
-                                                if bad else str(e))}
+                res["plex_token"] = {"status": "fail", "text": M("Plex token rejected") if bad else M("Couldn't check Plex sign-in"),
+                                     "detail": (M("Plex no longer accepts the saved token. Sign in again.")
+                                                if bad else msg(e))}
         # TrueNAS: optional. Is the API there, then is the key accepted?
         t = s["truenas"]
         if not t["url"]:
-            res["truenas_server"] = {"status": "warn", "text": "TrueNAS not set up (optional)",
-                                     "detail": "Without it, cache devices and dataset settings can't be checked, "
-                                               "and Library warm-up can't be sized."}
-            res["truenas_key"] = {"status": "off", "text": "TrueNAS API key", "detail": ""}
+            res["truenas_server"] = {"status": "warn", "text": M("TrueNAS not set up (optional)"),
+                                     "detail": M("Without it, cache devices and dataset settings can't be checked, "
+                                                 "and Library warm-up can't be sized.")}
+            res["truenas_key"] = {"status": "off", "text": M("TrueNAS API key"), "detail": ""}
         elif not probe_truenas(t["url"]):
-            res["truenas_server"] = {"status": "fail", "text": "TrueNAS not found",
-                                     "detail": f"No TrueNAS API answered at {t['url']}."}
-            res["truenas_key"] = {"status": "off", "text": "API key: waiting for TrueNAS", "detail": ""}
+            res["truenas_server"] = {"status": "fail", "text": M("TrueNAS not found"),
+                                     "detail": M("No TrueNAS API answered at {url}.", url=t["url"])}
+            res["truenas_key"] = {"status": "off", "text": M("API key: waiting for TrueNAS"), "detail": ""}
         else:
-            res["truenas_server"] = {"status": "ok", "text": "TrueNAS found", "detail": t["url"]}
+            res["truenas_server"] = {"status": "ok", "text": M("TrueNAS found"), "detail": t["url"]}
             if not t["api_key"]:
-                res["truenas_key"] = {"status": "warn", "text": "TrueNAS API key needed",
-                                      "detail": "Add a key so the app can read pool and dataset settings. "
-                                                "It only reads; nothing is changed."}
+                res["truenas_key"] = {"status": "warn", "text": M("TrueNAS API key needed"),
+                                      "detail": M("Add a key so the app can read pool and dataset settings. "
+                                                  "It only reads; nothing is changed.")}
             else:
                 try:
                     with self.truenas() as tn:
                         v = tn.version()
-                    res["truenas_key"] = {"status": "ok", "text": "TrueNAS API key accepted", "detail": v or "Connected"}
+                    res["truenas_key"] = {"status": "ok", "text": M("TrueNAS API key accepted"), "detail": v or M("Connected")}
                 except TrueNASError as e:
-                    res["truenas_key"] = {"status": "fail", "text": "TrueNAS API key not accepted", "detail": str(e)}
+                    res["truenas_key"] = {"status": "fail", "text": M("TrueNAS API key not accepted"), "detail": msg(e)}
         problems = [k for k in ("plex_server", "plex_token") if res[k]["status"] != "ok"]
         optional = [k for k in ("truenas_server", "truenas_key") if res[k]["status"] in ("warn", "fail")]
         if problems:
             res["summary"] = {"status": "fail" if any(res[k]["status"] == "fail" for k in problems) else "warn",
-                              "text": "Plex needs attention — the app can't do anything until Plex is connected."}
+                              "text": M("Plex needs attention — the app can't do anything until Plex is connected.")}
         elif optional:
-            res["summary"] = {"status": "warn", "text": "Plex is connected. TrueNAS is optional but recommended."}
+            res["summary"] = {"status": "warn", "text": M("Plex is connected. TrueNAS is optional but recommended.")}
         else:
-            res["summary"] = {"status": "ok", "text": "Everything is connected."}
+            res["summary"] = {"status": "ok", "text": M("Everything is connected.")}
         with self.lock:
             self.connections = res
         return res
@@ -376,30 +385,30 @@ class App:
             try:
                 PlexClient(url, "", timeout=4).identity()
                 self.settings.update({"plex": {"url": url}})
-                changed.append(f"Plex at {url}")
+                changed.append(M("Plex at {url}", url=url))
             except PlexError:
                 pass
         if not s["truenas"]["url"]:
             url = f"https://{h}" + ("" if TRUENAS_PROBE_PORT == 443 else f":{TRUENAS_PROBE_PORT}")
             if probe_truenas(url, timeout=4):
                 self.settings.update({"truenas": {"url": url}})
-                changed.append(f"TrueNAS at {url}")
+                changed.append(M("TrueNAS at {url}", url=url))
         if changed:
-            self.activity.event("settings", "found " + " and ".join(changed))
+            self.activity.event("settings", M("found {list}", list=join(changed)))
         self.test_connections_async(then_checks=bool(changed), rescan=bool(changed))
 
     def check_library_modes(self, modes) -> None:
         """Each library's preload choice must suit its kind (TV: off/next; music and
         audiobooks: the rest), for a library Plex actually has. Raises SettingsError."""
         if not isinstance(modes, dict):
-            raise config.SettingsError("library_modes must be an object")
+            raise config.SettingsError(M("library_modes must be an object"))
         kinds = {lib["key"]: lib.get("kind") for lib in self.libraries}
         for key, mode in modes.items():
             if kinds and key not in kinds:
-                raise config.SettingsError(f"Plex has no library {key}")
+                raise config.SettingsError(M("Plex has no library {key}", key=key))
             allowed = config.TV_MODES if kinds.get(key) == "tv" else config.AUDIO_MODES
             if kinds.get(key) in ("tv", "audio") and mode not in allowed:
-                raise config.SettingsError(f"“{mode}” isn't a preload choice for that library")
+                raise config.SettingsError(M("“{mode}” isn't a preload choice for that library", mode=str(mode)))
 
     def library_datasets(self, key: str) -> list[dict]:
         """The datasets holding a library's folders (from the last check)."""
@@ -589,7 +598,7 @@ class App:
                             d["props_debug"] = list(getattr(tn, "last_props_raw", []) or [])
                 info["truenas_error"] = None
             except TrueNASError as e:
-                info["truenas_error"] = str(e)
+                info["truenas_error"] = msg(e)
         self._survey_blocks(datasets)
         with self.lock:
             self.zfs = info
@@ -664,21 +673,21 @@ class App:
     def _warmup_worker(self, manual: bool):
         started = dt.datetime.now()
         try:
-            self.activity.event("warm-up", "started" + (" (run now, full speed)" if manual else ""))
+            self.activity.event("warm-up", M("started (run now, full speed)") if manual else M("started"))
             self.scan_library()
             if self.scan_error:
-                self.activity.event("warm-up", f"stopped: couldn't read libraries: {self.scan_error}", "warn")
+                self.activity.event("warm-up", M("stopped: couldn't read libraries: {why}", why=self.scan_error), "warn")
                 return
             self.probe_zfs()
             s = self.settings.get()
             w, g = s["warmup"], s["general"]
             p = plan(self.stats, w, self.l2_total(), self.index_avg())
             if p["status"] == "none":
-                self.activity.event("warm-up", "skipped: no L2ARC on the media pool", "warn")
+                self.activity.event("warm-up", M("skipped: no L2ARC on the media pool"), "warn")
                 return
             if p["status"] in ("reduced", "insufficient"):
-                secs = ", ".join(f"{k} {v:g}s" for k, v in p["seconds"].items())
-                self.activity.event("warm-up", f"L2ARC too small for your settings, using {secs}", "warn")
+                secs = [M("{kind} {n} s", kind=KIND_LABEL.get(k, k), n=v) for k, v in p["seconds"].items()]
+                self.activity.event("warm-up", M("L2ARC too small for your settings, using {list}", list=secs), "warn")
             files = [f.__class__(self.map_path(f.path), f.kbps, f.size, f.kind, f.library, f.library_key)
                      for f in self.files if self.library_cacheable(f.library_key, "warmup")]
             pauses = WarmupPauses(self, manual)
@@ -688,7 +697,7 @@ class App:
                 why = pauses.reason()
                 run = holder.get("run")
                 if run is not None and why != run.paused:
-                    self.activity.event("warm-up", f"paused: {why}" if why else "carrying on")
+                    self.activity.event("warm-up", M("paused: {why}", why=why) if why else M("carrying on"))
                     run.paused = why
                 return why is not None
 
@@ -700,25 +709,26 @@ class App:
             holder["run"] = run
             with self.lock:
                 self.warmup_run = run
-            self.activity.event("warm-up", f"reading the start of {len(files):,} files at {run.pacer.percent:g}% pacing")
+            self.activity.event("warm-up", M("reading the start of {n} files at {pct}% pacing", n=len(files), pct=run.pacer.percent))
             result = run.run()
             result["manual"] = manual
             self.activity.add_run(result)
             hr = result["hit_rate"]
             growth = result["l2_growth"]
-            msg = f"{result['result']}: {result['files']:,} files, {result['bytes'] / 1e9:.1f} GB read"
+            outcome = {"ok": M("ok"), "stopped": M("stopped"), "errors": M("errors")}.get(result["result"], result["result"])
+            bits = [M("{outcome}: {n} files, {size} GB read", outcome=outcome, n=result["files"], size=Fixed(result["bytes"] / 1e9, 1))]
             if hr is not None:
-                msg += f", {hr * 100:.0f}% already cached"
+                bits.append(M("{pct}% already cached", pct=round(hr * 100)))
             if growth is not None:
-                msg += f", L2ARC {'+' if growth >= 0 else ''}{growth / 1e9:.1f} GB"
+                bits.append(M("L2ARC {sign}{size} GB", sign="+" if growth >= 0 else "", size=Fixed(growth / 1e9, 1)))
             if result["errors"]:
-                msg += f", {result['errors']} unreadable"
-            self.activity.event("warm-up", msg, "warn" if result["errors"] else "info")
+                bits.append(M("{n} unreadable", n=result["errors"]))
+            self.activity.event("warm-up", M("{list}", list=bits), "warn" if result["errors"] else "info")
             if result.get("index"):
                 self.activity.event("warm-up", index_summary(result))
         except Exception as e:  # keep the app alive
             log.exception("warm-up failed")
-            self.activity.event("warm-up", f"failed: {e}", "warn")
+            self.activity.event("warm-up", M("failed: {why}", why=msg(e)), "warn")
         finally:
             self.last_warmup = started
             with self.lock:
@@ -780,7 +790,7 @@ class App:
             with self.lock:
                 self.block_scans[dataset] = res
                 self._save_json("blockscans.json", self.block_scans)
-            self.activity.event("record size", f"{dataset}: checked {res['checked']:,} files")
+            self.activity.event("record size", M("{dataset}: checked {n} files", dataset=dataset, n=res["checked"]))
             self.run_checks()
 
         threading.Thread(target=work, name="block-scan", daemon=True).start()
@@ -829,11 +839,12 @@ class App:
                     finished.append(name)
                 if results:
                     self.settings.update({"general": {"hdd_measured_at": now}})
-                    self.activity.event("benchmark", "measured " + ", ".join(f"{k} {v} MB/s" for k, v in results.items()))
+                    self.activity.event("benchmark", M("measured {list}", list=[M("{dataset} {n} MB/s", dataset=k, n=v)
+                                                                                  for k, v in results.items()]))
                     self.benchmark = {"rows": rows, "results": results, "at": time.time()}
                 else:
                     self.benchmark = {"rows": [], "results": {}, "at": time.time(),
-                                      "error": "No readable media files to benchmark."}
+                                      "error": M("No readable media files to benchmark.")}
             finally:
                 with self.lock:
                     self.benchmarking = False

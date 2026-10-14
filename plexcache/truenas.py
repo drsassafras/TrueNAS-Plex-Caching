@@ -11,6 +11,7 @@ import json
 import urllib.parse
 
 from .wsclient import WebSocket, WebSocketError
+from .i18n import M
 
 
 class TrueNASError(Exception):
@@ -21,9 +22,7 @@ def ws_url(url: str) -> str:
     u = urllib.parse.urlparse(url if "://" in url else "https://" + url)
     if u.scheme != "https":
         # TrueNAS revokes API keys that are sent over unencrypted connections.
-        raise TrueNASError(
-            "Use an https:// address for TrueNAS. API keys sent over plain http get revoked by TrueNAS."
-        )
+        raise TrueNASError(M("Use an https:// address for TrueNAS. API keys sent over plain http get revoked by TrueNAS."))
     return urllib.parse.urlunparse(("wss", u.netloc, "/api/current", "", "", ""))
 
 
@@ -46,12 +45,12 @@ def probe(url: str, timeout: float = 5) -> bool:
 class TrueNASClient:
     def __init__(self, url: str, api_key: str, verify_tls: bool = False, timeout: float = 20):
         if not url or not api_key:
-            raise TrueNASError("TrueNAS address and API key are not set")
+            raise TrueNASError(M("TrueNAS address and API key are not set"))
         self._ids = itertools.count(1)
         try:
             self.ws = WebSocket(ws_url(url), verify_tls=verify_tls, timeout=timeout)
         except WebSocketError as e:
-            raise TrueNASError(f"Can't connect to TrueNAS: {e}") from None
+            raise TrueNASError(M("Can't connect to TrueNAS: {why}", why=str(e))) from None
         try:
             ok = self.call("auth.login_with_api_key", [api_key])
         except TrueNASError:
@@ -59,7 +58,7 @@ class TrueNASClient:
             raise
         if ok is not True:
             self.close()
-            raise TrueNASError("TrueNAS rejected the API key")
+            raise TrueNASError(M("TrueNAS rejected the API key"))
 
     def call(self, method: str, params: list | None = None):
         msg_id = next(self._ids)
@@ -72,12 +71,12 @@ class TrueNASClient:
                 if "error" in reply and reply["error"]:
                     err = reply["error"]
                     detail = (err.get("data") or {}).get("reason") or err.get("message") or str(err)
-                    raise TrueNASError(f"{method} failed: {detail}")
+                    raise TrueNASError(M("{method} failed: {why}", method=method, why=str(detail)))
                 return reply.get("result")
         except WebSocketError as e:
-            raise TrueNASError(f"TrueNAS connection problem: {e}") from None
+            raise TrueNASError(M("TrueNAS connection problem: {why}", why=str(e))) from None
         except ValueError:
-            raise TrueNASError("TrueNAS sent a reply that isn't JSON") from None
+            raise TrueNASError(M("TrueNAS sent a reply that isn't JSON")) from None
 
     def close(self) -> None:
         self.ws.close()

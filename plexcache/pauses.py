@@ -18,6 +18,7 @@ import re
 import time
 
 from . import zfs
+from .i18n import M, msg
 from .truenas import TrueNASError
 
 BUFFER_HOLD = 180  # seconds to stay paused after a player last reported buffering
@@ -91,12 +92,13 @@ class WarmupPauses:
                 for name in sorted(pools):
                     scan = (tn.pool(name) or {}).get("scan") or {}
                     if scan.get("state") == "SCANNING":
-                        what = {"SCRUB": "a scrub", "RESILVER": "a resilver"}.get(scan.get("function"), "a scan")
-                        self._scrub = f"{what} is running on {name}"
+                        self._scrub = {"SCRUB": M("a scrub is running on {pool}", pool=name),
+                                       "RESILVER": M("a resilver is running on {pool}", pool=name)}.get(
+                            scan.get("function"), M("a scan is running on {pool}", pool=name))
                         break
             self.scrub_error = None
         except (TrueNASError, OSError) as e:
-            self.scrub_error = str(e)  # can't tell, so don't pause for it
+            self.scrub_error = msg(e)  # can't tell, so don't pause for it
         return self._scrub
 
     def reason(self) -> str | None:
@@ -104,11 +106,11 @@ class WarmupPauses:
         w = self.app.settings.section("warmup")
         if (w["finish_by_enabled"] and not self.manual and w["schedule"] in ("daily", "weekly")
                 and in_quiet_hours(dt.datetime.now(), w["finish_by"], w["time"])):
-            return f"past the finish-by time ({w['finish_by']}); carries on at {w['time']}"
+            return M("past the finish-by time ({finish}); carries on at {start}", finish=w["finish_by"], start=w["time"])
         if w["pause_buffering"]:
             last = self.app.monitor.last_buffering
             if last and time.time() - last[0] < BUFFER_HOLD:
-                return f"a player was buffering ({last[1]})"
+                return M("a player was buffering ({player})", player=last[1])
         if w["pause_preload"]:
             what = self.app.monitor.preloading()
             if what:
@@ -119,5 +121,5 @@ class WarmupPauses:
                 return what
         busy = self._disk_busy()
         if w["pause_disk_busy"] and not self.manual and busy is not None and busy >= w["pause_disk_busy"]:
-            return f"the pool's disks are {busy:.0f}% busy with other work"
+            return M("the pool's disks are {pct}% busy with other work", pct=round(busy))
         return None

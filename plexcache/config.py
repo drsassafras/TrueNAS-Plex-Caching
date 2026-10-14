@@ -17,6 +17,8 @@ import urllib.parse
 import threading
 import uuid
 
+from .i18n import CODES, M
+
 SECRET_MASK = "__unchanged__"
 SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"), ("mqtt", "password"))
 
@@ -106,6 +108,7 @@ DEFAULTS: dict = {
         "interval": 30,  # seconds between status updates
         "report_period": "week",  # what the "last N days" sensors cover: today | week | month
         "allow_control": True,  # accept commands (switches, buttons, numbers and selects in Home Assistant)
+        "language": "en",  # names and text sent to Home Assistant (it doesn't say which language it uses)
     },
 }
 
@@ -149,6 +152,7 @@ CHOICES = {
     ("nowplaying", "delay_sec"): (0, 15, 30, 60),
     ("nextepisode", "start_at"): ("default", "after_nowplaying", "80", "90"),
     ("mqtt", "report_period"): ("today", "week", "month"),
+    ("mqtt", "language"): tuple(CODES),
 }
 MAX_ITEMS = 500  # entries in a list/map setting (libraries, mappings, datasets)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -198,9 +202,9 @@ def normalize_url(section: str, value: str) -> str:
 def _text(section: str, key: str, value, max_len: int = 255, spaces: bool = True) -> str:
     """A string: no control characters, a sensible length, optionally no spaces."""
     if not isinstance(value, str):
-        raise SettingsError(f"{section}.{key} must be text")
+        raise SettingsError(M("{setting} must be text", setting=f"{section}.{key}"))
     if len(value) > max_len or _CONTROL.search(value) or (not spaces and any(c.isspace() for c in value)):
-        raise SettingsError(f"{section}.{key} isn't valid")
+        raise SettingsError(M("{setting} isn't valid", setting=f"{section}.{key}"))
     return value
 
 
@@ -208,7 +212,7 @@ def _path(section: str, key: str, value) -> str:
     """A folder path: absolute, no '..' parts."""
     value = _text(section, key, value, 1024).rstrip("/") or "/"
     if not value.startswith("/") or ".." in value.split("/"):
-        raise SettingsError(f"{section}.{key}: folder paths must start with / (and can't use ..)")
+        raise SettingsError(M("{setting}: folder paths must start with / (and can't use ..)", setting=f"{section}.{key}"))
     return value
 
 
@@ -218,11 +222,11 @@ def _url(section: str, value) -> str:
         return ""
     u = urllib.parse.urlsplit(value)
     if u.scheme not in ("http", "https") or not u.hostname or "@" in u.netloc or u.query or u.fragment:
-        raise SettingsError(f"{section}.url must be an address like 192.168.1.10 or http://nas.local:32400")
+        raise SettingsError(M("{setting} must be an address like 192.168.1.10 or http://nas.local:32400", setting=f"{section}.url"))
     try:
         u.port  # raises on a bad port
     except ValueError:
-        raise SettingsError(f"{section}.url has a bad port") from None
+        raise SettingsError(M("{setting} has a bad port", setting=f"{section}.url")) from None
     return value
 
 
@@ -234,26 +238,26 @@ def _coerce(section: str, key: str, value, current):
         if isinstance(choices[0], int):
             # Numbers may arrive as 10 or "10" (a form field); nothing else
             if isinstance(value, bool) or not isinstance(value, (int, str)) or not str(value).isdigit():
-                raise SettingsError(f"{where} must be one of {', '.join(map(str, choices))}")
+                raise SettingsError(M("{setting} must be one of {choices}", setting=where, choices=", ".join(map(str, choices))))
             value = int(value)
         if value not in choices:
-            raise SettingsError(f"{where} must be one of {', '.join(map(str, choices))}")
+            raise SettingsError(M("{setting} must be one of {choices}", setting=where, choices=", ".join(map(str, choices))))
         return value
     if isinstance(current, bool):
         if not isinstance(value, bool):
-            raise SettingsError(f"{where} must be true or false")
+            raise SettingsError(M("{setting} must be true or false", setting=where))
         return value
     if isinstance(current, int):
         if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
                 or value != int(value)):
-            raise SettingsError(f"{where} must be a whole number")
+            raise SettingsError(M("{setting} must be a whole number", setting=where))
         lo, hi = LIMITS[(section, key)]
         if not lo <= value <= hi:
-            raise SettingsError(f"{where} must be between {lo} and {hi}")
+            raise SettingsError(M("{setting} must be between {min} and {max}", setting=where, min=str(lo), max=str(hi)))
         return int(value)
     if key in ("time", "finish_by"):
         if not isinstance(value, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
-            raise SettingsError("time must look like 03:00")
+            raise SettingsError(M("time must look like 03:00"))
         return value
     if key == "url":
         return _url(section, value)
@@ -262,7 +266,7 @@ def _coerce(section: str, key: str, value, current):
     if (section, key) == ("mqtt", "host"):
         value = _text(section, key, value, 253).strip()
         if value and not _HOST.fullmatch(value):
-            raise SettingsError("mqtt.host must be an IP address or host name")
+            raise SettingsError(M("mqtt.host must be an IP address or host name"))
         return value
     if (section, key) == ("mqtt", "username"):
         return _text(section, key, value, 128)
@@ -270,58 +274,58 @@ def _coerce(section: str, key: str, value, current):
         return _text(section, key, value, 256)
     if key == "hdd_measured_at":
         if value is not None and not (isinstance(value, str) and _ISO_TIME.fullmatch(value)):
-            raise SettingsError("general.hdd_measured_at must be a date and time")
+            raise SettingsError(M("general.hdd_measured_at must be a date and time"))
         return value
     if key == "excluded_libraries":
         if not isinstance(value, list) or len(value) > MAX_ITEMS:
-            raise SettingsError("excluded_libraries must be a list")
+            raise SettingsError(M("excluded_libraries must be a list"))
         return [_text(section, key, x, 200) for x in value]
     if key in ("base_topic", "discovery_prefix"):
         value = _text(section, key, value, 100).strip().strip("/")
         if not re.fullmatch(r"[A-Za-z0-9_\-]+(/[A-Za-z0-9_\-]+)*", value):
-            raise SettingsError(f"{key} may only use letters, numbers, - _ and /")
+            raise SettingsError(M("{setting} may only use letters, numbers, - _ and /", setting=key))
         return value
     if key == "library_modes":
         if not isinstance(value, dict) or len(value) > MAX_ITEMS:
-            raise SettingsError("library_modes must be an object")
+            raise SettingsError(M("library_modes must be an object"))
         out = {}
         for lib, mode in value.items():
             if not _LIB_KEY.fullmatch(str(lib)):
-                raise SettingsError(f"unknown library: {lib}")
+                raise SettingsError(M("unknown library: {key}", key=str(lib)))
             if mode not in AUDIO_MODES and mode not in TV_MODES:
-                raise SettingsError(f"unknown preload choice: {mode}")
+                raise SettingsError(M("unknown preload choice: {mode}", mode=str(mode)))
             out[str(lib)] = mode
         return out
     if key == "disk_speeds":
         if not isinstance(value, dict) or len(value) > MAX_ITEMS:
-            raise SettingsError("disk_speeds must be an object")
+            raise SettingsError(M("disk_speeds must be an object"))
         out = {}
         for name, row in value.items():
             _text(section, key, name, 255)
             if row is None:
                 continue  # null removes a dataset's measurement
             if not isinstance(row, dict):
-                raise SettingsError("disk speed must be an object")
+                raise SettingsError(M("disk speed must be an object"))
             mb, at = row.get("mb_s"), row.get("measured_at")
             if isinstance(mb, bool) or not isinstance(mb, (int, float)) or not (math.isfinite(mb) and 10 <= mb <= 20000):
-                raise SettingsError("disk speed must be between 10 and 20000 MB/s")
+                raise SettingsError(M("disk speed must be between 10 and 20000 MB/s"))
             if at is not None and not (isinstance(at, str) and _ISO_TIME.fullmatch(at)):
-                raise SettingsError("disk speed measured_at must be a date and time")
+                raise SettingsError(M("disk speed measured_at must be a date and time"))
             out[name] = {"mb_s": int(mb), "measured_at": at}
         return out
     if key == "path_map":
         if not isinstance(value, list) or len(value) > MAX_ITEMS:
-            raise SettingsError("path_map must be a list")
+            raise SettingsError(M("path_map must be a list"))
         rows = []
         for row in value:
             if not isinstance(row, dict):
-                raise SettingsError("each media mapping must be an object")
+                raise SettingsError(M("each media mapping must be an object"))
             plex, local = row.get("plex") or "", row.get("local") or ""
             if plex and local:  # a row without both is a mapping being removed
                 # Plex's side is only matched as text (Plex may even run on Windows); ours must be a real path here
                 rows.append({"plex": _text(section, key, plex, 1024).rstrip("/") or "/", "local": _path(section, key, local)})
         return rows
-    raise SettingsError(f"{where} can't be changed")  # anything not covered above
+    raise SettingsError(M("{setting} can't be changed", setting=where))  # anything not covered above
 
 
 class Settings:
@@ -405,17 +409,17 @@ class Settings:
     def update(self, patch: dict) -> dict:
         """Apply a partial update like ``{"warmup": {"tv_sec": 20}}``."""
         if not isinstance(patch, dict):
-            raise SettingsError("settings update must be an object")
+            raise SettingsError(M("settings update must be an object"))
         with self._lock:
             new = copy.deepcopy(self._data)
             for sec, values in patch.items():
                 if sec not in DEFAULTS or not isinstance(values, dict):
-                    raise SettingsError(f"unknown settings section: {sec}")
+                    raise SettingsError(M("unknown settings section: {section}", section=str(sec)))
                 for key, value in values.items():
                     if key.endswith("_set") or key == "client_id":
                         continue
                     if key not in DEFAULTS[sec]:
-                        raise SettingsError(f"unknown setting: {sec}.{key}")
+                        raise SettingsError(M("unknown setting: {setting}", setting=f"{sec}.{key}"))
                     if (sec, key) in SECRET_PATHS and value == SECRET_MASK:
                         continue
                     new[sec][key] = _coerce(sec, key, value, DEFAULTS[sec][key])
@@ -424,7 +428,7 @@ class Settings:
                 if w[f"{kind}_min_sec"] > w[f"{kind}_sec"]:
                     w[f"{kind}_min_sec"] = w[f"{kind}_sec"]
             if new["nowplaying"]["ram_percent"] + new["nextepisode"]["ram_percent"] > 100:
-                raise SettingsError("Now-playing and Next-episode limits together can't be more than 100%")
+                raise SettingsError(M("Now-playing and Next-episode limits together can't be more than 100%"))
             self._data = new
             self._save()
             return copy.deepcopy(self._data)

@@ -10,6 +10,8 @@ import os
 import threading
 import time
 
+from .i18n import from_json, jsonable
+
 log = logging.getLogger("plexcache")
 
 RAW_DAYS = 31  # measurements older than this are folded into one summary per day
@@ -59,7 +61,7 @@ class Activity:
                 for m in self.metrics:
                     _count_total(self.totals, m.get("what"), m)
             for e in data.get("events", [])[-max_events:]:
-                self.events.append(e)
+                self.events.append(dict(e, message=from_json(e.get("message"))))
         except (OSError, ValueError):
             pass
 
@@ -71,12 +73,13 @@ class Activity:
         try:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump({"runs": self.runs, "counters": self.counters, "metrics": self.metrics,
-                           "daily": self.daily, "totals": self.totals, "events": list(self.events)[-100:]}, fh)
+                           "daily": self.daily, "totals": self.totals, "events": jsonable(list(self.events)[-100:])}, fh)
             os.replace(tmp, self.path)
         except OSError as e:
             log.warning("could not save history: %s", e)
 
-    def event(self, kind: str, message: str, level: str = "info") -> None:
+    def event(self, kind: str, message, level: str = "info") -> None:
+        """Log ``message`` (an ``M`` keeps its template, so each browser shows it in its own language)."""
         log.log(logging.WARNING if level == "warn" else logging.INFO, "%s: %s", kind, message)
         with self._lock:
             self.events.append({"t": time.time(), "kind": kind, "message": message, "level": level})

@@ -34,12 +34,18 @@ os.environ["PLEXCACHE_SYS"] = fakes.make_sys(TMP, {"l2arc_noprefetch": 1, "l2arc
 
 from plexcache import config, scheduler, zfs  # noqa: E402
 
+
+def en(v) -> str:
+    """A message from the API ({"_t": ...}) as English text."""
+    return str(from_json(v))
+
 # Test files sit on an ordinary filesystem, whose 4K blocks would look like files written
 # before a recordsize change. Report every sampled file as fitting in one block instead
 # (no information); BlockSizeTests checks the real function and what Health makes of it.
 REAL_BLOCK_SIZES = zfs.block_sizes
 zfs.block_sizes = lambda paths: (lambda n: {"checked": n, "single": n, "sizes": {}})(len(list(paths)))
 from plexcache.app import App  # noqa: E402
+from plexcache.i18n import from_json  # noqa: E402
 from plexcache.plex import PlexClient, PlexError  # noqa: E402
 from plexcache.reader import MiB, ReadResult, is_cache_hit, read_range  # noqa: E402
 from plexcache.truenas import TrueNASClient, TrueNASError, describe_pool, ws_url  # noqa: E402
@@ -924,7 +930,7 @@ class AppTests(unittest.TestCase):
                 self.app.settings.update({feature: {"enabled": False}})
                 status, r = self.post("/api/settings", {feature: {"enabled": True}})
                 self.assertEqual(status, 400, feature)
-                self.assertIn("primarycache", r["error"])
+                self.assertIn("primarycache", en(r["error"]))
                 # switching off is always allowed
                 status, _ = self.post("/api/settings", {feature: {"enabled": False}})
                 self.assertEqual(status, 200)
@@ -969,7 +975,7 @@ class AppTests(unittest.TestCase):
             self.app.settings.update({"warmup": {"enabled": False}})
             status, r = self.post("/api/settings", {"warmup": {"enabled": True}})
             self.assertEqual(status, 400)
-            self.assertIn("L2ARC", r["error"])
+            self.assertIn("L2ARC", en(r["error"]))
             self.assertFalse(self.app.settings.section("warmup")["enabled"])
             self.assertEqual(self.app.state()["l2arc"], "absent")
             from plexcache import checks
@@ -1603,7 +1609,7 @@ class ReportTests(unittest.TestCase):
                 ("streamend", {"label": "A", "seconds": 60, "busy_avg": 12, "busy_peak": 40})]
         r = report.build(self.app_with(rows))
         self.assertEqual(r["verdict"]["status"], "ok")
-        self.assertEqual("Last 7 days, 2 streams: 1 of 1 skips and 1 of 1 next episodes came from cache.",
+        self.assertEqual("Last 7 days, 2 streams: 1 of 1 skip and 1 of 1 next episode came from cache.",
                          r["verdict"]["text"])
         t = r["tiles"]
         self.assertEqual((t["skips"]["cached"], t["next"]["lead_min"], t["retention"]["pct"], t["preloaded"]["cached_pct"]),
@@ -1700,7 +1706,7 @@ class ReportTests(unittest.TestCase):
         b = report.summarize([{"what": "streamend", "busy_avg": 20, "busy_peak": 80},
                               {"what": "skip", "cached": False}])
         s = report.add(a, b)
-        self.assertEqual((s["busy_n"], s["busy_peak"], s["miss"], s["late"]), (2, 80, {"unknown": 1}, ["X (20% loaded)"]))
+        self.assertEqual((s["busy_n"], s["busy_peak"], s["miss"], s["late"]), (2, 80, {"unknown": 1}, [{"label": "X", "pct": 20}]))
         self.assertEqual(report.add(report.empty(), report.empty())["busy_peak"], None)
 
     def test_reports_in_state_are_cached(self):
@@ -2156,7 +2162,7 @@ class AppEdgeTests(unittest.TestCase):
                               "by_kind": {"movie": {"files": 3}, "tv": {"files": 5}, "audio": {"files": 0}}})
         self.assertIn("movies: 3 of 3 had one at the end, 0.2 GB (largest 2.0 MB)", text)
         self.assertIn("TV episodes: none at the end", text)
-        self.assertIn("1 MP4 file keep their index at the end", text)
+        self.assertIn("1 MP4 file keeps its index at the end", text)
 
     def test_main_entry_point(self):
         import plexcache.__main__ as main_mod
@@ -2710,8 +2716,8 @@ class LoginTests(unittest.TestCase):
             # The right username and the example password: refused, saying what to change
             status, body, headers = post("plex-cache", "change-me")
             self.assertEqual(status, 403)
-            self.assertIn("default password", body["error"])
-            self.assertIn("PLEXCACHE_PASSWORD", body["error"])
+            self.assertIn("default password", en(body["error"]))
+            self.assertIn("PLEXCACHE_PASSWORD", en(body["error"]))
             self.assertIsNone(headers.get("Set-Cookie"))
             self.assertTrue(any("hasn't been changed" in e["message"] for e in app.activity.snapshot()["events"]))
             # A wrong guess still just says it doesn't match (nothing given away)
@@ -2894,7 +2900,7 @@ class ValidationTests(unittest.TestCase):
             tv = next(l for l in app.libraries if l["kind"] == "tv")
             status, body = post("/api/settings", {"nextepisode": {"library_modes": {tv["key"]: "album"}}})
             self.assertEqual(status, 400)
-            self.assertIn("isn't a preload choice", body["error"])
+            self.assertIn("isn't a preload choice", en(body["error"]))
             self.assertEqual(post("/api/settings", {"nextepisode": {"library_modes": {"9999": "off"}}})[0], 400)
             self.assertEqual(post("/api/settings", {"nextepisode": {"library_modes": {tv["key"]: "off"}}})[0], 200)
             # Requests from another site's page are refused; this app's own pages and scripts are fine
@@ -3403,7 +3409,7 @@ class MQTTTests(unittest.TestCase):
     def test_wrong_password_then_retry(self):
         self.enable(password="wrong")
         self.assertTrue(wait_for(lambda: self.app.ha.status["state"] == "error"))
-        self.assertIn("not authorised", self.app.ha.status["error"])
+        self.assertIn("not authorized", self.app.ha.status["error"])
         self.assertEqual(self.steps(), {"broker": "ok", "tls": "off", "login": "fail", "publish": "off"})
         self.assertIsNotNone(self.app.ha.status["next_retry"])
         # Fixed on the broker's side: "Reconnect now" doesn't wait for the next attempt
@@ -3593,6 +3599,50 @@ class MQTTTests(unittest.TestCase):
         self.app.ha.close()
         self.assertTrue(wait_for(lambda: self.broker.state("nas/plexcache/availability") == b"offline", timeout=10))
         self.app.settings.update({"mqtt": {"base_topic": "plexcache"}})
+
+
+class TranslationTests(unittest.TestCase):
+    """The catalogs match the texts in the code; untranslated texts fall back to English."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("i18n_tool", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dev", "i18n.py"))
+        cls.tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.tool)
+        problems = []
+        cls.keys = cls.tool.all_keys(problems)
+        cls.problems = problems
+
+    def test_texts_extract_cleanly(self):
+        # Notes about helpers called on variables are expected (their texts are marked with N());
+        # anything else means a text the tool couldn't read
+        self.assertEqual([p for p in self.problems if "of a variable" not in p and "without literal" not in p], [])
+        self.assertGreater(len(self.keys), 500)
+
+    def test_catalogs_consistent(self):
+        for code in self.tool.TRANSLATED + list(self.tool.VARIANTS):
+            with self.subTest(code):
+                self.assertEqual(self.tool.check_catalog(code, self.keys, self.tool.load(code)), [])
+
+    def test_catalogs_list_every_text(self):
+        # After `dev/i18n.py sync` every text is in each catalog, null until translated
+        for code in self.tool.TRANSLATED:
+            with self.subTest(code):
+                missing = [k for k in self.keys if k not in self.tool.load(code)]
+                self.assertEqual(missing[:5], [], "run: python3 dev/i18n.py sync")
+
+    def test_untranslated_falls_back_to_english(self):
+        from unittest import mock
+        from plexcache import i18n
+        i18n._catalogs["xx-test"] = {"Idle": None, "{n} files": {"one": None, "other": None}}
+        try:
+            with mock.patch.object(i18n, "CODES", list(i18n.CODES) + ["xx-test"]):
+                self.assertEqual(i18n.render(i18n.M("Idle"), "xx-test"), "Idle")
+                self.assertEqual(i18n.render(i18n.M("{n} files", one="{n} file", n=1), "xx-test"), "1 file")
+                self.assertEqual(i18n.render(i18n.M("{n} files", one="{n} file", n=3), "xx-test"), "3 files")
+        finally:
+            i18n._catalogs.pop("xx-test", None)
 
 
 if __name__ == "__main__":

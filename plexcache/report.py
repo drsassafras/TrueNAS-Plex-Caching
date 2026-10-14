@@ -18,6 +18,8 @@ import collections
 import datetime as dt
 import time
 
+from .i18n import M, join
+
 RETENTION_LOW = 70  # % still cached below which preloads are being pushed out too soon
 DISK_BUSY_HIGH = 85  # % busy (peak during a stream) worth a look
 
@@ -73,7 +75,7 @@ def summarize(rows: list[dict]) -> dict:
                     s["lead_sum"] += r["lead"]
                     s["lead_n"] += 1
             else:
-                s["late"].append(f"{r['label']} ({r.get('pct', 0)}% loaded)")
+                s["late"].append({"label": r["label"], "pct": r.get("pct", 0)})
         elif w == "retention":
             s["ret_sum"] += r["pct"]
             s["ret_n"] += 1
@@ -95,8 +97,10 @@ def summarize(rows: list[dict]) -> dict:
     return s
 
 
-def _plural(n: int, word: str, many: str | None = None) -> str:
-    return f"{n:,} {word if n == 1 else (many or word + 's')}"
+def _late_text(x) -> M:
+    if isinstance(x, dict):  # (older history kept these as English text)
+        return M("{title} ({pct}% loaded)", title=x.get("label", ""), pct=x.get("pct", 0))
+    return x
 
 
 # ------------------------------------------------------------------ buckets
@@ -170,8 +174,9 @@ def build(app, period: str = "week", now: float | None = None) -> dict:
     for b_start, b_end, label in buckets:
         p = _point(_sum_between(raw, daily, b_start, b_end))
         p["label"] = label
+        p["start"] = b_start  # each browser writes its own label from this
         series.append(p)
-    span = {"today": "Today", "week": "Last 7 days", "month": "Last 30 days", "year": "Last 12 months"}[period]
+    span = {"today": M("Today"), "week": M("Last 7 days"), "month": M("Last 30 days"), "year": M("Last 12 months")}[period]
 
     busy_avg = round(s["busy_sum"] / s["busy_n"]) if s["busy_n"] else None
     busy_peak = round(s["busy_peak"]) if s["busy_peak"] is not None else None
@@ -189,60 +194,63 @@ def build(app, period: str = "week", now: float | None = None) -> dict:
     attention = []
     for reason, n in sorted(s["miss"].items(), key=lambda kv: -kv[1]):
         if reason == "only part of the file fits in the RAM limit":
-            attention.append({"status": "warn", "title": f"{_plural(n, 'skip')} went to disk: RAM limit full",
-                              "detail": "Only part of those files fit in Now-playing's RAM limit, and the viewer skipped "
-                                        "past the part that was loaded.",
-                              "fix": "Raise Now-playing's RAM limit (Features), or lower “ZFS cache to leave for the "
-                                     "rest of the NAS” (Settings → Behaviour).", "link": "/features"})
+            attention.append({"status": "warn", "title": M("{n} skips went to disk: RAM limit full", one="{n} skip went to disk: RAM limit full", n=n),
+                              "detail": M("Only part of those files fit in Now-playing's RAM limit, and the viewer skipped "
+                                          "past the part that was loaded."),
+                              "fix": M("Raise Now-playing's RAM limit (Features), or lower “ZFS cache to leave for the "
+                                       "rest of the NAS” (Settings → Behaviour)."), "link": "/features"})
         elif reason == "the preload hadn't started yet":
-            attention.append({"status": "warn", "title": f"{_plural(n, 'skip')} before the preload started",
-                              "detail": "The viewer skipped while Now-playing was still waiting to start.",
-                              "fix": "Use the automatic start time, or a shorter fixed delay (Features → Now-playing).",
+            attention.append({"status": "warn", "title": M("{n} skips before the preload started", one="{n} skip before the preload started", n=n),
+                              "detail": M("The viewer skipped while Now-playing was still waiting to start."),
+                              "fix": M("Use the automatic start time, or a shorter fixed delay (Features → Now-playing)."),
                               "link": "/features"})
         elif reason == "the preload hadn't reached that part yet":
-            attention.append({"status": "info", "title": f"{_plural(n, 'skip')} ahead of the preload",
-                              "detail": "The viewer skipped further than Now-playing had read so far. Normal in the first "
-                                        "minute or two; if it's common, the disks may be busy with other work.",
+            attention.append({"status": "info", "title": M("{n} skips ahead of the preload", one="{n} skip ahead of the preload", n=n),
+                              "detail": M("The viewer skipped further than Now-playing had read so far. Normal in the first "
+                                          "minute or two; if it's common, the disks may be busy with other work."),
                               "fix": "", "link": None})
         elif reason == "Now-playing preload is off":
-            attention.append({"status": "info", "title": f"{_plural(n, 'skip')} without Now-playing",
-                              "detail": "Now-playing preload is off, so skips read from the disks.",
-                              "fix": "Turn it on in Features.", "link": "/features"})
+            attention.append({"status": "info", "title": M("{n} skips without Now-playing", one="{n} skip without Now-playing", n=n),
+                              "detail": M("Now-playing preload is off, so skips read from the disks."),
+                              "fix": M("Turn it on in Features."), "link": "/features"})
     late = s["next"] - s["next_ready"]
     if late:
-        examples = "; ".join(s["late"][-3:])
-        attention.append({"status": "warn", "title": f"{_plural(late, 'next episode')} not ready in time",
-                          "detail": (examples + ".") if examples else "They hadn't finished loading when they started.",
-                          "fix": "Start Next-episode earlier: “After Now-playing preload finishes” or “At 80%” (Features).",
+        examples = [_late_text(x) for x in s["late"][-3:]]
+        attention.append({"status": "warn", "title": M("{n} next episodes not ready in time", one="{n} next episode not ready in time", n=late),
+                          "detail": M("{list}.", list=examples) if examples else M("They hadn't finished loading when they started."),
+                          "fix": M("Start Next-episode earlier: “After Now-playing preload finishes” or “At 80%” (Features)."),
                           "link": "/features"})
     if ret_avg is not None and ret_avg < RETENTION_LOW:
-        attention.append({"status": "warn", "title": f"Preloads aren't staying in RAM ({ret_avg}% still cached)",
-                          "detail": "About 30 minutes after loading, much of the data had already been pushed out of "
-                                    "the ZFS cache by other work.",
-                          "fix": "Lower Now-playing's and Next-episode's RAM limits so preloads don't push each other out, "
-                                 "leave more for the rest of the NAS, or add an L2ARC (SSD cache).", "link": "/features"})
+        attention.append({"status": "warn", "title": M("Preloads aren't staying in RAM ({pct}% still cached)", pct=ret_avg),
+                          "detail": M("About 30 minutes after loading, much of the data had already been pushed out of "
+                                      "the ZFS cache by other work."),
+                          "fix": M("Lower Now-playing's and Next-episode's RAM limits so preloads don't push each other out, "
+                                   "leave more for the rest of the NAS, or add an L2ARC (SSD cache)."), "link": "/features"})
     if busy_peak is not None and busy_peak >= DISK_BUSY_HIGH:
-        attention.append({"status": "info", "title": f"Disks reached {busy_peak}% busy while people watched",
-                          "detail": f"On average they were {busy_avg}% busy during streams.",
-                          "fix": "There's little headroom left for skips that go to disk. Check what else uses the pool; "
-                                 "Library warm-up pauses for busy disks (Settings → Library warm-up pauses).",
+        attention.append({"status": "info", "title": M("Disks reached {pct}% busy while people watched", pct=busy_peak),
+                          "detail": M("On average they were {pct}% busy during streams.", pct=busy_avg),
+                          "fix": M("There's little headroom left for skips that go to disk. Check what else uses the pool; "
+                                   "Library warm-up pauses for busy disks (Settings → Library warm-up pauses)."),
                           "link": "/settings#warmup-pauses"})
 
     has_data = any(s[k] for k in ("streams", "skips", "next", "ret_n", "read_cached", "read_disk"))
     if not has_data:
-        verdict = {"status": "info", "text": f"{span}: nothing has played yet, so there's nothing to report."}
+        verdict = {"status": "info", "text": M("{period}: nothing has played yet, so there's nothing to report.", period=span)}
     else:
         bits = []
         if s["skips"]:
-            bits.append(f"{s['skips_cached']} of {s['skips']} skips")
+            bits.append(M("{cached} of {n} skips", one="{cached} of {n} skip", cached=s["skips_cached"], n=s["skips"]))
         if s["next"]:
-            bits.append(f"{s['next_ready']} of {s['next']} next episodes")
+            bits.append(M("{ready} of {n} next episodes", one="{ready} of {n} next episode", ready=s["next_ready"], n=s["next"]))
         warns = sum(a["status"] == "warn" for a in attention)
+        streams = M("{n} streams", one="{n} stream", n=s["streams"])
         if warns:
-            verdict = {"status": "warn", "text": f"{span}: {_plural(warns, 'thing')} could be better — see below."}
+            verdict = {"status": "warn", "text": M("{period}: {n} things could be better — see below.",
+                                                   one="{period}: {n} thing could be better — see below.", period=span, n=warns)}
+        elif bits:
+            verdict = {"status": "ok", "text": M("{period}, {streams}: {list} came from cache.", period=span, streams=streams, list=join(bits))}
         else:
-            tail = f": {' and '.join(bits)} came from cache" if bits else ", and caching had nothing to fix"
-            verdict = {"status": "ok", "text": f"{span}, {_plural(s['streams'], 'stream')}{tail}."}
+            verdict = {"status": "ok", "text": M("{period}, {streams}, and caching had nothing to fix.", period=span, streams=streams)}
 
     ram = app.ram_budget()
     return {

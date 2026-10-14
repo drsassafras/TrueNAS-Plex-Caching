@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from . import zfs
 from .layout import tail_ranges
+from .i18n import Fixed, M, msg
 from .pauses import busy_percent
 from .plex import PlexClient, PlexError
 from .reader import MiB, Pacer, Stopped, is_cache_hit, read_range
@@ -255,7 +256,8 @@ class PlaybackMonitor:
             for info in self.sessions.values():
                 for j in info["jobs"]:
                     if j.state == "reading" and not j.cancel:
-                        return ("Now-playing is loading " if j.feature == "nowplaying" else "Next-episode is loading ") + j.target
+                        return (M("Now-playing is loading {title}", title=j.target) if j.feature == "nowplaying"
+                                else M("Next-episode is loading {title}", title=j.target))
         return None
 
     def ram_in_use(self) -> dict:
@@ -282,10 +284,10 @@ class PlaybackMonitor:
                 self.last_error = None
             except PlexError as e:
                 if self.last_error != str(e):
-                    self.app.activity.event("playback", f"can't read Plex sessions: {e}", "warn")
-                self.last_error = str(e)
+                    self.app.activity.event("playback", M("can't read Plex sessions: {why}", why=msg(e)), "warn")
+                self.last_error = msg(e)
             except Exception as e:  # never let the monitor die
-                self.last_error = f"unexpected error: {e}"
+                self.last_error = M("unexpected error: {why}", why=str(e))
                 self.app.activity.event("playback", self.last_error, "warn")
             self.stop.wait(settings["general"]["poll_seconds"])
 
@@ -334,15 +336,17 @@ class PlaybackMonitor:
                 else:
                     new = False
                 if s.state == "buffering":
-                    self.last_buffering = (time.time(), f"{s.label} on {s.player or 'a player'}")
+                    self.last_buffering = (time.time(), M("{title} on {player}", title=s.label, player=s.player)
+                                           if s.player else M("{title} on a player", title=s.label))
                 info.update(
                     progress=round(s.progress * 100), state=s.state, local=s.local,
                     transcoding=s.transcoding, type=s.type, kbps=s.kbps,
                 )
             if new:
-                where = "remote" if not s.local else "local"
-                how = "transcoding" if s.transcoding else "direct play"
-                self.app.activity.event("playback", f"started: {s.label} on {s.player or 'unknown player'} ({where}, {how})")
+                where = M("remote") if not s.local else M("local")
+                how = M("transcoding") if s.transcoding else M("direct play")
+                self.app.activity.event("playback", M("started: {title} on {player} ({where}, {how})", title=s.label,
+                                                      player=s.player or M("unknown player"), where=where, how=how))
                 self._stream_started(s)
             else:
                 self._observe(key, s, settings)
@@ -494,7 +498,7 @@ class PlaybackMonitor:
         if sum(n for _, n in ranges) < min(MIN_JOB, want or MIN_JOB):
             if not self._seen[key]["no_room"]:
                 self._seen[key]["no_room"] = True
-                self.app.activity.event("now-playing", f"no room left in its RAM limit for {s.label}", "warn")
+                self.app.activity.event("now-playing", M("no room left in its RAM limit for {title}", title=s.label), "warn")
                 self.app.activity.record("limit", label=s.label, feature="nowplaying", pct=0)
             return
         self._seen[key]["now"] = True
@@ -510,7 +514,7 @@ class PlaybackMonitor:
         job.delay = 0 if restart else start_delay(cfg, kbps, s.transcoding,
                                                      self.app.disk_speed_for_library(s.library_key))
         if restart:
-            self.app.activity.event("now-playing", f"{s.label}: viewer skipped ahead, reading from the new position")
+            self.app.activity.event("now-playing", M("{title}: viewer skipped ahead, reading from the new position", title=s.label))
         self._start(key, job, job.delay, cfg["pacing_percent"], cfg["max_streams"])
 
     def _maybe_nextepisode(self, key, s, settings, client):
@@ -529,10 +533,10 @@ class PlaybackMonitor:
         try:
             nxt = client.next_episode(s.rating_key, s.grandparent_rating_key)
         except PlexError as e:
-            self.app.activity.event("next-episode", f"couldn't look up the episode after {s.label}: {e}", "warn")
+            self.app.activity.event("next-episode", M("couldn't look up the episode after {title}: {why}", title=s.label, why=msg(e)), "warn")
             return
         if not nxt or not nxt["files"]:
-            self.app.activity.event("next-episode", f"no next episode after {s.label}")
+            self.app.activity.event("next-episode", M("no next episode after {title}", title=s.label))
             return
         files = nxt["files"]
         label = f"{s.grandparent_title} · S{nxt['season']:02d}E{nxt['episode']:02d}"
@@ -545,7 +549,7 @@ class PlaybackMonitor:
             # From the start: the opening is what makes it start instantly; the rest if there's room.
             ranges = with_index(path, size, plan_ranges(size, 0, size or room, room, wrap=False), room)
             if sum(n for _, n in ranges) < min(MIN_JOB, size or MIN_JOB):
-                self.app.activity.event("next-episode", f"no room left in its RAM limit for {label}", "warn")
+                self.app.activity.event("next-episode", M("no room left in its RAM limit for {title}", title=label), "warn")
                 continue
             job = Job("nextepisode", label, path, ranges, size, rating_key=nxt.get("rating_key", ""),
                       disk_mb_s=self.app.disk_speed_for_library(s.library_key))
@@ -572,7 +576,7 @@ class PlaybackMonitor:
         try:
             plan = self._track_plan(client, s, mode)
         except PlexError as e:
-            self.app.activity.event("next-episode", f"couldn't look up the tracks after {s.label}: {e}", "warn")
+            self.app.activity.event("next-episode", M("couldn't look up the tracks after {title}: {why}", title=s.label, why=msg(e)), "warn")
             return
         pid = s.session_key
         wanted = [(self.app.map_path(path), size, t, sl) for t, sl in plan for path, size in t["files"] if size]
@@ -610,8 +614,10 @@ class PlaybackMonitor:
             if key in self.sessions:
                 self.sessions[key]["jobs"].extend(new_jobs)
         whole = sum(1 for j in new_jobs if not j.slice)
-        self.app.activity.event("next-episode", f"after {s.label}: reading {whole} track{'s' if whole != 1 else ''}"
-                                + (f" and the start of {len(new_jobs) - whole} more" if len(new_jobs) > whole else ""))
+        reading = M("after {title}: reading {n} tracks", one="after {title}: reading {n} track", title=s.label, n=whole)
+        if len(new_jobs) > whole:
+            reading = M("{text} and the start of {more} more", text=reading, more=len(new_jobs) - whole)
+        self.app.activity.event("next-episode", reading)
 
         def run():
             for job in new_jobs:
@@ -720,14 +726,14 @@ class PlaybackMonitor:
                 job.finished = time.time()
                 self._record_read(job)
                 if not job.cancel:
-                    self.app.activity.event(job.feature, f"stopped (playback ended): {job.target}")
+                    self.app.activity.event(job.feature, M("stopped (playback ended): {title}", title=job.target))
                 return
             took = time.monotonic() - started
             job.finished = time.time()
             if res.error:
                 job.state = "failed"
                 job.message = res.error
-                self.app.activity.event(job.feature, f"couldn't read {job.path}: {res.error}", "warn")
+                self.app.activity.event(job.feature, M("couldn't read {path}: {why}", path=job.path, why=res.error), "warn")
                 return
             job.state = "done"
             if not job.slice:
@@ -735,7 +741,7 @@ class PlaybackMonitor:
             self._record_read(job)
             self._retention.append((time.time() + RETENTION_AFTER, job))
             gb = res.bytes / 1e9
-            self.app.activity.event(job.feature, f"{job.target}: {gb:.1f} GB cached in {took:.0f} s")
+            self.app.activity.event(job.feature, M("{title}: {size} GB cached in {s} s", title=job.target, size=Fixed(gb, 1), s=round(took)))
             self.app.activity.count(job.feature)
 
 

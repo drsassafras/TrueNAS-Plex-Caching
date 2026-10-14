@@ -1,0 +1,8 @@
+{
+ "Add RAM, an L2ARC (SSD cache), or lower “ZFS cache to leave for the rest of the NAS” in Settings → Behaviour.": "Add RAM, an L2ARC (SSD cache), or lower “ZFS cache to leave for the rest of the NAS” in Settings → Behavior.",
+ "Behaviour": "Behavior",
+ "Lower “ZFS cache to leave for the rest of the NAS” in Settings → Behaviour, or add RAM.": "Lower “ZFS cache to leave for the rest of the NAS” in Settings → Behavior, or add RAM.",
+ "No ZFS cache is left after the reserve (Settings → Behaviour).": "No ZFS cache is left after the reserve (Settings → Behavior).",
+ "Raise Now-playing's RAM limit (Features), or lower “ZFS cache to leave for the rest of the NAS” (Settings → Behaviour).": "Raise Now-playing's RAM limit (Features), or lower “ZFS cache to leave for the rest of the NAS” (Settings → Behavior).",
+ "{pct}% of the {usable} usable: ZFS cache available {avail} minus {reserve} left for the rest of the NAS (Settings → Behaviour).": "{pct}% of the {usable} usable: ZFS cache available {avail} minus {reserve} left for the rest of the NAS (Settings → Behavior)."
+}

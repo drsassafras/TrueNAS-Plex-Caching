@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .auth import SESSION_DAYS, Auth
 from .config import SettingsError
+from .i18n import M, jsonable, msg
 from .plex import PlexError, check_pin, create_pin
 
 log = logging.getLogger("plexcache")
@@ -62,9 +63,10 @@ def make_handler(app):
                 self.wfile.write(body)
 
         def _json(self, data, status: int = 200):
-            self._send(status, json.dumps(data, default=str).encode(), "application/json", {"Cache-Control": "no-store"})
+            # Messages (M) go out as {"_t": template, "_p": values}, for each browser to translate.
+            self._send(status, json.dumps(jsonable(data), default=str).encode(), "application/json", {"Cache-Control": "no-store"})
 
-        def _error(self, message: str, status: int = 400):
+        def _error(self, message, status: int = 400):
             self._json({"error": message}, status)
 
         def _file(self, path: str):
@@ -123,7 +125,7 @@ def make_handler(app):
                 return self._file(os.path.join(WEB_DIR, "login.html" if auth.enabled else "index.html"))
             if path.startswith("/static/"):
                 name = path[len("/static/"):]
-                if not re.fullmatch(r"[a-zA-Z0-9_.-]+", name) or name.startswith("."):
+                if not re.fullmatch(r"(i18n/)?[a-zA-Z0-9_-][a-zA-Z0-9_.-]*", name):
                     return self._error("not found", 404)
                 return self._file(os.path.join(WEB_DIR, name))
             if path == "/tools/rewrite_blocks.py":
@@ -157,24 +159,24 @@ def make_handler(app):
             try:
                 body = self._body()
             except SettingsError as e:
-                return self._error(str(e), 415 if "json" in str(e) else 400)
+                return self._error(msg(e), 415 if "json" in str(e) else 400)
             if path == "/login":
                 if not auth.enabled:
                     return self._json({"ok": True})
                 user, pw = body.get("username", ""), body.get("password", "")
                 if not isinstance(user, str) or not isinstance(pw, str) or len(user) > 256 or len(pw) > 1024:
-                    return self._error("username and password must be text", 400)
+                    return self._error(M("username and password must be text"), 400)
                 if auth.check_password(user, pw):
                     if auth.default_password:
-                        app.activity.event("settings", "sign-in refused: the default password hasn't been changed", "warn")
-                        return self._error("The default password can't be used. Set your own PLEXCACHE_PASSWORD (and "
-                                           "username) in the app's YAML in TrueNAS — Apps → Plex Cache → Edit — then sign "
-                                           "in with it.", 403)
-                    app.activity.event("settings", "signed in to the web UI")
+                        app.activity.event("settings", M("sign-in refused: the default password hasn't been changed"), "warn")
+                        return self._error(M("The default password can't be used. Set your own PLEXCACHE_PASSWORD (and "
+                                             "username) in the app's YAML in TrueNAS — Apps → Plex Cache → Edit — then sign "
+                                             "in with it."), 403)
+                    app.activity.event("settings", M("signed in to the web UI"))
                     return self._send(200, b'{"ok": true}', "application/json",
                                       {"Set-Cookie": auth.cookie(auth.new_session(), SESSION_DAYS * 86400)})
-                app.activity.event("settings", f"failed sign-in from {self.address_string()}", "warn")
-                return self._error("wrong username or password", 401)
+                app.activity.event("settings", M("failed sign-in from {address}", address=self.address_string()), "warn")
+                return self._error(M("wrong username or password"), 401)
             if path == "/logout":
                 auth.revoke(auth.cookie_value(self.headers))
                 return self._send(200, b'{"ok": true}', "application/json", {"Set-Cookie": auth.cookie("", 0)})
@@ -209,13 +211,13 @@ def make_handler(app):
                 if path == "/api/checks":
                     rescan = body.get("rescan", True)
                     if not isinstance(rescan, bool):
-                        raise SettingsError("rescan must be true or false")
+                        raise SettingsError(M("rescan must be true or false"))
                     app.run_checks_async(rescan=rescan)
                     return self._json({"started": True})
                 if path == "/api/blockscan":
                     dataset = body.get("dataset")
                     if not isinstance(dataset, str) or len(dataset) > 255:
-                        raise SettingsError("dataset must be a dataset name")
+                        raise SettingsError(M("dataset must be a dataset name"))
                     return self._json({"started": app.run_block_scan(dataset)})
                 if path == "/api/mqtt/reconnect":
                     app.ha.retry()
@@ -234,19 +236,19 @@ def make_handler(app):
                     try:
                         token = check_pin(app.settings.section("general")["client_id"], int(m.group(1)))
                     except PlexError as e:
-                        return self._error(str(e), 502)
+                        return self._error(msg(e), 502)
                     if token:
                         app.settings.update({"plex": {"token": token}})
-                        app.activity.event("settings", "signed in with Plex")
+                        app.activity.event("settings", M("signed in with Plex"))
                         app.test_connections_async(then_checks=True, rescan=True)
                     return self._json({"done": bool(token)})
                 if path == "/api/plex/pin":
                     try:
                         return self._json(create_pin(app.settings.section("general")["client_id"]))
                     except PlexError as e:
-                        return self._error(str(e), 502)
+                        return self._error(msg(e), 502)
             except SettingsError as e:
-                return self._error(str(e), 400)
+                return self._error(msg(e), 400)
             return self._error("not found", 404)
 
     return Handler

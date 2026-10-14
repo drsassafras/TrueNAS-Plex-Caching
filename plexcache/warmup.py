@@ -11,6 +11,7 @@ import random
 import time
 from dataclasses import dataclass, field
 
+from .i18n import M
 from .layout import tail_ranges
 from .reader import MiB, Pacer, Stopped, is_cache_hit, read_range
 
@@ -85,26 +86,26 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | N
     need_max = sum(mx.values()) + sum(index.values())
     need_min = sum(mn.values()) + sum(index.values())
     seconds = {k: float(w[f"{k}_sec"]) for k in KINDS}
-    status, note = "unknown", "L2ARC size unknown — add a TrueNAS API key in Settings to size this."
+    status, note = "unknown", M("L2ARC size unknown — add a TrueNAS API key in Settings to size this.")
     if l2_total is not None:
         available = l2_total - reserve
         if l2_total <= 0:
-            status, note = "none", "No L2ARC devices were found on the media pool."
+            status, note = "none", M("No L2ARC devices were found on the media pool.")
         elif need_max <= available * 0.9:
-            status, note = "fits", "Fits with room to spare."
+            status, note = "fits", M("Fits with room to spare.")
         elif need_max <= available:
-            status, note = "tight", "Fits, but with little room to spare."
+            status, note = "tight", M("Fits, but with little room to spare.")
         elif need_min <= available:
             wiggle = need_max - need_min
             factor = min(1.0, (need_max - available) / wiggle) if wiggle > 0 else 1.0
             for k in KINDS:
                 hi, lo = w[f"{k}_sec"], w[f"{k}_min_sec"]
                 seconds[k] = max(lo, math.floor((hi - (hi - lo) * factor) * 10) / 10)
-            status, note = "reduced", "Too big for your L2ARC — seconds are reduced automatically to fit."
+            status, note = "reduced", M("Too big for your L2ARC — seconds are reduced automatically to fit.")
         else:
             for k in KINDS:
                 seconds[k] = float(w[f"{k}_min_sec"])
-            status, note = "insufficient", "Even the minimum seconds don't fit. Lower the reserve or add L2ARC."
+            status, note = "insufficient", M("Even the minimum seconds don't fit. Lower the reserve or add L2ARC.")
     used = {k: (mx[k] * seconds[k] / w[f"{k}_sec"]) if w[f"{k}_sec"] else 0 for k in KINDS}
     return {
         "need_max": need_max,

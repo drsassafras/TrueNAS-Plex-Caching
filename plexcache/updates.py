@@ -14,6 +14,7 @@ import time
 import urllib.request
 
 from . import REPO_URL
+from .i18n import M
 
 log = logging.getLogger("plexcache")
 SOURCE = REPO_URL.replace("https://github.com/", "https://raw.githubusercontent.com/") + "/main/plexcache/__init__.py"
@@ -74,7 +75,7 @@ class UpdateChecker:
         self.latest = found if newer(found, self.app.version) else self.app.version
         self.checked, self.error = time.time(), None
         if self.latest != self.app.version and before != self.latest:
-            self.app.activity.event("update", f"Plex Cache {self.latest} is available (this is {self.app.version})")
+            self.app.activity.event("update", M("Plex Cache {latest} is available (this is {current})", latest=self.latest, current=self.app.version))
         if getattr(self.app, "ha", None):
             self.app.ha.wake.set()
         return True

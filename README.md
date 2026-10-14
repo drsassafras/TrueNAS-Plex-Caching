@@ -153,6 +153,14 @@ Plex doesn't read a whole file at once — it buffers a little ahead of playback
 - **Disk speed** (Settings) is measured per dataset by *Benchmark now*, which times reads of a few media files on each one. A read counts as "already cached" when it runs at least 4× faster than its dataset's speed. Unreadable files are reported, never counted as hits.
 - L2ARC fills gradually and is evicted over time, which is why warm-up runs on a schedule. Size your L2ARC larger than the estimate so cached data lasts longer — even a modest SSD helps.
 
+## Languages
+
+The web UI follows your browser's language. To pick another one, use the language button at the top right (it's also on the sign-in page). English is the original, written in Canadian English, with US and UK spellings available. The other languages are Spanish, French, German, Portuguese (Brazil), Italian, Dutch, Polish, Russian, Ukrainian, Japanese, Korean, Chinese (Simplified and Traditional), Swedish and Turkish.
+
+Home Assistant entity names, descriptions and state text follow **Language in Home Assistant** in **Settings → MQTT** (English by default). Entity IDs and enum states (`ok`, `warning`, `running` …) stay in English, so automations keep working when you change it.
+
+The translations were made with AI and haven't been reviewed by native speakers yet, and some are still in progress. Anything not translated yet shows in English. To suggest a fix, use **Suggest a fix** in the language menu or open an issue.
+
 ## Requirements
 
 - TrueNAS SCALE / Community Edition 24.10 or later (Docker-based apps)
@@ -183,6 +191,19 @@ python3 tests/demo.py     # UI demo at http://127.0.0.1:8642 with sample data
 node dev/screenshots.js   # README screenshots (see the file for how to run it)
 docker build -t plex-cache .
 ```
+
+### Translations
+
+Each language has a catalog in `plexcache/web/i18n/<code>.json`, keyed by the English text. Texts are marked in the code with `T()`, `H()`, `P()` and `N()` in JavaScript, `data-i18n` attributes in HTML and `M()` in Python. You translate in place: a text with no translation yet is in the catalog as `null`, and the app shows the English until it's filled in.
+
+```sh
+python3 dev/i18n.py status      # how much of each language is translated
+python3 dev/i18n.py sync        # after changing texts: add new ones as null, drop unused ones
+python3 dev/i18n.py check       # placeholders, HTML tags and plural forms match the English
+python3 dev/i18n.py leftovers   # English in app.js that isn't marked for translation
+```
+
+Keep every `{placeholder}` and HTML tag from the English. A plural is an object with the forms its language uses, e.g. `{"one": "{n} file", "other": "{n} files"}`; Russian, Ukrainian and Polish also use `few` and `many`, and Japanese, Korean and Chinese only `other`. `en-US.json` and `en-GB.json` only list the texts whose spelling differs from the Canadian original. The tests fail if a catalog is out of sync or a translation doesn't match its English.
 
 ### Environment variables
 

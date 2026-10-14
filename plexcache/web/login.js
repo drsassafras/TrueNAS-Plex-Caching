@@ -1,4 +1,9 @@
 // The sign-in form (kept out of login.html so the page can forbid inline scripts).
+var T = PCI18N.T;
+PCI18N.ready.then(function () {
+  document.title = T("Plex Cache – Sign in");
+  document.getElementById("langslot").appendChild(PCI18N.picker());
+});
 function showHelp(open) {
   var b = document.getElementById("help-btn"), h = document.getElementById("help");
   h.hidden = !open;
@@ -17,12 +22,12 @@ document.getElementById("login").addEventListener("submit", function (e) {
     .then(function (r) {
       if (r.ok) { if (location.pathname === "/login") location.replace("/"); else location.reload(); return; }
       return r.json().catch(function () { return {}; }).then(function (data) {
-        err.textContent = r.status === 401 ? "That username and password don't match." :
-          r.status === 403 && data.error ? data.error : "Couldn't sign in (" + r.status + ").";
+        err.textContent = r.status === 401 ? T("That username and password don't match.") :
+          r.status === 403 && data.error ? PCI18N.msg(data.error) : T("Couldn't sign in ({status}).", { status: r.status });
         err.hidden = false;
         btn.disabled = false;
         if (r.status === 403) showHelp(true);
       });
     })
-    .catch(function () { err.textContent = "Can't reach Plex Cache."; err.hidden = false; btn.disabled = false; });
+    .catch(function () { err.textContent = T("Can't reach Plex Cache."); err.hidden = false; btn.disabled = false; });
 });

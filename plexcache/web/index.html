@@ -9,18 +9,19 @@
 </head>
 <body>
 <div class="shell">
-  <nav class="side" aria-label="Main">
-    <div class="brand"><img src="/static/logo.svg" alt="" width="34" height="34"><div><a class="brandlink" href="https://github.com/drsassafras/TrueNAS-Plex-Caching" target="_blank" rel="noopener" title="Plex Cache on GitHub">Plex Cache</a><small id="version">TrueNAS</small></div></div>
-    <a class="nav" data-page="health" href="/health"><span class="dot" id="dot-health"></span>Health</a>
-    <a class="nav" data-page="features" href="/features"><span class="dot ok"></span>Features</a>
-    <a class="nav" data-page="activity" href="/activity"><span class="dot ok"></span>Activity</a>
-    <a class="nav" data-page="settings" href="/settings"><span class="dot ok"></span>Settings</a>
+  <nav class="side" aria-label="Main" data-i18n-aria-label="Main">
+    <div class="brand"><img src="/static/logo.svg" alt="" width="34" height="34"><div><a class="brandlink" href="https://github.com/drsassafras/TrueNAS-Plex-Caching" target="_blank" rel="noopener" title="Plex Cache on GitHub" data-i18n-title="Plex Cache on GitHub">Plex Cache</a><small id="version">TrueNAS</small></div></div>
+    <a class="nav" data-page="health" href="/health"><span class="dot" id="dot-health"></span><span data-i18n>Health</span></a>
+    <a class="nav" data-page="features" href="/features"><span class="dot ok"></span><span data-i18n>Features</span></a>
+    <a class="nav" data-page="activity" href="/activity"><span class="dot ok"></span><span data-i18n>Activity</span></a>
+    <a class="nav" data-page="settings" href="/settings"><span class="dot ok"></span><span data-i18n>Settings</span></a>
   </nav>
   <main class="main" id="main" tabindex="-1">
-    <p class="muted">Loading…</p>
+    <p class="muted" data-i18n>Loading…</p>
   </main>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

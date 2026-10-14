@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
 from . import __version__
+from .i18n import M
 
 PRODUCT = "Plex Cache"
 PAGE_SIZE = 500
@@ -101,7 +102,7 @@ def media_kbps(media: ET.Element, part: ET.Element) -> int:
 class PlexClient:
     def __init__(self, url: str, token: str, timeout: float = 30):
         if not url:
-            raise PlexError("Plex server address is not set")
+            raise PlexError(M("Plex server address is not set"))
         self.url = url.rstrip("/")
         self.token = token
         self.timeout = timeout
@@ -129,19 +130,19 @@ class PlexClient:
         except urllib.error.HTTPError as e:
             e.close()  # it holds the connection open
             if e.code == 401:
-                raise PlexError("Plex rejected the token (401 Unauthorized)") from None
-            raise PlexError(f"Plex returned HTTP {e.code} for {path}") from None
+                raise PlexError(M("Plex rejected the token (401 Unauthorized)")) from None
+            raise PlexError(M("Plex returned HTTP {code} for {path}", code=str(e.code), path=path)) from None
         except urllib.error.URLError as e:
-            raise PlexError(f"Can't reach Plex at {self.url}: {e.reason}") from None
+            raise PlexError(M("Can't reach Plex at {url}: {why}", url=self.url, why=str(e.reason))) from None
         except (TimeoutError, OSError) as e:
-            raise PlexError(f"Can't reach Plex at {self.url}: {e}") from None
+            raise PlexError(M("Can't reach Plex at {url}: {why}", url=self.url, why=str(e))) from None
 
     def get(self, path: str, params: dict | None = None, headers: dict | None = None) -> ET.Element:
         body = self._request(path, params, headers)
         try:
             return ET.fromstring(body)
         except ET.ParseError:
-            raise PlexError(f"Plex returned something that isn't XML for {path}") from None
+            raise PlexError(M("Plex returned something that isn't XML for {path}", path=path)) from None
 
     # --------------------------------------------------------------- server
     def identity(self) -> dict:
@@ -152,9 +153,9 @@ class PlexClient:
         try:
             root = ET.fromstring(body)
         except ET.ParseError:
-            raise PlexError(f"Something answered at {self.url}, but it isn't Plex") from None
+            raise PlexError(M("Something answered at {url}, but it isn't Plex", url=self.url)) from None
         if not root.get("machineIdentifier"):
-            raise PlexError(f"Something answered at {self.url}, but it isn't Plex")
+            raise PlexError(M("Something answered at {url}, but it isn't Plex", url=self.url))
         return {"version": root.get("version", ""), "machine_id": root.get("machineIdentifier", ""), "ms": ms}
 
     def ping(self) -> dict:
@@ -332,9 +333,9 @@ def _plextv(method: str, path: str, client_id: str, data: bytes | None = None) -
             return json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         e.close()
-        raise PlexError(f"plex.tv returned HTTP {e.code}") from None
+        raise PlexError(M("plex.tv returned HTTP {code}", code=str(e.code))) from None
     except (urllib.error.URLError, OSError) as e:
-        raise PlexError(f"Can't reach plex.tv: {e}") from None
+        raise PlexError(M("Can't reach plex.tv: {why}", why=str(e))) from None
 
 
 def create_pin(client_id: str) -> dict:
