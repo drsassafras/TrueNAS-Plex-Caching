@@ -9,14 +9,16 @@
 #   tnsync init      set up tnsync for the project you're in
 #
 # Options:
-#   -n, --dry-run    run the tests and show what would be copied; change nothing
+#   -n, --dry-run    show what would be copied and run the tests; change nothing
 #   -y, --yes        restart the app afterwards without asking
 #   -N, --no-restart don't restart (and don't ask)
-#   --skip-tests     copy without running the project's tests (not recommended)
+#   --tests-first    run the tests BEFORE copying, and copy nothing unless they pass
+#   --skip-tests     don't run the project's tests at all
 #   -h, --help       this help
 #
-# If the project's .tnsync has TN_TEST, that command runs first, in the code
-# being copied. Nothing is copied unless it passes.
+# If the project's .tnsync has TN_TEST, that command runs in the code being
+# copied: by default after the copy and restart (so the app is ready sooner),
+# or first with --tests-first. Failures end in a red banner either way.
 #
 # Settings come from two files (KEY=value lines):
 #   ~/.config/tnsync/config   shared:      TN_HOST, TN_USER, TN_PORT
@@ -27,7 +29,7 @@
 
 set -eo pipefail
 
-TNSYNC_VERSION="1.2.0"
+TNSYNC_VERSION="1.3.0"
 GLOBAL_CONF="${TNSYNC_CONFIG:-$HOME/.config/tnsync/config}"
 
 # ----------------------------------------------------------------- output
@@ -63,12 +65,14 @@ MODE=""
 DRY_RUN=0
 RESTART="ask"   # ask | yes | no
 SKIP_TESTS=0
+TESTS_FIRST=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -n|--dry-run)    DRY_RUN=1 ;;
         -y|--yes)        RESTART="yes" ;;
         -N|--no-restart) RESTART="no" ;;
         --skip-tests)    SKIP_TESTS=1 ;;
+        --tests-first)   TESTS_FIRST=1 ;;
         -h|--help)       usage 0 ;;
         --version)       say "tnsync $TNSYNC_VERSION"; exit 0 ;;
         -*)              die "unknown option: $1 (see tnsync --help)" ;;
@@ -257,25 +261,45 @@ say "  ${C_DIM}App${C_OFF}      $TN_APP"
 say ""
 
 # ----------------------------------------------------------------- tests
-if [ "$SKIP_TESTS" = 1 ]; then
-    warn "--skip-tests: copying WITHOUT running the tests"
-elif [ -n "$TN_TEST" ]; then
+# run_tests before|after — runs TN_TEST in the code being copied. Returns non-zero
+# (after a red banner) if it fails.
+run_tests() {
+    local when="$1"
+    if [ "$SKIP_TESTS" = 1 ]; then
+        warn "--skip-tests: the tests weren't run"
+        return 0
+    fi
+    if [ -z "$TN_TEST" ]; then
+        say "  ${C_DIM}No TN_TEST in .tnsync, so no tests were run.${C_OFF}"
+        return 0
+    fi
     info "Running tests: $TN_TEST"
     # Run in the code being copied (for master/release/beta that's the exported
     # copy, not your folder). Python's bytecode cache is kept out of the project.
     # Straight to the terminal (not through a pipe), so a test runner can draw a progress bar.
     if ( cd "$SRC" && PYTHONDONTWRITEBYTECODE=1 bash -c "$TN_TEST" ); then
         ok "Tests passed"
-    else
+        return 0
+    fi
+    if [ "$when" = "before" ]; then
         red_banner "TESTS FAILED  -  NOTHING WAS COPIED TO $TN_HOST" \
                    "" \
                    "$TN_APP is still running the code it had before." \
+                   "Fix the failures above, then run 'tnsync $MODE' again."
+    elif [ "$DRY_RUN" = 1 ]; then
+        red_banner "TESTS FAILED  (dry run: nothing was copied)"
+    else
+        red_banner "TESTS FAILED  -  BUT THE CODE IS ALREADY ON $TN_HOST" \
+                   "" \
+                   "$TN_APP has this code$( [ "$RESTART" = "yes" ] && printf ' and was restarted' )." \
                    "Fix the failures above, then run 'tnsync $MODE' again." \
-                   "(--skip-tests copies anyway, if you really must.)"
-        exit 1
+                   "(--tests-first copies only code whose tests pass.)"
     fi
-else
-    say "  ${C_DIM}No TN_TEST in .tnsync, so no tests were run.${C_OFF}"
+    return 1
+}
+
+if [ "$TESTS_FIRST" = 1 ]; then
+    run_tests before || exit 1
 fi
 
 command -v rsync >/dev/null 2>&1 || die "rsync isn't installed (on a Mac: it normally is; try 'brew install rsync')"
@@ -314,7 +338,12 @@ done
 if [ "$DRY_RUN" = 1 ]; then ok "Dry run: the files listed above would be copied"; else ok "Copied $COPIED path(s) to $TN_HOST"; fi
 
 # ----------------------------------------------------------------- restart
-[ "$DRY_RUN" = 1 ] && exit 0
+finish() {   # the tests, unless they already ran first
+    if [ "$TESTS_FIRST" = 1 ]; then exit 0; fi
+    run_tests after || exit 1
+    exit 0
+}
+[ "$DRY_RUN" = 1 ] && finish
 if [ "$RESTART" = "ask" ]; then
     if [ -t 0 ]; then
         read -r -p "Restart '$TN_APP' on $TN_HOST now? [y/N] " ans
@@ -323,7 +352,10 @@ if [ "$RESTART" = "ask" ]; then
         RESTART="no"
     fi
 fi
-[ "$RESTART" = "yes" ] || { say "Not restarted. Run 'tnsync $MODE -y' or restart it in TrueNAS when ready."; exit 0; }
+if [ "$RESTART" != "yes" ]; then
+    say "Not restarted. Run 'tnsync $MODE -y' or restart it in TrueNAS when ready."
+    finish
+fi
 
 info "Restarting $TN_APP (this waits until TrueNAS has finished)…"
 REMOTE_RESTART="a='$TN_APP'
@@ -332,7 +364,8 @@ out2=\$(sudo -n /usr/bin/midclt call -j app.redeploy \"\$a\" 2>&1) && exit 0
 printf '%s\n%s\n' \"\$out\" \"\$out2\" | tail -n 6 >&2
 exit 1"
 if ssh_run "$REMOTE_RESTART"; then
-    ok "Restarted $TN_APP"
+    ok "Restarted $TN_APP — ready to try while the tests run"
 else
     die "couldn't restart $TN_APP. Check the app name, and that $TN_USER may run midclt (see the tnsync README)."
 fi
+finish

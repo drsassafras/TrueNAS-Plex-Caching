@@ -5,7 +5,7 @@ This folder holds what you need to try changes on a real TrueNAS before pushing 
 | File | What it is |
 |------|------------|
 | `compose.dev.yaml` | A **test copy** of the app (`plex-cache-dev`, port 8643) that runs the published image but with its code replaced by whatever you last copied to the NAS. It has its own settings, so it never touches the real `plex-cache` app. |
-| `tnsync` | A small script that **runs the tests, copies your code to the NAS and restarts the test app** — in one command, from your Mac. |
+| `tnsync` | A small script that **copies your code to the NAS, restarts the test app and runs the tests** — in one command, from your Mac. |
 | `coverage.py` | Runs the tests and shows how much of the code they reach, per file. No installs needed (Python 3.12+). |
 | `screenshots.js` | Makes the README screenshots from the demo (see below). |
 
@@ -20,15 +20,18 @@ tnsync release    the newest release tag, e.g. v1.2.0
 tnsync beta       the newest tag including pre-releases, e.g. v1.3.0-beta.1
 tnsync init       set up tnsync for a project
 
-  -n  dry run: run the tests and list what would be copied, change nothing
+  -n  dry run: list what would be copied and run the tests, change nothing
   -y  restart the app afterwards without asking
   -N  don't restart and don't ask
-  --skip-tests  copy without running the tests (not recommended)
+  --tests-first  run the tests before copying, and copy nothing unless they pass
+  --skip-tests   don't run the tests
 ```
 
-1. **Tests first.** It runs this project's tests (`python3 tests/run.py`) on exactly the code it's about to copy. If any fail, it stops with a big red banner: **nothing is copied and the app isn't restarted**, so the NAS keeps running the last good code.
-2. **Copies only what changed** with rsync over SSH, and deletes files on the NAS that you deleted locally.
-3. **Restarts the test app** with TrueNAS's own `midclt call app.redeploy plex-cache-dev`, and waits until TrueNAS says it's done.
+1. **Copies only what changed** with rsync over SSH, and deletes files on the NAS that you deleted locally.
+2. **Restarts the test app** with TrueNAS's own `midclt call app.redeploy plex-cache-dev`, and waits until TrueNAS says it's done. You can refresh the page and try your change from here.
+3. **Runs the tests** (`python3 tests/run.py`) on exactly the code it copied. If any fail, a big red banner says so — the test app is already running that code, so fix it and sync again.
+
+With `--tests-first`, the tests run before anything is copied instead, and if any fail **nothing is copied and the app isn't restarted**, so the NAS keeps running the last good code. Use it when the test app needs to stay working (for example, before syncing `master` or a release).
 
 `master`, `release` and `beta` copy exactly what's in git at that point; they never touch your working folder.
 
