@@ -66,6 +66,26 @@ def _iso(ts) -> str | None:
 
 
 # --------------------------------------------------------------------- state
+# The web pages' summaries point at lists further down the page ("see below"). Home Assistant
+# shows them on their own, so these say what the lists would have said.
+def _verdict(rep: dict) -> str | None:
+    verdict = rep.get("verdict") or {}
+    if verdict.get("status") != "warn":
+        return verdict.get("text")
+    titles = [a["title"] for a in rep.get("attention") or [] if a.get("status") == "warn"]
+    return f"{rep.get('span')}: " + "; ".join(titles) if titles else verdict.get("text")
+
+
+def _health_text(health: dict) -> str | None:
+    summary, counts = health.get("summary") or {}, health.get("counts") or {}
+    if summary.get("status") not in ("fail", "warn"):
+        return summary.get("text")
+    fails, warns = counts.get("fail", 0), counts.get("warn", 0)
+    bits = ([f"{fails} problem{'s' if fails != 1 else ''} to fix"] if fails else []) + \
+           ([f"{warns} warning{'s' if warns != 1 else ''}"] if warns else [])
+    return " and ".join(bits).capitalize() + " — open Health in Plex Cache for the details."
+
+
 def update_info(app) -> dict:
     """For Home Assistant's update entity: the installed version and the newest one."""
     latest = (getattr(app, "updates", None) and app.updates.latest) or app.version
@@ -119,7 +139,7 @@ def build_state(app, period: str = "week") -> dict:
         # Health
         "health": "checking" if st.get("checking") and not summary else
                   {"ok": "ok", "warn": "warning", "fail": "problem"}.get(summary, "checking"),
-        "health_text": (health.get("summary") or {}).get("text"),
+        "health_text": _health_text(health),
         "health_passed": counts.get("pass", 0),
         "health_warnings": counts.get("warn", 0),
         "health_failures": counts.get("fail", 0),
@@ -160,7 +180,7 @@ def build_state(app, period: str = "week") -> dict:
         "warmup_last_files": last.get("files"),
         # The Activity report, for the chosen period
         "report_period": PERIOD_NAME.get(period, period),
-        "report_verdict": (rep.get("verdict") or {}).get("text"),
+        "report_verdict": _verdict(rep),
         "report_streams": rep.get("streams"),
         "skips": (tiles.get("skips") or {}).get("total"),
         "skips_cached": (tiles.get("skips") or {}).get("cached"),
@@ -346,13 +366,14 @@ def entities(state: dict, allow_control: bool) -> list[tuple[str, str, dict]]:
         for oid, name, icon in (("run_warmup", "Run warm-up now", "mdi:play"), ("stop_warmup", "Stop warm-up", "mdi:stop"),
                                 ("recheck", "Re-run health checks", "mdi:refresh"), ("benchmark", "Benchmark disks", "mdi:speedometer")):
             E.append(("button", oid, {"_device": "main", "name": name, "payload_press": "PRESS", "icon": icon}))
-        for oid, name, lo, hi, step, unit in (("nowplaying_ram_percent", "Now-playing RAM limit", 5, 90, 5, "%"),
-                                              ("nextepisode_ram_percent", "Next-episode RAM limit", 5, 90, 5, "%"),
+        # Boxes, not sliders: Home Assistant's device page shows a slider without its value or unit.
+        for oid, name, lo, hi, step, unit in (("nowplaying_ram_percent", "Now-playing RAM", 5, 90, 5, "%"),
+                                              ("nextepisode_ram_percent", "Next-episode RAM", 5, 90, 5, "%"),
                                               ("warmup_pacing_percent", "Warm-up pacing", 5, 100, 5, "%"),
-                                              ("ram_reserve_gb", "ZFS cache left for the NAS", 0, 4096, 1, "GB")):
+                                              ("ram_reserve_gb", "ZFS cache reserve", 0, 4096, 1, "GB")):
             E.append(("number", oid, {"_device": "main", "name": name, "value_template": "{{ value_json.%s }}" % oid,
                                       "min": lo, "max": hi, "step": step, "unit_of_measurement": unit,
-                                      "mode": "slider" if unit == "%" else "box", "entity_category": "config"}))
+                                      "mode": "box", "entity_category": "config", "icon": "mdi:tune-variant"}))
         E.append(("select", "poll_seconds", {"_device": "main", "name": "Check what's playing every",
                                              "value_template": "{{ value_json.poll_seconds }}",
                                              "options": list(POLL.values()), "entity_category": "config"}))

@@ -3117,6 +3117,21 @@ class MQTTTests(unittest.TestCase):
         raw = self.broker.state("plexcache/state")
         return json.loads(raw) if raw else None
 
+    def test_texts_stand_on_their_own(self):
+        """The web pages' summaries say "see below"; Home Assistant has nothing below them."""
+        from plexcache.homeassistant import _health_text, _verdict
+        rep = {"span": "Last 7 days", "verdict": {"status": "warn", "text": "Last 7 days: 2 things could be better — see below."},
+               "attention": [{"status": "warn", "title": "Preloads aren't staying in RAM (22% still cached)"},
+                             {"status": "info", "title": "Not a problem"},
+                             {"status": "warn", "title": "1 next episode not ready in time"}]}
+        self.assertEqual(_verdict(rep), "Last 7 days: Preloads aren't staying in RAM (22% still cached); 1 next episode not ready in time")
+        self.assertEqual(_verdict({"verdict": {"status": "ok", "text": "All good."}}), "All good.")
+        self.assertEqual(_health_text({"summary": {"status": "fail"}, "counts": {"fail": 1, "warn": 2}}),
+                         "1 problem to fix and 2 warnings — open Health in Plex Cache for the details.")
+        self.assertEqual(_health_text({"summary": {"status": "ok", "text": "Everything is OK."}}), "Everything is OK.")
+        for text in (_verdict(rep), _health_text({"summary": {"status": "warn"}, "counts": {"warn": 1}})):
+            self.assertNotIn("below", text)
+
     def test_helpers(self):
         from plexcache.mqttclient import _packet, topic_matches
         self.assertTrue(topic_matches("a/#", "a/b/c"))
@@ -3226,6 +3241,12 @@ class MQTTTests(unittest.TestCase):
         self.assertEqual(sub["device"]["via_device"], health["device"]["identifiers"][0])
         self.assertFalse(any("_device" in v for v in disc.values()))
         self.assertEqual(next(v for t, v in disc.items() if "/health_passed/" in t)["entity_category"], "diagnostic")
+        # Number controls show their value and unit (a slider wouldn't, on the device page)
+        numbers = [v for t, v in disc.items() if t.startswith("homeassistant/number/")]
+        self.assertEqual(len(numbers), 4)
+        for n in numbers:
+            self.assertEqual(n["mode"], "box")
+            self.assertIn(n["unit_of_measurement"], ("%", "GB"))
         # Dropped: a recommendation shown as if it were a minimum, and a figure nobody needs
         self.assertFalse(any("/arc_max/" in t or "/l2arc_needed/" in t for t in disc))
         self.assertNotIn("l2arc_needed", st)

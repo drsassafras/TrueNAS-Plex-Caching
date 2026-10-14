@@ -255,9 +255,7 @@ def check_datasets(app) -> dict:
                           + (" (see TrueNAS & ZFS)." if tn_set else "."),
                           "Check Settings → TrueNAS."))
     return {"id": "datasets", "title": "Media datasets",
-            "hint": "Each dataset your libraries are on, checked on its own. Record size is checked for every library, "
-                    "since it affects how well Plex reads the files whether or not they're cached. For libraries unticked "
-                    "in Settings → Media mappings, that's all that's checked.",
+            "hint": "Each dataset your libraries are on, checked on its own.",
             "datasets": rows, "items": items}
 
 

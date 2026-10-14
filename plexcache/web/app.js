@@ -213,7 +213,8 @@
         });
       }
       if (g.datasets && g.datasets.length) {
-        out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">Dataset</th><th scope="col">In use</th><th scope="col">Cache settings</th><th scope="col">Record size</th><th scope="col">L2ARC</th></tr></thead><tbody>';
+        out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">Dataset</th>' +
+          DS_COLUMNS.map(function (col) { return '<th scope="col">' + col[0] + info(col[1], col[0]) + "</th>"; }).join("") + "</tr></thead><tbody>";
         g.datasets.forEach(function (r) {
           var c = function (x) { return x ? badge(x.status, x.badge || STATUS_TEXT[x.status] || x.status) + (x.text ? '<div class="det">' + esc(x.text) + "</div>" : "") : '<span class="muted">—</span>'; };
           out += '<tr><td class="mono nw">' + esc(r.dataset) + (r.mountpoint !== r.dataset ? '<div class="det">at ' + esc(r.mountpoint) + "</div>" : "") + "</td><td>" + c(r.in_use) + "</td><td>" + c(r.cache) + "</td><td>" + c(r.recordsize) + (r.recordsize ? scanCtl(r.dataset) : "") + "</td><td>" + c(r.l2arc) + "</td></tr>";
@@ -228,16 +229,29 @@
     return out;
   }
 
+  // Media datasets table: each column's explanation sits behind an ⓘ in its header.
+  var DS_COLUMNS = [
+    ["In use", "Which libraries are on the dataset. A dataset mounted in this app with no Plex library on it is flagged, " +
+      "in case a mount is pointing at the wrong place. Libraries unticked in Settings → Media mappings show as “caching off”: " +
+      "only their record size is checked."],
+    ["Cache settings", "<strong>primarycache=all</strong> is needed for any caching: ZFS only keeps in RAM, and only copies to the SSD, " +
+      "data that passed through RAM. With <strong>metadata</strong>, nothing is cached and no feature can help.<br><br>" +
+      "<strong>secondarycache=all</strong> lets that data go on to the SSD cache (L2ARC). Only Library warm-up needs it."],
+    ["Record size", "The block size ZFS uses for new files. Large media files read best in big blocks: <strong>1M</strong> for movies and TV, " +
+      "<strong>512K or 1M</strong> for audio. It's checked for every library, cached or not, because it affects how Plex reads the files either way.<br><br>" +
+      "A new record size only applies to files written after the change, so Health also looks at a random sample of about 300 files on each check. " +
+      "<strong>Check every file</strong> reads the details (not the contents) of every file on the dataset — a minute or two for a large library — and changes nothing."],
+    ["L2ARC", "The SSD cache devices on the dataset's pool, and how much they hold. Only Library warm-up needs an L2ARC; " +
+      "Now-playing and Next-episode work from RAM."]
+  ];
+
   // "Check every file" for a dataset: Health otherwise looks at a random sample on each check.
   function scanCtl(ds) {
     var sc = (ST.block_scans || {})[ds];
     if (sc && sc.running) return '<div class="det">Checking every file… ' + fmtNum(sc.checked) + " so far</div>";
     var when = sc && sc.at && sc.complete ? '<span class="muted">checked ' + esc(ago(sc.at)) + "</span>" : "";
     return '<div class="det scanctl"><button class="link" type="button" data-act="blockscan" data-ds="' + esc(ds) + '">' +
-      (when ? "Check again" : "Check every file") + "</button>" + when + info(
-        "Health looks at a random sample of about 300 files on each check, so a few older files can go unnoticed. " +
-        "This reads the details (not the contents) of every file on the dataset, which takes a minute or two for a large library, and changes nothing.",
-        "checking every file") + "</div>";
+      (when ? "Check again" : "Check every file") + "</button>" + when + "</div>";
   }
 
   function itemRow(it, extra) {
@@ -588,11 +602,15 @@
       out += '<div class="grid">' +
         range("nowplaying", "ram_percent", "RAM limit", 5, 90, 5, "%", ramHelp("nowplaying", "Reads the whole file if it fits, otherwise as much as fits ahead of the viewer.")) +
         select("nowplaying", "delay_sec", "When to start", [[0, "Automatic (after Plex’s buffer)"], [15, "15 s after playback starts"], [30, "30 s after playback starts"], [60, "60 s after playback starts"]],
-          n.delay_sec ? "Counted from when Plex reports the stream playing." : "Waits until Plex reports the stream playing, then for the time the disks take to read Plex’s buffer, so it doesn’t compete with it.") +
+          n.delay_sec ? { s: "Counted from when Plex reports “playing” — after the player’s start-up buffering.",
+                          more: "Plex reports a stream as playing once the player has finished its start-up buffering; the wait starts then." } :
+            { s: "Plex reports “playing” after the player’s start-up buffering; this then waits for Plex’s buffer to fill.",
+              more: "After the start-up buffering, Plex keeps reading ahead to fill the rest of its buffer. Automatic waits for the time the disks take to read that " +
+                "(see Automatic start timing below), so the preload doesn’t compete with it." }) +
         number("nowplaying", "max_streams", "Files to read at the same time", 1, 20,
-          "If more people are watching, the others wait their turn — every stream still gets preloaded. " +
-          "Hard drives slow right down when reading several files at once (the heads jump between them), so one or two at a time finishes each sooner. " +
-          "Suggested: hard drives 2, SATA SSD 4, NVMe SSD 8.") +
+          { s: '<span class="suggest" aria-label="Suggested values"><span><b>2</b> hard drives</span><span><b>4</b> SATA SSD</span><span><b>8</b> NVMe SSD</span></span>',
+            more: "If more people are watching, the others wait their turn — every stream still gets preloaded. " +
+              "Hard drives slow right down when reading several files at once (the heads jump between them), so one or two at a time finishes each sooner." }) +
         "</div>";
       if (!n.delay_sec) {
         out += details("np-timing", "Automatic start timing",
@@ -614,7 +632,7 @@
       "Uses Plex’s own order, so it crosses seasons and works with any folder layout.</p>" +
       guide("nextepisode", [
         ["When it helps", "Binge watching, and listening to an album or audiobook straight through. Removes the pause before the next episode or track, even without L2ARC."],
-        ["What it needs", "<span class=\"mono\">primarycache=all</span> on the media dataset so the read stays cached. Plex tells the app what’s playing — no Tautulli, no scripts, no Plex Pass."],
+        ["What it needs", "<span class=\"mono\">primarycache=all</span> on the media dataset so the read stays cached. Plex tells the app what’s playing."],
         ["Cost", "One read of up to the limit below per episode watched, at a gentle pace."]]);
     if (unavailable("nextepisode")) out += unavailableNote("nextepisode", esc(unavailable("nextepisode")));
     if (isOn("nextepisode")) {
