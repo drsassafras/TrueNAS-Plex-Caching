@@ -145,7 +145,7 @@ Node-RED, openHAB, ioBroker, Telegraf and the like can use the topics directly (
 Plex doesn't read a whole file at once — it buffers a little ahead of playback and reads more as needed. The disk delays you feel are seeks: starting a title, skipping, moving to the next episode. Plex Cache reads those parts *before* Plex asks for them, so ZFS already has them in RAM or on SSD.
 
 - Bitrates come from Plex per file (or are calculated from size and duration when Plex has none), so a 4K remux gets more bytes cached than a 720p episode for the same number of seconds.
-- Background work is paced (by default 10% of disk time) and pauses for anything more important (see Library warm-up above). "Run now" runs at full speed.
+- Background work is paced (by default 10% of disk time) and pauses for anything more important (see Library warm-up above). "Run now" runs at full speed and ignores the busy-disks and finish-by pauses, but still steps aside for buffering, preloads and scrubs.
 - **Disk speed** (Settings) is measured per dataset by *Benchmark now*, which times reads of a few media files on each one. A read counts as "already cached" when it runs at least 4× faster than its dataset's speed. Unreadable files are reported, never counted as hits.
 - L2ARC fills gradually and is evicted over time, which is why warm-up runs on a schedule. Size your L2ARC larger than the estimate so cached data lasts longer — even a modest SSD helps.
 
@@ -168,17 +168,30 @@ sudo python3 rewrite_blocks.py tank/plexfiles --apply    # rewrite
 
 It paces itself (`--mb-per-sec`, default 80), skips files any program has open, copies with plain reads and writes so ZFS block cloning can't reuse the old blocks, checks each copy byte for byte, keeps owners, permissions, timestamps and ACLs, swaps with an atomic rename, leaves hard-linked files alone, and stops before free space runs low. It can be stopped and run again. Snapshots keep the old blocks until they expire, and replication will send rewritten files again.
 
-The app is pure Python with no third-party dependencies. It runs as the `apps` user with all capabilities dropped and media mounted read-only.
-
 ## Development
 
 To try changes on your own TrueNAS before pushing, see [`dev/README.md`](dev/README.md): a test copy of the app plus `tnsync`, which runs the tests, copies your code to the NAS and restarts the test app in one command.
 
 ```sh
-python3 tests/run.py   # progress bar; tests use fake Plex and TrueNAS servers
-python3 tests/demo.py                          # UI demo at http://127.0.0.1:8642 with sample data
-node dev/screenshots.js                        # README screenshots (see the file for how to run it)
+python3 tests/run.py      # progress bar; tests use fake Plex, TrueNAS and MQTT servers
+python3 dev/coverage.py   # the same, with test coverage per file (Python 3.12+)
+python3 tests/demo.py     # UI demo at http://127.0.0.1:8642 with sample data
+node dev/screenshots.js   # README screenshots (see the file for how to run it)
 docker build -t plex-cache .
 ```
 
-Configuration lives in `$PLEXCACHE_CONFIG/settings.json` (default `/config`). `PLEX_URL`, `PLEX_TOKEN`, `TRUENAS_URL` and `TRUENAS_API_KEY` environment variables seed it on first start.
+### Environment variables
+
+| Variable | |
+| --- | --- |
+| `PLEXCACHE_USERNAME`, `PLEXCACHE_PASSWORD` | web UI login ([see above](#the-web-ui-login)) |
+| `PLEXCACHE_URL` | the address links to the web UI should use (Home Assistant's **Visit**), when it's behind a reverse proxy |
+| `PLEXCACHE_CONFIG` | settings folder (default `/config`) |
+| `PLEXCACHE_PORT`, `PLEXCACHE_HOST` | where the web UI listens (default `8642` on all addresses) |
+| `PLEXCACHE_DEBUG` | any value: more detail in the app's log |
+| `PLEX_URL`, `PLEX_TOKEN`, `TRUENAS_URL`, `TRUENAS_API_KEY` | fill in those settings when they're empty (handy for scripted installs); the web UI can change them afterwards |
+| `TZ` | time zone for schedules |
+
+### The config folder
+
+`settings.json` (all settings, including the Plex token, TrueNAS API key and MQTT password — readable only by the app), `history.json` (Activity history), `session.key` and `signed-out.json` (web UI sessions), and small files remembering the web UI's address, "Check every file" results and the Home Assistant entities published. `GET /api/export` downloads the settings without any secrets.

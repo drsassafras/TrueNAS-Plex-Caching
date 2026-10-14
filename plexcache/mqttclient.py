@@ -1,8 +1,8 @@
 """A small MQTT 3.1.1 client (standard library only).
 
-Just what the Home Assistant bridge needs: connect with a username and password
+Just what the MQTT bridge (homeassistant.py) needs: connect with a username and password
 (optionally over TLS), a "last will" so Home Assistant marks everything unavailable
-if the app disappears, QoS 0 publish (retained or not), subscribe, and keep-alive.
+if the app disappears, QoS 0 publish (retained or not), subscribe (QoS 1 messages are acknowledged), and keep-alive.
 """
 
 from __future__ import annotations

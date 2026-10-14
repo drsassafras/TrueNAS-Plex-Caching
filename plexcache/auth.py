@@ -1,7 +1,8 @@
-"""Optional login for the web UI and API.
+"""Login for the web UI and API.
 
-Set PLEXCACHE_USERNAME and PLEXCACHE_PASSWORD (in the app's YAML) to turn it on;
-with either missing, the app stays open as before.
+On when PLEXCACHE_USERNAME and PLEXCACHE_PASSWORD are both set in the app's YAML (as
+compose.yaml does); with either missing, the web UI is open to anyone on the network.
+The example password from compose.yaml (DEFAULT_PASSWORD) is never accepted.
 
 After signing in, the browser keeps a session cookie (HttpOnly, SameSite=Strict)
 signed with a key kept in the config folder, so it survives restarts. Signing out

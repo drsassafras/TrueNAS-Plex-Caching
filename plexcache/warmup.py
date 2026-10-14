@@ -1,4 +1,4 @@
-"""Library warm-up: cache the first seconds of every file in L2ARC.
+"""Library warm-up: cache the first seconds of every file, and its seek index, in L2ARC.
 
 Port of plex_preload_l2arc2.sh with its unit and sizing bugs fixed:
 bitrates are kbps, so bytes = kbps * 125 * seconds everywhere.

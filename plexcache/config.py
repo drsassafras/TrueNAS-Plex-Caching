@@ -33,7 +33,7 @@ DEFAULTS: dict = {
         # RAM kept out of reach of Now-playing and Next-episode, for TrueNAS,
         # other apps and ZFS itself. Their limits are shares of what's left.
         "ram_reserve_gb": 4,
-        "debug": False,
+        "debug": False,  # unused: logging detail comes from PLEXCACHE_DEBUG (kept so older exports still import)
         "excluded_libraries": [],
         # Optional rewrites when Plex sees media at a different path than
         # this app does: [{"plex": "/data", "local": "/media"}]

@@ -15,8 +15,8 @@
 #      turns the login off, leaving the web UI open to anyone on your network.
 #      Changing the password later signs everyone out.
 #
-# Everything else (Plex address, sign-in, TrueNAS API key, features, Home
-# Assistant) is set in the web UI at http://<your-nas-ip>:8642 after it starts.
+# Everything else (Plex address, sign-in, TrueNAS API key, features, MQTT /
+# Home Assistant) is set in the web UI at http://<your-nas-ip>:8642 after it starts.
 #
 # x-portals adds a "Web UI" button in TrueNAS. TrueNAS only reads it when the
 # app is first installed, so add it then (not by editing later).

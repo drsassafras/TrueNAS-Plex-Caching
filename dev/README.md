@@ -6,6 +6,8 @@ This folder holds what you need to try changes on a real TrueNAS before pushing 
 |------|------------|
 | `compose.dev.yaml` | A **test copy** of the app (`plex-cache-dev`, port 8643) that runs the published image but with its code replaced by whatever you last copied to the NAS. It has its own settings, so it never touches the real `plex-cache` app. |
 | `tnsync` | A small script that **runs the tests, copies your code to the NAS and restarts the test app** — in one command, from your Mac. |
+| `coverage.py` | Runs the tests and shows how much of the code they reach, per file. No installs needed (Python 3.12+). |
+| `screenshots.js` | Makes the README screenshots from the demo (see below). |
 
 The loop is: edit on your Mac → `tnsync local -y` → refresh `http://<nas-ip>:8643`. Nothing reaches GitHub (or the real app) until you commit and push.
 
@@ -106,4 +108,4 @@ NODE_PATH=$(npm root -g) node dev/screenshots.js
 - **"can't SSH to …"** — SSH isn't running on TrueNAS, or your key isn't on `truenas_admin` (step 1.2).
 - **Copied, but the restart failed** — `/usr/bin/midclt` isn't in the user's no-password sudo commands (step 1.3).
 - **The test app won't start after installing** — the code folder was empty: run `tnsync local -y`.
-- **Tests fail only on the Mac** — the suite has to pass on the Mac's Python 3.9 as well as the 3.13 in the image.
+- **Tests fail only on the Mac** — the suite has to pass on the Mac's Python 3.9 as well as the 3.13 in the image, and macOS has no `/proc` and lacks some Linux-only calls (such as `os.posix_fadvise`): tests that touch those need to fake them or work without them.

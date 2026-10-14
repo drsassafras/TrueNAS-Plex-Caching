@@ -1,7 +1,9 @@
 """Watches Plex's active sessions and runs the two playback features.
 
-* Now-playing preload: read ahead of the viewer so seeking hits cache.
-* Next-episode prefetch: read the start of the next episode.
+* Now-playing preload: read the file from the play position (then from the start,
+  if it fits) so seeking hits cache.
+* Next-episode prefetch: read the start of the next episode; for music and
+  audiobooks, read ahead in the album or book (per-library modes, see config).
 
 Replaces the Tautulli-triggered scripts; Plex itself reports what's playing.
 """
