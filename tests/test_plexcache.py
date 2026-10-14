@@ -102,7 +102,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_defaults_and_persistence(self):
         s = config.Settings(self.dir)
-        s.update({"warmup": {"tv_sec": "20", "enabled": True}})
+        s.update({"warmup": {"tv_sec": 20, "enabled": True}})
         again = config.Settings(self.dir)
         self.assertEqual(again.section("warmup")["tv_sec"], 20)
         self.assertTrue(again.section("warmup")["enabled"])
@@ -721,8 +721,8 @@ class AppTests(unittest.TestCase):
             "truenas": {"url": TRUENAS.url, "api_key": "good-key"},
             "warmup": {"enabled": True},
             "nowplaying": {"enabled": True, "delay_sec": 0, "min_delay_sec": 0},
-            "general": {"poll_seconds": 2},
         })
+        force_settings(cls.app, {"general": {"poll_seconds": 2}})
         from plexcache.server import serve
         cls.httpd = serve(cls.app, "127.0.0.1", 0)
         import threading
@@ -1165,6 +1165,14 @@ class AppTests(unittest.TestCase):
 
 
 
+def force_settings(app, patch):
+    """Set values the web UI can't (a 1 s delay, a 2 s poll, an exact RAM reserve), to make
+    tests quick and precise. Bypasses validation on purpose: tests only."""
+    with app.settings._lock:
+        for sec, values in patch.items():
+            app.settings._data[sec].update(values)
+
+
 def wait_for(cond, timeout=10.0, step=0.05):
     end = time.time() + timeout
     while time.time() < end:
@@ -1301,7 +1309,7 @@ class PlaybackMonitorTests(unittest.TestCase):
         self.assertTrue(self.jobs()[0]["whole"])
 
     def test_preloading_reports_what_it_reads(self):
-        self.app.settings.update({"nowplaying": {"delay_sec": 3}})
+        force_settings(self.app, {"nowplaying": {"delay_sec": 3}})
         self.session(CAT["episodes"][1], 60000)
         self.poll()
         job = self.app.monitor.sessions["m1:" + CAT["episodes"][1]["key"]]["jobs"][0]
@@ -1314,7 +1322,7 @@ class PlaybackMonitorTests(unittest.TestCase):
         self.pb.MIN_JOB, self.pb.RESTART_EVERY = MiB, 0
         b = self.app.ram_budget()
         # leave Now-playing about 5 MB, less than the 12 MB episode
-        self.app.settings.update({"general": {"ram_reserve_gb": (b["available"] - 8.5e6) / 1e9}})
+        force_settings(self.app, {"general": {"ram_reserve_gb": (b["available"] - 8.5e6) / 1e9}})
         ep = CAT["episodes"][2]
         self.session(ep, 120000)                                # 10% in
         self.poll()
@@ -1329,7 +1337,7 @@ class PlaybackMonitorTests(unittest.TestCase):
     def test_no_room_is_reported_once(self):
         self.pb.MIN_JOB = MiB
         b = self.app.ram_budget()
-        self.app.settings.update({"general": {"ram_reserve_gb": b["available"] / 1e9}})
+        force_settings(self.app, {"general": {"ram_reserve_gb": b["available"] / 1e9}})
         self.session(CAT["episodes"][3], 60000)
         self.poll()
         self.poll()
@@ -1345,7 +1353,7 @@ class PlaybackMonitorTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: any("couldn't read" in m for m in self.events())))
 
     def test_stream_ending_cancels_waiting_preload(self):
-        self.app.settings.update({"nowplaying": {"delay_sec": 1}})
+        force_settings(self.app, {"nowplaying": {"delay_sec": 1}})
         self.session(CAT["episodes"][4], 60000)
         self.poll()
         job = list(self.app.monitor.sessions.values())[0]["jobs"][0]
@@ -1368,7 +1376,7 @@ class PlaybackMonitorTests(unittest.TestCase):
 
     def test_monitor_survives_errors(self):
         mon = self.app.monitor
-        self.app.settings.update({"general": {"poll_seconds": 2}})
+        force_settings(self.app, {"general": {"poll_seconds": 2}})
         real = mon.poll
         try:
             for boom, expect in ((PlexError("Plex is down"), "can't read Plex sessions"), (ValueError("bad"), "unexpected error")):
@@ -1534,14 +1542,14 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(pin["id"], 4242)
         self.assertIn("code=ABCD1234", pin["auth_url"])
         self.plextv.approved = False
-        self.assertEqual(json.loads(self.req("GET", "/api/plex/pin/4242")[1]), {"done": False})
+        self.assertEqual(json.loads(self.req("POST", "/api/plex/pin/4242", {})[1]), {"done": False})
         self.plextv.approved = True
-        self.assertEqual(json.loads(self.req("GET", "/api/plex/pin/4242")[1]), {"done": True})
+        self.assertEqual(json.loads(self.req("POST", "/api/plex/pin/4242", {})[1]), {"done": True})
         self.assertEqual(self.app.settings.section("plex")["token"], "good-token")
         self.plextv.fail = True
         try:
             self.assertEqual(self.req("POST", "/api/plex/pin", {})[0], 502)
-            self.assertEqual(self.req("GET", "/api/plex/pin/4242")[0], 502)
+            self.assertEqual(self.req("POST", "/api/plex/pin/4242", {})[0], 502)
         finally:
             self.plextv.fail = False
 
@@ -2312,7 +2320,7 @@ class SmallModuleTests(unittest.TestCase):
         for patch in bad:
             with self.assertRaises(config.SettingsError, msg=patch):
                 s.update(patch)
-        s.update({"general": {"disk_speeds": {"tank/a": {"mb_s": 200}, "tank/b": None}, "debug": "yes"},
+        s.update({"general": {"disk_speeds": {"tank/a": {"mb_s": 200}, "tank/b": None}, "debug": True},
                   "plex": {"token_set": True}, "warmup": {"finish_by": "06:30"}})
         self.assertEqual(s.section("general")["disk_speeds"], {"tank/a": {"mb_s": 200, "measured_at": None}})
         self.assertTrue(s.section("general")["debug"])
@@ -2767,6 +2775,146 @@ class LoginTests(unittest.TestCase):
             os.environ.update(old)
 
 
+class ValidationTests(unittest.TestCase):
+    """Every setting accepts only what the web UI can send: its choices, whole numbers in its
+    ranges, and well-formed text. MQTT commands go through the same checks."""
+
+    def setUp(self):
+        self.s = config.Settings(tempfile.mkdtemp(dir=TMP))
+
+    def bad(self, patch):
+        with self.assertRaises(config.SettingsError, msg=patch):
+            self.s.update(patch)
+
+    def test_every_setting_has_a_rule(self):
+        for sec, values in config.DEFAULTS.items():
+            for key, default in values.items():
+                if key == "client_id" or (sec, key) in config.CHOICES or isinstance(default, bool):
+                    continue
+                if isinstance(default, int):
+                    self.assertIn((sec, key), config.LIMITS, f"{sec}.{key} has no range")
+
+    def test_ranges_and_choices(self):
+        for (sec, key), (lo, hi) in config.LIMITS.items():
+            if (sec, key) in (("warmup", "movie_min_sec"), ("warmup", "tv_min_sec"), ("warmup", "audio_min_sec")):
+                continue  # clamped to the matching *_sec, checked below
+            if key == "ram_percent":  # the two RAM limits share 100%: make room for this one
+                other = "nextepisode" if sec == "nowplaying" else "nowplaying"
+                self.s.update({other: {"ram_percent": 5}})
+            for ok in (lo, hi):
+                self.s.update({sec: {key: ok}})
+                self.assertEqual(self.s.section(sec)[key], ok)
+            for wrong in (lo - 1, hi + 1, lo + 0.5, str(lo), True, None, float("nan"), float("inf"), [lo]):
+                self.bad({sec: {key: wrong}})
+        for (sec, key), choices in config.CHOICES.items():
+            for ok in choices:
+                self.s.update({sec: {key: ok}})
+            wrong = [999, "nope", None, True, 1.5] + (["2"] if isinstance(choices[0], int) else [])
+            for w in wrong:
+                self.bad({sec: {key: w}})
+        self.s.update({"general": {"poll_seconds": "10"}})  # a form field's "10" is fine for a numeric choice
+        self.assertEqual(self.s.section("general")["poll_seconds"], 10)
+
+    def test_types(self):
+        for sec, key in (("warmup", "enabled"), ("mqtt", "tls"), ("general", "update_check")):
+            for wrong in ("yes", "true", 1, 0, None, "ON"):
+                self.bad({sec: {key: wrong}})
+        for wrong in ("3:00", "24:00", "03:60", 300, None, "03:00 "):
+            self.bad({"warmup": {"time": wrong}})
+        self.bad({"general": {"client_id_x": 1}})
+        self.bad({"general": {"hdd_measured_at": "yesterday"}})
+        self.s.update({"general": {"hdd_measured_at": "2026-10-14T10:00:00"}})
+
+    def test_text_fields(self):
+        for url in ("javascript:alert(1)", "http://user:pw@nas", "http://nas/x?y=1", "ftp://nas", "http://nas:99999",
+                    "nas name", "http://", 42, "http://nas\n"):
+            self.bad({"plex": {"url": url}})
+        self.s.update({"plex": {"url": "nas.local"}, "truenas": {"url": "192.168.1.10"}})
+        self.assertEqual(self.s.section("plex")["url"], "http://nas.local:32400")
+        self.assertEqual(self.s.section("truenas")["url"], "https://192.168.1.10")
+        self.s.update({"plex": {"url": "https://plex.example.com/proxy"}})  # a reverse proxy with a path is fine
+        for token in ("has space", "x" * 300, "tab\there", 123):
+            self.bad({"plex": {"token": token}})
+        for host in ("bad host", "evil;rm", "x" * 300, "a/b"):
+            self.bad({"mqtt": {"host": host}})
+        for ok in ("192.168.1.20", "homeassistant.local", "fe80::1", "[fe80::1]", ""):
+            self.s.update({"mqtt": {"host": ok}})
+        self.s.update({"mqtt": {"password": "pass with spaces & symbols!"}})
+        self.bad({"mqtt": {"password": "line\nbreak"}})
+        self.bad({"mqtt": {"username": "x" * 200}})
+        for topic in ("a/#", "a/+/b", "", "x" * 120, "spaces here"):
+            self.bad({"mqtt": {"base_topic": topic}})
+
+    def test_lists_and_maps(self):
+        self.bad({"general": {"path_map": [{"plex": "/data", "local": "relative/path"}]}})
+        self.bad({"general": {"path_map": [{"plex": "/data", "local": "/media/../etc"}]}})
+        self.bad({"general": {"path_map": ["not a row"]}})
+        self.bad({"general": {"path_map": [{"plex": "/x", "local": "/y"}] * (config.MAX_ITEMS + 1)}})
+        self.s.update({"general": {"path_map": [{"plex": "D:\\Movies", "local": "/media/movies/"}, {"plex": "/tv", "local": ""}]}})
+        self.assertEqual(self.s.section("general")["path_map"], [{"plex": "D:\\Movies", "local": "/media/movies"}])
+        self.bad({"nextepisode": {"library_modes": {"1": "forever"}}})
+        self.bad({"nextepisode": {"library_modes": {"../1": "off"}}})
+        self.bad({"nextepisode": {"library_modes": ["off"]}})
+        self.bad({"general": {"excluded_libraries": [1, 2]}})
+        self.bad({"general": {"disk_speeds": {"tank/a": {"mb_s": float("nan")}}}})
+        self.bad({"general": {"disk_speeds": {"tank/a": {"mb_s": 200, "measured_at": "soon"}}}})
+        self.bad({"general": {"disk_speeds": {"tank/a": 200}}})
+
+    def test_one_bad_value_changes_nothing(self):
+        before = self.s.get()
+        self.bad({"warmup": {"tv_sec": 20, "movie_sec": 9999}})
+        self.assertEqual(self.s.get(), before)
+
+    def test_http_api(self):
+        from plexcache.server import serve
+        app = _new_app()
+        app.scan_library()
+        httpd = serve(app, "127.0.0.1", 0)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        def post(path, raw, headers=None):
+            r = urllib.request.Request(base + path, data=raw if isinstance(raw, bytes) else json.dumps(raw).encode(),
+                                       method="POST", headers={"Content-Type": "application/json", **(headers or {})})
+            try:
+                with urllib.request.urlopen(r) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.loads(e.read())
+        try:
+            self.assertEqual(post("/api/settings", b'{"warmup": {"tv_sec": NaN}}')[0], 400)
+            self.assertEqual(post("/api/settings", b'{"warmup": {"tv_sec": Infinity}}')[0], 400)
+            self.assertEqual(post("/api/settings", {"warmup": {"tv_sec": "20"}})[0], 400)
+            self.assertEqual(post("/api/settings", {"warmup": {"tv_sec": 20}})[0], 200)
+            self.assertEqual(post("/api/checks", {"rescan": "yes"})[0], 400)
+            self.assertEqual(post("/api/blockscan", {"dataset": ["x"]})[0], 400)
+            self.assertEqual(post("/login", {"username": ["a"], "password": "b"})[0], 200)  # login off: always fine
+            # A preload choice must suit the library's kind, from the web UI as from MQTT
+            tv = next(l for l in app.libraries if l["kind"] == "tv")
+            status, body = post("/api/settings", {"nextepisode": {"library_modes": {tv["key"]: "album"}}})
+            self.assertEqual(status, 400)
+            self.assertIn("isn't a preload choice", body["error"])
+            self.assertEqual(post("/api/settings", {"nextepisode": {"library_modes": {"9999": "off"}}})[0], 400)
+            self.assertEqual(post("/api/settings", {"nextepisode": {"library_modes": {tv["key"]: "off"}}})[0], 200)
+            # Requests from another site's page are refused; this app's own pages and scripts are fine
+            port = httpd.server_address[1]
+            status, body = post("/api/settings", {"warmup": {"tv_sec": 25}}, {"Origin": "http://evil.example.com"})
+            self.assertEqual(status, 403)
+            self.assertEqual(app.settings.section("warmup")["tv_sec"], 20)
+            self.assertEqual(post("/api/settings", {"warmup": {"tv_sec": 25}}, {"Origin": f"http://127.0.0.1:{port}"})[0], 200)
+            self.assertEqual(post("/api/settings", {"warmup": {"tv_sec": 25}}, {"Origin": "https://plex.example.com",
+                                                                                   "X-Forwarded-Host": "plex.example.com"})[0], 200)
+            # Checking the Plex sign-in saves the token, so it's a POST (a link or image can't trigger it)
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(base + "/api/plex/pin/1")
+            self.assertEqual(cm.exception.code, 404)
+            cm.exception.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 class ActivityTotalsTests(unittest.TestCase):
     def test_totals_count_up_and_survive_restart(self):
         from plexcache.activity import Activity
@@ -3085,6 +3233,12 @@ class MQTTTests(unittest.TestCase):
         self.assertEqual(st["update"]["installed_version"], self.app.version)
         upd = next(v for t, v in disc.items() if t.startswith("homeassistant/update/"))
         self.assertEqual(upd["release_url"], "https://github.com/drsassafras/TrueNAS-Plex-Caching")
+        # Home Assistant reads the versions straight from their own topic (no template)
+        self.assertEqual(upd["state_topic"], "plexcache/update")
+        self.assertNotIn("value_template", upd)
+        self.assertTrue(wait_for(lambda: self.broker.state("plexcache/update") is not None))
+        versions = json.loads(self.broker.state("plexcache/update"))
+        self.assertEqual((versions["installed_version"], versions["latest_version"]), (self.app.version, self.app.version))
         # Per-library preload choice: TV gets two options, audio libraries get the long list
         libs = {v["name"]: v for t, v in disc.items() if "/library_" in t}
         tv_names = {l["title"] for l in self.app.libraries if l["kind"] == "tv"}
@@ -3133,6 +3287,13 @@ class MQTTTests(unittest.TestCase):
         finally:
             for n, f in saved.items():
                 setattr(self.app, n, f)
+        # Out of range, not a whole number, or not a number: refused by the same rules as the web UI
+        for name, value in (("nowplaying_ram_percent", "95"), ("warmup_pacing_percent", "2"), ("ram_reserve_gb", "6.5"),
+                            ("ram_reserve_gb", "nan"), ("poll_seconds", "7")):
+            n = sum("couldn't do" in e["message"] for e in self.app.activity.snapshot()["events"])
+            self.broker.inject(f"plexcache/set/{name}", value)
+            self.assertTrue(wait_for(lambda: sum("couldn't do" in e["message"] for e in self.app.activity.snapshot()["events"]) > n),
+                            (name, value))
         self.broker.inject("plexcache/set/warmup_pacing_percent", "25")
         self.broker.inject("plexcache/set/ram_reserve_gb", "6")
         self.broker.inject("plexcache/set/start_at", "At 80%")

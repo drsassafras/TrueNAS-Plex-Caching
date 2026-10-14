@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
+import urllib.parse
 import threading
 import uuid
 
@@ -111,41 +113,48 @@ TV_MODES = ("off", "next")
 AUDIO_MODES = ("off", "10", "20", "60", "rest", "album", "artist")
 DEFAULT_MODE = {"tv": "next", "audio": "20"}
 
-# Basic validation: (min, max) for numeric fields.
+# What each setting accepts. Every change — from the web UI, the API or MQTT — goes
+# through _coerce(), so these are the only rules. Numbers are whole numbers in the same
+# ranges the web UI offers; dropdowns accept only their own choices.
 LIMITS = {
-    ("general", "poll_seconds"): (2, 120),
     ("general", "hdd_mb_per_sec"): (10, 5000),
     ("general", "ram_reserve_gb"): (0, 4096),
     ("warmup", "weekday"): (0, 6),
     ("warmup", "every_hours"): (1, 168),
-    ("warmup", "pacing_percent"): (1, 100),
-    ("warmup", "movie_sec"): (1, 600),
-    ("warmup", "tv_sec"): (1, 600),
-    ("warmup", "audio_sec"): (1, 600),
+    ("warmup", "pacing_percent"): (5, 100),
+    ("warmup", "movie_sec"): (3, 180),
+    ("warmup", "tv_sec"): (3, 180),
+    ("warmup", "audio_sec"): (1, 60),
     ("warmup", "movie_min_sec"): (1, 600),
     ("warmup", "tv_min_sec"): (1, 600),
     ("warmup", "audio_min_sec"): (1, 600),
-    ("warmup", "reserve_gb"): (0, 100000),
+    ("warmup", "reserve_gb"): (0, 500),
     ("warmup", "padding_video"): (0, 100),
     ("warmup", "padding_audio"): (0, 100),
-    ("warmup", "pause_disk_busy"): (0, 100),
-    ("nowplaying", "ram_percent"): (1, 90),
-    ("nowplaying", "delay_sec"): (0, 600),
+    ("nowplaying", "ram_percent"): (5, 90),
     ("nowplaying", "buffer_direct_sec"): (0, 600),
     ("nowplaying", "buffer_transcode_sec"): (0, 600),
     ("nowplaying", "min_delay_sec"): (0, 600),
     ("nowplaying", "max_streams"): (1, 20),
-    ("nowplaying", "pacing_percent"): (1, 100),
-    ("nextepisode", "ram_percent"): (1, 90),
-    ("nextepisode", "pacing_percent"): (1, 100),
+    ("nowplaying", "pacing_percent"): (5, 100),
+    ("nextepisode", "ram_percent"): (5, 90),
+    ("nextepisode", "pacing_percent"): (5, 100),
     ("mqtt", "port"): (1, 65535),
     ("mqtt", "interval"): (5, 600),
 }
 CHOICES = {
+    ("general", "poll_seconds"): (3, 5, 10, 30),
     ("warmup", "schedule"): ("daily", "weekly", "hours", "manual"),
+    ("warmup", "pause_disk_busy"): (0, 40, 50, 60),
+    ("nowplaying", "delay_sec"): (0, 15, 30, 60),
     ("nextepisode", "start_at"): ("default", "after_nowplaying", "80", "90"),
     ("mqtt", "report_period"): ("today", "week", "month"),
 }
+MAX_ITEMS = 500  # entries in a list/map setting (libraries, mappings, datasets)
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_ISO_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?")
+_LIB_KEY = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_HOST = re.compile(r"[A-Za-z0-9._:\[\]-]{1,253}")
 
 
 class SettingsError(ValueError):
@@ -186,87 +195,133 @@ def normalize_url(section: str, value: str) -> str:
     return value
 
 
+def _text(section: str, key: str, value, max_len: int = 255, spaces: bool = True) -> str:
+    """A string: no control characters, a sensible length, optionally no spaces."""
+    if not isinstance(value, str):
+        raise SettingsError(f"{section}.{key} must be text")
+    if len(value) > max_len or _CONTROL.search(value) or (not spaces and any(c.isspace() for c in value)):
+        raise SettingsError(f"{section}.{key} isn't valid")
+    return value
+
+
+def _path(section: str, key: str, value) -> str:
+    """A folder path: absolute, no '..' parts."""
+    value = _text(section, key, value, 1024).rstrip("/") or "/"
+    if not value.startswith("/") or ".." in value.split("/"):
+        raise SettingsError(f"{section}.{key}: folder paths must start with / (and can't use ..)")
+    return value
+
+
+def _url(section: str, value) -> str:
+    value = normalize_url(section, _text(section, "url", value, 255, spaces=False))
+    if not value:
+        return ""
+    u = urllib.parse.urlsplit(value)
+    if u.scheme not in ("http", "https") or not u.hostname or "@" in u.netloc or u.query or u.fragment:
+        raise SettingsError(f"{section}.url must be an address like 192.168.1.10 or http://nas.local:32400")
+    try:
+        u.port  # raises on a bad port
+    except ValueError:
+        raise SettingsError(f"{section}.url has a bad port") from None
+    return value
+
+
 def _coerce(section: str, key: str, value, current):
-    """Coerce an incoming value to the type of the current one and validate it."""
-    if key == "pause_disk_busy":
-        try:
-            num = int(float(value))
-        except (TypeError, ValueError):
-            num = -1
-        if num not in (0, 40, 50, 60):
-            raise SettingsError("warmup.pause_disk_busy must be 0, 40, 50 or 60")
-        return num
+    """Check an incoming value strictly against what the setting accepts, and return it."""
+    where = f"{section}.{key}"
     if (section, key) in CHOICES:
-        value = str(value)
-        if value not in CHOICES[(section, key)]:
-            raise SettingsError(f"{section}.{key} must be one of {CHOICES[(section, key)]}")
+        choices = CHOICES[(section, key)]
+        if isinstance(choices[0], int):
+            # Numbers may arrive as 10 or "10" (a form field); nothing else
+            if isinstance(value, bool) or not isinstance(value, (int, str)) or not str(value).isdigit():
+                raise SettingsError(f"{where} must be one of {', '.join(map(str, choices))}")
+            value = int(value)
+        if value not in choices:
+            raise SettingsError(f"{where} must be one of {', '.join(map(str, choices))}")
         return value
     if isinstance(current, bool):
-        if isinstance(value, str):
-            return value.lower() in ("1", "true", "yes", "on")
-        return bool(value)
-    if isinstance(current, (int, float)) and not isinstance(current, bool):
-        try:
-            num = float(value)
-        except (TypeError, ValueError):
-            raise SettingsError(f"{section}.{key} must be a number") from None
-        lo, hi = LIMITS.get((section, key), (None, None))
-        if lo is not None and not (lo <= num <= hi):
-            raise SettingsError(f"{section}.{key} must be between {lo} and {hi}")
-        return int(num) if isinstance(current, int) and num == int(num) else num
+        if not isinstance(value, bool):
+            raise SettingsError(f"{where} must be true or false")
+        return value
+    if isinstance(current, int):
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                or value != int(value)):
+            raise SettingsError(f"{where} must be a whole number")
+        lo, hi = LIMITS[(section, key)]
+        if not lo <= value <= hi:
+            raise SettingsError(f"{where} must be between {lo} and {hi}")
+        return int(value)
     if key in ("time", "finish_by"):
-        value = str(value)
-        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
+        if not isinstance(value, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
             raise SettingsError("time must look like 03:00")
         return value
     if key == "url":
-        return normalize_url(section, str(value))
+        return _url(section, value)
+    if (section, key) in (("plex", "token"), ("truenas", "api_key")):
+        return _text(section, key, value, 255, spaces=False)
+    if (section, key) == ("mqtt", "host"):
+        value = _text(section, key, value, 253).strip()
+        if value and not _HOST.fullmatch(value):
+            raise SettingsError("mqtt.host must be an IP address or host name")
+        return value
+    if (section, key) == ("mqtt", "username"):
+        return _text(section, key, value, 128)
+    if (section, key) == ("mqtt", "password"):
+        return _text(section, key, value, 256)
+    if key == "hdd_measured_at":
+        if value is not None and not (isinstance(value, str) and _ISO_TIME.fullmatch(value)):
+            raise SettingsError("general.hdd_measured_at must be a date and time")
+        return value
     if key == "excluded_libraries":
-        if not isinstance(value, list):
+        if not isinstance(value, list) or len(value) > MAX_ITEMS:
             raise SettingsError("excluded_libraries must be a list")
-        return [str(x) for x in value]
+        return [_text(section, key, x, 200) for x in value]
     if key in ("base_topic", "discovery_prefix"):
-        value = str(value).strip().strip("/")
+        value = _text(section, key, value, 100).strip().strip("/")
         if not re.fullmatch(r"[A-Za-z0-9_\-]+(/[A-Za-z0-9_\-]+)*", value):
             raise SettingsError(f"{key} may only use letters, numbers, - _ and /")
         return value
     if key == "library_modes":
-        if not isinstance(value, dict):
+        if not isinstance(value, dict) or len(value) > MAX_ITEMS:
             raise SettingsError("library_modes must be an object")
         out = {}
         for lib, mode in value.items():
+            if not _LIB_KEY.fullmatch(str(lib)):
+                raise SettingsError(f"unknown library: {lib}")
             if mode not in AUDIO_MODES and mode not in TV_MODES:
                 raise SettingsError(f"unknown preload choice: {mode}")
-            out[str(lib)] = str(mode)
+            out[str(lib)] = mode
         return out
     if key == "disk_speeds":
-        if not isinstance(value, dict):
+        if not isinstance(value, dict) or len(value) > MAX_ITEMS:
             raise SettingsError("disk_speeds must be an object")
         out = {}
         for name, row in value.items():
+            _text(section, key, name, 255)
             if row is None:
                 continue  # null removes a dataset's measurement
-            try:
-                mb = float(row.get("mb_s"))
-            except (TypeError, ValueError, AttributeError):
-                raise SettingsError("disk speed must be a number") from None
-            if not 10 <= mb <= 20000:
+            if not isinstance(row, dict):
+                raise SettingsError("disk speed must be an object")
+            mb, at = row.get("mb_s"), row.get("measured_at")
+            if isinstance(mb, bool) or not isinstance(mb, (int, float)) or not (math.isfinite(mb) and 10 <= mb <= 20000):
                 raise SettingsError("disk speed must be between 10 and 20000 MB/s")
-            at = row.get("measured_at")
-            out[str(name)] = {"mb_s": int(mb), "measured_at": str(at) if at else None}
+            if at is not None and not (isinstance(at, str) and _ISO_TIME.fullmatch(at)):
+                raise SettingsError("disk speed measured_at must be a date and time")
+            out[name] = {"mb_s": int(mb), "measured_at": at}
         return out
     if key == "path_map":
-        if not isinstance(value, list):
+        if not isinstance(value, list) or len(value) > MAX_ITEMS:
             raise SettingsError("path_map must be a list")
         rows = []
         for row in value:
-            plex, local = str(row.get("plex", "")).rstrip("/"), str(row.get("local", "")).rstrip("/")
-            if plex and local:
-                rows.append({"plex": plex, "local": local})
+            if not isinstance(row, dict):
+                raise SettingsError("each media mapping must be an object")
+            plex, local = row.get("plex") or "", row.get("local") or ""
+            if plex and local:  # a row without both is a mapping being removed
+                # Plex's side is only matched as text (Plex may even run on Windows); ours must be a real path here
+                rows.append({"plex": _text(section, key, plex, 1024).rstrip("/") or "/", "local": _path(section, key, local)})
         return rows
-    if current is None or isinstance(current, str):
-        return None if value is None else str(value)
-    return value
+    raise SettingsError(f"{where} can't be changed")  # anything not covered above
 
 
 class Settings:

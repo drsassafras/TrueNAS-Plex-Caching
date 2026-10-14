@@ -283,9 +283,9 @@ def entities(state: dict, allow_control: bool) -> list[tuple[str, str, dict]]:
         sensor("main", f"dataset_{slug}_cache", f"{d['name']} cache settings", f"datasets.{slug}.cache_settings",
                icon="mdi:database-cog-outline", cat=D)
     # The installed version, and the newest one on GitHub (when checking is on)
+    # (Its own topic, <base>/update, holds just the JSON Home Assistant's update entity reads.)
     E.append(("update", "update", {"_device": "main", "name": "Update", "device_class": "firmware",
-                                   "title": "Plex Cache", "release_url": REPO_URL,
-                                   "value_template": "{{ value_json.update | tojson }}"}))
+                                   "title": "Plex Cache", "release_url": REPO_URL, "entity_category": "diagnostic"}))
 
     # ---- Activity: the Activity page's report, plus totals that only go up
     sensor("activity", "report_verdict", f"Report ({period})", "report_verdict", icon="mdi:chart-box-outline")
@@ -349,7 +349,7 @@ def entities(state: dict, allow_control: bool) -> list[tuple[str, str, dict]]:
         for oid, name, lo, hi, step, unit in (("nowplaying_ram_percent", "Now-playing RAM limit", 5, 90, 5, "%"),
                                               ("nextepisode_ram_percent", "Next-episode RAM limit", 5, 90, 5, "%"),
                                               ("warmup_pacing_percent", "Warm-up pacing", 5, 100, 5, "%"),
-                                              ("ram_reserve_gb", "ZFS cache left for the NAS", 0, 512, 1, "GB")):
+                                              ("ram_reserve_gb", "ZFS cache left for the NAS", 0, 4096, 1, "GB")):
             E.append(("number", oid, {"_device": "main", "name": name, "value_template": "{{ value_json.%s }}" % oid,
                                       "min": lo, "max": hi, "step": step, "unit_of_measurement": unit,
                                       "mode": "slider" if unit == "%" else "box", "entity_category": "config"}))
@@ -510,6 +510,7 @@ class HomeAssistantBridge:
                     self._publish_discovery(c, cfg, node, state)
                     discovery_sig = sig
                 c.publish(state_topic, json.dumps(state, default=str), retain=True)
+                c.publish(f"{base}/update", json.dumps(state["update"]), retain=True)
                 self.status["last_publish"] = time.time()
                 self._step("publish", "ok", f"{state_topic}" + (f" · {self.status['entities']} Home Assistant entities"
                                                               if cfg["discovery"] else ""))
@@ -564,7 +565,9 @@ class HomeAssistantBridge:
             conf = dict(conf)
             conf = dict(conf, unique_id=f"{node}_{oid}", availability_topic=avail, device=devices[conf.pop("_device")])
             conf["object_id"] = f"plex_cache_{oid}"
-            if component != "button":
+            if component == "update":
+                conf["state_topic"] = f"{base}/update"
+            elif component != "button":
                 conf["state_topic"] = state_topic
             if component in ("switch", "button", "number", "select"):
                 conf["command_topic"] = f"{set_topic}/{oid}"
@@ -633,11 +636,11 @@ class HomeAssistantBridge:
             elif name.startswith("library_") and name.endswith("_preload"):
                 key = name[len("library_"):-len("_preload")]
                 mode = _choice(MODE_NAME, value)
-                lib = next((x for x in app.libraries if x["key"] == key), None)
-                if lib is None or mode not in (TV_MODES if lib.get("kind") == "tv" else AUDIO_MODES):
-                    raise SettingsError("not a choice for that library")
+                if not any(x["key"] == key for x in app.libraries):
+                    raise SettingsError("Plex has no such library")
                 modes = dict(app.settings.section("nextepisode").get("library_modes") or {})
                 modes[key] = mode
+                app.check_library_modes(modes)  # the same check as the web UI's
                 app.settings.update({"nextepisode": {"library_modes": modes}})
             else:
                 raise SettingsError(f"unknown command {name}")

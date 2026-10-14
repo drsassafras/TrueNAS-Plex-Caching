@@ -388,6 +388,19 @@ class App:
             self.activity.event("settings", "found " + " and ".join(changed))
         self.test_connections_async(then_checks=bool(changed), rescan=bool(changed))
 
+    def check_library_modes(self, modes) -> None:
+        """Each library's preload choice must suit its kind (TV: off/next; music and
+        audiobooks: the rest), for a library Plex actually has. Raises SettingsError."""
+        if not isinstance(modes, dict):
+            raise config.SettingsError("library_modes must be an object")
+        kinds = {lib["key"]: lib.get("kind") for lib in self.libraries}
+        for key, mode in modes.items():
+            if kinds and key not in kinds:
+                raise config.SettingsError(f"Plex has no library {key}")
+            allowed = config.TV_MODES if kinds.get(key) == "tv" else config.AUDIO_MODES
+            if kinds.get(key) in ("tv", "audio") and mode not in allowed:
+                raise config.SettingsError(f"“{mode}” isn't a preload choice for that library")
+
     def library_datasets(self, key: str) -> list[dict]:
         """The datasets holding a library's folders (from the last check)."""
         return [d for d in (self.zfs or {}).get("datasets", []) if key in d["keys"]]

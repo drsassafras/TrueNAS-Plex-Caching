@@ -137,7 +137,8 @@ Node-RED, openHAB, ioBroker, Telegraf and the like can use the topics directly (
 | --- | --- |
 | `plexcache/state` | everything, as one retained JSON message — sent every 30 s and straight away after a change |
 | `plexcache/availability` | `online`, or `offline` (also sent by the broker if the app disappears) |
-| `plexcache/set/<name>` | commands, when **Allow control** is on: `warmup_enabled`, `nowplaying_enabled`, `nextepisode_enabled` (`ON`/`OFF`); `run_warmup`, `stop_warmup`, `recheck`, `benchmark` (any payload); `nowplaying_ram_percent`, `nextepisode_ram_percent`, `warmup_pacing_percent`, `ram_reserve_gb` (a number); `poll_seconds` (`3`, `5`, `10`, `30`); `start_at` (`default`, `after_nowplaying`, `80`, `90`); `library_<key>_preload` (`off`, `next`, `10`, `20`, `60`, `rest`, `album`, `artist`) |
+| `plexcache/update` | the installed and newest version, for Home Assistant's update entity |
+| `plexcache/set/<name>` | commands, when **Allow control** is on: `warmup_enabled`, `nowplaying_enabled`, `nextepisode_enabled` (`ON`/`OFF`); `run_warmup`, `stop_warmup`, `recheck`, `benchmark` (any payload); `nowplaying_ram_percent`, `nextepisode_ram_percent`, `warmup_pacing_percent`, `ram_reserve_gb` (a whole number, in the same range as the web UI); `poll_seconds` (`3`, `5`, `10`, `30`); `start_at` (`default`, `after_nowplaying`, `80`, `90`); `library_<key>_preload` (`off`, `next`, `10`, `20`, `60`, `rest`, `album`, `artist`) |
 | `homeassistant/…/config` | Home Assistant discovery (openHAB and Domoticz read it too) |
 
 ## How it works

@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import re
+import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -25,6 +26,10 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
 # Reachable without signing in: the sign-in page's own files, the container health
 # check, and the record-size script (fetched with curl from the TrueNAS shell).
 OPEN_PATHS = {"/healthz", "/login", "/tools/rewrite_blocks.py"}
+
+
+def _no_constants(name):
+    raise ValueError(f"{name} isn't allowed")
 
 
 def make_handler(app):
@@ -85,7 +90,7 @@ def make_handler(app):
                 raise SettingsError("request too large" if n > 0 else "bad Content-Length")
             raw = self.rfile.read(n) if n else b"{}"
             try:
-                data = json.loads(raw or b"{}")
+                data = json.loads(raw or b"{}", parse_constant=_no_constants)  # NaN / Infinity aren't JSON
             except ValueError:
                 raise SettingsError("invalid JSON") from None
             if not isinstance(data, dict):
@@ -132,21 +137,23 @@ def make_handler(app):
                 body = json.dumps(app.settings.export(), indent=2).encode()
                 return self._send(200, body, "application/json",
                                   {"Content-Disposition": 'attachment; filename="plex-cache-settings.json"'})
-            m = re.fullmatch(r"/api/plex/pin/(\d+)", path)
-            if m:
-                try:
-                    token = check_pin(app.settings.section("general")["client_id"], int(m.group(1)))
-                except PlexError as e:
-                    return self._error(str(e), 502)
-                if token:
-                    app.settings.update({"plex": {"token": token}})
-                    app.activity.event("settings", "signed in with Plex")
-                    app.test_connections_async(then_checks=True, rescan=True)
-                return self._json({"done": bool(token)})
             return self._error("not found", 404)
+
+        def _same_origin(self) -> bool:
+            """A browser says which page a request came from (Origin). Changes are only
+            taken from this app's own pages; scripts and tools send no Origin at all."""
+            origin = self.headers.get("Origin")
+            if not origin:
+                return True
+            # Behind a reverse proxy the browser's address is the proxy's: accept that too.
+            ours = {(self.headers.get("Host") or "").lower(), (self.headers.get("X-Forwarded-Host") or "").lower(),
+                    urllib.parse.urlsplit(os.environ.get("PLEXCACHE_URL", "")).netloc.lower()}
+            return urllib.parse.urlsplit(origin).netloc.lower() in ours - {""}
 
         def do_POST(self):
             path = self.path.split("?", 1)[0]
+            if not self._same_origin():
+                return self._error("requests from other sites aren't accepted", 403)
             try:
                 body = self._body()
             except SettingsError as e:
@@ -154,7 +161,10 @@ def make_handler(app):
             if path == "/login":
                 if not auth.enabled:
                     return self._json({"ok": True})
-                if auth.check_password(body.get("username", ""), body.get("password", "")):
+                user, pw = body.get("username", ""), body.get("password", "")
+                if not isinstance(user, str) or not isinstance(pw, str) or len(user) > 256 or len(pw) > 1024:
+                    return self._error("username and password must be text", 400)
+                if auth.check_password(user, pw):
                     if auth.default_password:
                         app.activity.event("settings", "sign-in refused: the default password hasn't been changed", "warn")
                         return self._error("The default password can't be used. Set your own PLEXCACHE_PASSWORD (and "
@@ -173,6 +183,9 @@ def make_handler(app):
             app.note_host(self.headers.get("Host"))
             try:
                 if path == "/api/settings":
+                    modes = (body.get("nextepisode") or {}).get("library_modes") if isinstance(body.get("nextepisode"), dict) else None
+                    if modes is not None:
+                        app.check_library_modes(modes)
                     for feature in ("warmup", "nowplaying", "nextepisode"):
                         sec = body.get(feature)
                         if isinstance(sec, dict) and sec.get("enabled") is True:
@@ -194,10 +207,16 @@ def make_handler(app):
                     app.test_connections_async(then_checks=True, rescan=True)
                     return self._json({"started": True})
                 if path == "/api/checks":
-                    app.run_checks_async(rescan=bool(body.get("rescan", True)))
+                    rescan = body.get("rescan", True)
+                    if not isinstance(rescan, bool):
+                        raise SettingsError("rescan must be true or false")
+                    app.run_checks_async(rescan=rescan)
                     return self._json({"started": True})
                 if path == "/api/blockscan":
-                    return self._json({"started": app.run_block_scan(str(body.get("dataset", "")))})
+                    dataset = body.get("dataset")
+                    if not isinstance(dataset, str) or len(dataset) > 255:
+                        raise SettingsError("dataset must be a dataset name")
+                    return self._json({"started": app.run_block_scan(dataset)})
                 if path == "/api/mqtt/reconnect":
                     app.ha.retry()
                     return self._json({"started": True})
@@ -209,6 +228,18 @@ def make_handler(app):
                 if path == "/api/warmup/stop":
                     app.stop_warmup()
                     return self._json({"stopping": True})
+                # Has the Plex sign-in been approved yet? (A POST: it saves the token when it has.)
+                m = re.fullmatch(r"/api/plex/pin/(\d{1,12})", path)
+                if m:
+                    try:
+                        token = check_pin(app.settings.section("general")["client_id"], int(m.group(1)))
+                    except PlexError as e:
+                        return self._error(str(e), 502)
+                    if token:
+                        app.settings.update({"plex": {"token": token}})
+                        app.activity.event("settings", "signed in with Plex")
+                        app.test_connections_async(then_checks=True, rescan=True)
+                    return self._json({"done": bool(token)})
                 if path == "/api/plex/pin":
                     try:
                         return self._json(create_pin(app.settings.section("general")["client_id"]))

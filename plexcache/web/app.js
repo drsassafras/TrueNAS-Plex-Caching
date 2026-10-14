@@ -1416,7 +1416,7 @@
       var tries = 0;
       var timer = setInterval(function () {
         if (++tries > 90) { clearInterval(timer); toast("Sign-in timed out"); return; }
-        api("/api/plex/pin/" + pin.id).then(function (r) {
+        api("/api/plex/pin/" + pin.id, {}).then(function (r) {
           if (r.done) {
             clearInterval(timer);
             if (win) try { win.close(); } catch (e) { /* ignore */ }
