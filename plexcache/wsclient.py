@@ -13,6 +13,8 @@ import ssl
 import struct
 import urllib.parse
 
+MAX_MESSAGE = 64 * 2**20  # TrueNAS's answers are well under this, even for big pools
+
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -117,6 +119,8 @@ class WebSocket:
                 n = struct.unpack("!H", self._recv(2))[0]
             elif n == 127:
                 n = struct.unpack("!Q", self._recv(8))[0]
+            if len(message) + n > MAX_MESSAGE:  # a broken or hostile server can't eat all the RAM
+                raise WebSocketError(f"message from the server is too large (over {MAX_MESSAGE // 2**20} MB)")
             mask = self._recv(4) if b2 & 0x80 else None
             payload = self._recv(n)
             if mask:

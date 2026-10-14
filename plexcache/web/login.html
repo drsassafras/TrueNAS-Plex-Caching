@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plex Cache – Sign in</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main class="login">
+  <form class="card" id="login" autocomplete="on">
+    <div class="brand-row"><img src="/static/logo.svg" alt="" width="40" height="40"><h1><a class="brandlink" href="https://github.com/drsassafras/TrueNAS-Plex-Caching" target="_blank" rel="noopener" title="Plex Cache on GitHub">Plex Cache</a></h1></div>
+    <p class="hint">Sign in with the username and password from the app's settings in TrueNAS.
+      <button type="button" class="info" id="help-btn" aria-expanded="false" aria-controls="help" title="Where do I find these?">i</button></p>
+    <div class="login-help" id="help" hidden>
+      <p><strong>Finding or changing them:</strong> in TrueNAS, open <strong>Apps → Plex Cache → Edit</strong>. They're the
+        <code>PLEXCACHE_USERNAME</code> and <code>PLEXCACHE_PASSWORD</code> lines under <code>environment:</code>.
+        Change them and save; the app restarts and everyone is signed out.</p>
+      <p><strong>The example password</strong> (<code>change-me</code>) is never accepted, since anyone could read it.
+        Set your own before signing in.</p>
+      <p><strong>Turning the login off:</strong> put a <code>#</code> in front of both lines (or remove them) and save.
+        The web UI then opens without a password, for anyone on your network.</p>
+    </div>
+    <div class="fld"><label for="u">Username</label><input id="u" name="username" autocomplete="username" required autofocus></div>
+    <div class="fld"><label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required></div>
+    <p class="login-err" id="err" role="alert" hidden></p>
+    <button class="btn pri" type="submit">Sign in</button>
+  </form>
+</main>
+<script src="/static/login.js"></script>
+</body>
+</html>

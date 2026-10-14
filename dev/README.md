@@ -82,7 +82,8 @@ After that, `tnsync local -y` is all you need.
 ## Working without a NAS
 
 ```sh
-python3 tests/run.py    # the test suite, with fake Plex and TrueNAS servers
+python3 tests/run.py    # the test suite, with fake Plex, TrueNAS and MQTT servers
+python3 dev/coverage.py # the same, showing how much of the code the tests reach (Python 3.12+; add --missing for line numbers)
 python3 tests/demo.py   # the UI with sample data at http://127.0.0.1:8642
 DEMO_NO_L2ARC=1 python3 tests/demo.py 8651   # the same, on a pool without an SSD cache
 ```

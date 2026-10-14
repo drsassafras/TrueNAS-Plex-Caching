@@ -37,12 +37,14 @@ import argparse
 import hashlib
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
 
 CHUNK = 1024 * 1024
 OPEN_FILES_TTL = 30  # seconds between re-scans of which files are open
+MOUNTINFO = "/proc/self/mountinfo"
 
 
 def human(n: float) -> str:
@@ -65,12 +67,16 @@ def resolve(target: str) -> tuple[str, str]:
     if target.startswith("/"):
         folder = os.path.realpath(target)
         best = ("", "")
-        with open("/proc/self/mountinfo", encoding="utf-8") as fh:
-            for line in fh:
-                left, _, right = line.partition(" - ")
-                mp, (fstype, source) = left.split()[4].replace("\\040", " "), right.split()[:2]
-                if fstype == "zfs" and (folder == mp or folder.startswith(mp.rstrip("/") + "/")) and len(mp) > len(best[0]):
-                    best = (mp, source)
+        try:
+            with open(MOUNTINFO, encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError:  # not Linux (no /proc): nothing here can be on a ZFS dataset we can find
+            lines = []
+        for line in lines:
+            left, _, right = line.partition(" - ")
+            mp, (fstype, source) = left.split()[4].replace("\\040", " "), right.split()[:2]
+            if fstype == "zfs" and (folder == mp or folder.startswith(mp.rstrip("/") + "/")) and len(mp) > len(best[0]):
+                best = (mp, source)
         if not best[1]:
             sys.exit(f"{folder} isn't on a ZFS dataset.")
         return folder, best[1]
@@ -116,63 +122,97 @@ class Pacer:
                 time.sleep(ahead)
 
 
-def copy_meta(src_st: os.stat_result, src: str, dst: str) -> None:
-    os.chown(dst, src_st.st_uid, src_st.st_gid)
-    os.chmod(dst, src_st.st_mode & 0o7777)
-    for name in (os.listxattr(src, follow_symlinks=False) if hasattr(os, "listxattr") else []):
-        os.setxattr(dst, name, os.getxattr(src, name, follow_symlinks=False), follow_symlinks=False)
-    os.utime(dst, ns=(src_st.st_atime_ns, src_st.st_mtime_ns))
+def copy_meta(src_st: os.stat_result, src_fd: int, dst_fd: int) -> None:
+    os.fchown(dst_fd, src_st.st_uid, src_st.st_gid)
+    os.fchmod(dst_fd, src_st.st_mode & 0o7777)
+    for name in (os.listxattr(src_fd) if hasattr(os, "listxattr") else []):
+        os.setxattr(dst_fd, name, os.getxattr(src_fd, name))
+    os.utime(dst_fd, ns=(src_st.st_atime_ns, src_st.st_mtime_ns))
 
 
-def same_content(a: str, b: str, pacer: Pacer) -> bool:
+def same_content(fa: int, fb: int, pacer: Pacer) -> bool:
     ha, hb = hashlib.sha256(), hashlib.sha256()
-    with open(a, "rb") as fa, open(b, "rb") as fb:
-        while True:
-            ca, cb = fa.read(CHUNK), fb.read(CHUNK)
-            ha.update(ca)
-            hb.update(cb)
-            pacer.add(len(ca) + len(cb))
-            if not ca and not cb:
-                return ha.digest() == hb.digest()
-            if len(ca) != len(cb):
-                return False
+    os.lseek(fa, 0, os.SEEK_SET)
+    os.lseek(fb, 0, os.SEEK_SET)
+    while True:
+        ca, cb = os.read(fa, CHUNK), os.read(fb, CHUNK)
+        ha.update(ca)
+        hb.update(cb)
+        pacer.add(len(ca) + len(cb))
+        if not ca and not cb:
+            return ha.digest() == hb.digest()
+        if len(ca) != len(cb):
+            return False
 
 
-def rewrite(path: str, st: os.stat_result, pacer: Pacer, verify: bool) -> str:
-    """Rewrite one file. Returns "" when done, or why it was skipped."""
+def same_file(a: os.stat_result, b: os.stat_result) -> bool:
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def rewrite(path: str, st: os.stat_result, dir_st: os.stat_result, pacer: Pacer, verify: bool) -> str:
+    """Rewrite one file. Returns "" when done, or why it was skipped.
+
+    Runs as root in folders other people may be able to write to, so everything happens
+    through the folder and file found by the scan, opened without following links: if
+    either was swapped for something else (say a link to a system file) since then, the
+    file is skipped rather than copied.
+    """
     folder, name = os.path.split(path)
-    tmp = os.path.join(folder, f".{name}.rewrite-tmp")
+    tmp = f".{name}.rewrite-tmp"
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return "a leftover temporary file is in the way (" + tmp + ")"
-    ok = False
+        dfd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as e:
+        return f"can't open its folder ({e.strerror})"
+    src = dst = -1
+    created = ok = False
     try:
+        if not same_file(os.fstat(dfd), dir_st):
+            return "its folder changed since the scan"
+        try:
+            src = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
+        except OSError as e:
+            return f"can't open it ({e.strerror})"
+        now = os.fstat(src)
+        if not same_file(now, st) or (now.st_size, now.st_mtime_ns) != (st.st_size, st.st_mtime_ns):
+            return "it changed since the scan"
+        try:
+            dst = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+            created = True
+        except FileExistsError:
+            return "a leftover temporary file is in the way (" + os.path.join(folder, tmp) + ")"
         # Plain reads and writes on purpose: cp/cat may use copy_file_range, which ZFS can
         # satisfy by cloning the existing blocks — and then nothing would be rewritten.
-        with open(path, "rb") as src, os.fdopen(fd, "wb") as dst:
-            while True:
-                chunk = src.read(CHUNK)
-                if not chunk:
-                    break
-                dst.write(chunk)
-                pacer.add(len(chunk))
-            dst.flush()
-            os.fsync(dst.fileno())
-        now = os.stat(path)
+        while True:
+            chunk = os.read(src, CHUNK)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(dst, view):]
+            pacer.add(len(chunk))
+        os.fsync(dst)
+        now = os.fstat(src)
         if (now.st_size, now.st_mtime_ns) != (st.st_size, st.st_mtime_ns):
             return "it changed while being copied"
-        if os.stat(tmp).st_size != st.st_size:
+        if os.fstat(dst).st_size != st.st_size:
             return "the copy came out a different size"
-        if verify and not same_content(path, tmp, pacer):
+        if verify and not same_content(src, dst, pacer):
             return "the copy didn't match the original"
-        copy_meta(st, path, tmp)
-        os.replace(tmp, path)  # atomic: the path always points at a complete file
+        copy_meta(st, src, dst)
+        # Atomic, and within the folder we checked: the path always points at a complete file.
+        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
         ok = True
         return ""
     finally:
-        if not ok and os.path.exists(tmp):
-            os.remove(tmp)
+        for fd in (src, dst):
+            if fd >= 0:
+                os.close(fd)
+        if created and not ok:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+        os.close(dfd)
 
 
 def main() -> int:
@@ -203,6 +243,10 @@ def main() -> int:
     for dirpath, dirnames, filenames in os.walk(folder):
         # Stay on this dataset: child datasets have their own recordsize.
         dirnames[:] = [d for d in dirnames if not d.startswith(".") and os.lstat(os.path.join(dirpath, d)).st_dev == root_dev]
+        try:
+            dir_st = os.lstat(dirpath)
+        except OSError:
+            continue
         for name in filenames:
             if name.startswith(".") and name.endswith(".rewrite-tmp"):
                 continue
@@ -211,7 +255,7 @@ def main() -> int:
                 st = os.lstat(path)
             except OSError:
                 continue
-            if not os.path.isfile(path) or os.path.islink(path):
+            if not stat.S_ISREG(st.st_mode):  # links and anything else that isn't a plain file
                 continue
             total += 1
             # A file that fits in one block is stored in one block sized to fit: nothing to fix.
@@ -219,8 +263,8 @@ def main() -> int:
                 ok_files += 1
                 continue
             by_bs[st.st_blksize] = by_bs.get(st.st_blksize, 0) + 1
-            todo.append((path, st))
-    size = sum(st.st_size for _, st in todo)
+            todo.append((path, st, dir_st))
+    size = sum(st.st_size for _, st, _ in todo)
     print(f"{total:,} files: {ok_files:,} already fine, {len(todo):,} to rewrite ({human(size)}).")
     for bs, n in sorted(by_bs.items()):
         print(f"  {n:,} written with {bs_label(bs)} blocks")
@@ -245,7 +289,7 @@ def main() -> int:
     pacer = Pacer(args.mb_per_sec)
     busy, busy_at = set(), 0.0
     done = skipped = 0
-    for i, (path, st) in enumerate(todo, 1):
+    for i, (path, st, dir_st) in enumerate(todo, 1):
         if stop["now"]:
             print("\nStopped. Run again to carry on.")
             break
@@ -264,7 +308,7 @@ def main() -> int:
             print(f"[{i}/{len(todo)}] skipped (in use — run again later): {path}")
             continue
         try:
-            why = rewrite(path, st, pacer, not args.no_verify)
+            why = rewrite(path, st, dir_st, pacer, not args.no_verify)
         except OSError as e:
             why = str(e)
         if why:

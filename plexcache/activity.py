@@ -16,6 +16,22 @@ DAILY_DAYS = 400  # daily summaries kept (a year, with room)
 MAX_METRICS = 20000
 
 
+TOTALS = ("streams", "skips", "skips_cached", "next", "next_ready", "preloaded_bytes")
+
+
+def _count_total(totals: dict, what: str, f: dict) -> None:
+    if what == "stream":
+        totals["streams"] += 1
+    elif what == "skip":
+        totals["skips"] += 1
+        totals["skips_cached"] += 1 if f.get("cached") else 0
+    elif what == "next":
+        totals["next"] += 1
+        totals["next_ready"] += 1 if f.get("ready") else 0
+    elif what == "read":
+        totals["preloaded_bytes"] += int(f.get("cached", 0) or 0) + int(f.get("disk", 0) or 0)
+
+
 class Activity:
     def __init__(self, config_dir: str, max_events: int = 300, max_runs: int = 60):
         self.path = os.path.join(config_dir, "history.json")
@@ -26,6 +42,8 @@ class Activity:
         # What happened while people watched (streams, skips, buffering, ...), for the Activity report.
         self.metrics: list[dict] = []
         self.daily: dict[str, dict] = {}  # "2026-10-13" -> summary of that day (older than RAW_DAYS)
+        # Running totals that only ever go up (for Home Assistant's long-term statistics).
+        self.totals: dict[str, int] = dict.fromkeys(TOTALS, 0)
         self.max_runs = max_runs
         try:
             with open(self.path, encoding="utf-8") as fh:
@@ -34,6 +52,11 @@ class Activity:
             self.counters = data.get("counters", [])
             self.metrics = data.get("metrics", [])
             self.daily = data.get("daily", {})
+            if "totals" in data:
+                self.totals.update({k: int(v) for k, v in data["totals"].items() if k in TOTALS})
+            else:  # history from before totals were kept: start from what's still there
+                for m in self.metrics:
+                    _count_total(self.totals, m.get("what"), m)
             for e in data.get("events", [])[-max_events:]:
                 self.events.append(e)
         except (OSError, ValueError):
@@ -47,7 +70,7 @@ class Activity:
         try:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump({"runs": self.runs, "counters": self.counters, "metrics": self.metrics,
-                           "daily": self.daily, "events": list(self.events)[-100:]}, fh)
+                           "daily": self.daily, "totals": self.totals, "events": list(self.events)[-100:]}, fh)
             os.replace(tmp, self.path)
         except OSError as e:
             log.warning("could not save history: %s", e)
@@ -66,6 +89,7 @@ class Activity:
         """Keep one measurement, e.g. record("skip", label="Dune", cached=True)."""
         with self._lock:
             self.metrics.append(dict(fields, t=time.time(), what=what))
+            _count_total(self.totals, what, fields)
             self._save()
 
     def since(self, seconds: float) -> list[dict]:

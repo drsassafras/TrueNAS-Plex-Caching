@@ -480,3 +480,207 @@ def make_sys(root: str, params: dict) -> str:
         with open(os.path.join(pdir, k), "w") as fh:
             fh.write(f"{v}\n")
     return sysdir
+
+
+# ------------------------------------------------------------------ MQTT broker
+class FakeMQTTBroker:
+    """A tiny MQTT 3.1.1 broker: one login, retained messages, subscriptions, last wills."""
+
+    def __init__(self, username="ha", password="secret", tls_dir=None):
+        import socket as _s
+        self.username, self.password = username, password
+        self.tls = None
+        if tls_dir:  # TLS on, with a self-signed certificate
+            cert, key = self_signed_cert(tls_dir)
+            self.tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self.tls.load_cert_chain(cert, key)
+        self.retained: dict = {}
+        self.published: list = []  # (topic, payload, retain) in arrival order
+        self.connects: list = []  # (client_id, username, accepted)
+        self.clients: list = []  # [sock, [patterns], will]
+        self.active = 0  # connections still being served (including ones winding down)
+        self.lock = threading.Lock()
+        self.srv = _s.socket()
+        self.srv.setsockopt(_s.SOL_SOCKET, _s.SO_REUSEADDR, 1)
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(8)
+        self.port = self.srv.getsockname()[1]
+        self.closed = False
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def close(self):
+        self.closed = True
+        self.srv.close()
+        with self.lock:
+            for c in self.clients:
+                try:
+                    c[0].close()
+                except OSError:
+                    pass
+
+    def drop_clients(self):
+        """Cut every connection without a goodbye (as if the network failed)."""
+        with self.lock:
+            clients, self.clients = self.clients, []
+        for sock, _, will in clients:
+            try:
+                sock.shutdown(2)
+                sock.close()
+            except OSError:
+                pass
+            if will:
+                self._route(*will)
+
+    def reset(self, timeout=10.0):
+        """Cut every connection, wait until they've all finished, then forget everything."""
+        import time as _t
+        self.drop_clients()
+        end = _t.time() + timeout
+        while self.active and _t.time() < end:
+            _t.sleep(0.02)
+        with self.lock:
+            self.retained.clear()
+            self.published.clear()
+            self.connects.clear()
+
+    def inject(self, topic, payload):
+        """Publish as if another client (Home Assistant) sent it."""
+        self._route(topic, payload.encode() if isinstance(payload, str) else payload, False)
+
+    def state(self, topic):
+        with self.lock:
+            v = self.retained.get(topic)
+        return v
+
+    @staticmethod
+    def _str(data, i):
+        n = struct.unpack("!H", data[i:i + 2])[0]
+        return data[i + 2:i + 2 + n], i + 2 + n
+
+    @staticmethod
+    def _packet(kind, body):
+        n, length = len(body), b""
+        while True:
+            byte, n = n % 128, n // 128
+            length += bytes([byte | (0x80 if n else 0)])
+            if not n:
+                break
+        return bytes([kind]) + length + body
+
+    def _accept(self):
+        while not self.closed:
+            try:
+                sock, _ = self.srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(sock,), daemon=True).start()
+
+    def _recv(self, sock, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError
+            buf += chunk
+        return buf
+
+    def _read(self, sock):
+        kind = self._recv(sock, 1)[0]
+        mult, length = 1, 0
+        while True:
+            b = self._recv(sock, 1)[0]
+            length += (b & 0x7F) * mult
+            mult *= 128
+            if not b & 0x80:
+                break
+        return kind, self._recv(sock, length) if length else b""
+
+    def _route(self, topic, payload, retain):
+        from plexcache.mqttclient import topic_matches
+        with self.lock:
+            self.published.append((topic, payload, retain))
+            if retain:
+                if payload:
+                    self.retained[topic] = payload
+                else:
+                    self.retained.pop(topic, None)
+            targets = [c[0] for c in self.clients if any(topic_matches(p, topic) for p in c[1])]
+        body = struct.pack("!H", len(topic.encode())) + topic.encode() + payload
+        for s in targets:
+            try:
+                s.sendall(self._packet(0x30, body))
+            except OSError:
+                pass
+
+    def _serve(self, sock):
+        from plexcache.mqttclient import topic_matches
+        entry = None
+        with self.lock:
+            self.active += 1
+        try:
+            if self.tls:
+                sock = self.tls.wrap_socket(sock, server_side=True)
+            kind, data = self._read(sock)
+            if kind != 0x10:
+                return
+            _, i = self._str(data, 0)
+            flags = data[i + 1]
+            i += 4
+            cid, i = self._str(data, i)
+            will = None
+            if flags & 0x04:
+                wt, i = self._str(data, i)
+                wm, i = self._str(data, i)
+                will = (wt.decode(), wm, bool(flags & 0x20))
+            user = pw = b""
+            if flags & 0x80:
+                user, i = self._str(data, i)
+            if flags & 0x40:
+                pw, i = self._str(data, i)
+            ok = user.decode() == self.username and pw.decode() == self.password
+            self.connects.append((cid.decode(), user.decode(), ok))
+            sock.sendall(self._packet(0x20, bytes([0, 0 if ok else 5])))
+            if not ok:
+                return
+            entry = [sock, [], will]
+            with self.lock:
+                self.clients.append(entry)
+            while True:
+                kind, data = self._read(sock)
+                t = kind & 0xF0
+                if t == 0x30:
+                    n = struct.unpack("!H", data[:2])[0]
+                    self._route(data[2:2 + n].decode(), data[2 + n:], bool(kind & 1))
+                elif t == 0x80:
+                    pid, j, topics = data[:2], 2, []
+                    while j < len(data):
+                        tp, j = self._str(data, j)
+                        j += 1
+                        topics.append(tp.decode())
+                    entry[1].extend(topics)
+                    sock.sendall(self._packet(0x90, pid + bytes([0] * len(topics))))
+                    with self.lock:
+                        matches = [(tp, v) for tp, v in self.retained.items()
+                                   for p in topics if topic_matches(p, tp)]
+                    for tp, v in matches:
+                        sock.sendall(self._packet(0x31, struct.pack("!H", len(tp.encode())) + tp.encode() + v))
+                elif t == 0xC0:
+                    sock.sendall(self._packet(0xD0, b""))
+                elif t == 0xE0:
+                    entry[2] = None  # a clean goodbye: no last will
+                    return
+        except (ConnectionError, OSError, IndexError, struct.error, ssl.SSLError):
+            pass
+        finally:
+            with self.lock:
+                gone = entry in self.clients
+                if gone:
+                    self.clients.remove(entry)
+            if entry and gone and entry[2]:
+                self._route(*entry[2])
+            try:
+                sock.close()
+            except OSError:
+                pass
+            with self.lock:
+                self.active -= 1

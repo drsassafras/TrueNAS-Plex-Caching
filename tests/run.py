@@ -45,8 +45,13 @@ class ProgressResult(unittest.TextTestResult):
             bar = f"{colour}{'#' * filled}{OFF}{DIM}{'-' * (BAR - filled)}{OFF}"
             note = f"  {RED}{bad} failed{OFF}" if bad else ""
             width = os.get_terminal_size(sys.stdout.fileno()).columns if sys.stdout.isatty() else 100
+            # Keep the line narrower than the terminal: a line that wraps can't be redrawn with \r,
+            # so each update would leave a broken copy of the bar behind.
+            visible = len(f"    [{'#' * BAR}] {self.done:>3}/{self.total}") + (len(f"  {bad} failed") if bad else 0) + 2
+            room = width - visible - 1
+            name = name if len(name) <= room else (name[: max(0, room - 1)] + "…" if room > 1 else "")
             line = f"    [{bar}] {self.done:>3}/{self.total}{note}  {DIM}{name}{OFF}"
-            sys.stdout.write("\r\033[K" + line[: width + 40])
+            sys.stdout.write("\r\033[K" + line)
             sys.stdout.flush()
         elif pct * 100 >= self.next_report or self.done == self.total:
             print(f"    {self.done}/{self.total} tests done" + (f", {bad} failed" if bad else ""), flush=True)

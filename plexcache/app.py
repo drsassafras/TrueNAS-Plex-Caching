@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 import json
 import logging
 import os
@@ -12,6 +13,9 @@ import time
 
 from . import __version__, checks, config, mapping, report, zfs
 from .activity import Activity
+from .auth import Auth
+from .homeassistant import HomeAssistantBridge
+from .updates import UpdateChecker
 from .config import PLEX_DEFAULT_PORT, Settings
 from .pauses import WarmupPauses
 from .playback import PlaybackMonitor
@@ -26,18 +30,45 @@ log = logging.getLogger("plexcache")
 TRUENAS_PROBE_PORT = 443  # tests point this at a fake server
 
 
-def _host_only(host_header: str | None) -> str | None:
-    """'192.168.1.10:8642' -> '192.168.1.10'; ignores loopback and junk."""
+def _split_host(host_header: str | None) -> tuple[str | None, int | None]:
+    """'192.168.1.10:8643' -> ('192.168.1.10', 8643); (None, None) for loopback and junk."""
     if not host_header:
-        return None
-    h = host_header.strip()
+        return None, None
+    h, port = host_header.strip(), None
     if h.startswith("["):
-        h = h[1:h.find("]")] if "]" in h else ""
+        end = h.find("]")
+        h, rest = (h[1:end], h[end + 1:]) if end > 0 else ("", "")
+        if rest.startswith(":"):
+            port = rest[1:]
     elif h.count(":") == 1:
-        h = h.split(":")[0]
-    if not h or h in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or not all(c.isalnum() or c in ".-:" for c in h):
-        return None
-    return h
+        h, port = h.split(":")
+    if port is not None:
+        if not port.isdigit() or not 0 < int(port) < 65536:
+            return None, None
+        port = int(port)
+    if (not h or len(h) > 253 or h.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+            or not all(c.isalnum() or c in ".-:" for c in h)):
+        return None, None
+    return h, port
+
+
+def _host_only(host_header: str | None) -> str | None:
+    return _split_host(host_header)[0]
+
+
+LOCAL_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal", ".localdomain", ".localhost")
+
+
+def _is_local_name(host: str) -> bool:
+    """An IP address, or a name that can only mean something on the home network. A public
+    domain name could be a DNS-rebinding trick, pointing at the NAS from someone else's page."""
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    h = host.lower().rstrip(".")
+    return "." not in h or h.endswith(LOCAL_SUFFIXES)
 
 
 KIND_LABEL = {"movie": "movies", "tv": "TV episodes", "audio": "audio files"}
@@ -70,6 +101,8 @@ class App:
     def __init__(self, config_dir: str):
         self.config_dir = config_dir
         self.settings = Settings(config_dir)
+        # Optional web UI login, from PLEXCACHE_USERNAME / PLEXCACHE_PASSWORD in the app's YAML.
+        self.auth = Auth.from_env(config_dir)
         self.activity = Activity(config_dir)
         self.lock = threading.RLock()
         self.version = __version__
@@ -90,6 +123,9 @@ class App:
         self.connections: dict = {}
         self.testing = False
         self.host: str | None = None  # how the browser reaches us (usually the NAS's IP)
+        # The web UI's address as the browser sees it, port included (the app can't know which
+        # host port TrueNAS maps to its 8642). Kept, so links work before anyone opens the page.
+        self.web_url: str | None = (self._load_json("web.json") or {}).get("url")
         self._autodetected: set = set()
         # Warm-up
         self.warmup_run: WarmupRun | None = None
@@ -108,6 +144,9 @@ class App:
             v["running"] = False  # a scan cut short by a restart
         # Playback
         self.monitor = PlaybackMonitor(self)
+        # Home Assistant over MQTT (does nothing until it's switched on in Settings)
+        self.ha = HomeAssistantBridge(self)
+        self.updates = UpdateChecker(self)
         self._slots: dict = {}
         self._slots_lock = threading.Lock()
         self.stopping = threading.Event()
@@ -146,6 +185,8 @@ class App:
 
     def start(self):
         self.monitor.start()
+        self.ha.start()
+        self.updates.start()
         threading.Thread(target=self._scheduler_loop, name="scheduler", daemon=True).start()
         threading.Thread(target=self._startup, name="startup", daemon=True).start()
 
@@ -296,13 +337,23 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def note_host(self, host_header: str | None):
-        """Remember how the browser reached us and fill in empty addresses from it.
+        """Remember how the browser reached us (for links, e.g. Home Assistant's "Visit"),
+        and fill in empty Plex/TrueNAS addresses from it.
 
-        The browser usually talks to us via the NAS's own IP, which is also
-        where Plex and TrueNAS live on a typical install.
+        Only called for signed-in requests. The browser usually talks to us via the NAS's
+        own IP, which is also where Plex and TrueNAS live on a typical install.
         """
-        host = _host_only(host_header)
-        if not host or host == self.host:
+        host, port = _split_host(host_header)
+        if not host or not _is_local_name(host):
+            return
+        address = f"[{host}]" if ":" in host else host
+        web_url = f"http://{address}" + (f":{port}" if port and port != 80 else "")
+        if web_url != self.web_url:
+            self.web_url = web_url
+            self._save_json("web.json", {"url": web_url})
+            if getattr(self, "ha", None):
+                self.ha.wake.set()
+        if host == self.host:
             return
         self.host = host
         if host in self._autodetected:
@@ -793,6 +844,7 @@ class App:
             "version": self.version,
             "settings": self.settings.public(),
             # Defaults of the tunable settings, for the page's "back to default" buttons.
+            "auth": {"enabled": self.auth.enabled, "user": self.auth.username if self.auth.enabled else ""},
             "defaults": {sec: {k: v for k, v in config.DEFAULTS[sec].items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
                          for sec in ("general", "warmup", "nowplaying", "nextepisode")},
             "health": self.health,
@@ -800,6 +852,7 @@ class App:
             "connections": self.connections,
             "testing": self.testing,
             "host": self.host,
+            "web_url": self.web_url,
             "locations": self.locations,
             "mapping_choices": self.mapping_choices,
             "l2arc": self.l2arc_status(),
@@ -826,6 +879,8 @@ class App:
             "playback": {"sessions": self.monitor.snapshot(), "error": self.monitor.last_error, "last_poll": self.monitor.last_poll},
             "activity": self.activity.snapshot(),
             "reports": self.reports(),
+            "mqtt": dict(self.ha.status),
+            "updates": self.updates.status(),
         }
 
 

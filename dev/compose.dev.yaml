@@ -24,6 +24,11 @@ services:
     environment:
       TZ: America/Toronto
       PLEXCACHE_DEBUG: "1"
+      # Web UI login. CHANGE ME: the example password is refused until you set your own.
+      # Put a # in front of both lines to turn the login off (anyone on your network can then use it).
+      PLEXCACHE_USERNAME: admin
+      PLEXCACHE_PASSWORD: "change-me"
+      # PLEXCACHE_URL: https://plexcache.example.com   # only behind a reverse proxy: the address links should use
     volumes:
       - /mnt/ssd/AppConfigs/plex-cache-dev/config:/config
       - /mnt/ssd/AppConfigs/plex-cache-dev/src/plexcache:/app/plexcache:ro
@@ -34,6 +39,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # The app only writes to /config, so the rest of the container is read-only:
+    # nothing (not even a bug) can change the app's own files. /tmp is a small scratch space.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
 
 # Adds a "Web UI" button in TrueNAS. Only read when the app is first installed,
 # and must sit at the top level (not under services). Uses your NAS's real IP.

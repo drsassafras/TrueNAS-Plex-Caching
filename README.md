@@ -14,8 +14,6 @@ Everything is set up in a web UI: what to cache, how much, and when. Health chec
 
 ## Screenshots
 
-*From the built-in demo, with an invented library.*
-
 | | |
 |---|---|
 | [<img src="docs/screenshots/health.png" alt="Health page" width="420">](docs/screenshots/health.png)<br>**Health** — every check with a plain-English fix | [<img src="docs/screenshots/features.png" alt="Features page" width="420">](docs/screenshots/features.png)<br>**Features** — three caching features, each with its own limits |
@@ -63,7 +61,10 @@ Everything is set up in a web UI: what to cache, how much, and when. Health chec
 - **L2ARC sizing** — tells you how big an SSD you'd need from your own library (titles × bitrate × seconds), and lets you try settings before you buy one.
 - **Disk speed benchmark** per dataset, so cache hits and preload timing are judged against your actual disks.
 - Help behind small ⓘ buttons instead of walls of text, a ↺ to put any setting back to its default, changes saved as you go, dark mode, and a layout that works on a phone.
-- **Safe by design** — runs as TrueNAS's unprivileged `apps` user with media mounted read-only and all extra permissions dropped. Pure Python with no third-party dependencies. If its settings folder isn't writable it says how to fix it, rather than restarting endlessly.
+- **MQTT, for Home Assistant and more** (optional) — publishes health, streams, RAM in use, ARC and L2ARC, warm-up progress, the Activity report and lifetime totals, and takes commands. In Home Assistant a "Plex Cache" device appears on its own with 60–80 entities, including switches, buttons and sliders; Node-RED, openHAB and other MQTT tools can use the same topics. Status lights show each step of the connection. See [MQTT](#mqtt-home-assistant-node-red-and-more).
+- **Login** for the web UI — a username and password set in the app's YAML (on by default; the example password is refused).
+- **Update notices** — checks GitHub every 6 hours (can be switched off in Settings) and says when there's a newer version, in the web UI and in Home Assistant.
+- **Safe by design** — runs as TrueNAS's unprivileged `apps` user in a read-only container, with media mounted read-only and all extra permissions dropped; it writes only to its settings folder. Pure Python with no third-party dependencies. If its settings folder isn't writable it says how to fix it, rather than restarting endlessly.
 
 ## Install on TrueNAS
 
@@ -74,10 +75,70 @@ TrueNAS doesn't support third-party app catalogs since 24.10, so this installs a
 3. **Apps → Discover Apps → ⋮ → Install via YAML**, name it `plex-cache`, and paste [`compose.yaml`](compose.yaml). Change the lines marked `CHANGE ME`:
    - the settings dataset → `/config`
    - each media host path → **the same mount path Plex uses**, read-only. Add a line per mount if Plex has several.
-4. Open `http://<your-nas-ip>:8642`.
+   - `PLEXCACHE_PASSWORD` (and the username, if you like) → your own; the example password is refused. See [the web UI login](#the-web-ui-login).
+4. Open `http://<your-nas-ip>:8642` and sign in.
 5. Open **Settings**. If Plex and TrueNAS run on the same NAS, their addresses are filled in for you; otherwise enter your NAS's IP (Plex's port 32400 is added automatically). Choose **Sign in with Plex** — Plex only shares library and playback details with apps that hold a token. Optionally add a TrueNAS API key (user menu → API Keys) so Health can see your cache devices and dataset settings. The app only reads from the API. Status lights on the page show what's working.
 6. If a library shows as not found, either mount it at the same path Plex uses, or mount it anywhere and pick the folder under **Settings → Media mappings**. Folders that contain the library's files are marked ✓.
 7. Check **Health** — it should say “Everything is OK” — then switch features on in **Features**.
+
+### The web UI login
+
+The web UI asks for a username and password, set under `environment:` in the app's YAML (Apps → plex-cache → Edit):
+
+```yaml
+      PLEXCACHE_USERNAME: plex-cache
+      PLEXCACHE_PASSWORD: "something-long"
+```
+
+The example password in `compose.yaml` (`change-me`) is never accepted — anyone can read it here — so set your own when you install. Signing in with it explains what to change. The sign-in page's ⓘ button says where to find and change these settings.
+
+To turn the login off, put a `#` in front of both lines (or remove them). The web UI then opens without a password, for anyone on your network.
+
+The browser stays signed in for 30 days (a signed, HttpOnly cookie; the signing key lives in the config folder). **Sign out** ends that session on the server too, so a copied cookie stops working, and changing the password signs everyone out. Wrong passwords are answered one at a time, a second apart (guessing in parallel is no faster), and logged under Activity. Scripts can use HTTP Basic auth. `/healthz` stays open so TrueNAS can check the app is up.
+
+## MQTT (Home Assistant, Node-RED and more)
+
+Off until you switch it on in **Settings → MQTT**. MQTT is the common language of home-automation and monitoring tools: everything connects to a *broker*, which passes messages along. Plex Cache connects to your broker as a client.
+
+The settings card shows a light for each step — broker found, TLS, login accepted, publishing — with the reason when one fails, and a **Reconnect now** button. Turn off **Allow control** for a watch-only connection. Broker ACLs can limit the app's login to the `plexcache/#` and `homeassistant/#` topics.
+
+### MQTT – Home Assistant
+
+<p align="center">
+  <a href="docs/screenshots/home-assistant.png"><img src="docs/screenshots/home-assistant.png" alt="The Plex Cache device in Home Assistant: device info, controls for each feature, sensors and recent activity" width="860"></a>
+</p>
+
+With **Home Assistant discovery** on (the default), a **Plex Cache** device appears in Home Assistant by itself — nothing to add to `configuration.yaml`. Its **Visit** link opens the Plex Cache web UI.
+
+1. Install the **Mosquitto broker** add-on and the **MQTT** integration.
+2. Add a Home Assistant user just for this app (Settings → People → Users, e.g. `plexcache`). Mosquitto accepts any Home Assistant login.
+3. In Plex Cache, tick **Publish over MQTT** and enter the broker address (your Home Assistant's IP), port `1883`, and that username and password.
+
+For TLS, use port `8883` and tick **Use TLS**. The Mosquitto add-on only opens 8883 when it has certificate files (by default `fullchain.pem` and `privkey.pem` in Home Assistant's `/ssl` folder); otherwise its log says `SSL not enabled - No valid certs found!` and the port is closed. If the certificate is for a domain name (e.g. Let's Encrypt) and you connect by IP, leave **Verify** off — the connection is still encrypted.
+
+What Home Assistant gets — a main **Plex Cache** device with three linked ones, so everything sits under a clear heading (each has its own page and dashboard card):
+
+| Device | Sensors | Diagnostic |
+| --- | --- | --- |
+| **Plex Cache** | health (ok / warning / problem) and summary, *Problem*, streams playing, *Streaming*, what's being preloaded | checks passed / warnings / failures, last check, Plex and TrueNAS connected, health check / benchmark running, version, record size and cache settings per dataset |
+| **Plex Cache Activity** | the Activity report for today, 7 or 30 days: verdict, streams, skips (and from cache), next episodes (and ready in time, how early), still cached 30 min later, data preloaded, disks busy, items needing attention; lifetime totals for long-term statistics | |
+| **Plex Cache Library warm-up** | state (off / idle / preparing / running / paused), progress, why it's paused, next and last run, last result, already cached, L2ARC growth | files done / total, data read, files in the last run |
+| **Plex Cache RAM & ZFS** | Now-playing and Next-episode RAM in use, ARC size and hit ratio, L2ARC filled | RAM limits, ZFS cache available, L2ARC size |
+
+The main device also has the **controls** — switches for the three features; buttons to run or stop warm-up, re-run checks and benchmark disks; RAM limits, pacing and reserve; poll interval, next-episode start, and the preload choice for each TV, music and audiobook library — and an **update** entity that shows when a newer version is on GitHub, with a link to the project.
+
+The **Visit** link uses the address and port your browser last used to open Plex Cache. Behind a reverse proxy, set `PLEXCACHE_URL` (e.g. `https://plexcache.example.com`) in the app's YAML instead.
+
+### MQTT – other tools
+
+Node-RED, openHAB, ioBroker, Telegraf and the like can use the topics directly (`plexcache` can be changed). Turn off **Home Assistant discovery** if you don't need it.
+
+| Topic | |
+| --- | --- |
+| `plexcache/state` | everything, as one retained JSON message — sent every 30 s and straight away after a change |
+| `plexcache/availability` | `online`, or `offline` (also sent by the broker if the app disappears) |
+| `plexcache/set/<name>` | commands, when **Allow control** is on: `warmup_enabled`, `nowplaying_enabled`, `nextepisode_enabled` (`ON`/`OFF`); `run_warmup`, `stop_warmup`, `recheck`, `benchmark` (any payload); `nowplaying_ram_percent`, `nextepisode_ram_percent`, `warmup_pacing_percent`, `ram_reserve_gb` (a number); `poll_seconds` (`3`, `5`, `10`, `30`); `start_at` (`default`, `after_nowplaying`, `80`, `90`); `library_<key>_preload` (`off`, `next`, `10`, `20`, `60`, `rest`, `album`, `artist`) |
+| `homeassistant/…/config` | Home Assistant discovery (openHAB and Domoticz read it too) |
 
 ## How it works
 

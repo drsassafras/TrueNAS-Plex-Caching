@@ -102,6 +102,7 @@
   function api(path, body) {
     var opts = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
     return fetch(path, opts).then(function (r) {
+      if (r.status === 401) { location.reload(); return new Promise(function () {}); }  // signed out: show the sign-in page
       return r.json().then(function (j) {
         if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
         return j;
@@ -926,10 +927,97 @@
           "<strong>30 seconds</strong> — the fewest requests, but streams and skips can be noticed up to half a minute late; short songs may be half over, and brief buffering can be missed.<br><br>" +
           "Faster than 3 seconds gains little: Now-playing waits for Plex’s own start-up buffer anyway." }) +
       number("general", "ram_reserve_gb", "ZFS cache to leave for the rest of the NAS (GB)", 0, 4096, reserveHelp()) +
-      "</div></section>";
+      "</div>" +
+      '<div class="chk" style="margin-top:12px"><label><input type="checkbox" data-check="general.update_check"' + (g.update_check ? " checked" : "") +
+      ">Check GitHub for new versions" + info("Every 6 hours the app downloads one small file from GitHub (the version number on the main branch) " +
+        "and, when there's a newer version, says so under the app's name and in Home Assistant’s update entity. Nothing about your setup is sent. " +
+        "Updating is still done in TrueNAS.", "update check") + "</label>" + updateLine() + "</div></section>";
     out += pauseCard();
     out += diskSpeedCard();
+    out += mqttCard();
     out += "</div>";
+    return out;
+  }
+
+  var MQTT_STEPS = [["broker", "Broker found"], ["tls", "Encrypted (TLS)"], ["login", "Login accepted"], ["publish", "Publishing"]];
+  var MQTT_WAITING = { broker: "Looking for the broker…", tls: "Starting TLS…", login: "Signing in…", publish: "Sending…" };
+  function updateLine() {
+    var u = ST.updates || {};
+    if (!S.general.update_check) return "";
+    if (u.available) return '<span class="muted" style="font-size:13px">v' + esc(u.latest) + " is available — update the app in TrueNAS.</span>";
+    if (u.checked) return '<span class="muted" style="font-size:13px">Up to date (checked ' + esc(ago(u.checked)) + ").</span>";
+    if (u.error) return '<span class="muted" style="font-size:13px">Couldn’t check: ' + esc(u.error) + "</span>";
+    return "";
+  }
+  function mqttLights() {
+    var m = ST.mqtt || {}, M = S.mqtt, steps = m.steps || {};
+    if (!M.enabled) return light("off", "Off", "Tick “Publish over MQTT” below to start.");
+    return MQTT_STEPS.map(function (st) {
+      var r = steps[st[0]] || { status: "off", text: "" }, detail = r.text;
+      if (st[0] === "publish" && r.status === "ok") {
+        detail = r.text + (m.last_publish ? " · last update " + ago(m.last_publish) : "") +
+          (m.ha_seen ? " · Home Assistant last said hello " + ago(m.ha_seen) : "");
+      }
+      if (r.status === "testing") return light("testing", st[1], MQTT_WAITING[st[0]]);
+      if (r.status === "off") return light("off", st[1], detail || (m.state === "error" ? "Waiting for the step before" : ""));
+      return light(r.status, st[1], detail);
+    }).join("");
+  }
+  function mqttRetryLine() {
+    var m = ST.mqtt || {};
+    if (!S.mqtt.enabled || !S.mqtt.host) return "";
+    var txt = "";
+    if (m.state === "error" && m.next_retry) {
+      var secs = Math.max(0, Math.round(m.next_retry - Date.now() / 1000));
+      txt = secs ? "Trying again in " + secs + " s." : "Trying again…";
+    } else if (m.state === "connecting") txt = "Connecting…";
+    return '<div class="acts"><button class="btn" data-act="mqtt-retry"' + (m.state === "connecting" ? " disabled" : "") + ">" +
+      (m.state === "connected" ? "Reconnect" : "Reconnect now") + "</button>" +
+      (txt ? '<span class="muted" style="font-size:13px">' + txt + "</span>" : "") + "</div>";
+  }
+  function mqttCard() {
+    var M = S.mqtt, on = M.enabled;
+    var out = '<section class="card" id="mqtt"><h2>MQTT <span class="muted" style="font-weight:400;font-size:14px">· Home Assistant, Node-RED, openHAB and more · optional</span></h2>' +
+      '<p class="hint">Publishes status and lots of metrics, and takes commands to switch features and run jobs.' +
+      info("MQTT is a common way for home automation and monitoring tools to share data, through a <strong>broker</strong> that everything connects to. " +
+        "Plex Cache publishes everything as one JSON message on <code>" + esc(M.base_topic) + "/state</code> (every " + M.interval + " s, and straight away after a change), " +
+        "says <code>online</code>/<code>offline</code> on <code>" + esc(M.base_topic) + "/availability</code>, and takes commands on <code>" + esc(M.base_topic) + "/set/…</code>. " +
+        "Node-RED, openHAB, ioBroker, Telegraf and others can read those directly.<br><br>" +
+        "<strong>Home Assistant:</strong> with discovery on, a “Plex Cache” device appears with sensors for health, streams, RAM, ARC/L2ARC, warm-up, " +
+        "the Activity report and lifetime totals, plus switches, buttons and selects. Install the <strong>Mosquitto broker</strong> add-on and the " +
+        "<strong>MQTT</strong> integration, add a Home Assistant user for this app (Settings → People → Users), and enter its name and password here.<br><br>" +
+        "<strong>Security:</strong> the broker login is the lock. Use a separate login per device, use TLS if your broker offers it, and switch off " +
+        "“Allow control” for a watch-only connection. Broker ACLs can limit this login to the <code>" + esc(M.base_topic) + "/#</code> and <code>" +
+        esc(M.discovery_prefix) + "/#</code> topics.", "MQTT") + "</p>" +
+      '<div class="lights">' + mqttLights() + "</div>" + mqttRetryLine() +
+      '<div class="chk" style="margin-top:12px"><label><input type="checkbox" data-check="mqtt.enabled"' + (on ? " checked" : "") + ">Publish over MQTT</label></div>";
+    if (!on) return out + "</section>";
+    out += '<div class="grid">' +
+      textInput("mqtt", "host", "Broker address", "s-mhost", "For Home Assistant’s Mosquitto add-on, Home Assistant’s IP.", "192.168.1.20") +
+      number("mqtt", "port", "Port", 1, 65535, { s: "1883, or 8883 with TLS.", more: "1883 is the usual port without TLS and 8883 with it. " +
+        "In Home Assistant’s Mosquitto add-on, 8883 only opens when the add-on has certificate files (its log says “SSL not enabled - No valid certs found!” otherwise). " +
+        "Its websocket ports (1884, 8884) are for browsers and won’t work here." }) +
+      textInput("mqtt", "username", "Username", "s-muser", "", "plexcache") +
+      secretInput("mqtt", "password", "Password", "s-mpass") + "</div>" +
+      '<div class="chk" style="margin-top:12px"><label><input type="checkbox" data-check="mqtt.tls"' + (M.tls ? " checked" : "") + ">Use TLS</label>" +
+      (M.tls ? '<label><input type="checkbox" data-check="mqtt.verify_tls"' + (M.verify_tls ? " checked" : "") + ">Verify the broker’s certificate" +
+        info("Leave off for a self-signed certificate, or when connecting by IP to a broker whose certificate names a domain (such as a Let’s Encrypt one). " +
+          "The connection is still encrypted; on, it also proves it’s really your broker.", "Verify") + "</label>" : "") +
+      '<label><input type="checkbox" data-check="mqtt.discovery"' + (M.discovery ? " checked" : "") + ">Home Assistant discovery" +
+      info("Publishes Home Assistant’s discovery messages, so the “Plex Cache” device and its entities appear on their own. openHAB and Domoticz can read them too. " +
+        "Off: only the state, availability and command topics, for tools that don’t use discovery. Turning it off removes the entities from Home Assistant.", "Home Assistant discovery") + "</label>" +
+      '<label><input type="checkbox" data-check="mqtt.allow_control"' + (M.allow_control ? " checked" : "") + ">Allow control" +
+      info("Accepts commands on <code>" + esc(M.base_topic) + "/set/…</code>: switch the three features on or off, run or stop warm-up, re-run health checks, " +
+        "benchmark disks, change RAM limits and pacing, and pick each library’s preload. In Home Assistant these are switches, buttons, sliders and selects. " +
+        "Off: status only.", "Allow control") + "</label></div>" +
+      details("mqtt-more", "More options", '<div class="grid">' +
+        number("mqtt", "interval", "Send an update every (seconds)", 5, 600, "Changes are sent straight away too.") +
+        select("mqtt", "report_period", "Activity report figures cover", [["today", "Today"], ["week", "Last 7 days"], ["month", "Last 30 days"]],
+          "The skips, next-episode and preload figures.") +
+        textInput("mqtt", "base_topic", "Topic", "s-mbase", "Status goes to &lt;topic&gt;/state; commands come in on &lt;topic&gt;/set/….", "plexcache") +
+        (M.discovery ? textInput("mqtt", "discovery_prefix", "Discovery prefix", "s-mdisc", "Leave as homeassistant unless you changed it in Home Assistant.", "homeassistant") : "") +
+        "</div>", false) +
+      "</section>";
     return out;
   }
 
@@ -1088,7 +1176,20 @@
     var dot = document.getElementById("dot-health");
     var c = ST.health ? ST.health.counts : null;
     dot.className = "dot " + (!c ? "" : c.fail ? "fail" : c.warn ? "warn" : "ok");
-    document.getElementById("version").textContent = "TrueNAS · v" + ST.version;
+    var ver = document.getElementById("version"), up = ST.updates || {};
+    ver.innerHTML = "TrueNAS · v" + esc(ST.version) + (up.available ?
+      '<a class="update" href="' + esc(up.repo) + '" target="_blank" rel="noopener">v' + esc(up.latest) + " available ↗</a>" : "");
+    var bar = document.getElementById("userbar");
+    if (ST.auth && ST.auth.enabled && !bar) {
+      bar = document.createElement("div");
+      bar.id = "userbar";
+      bar.className = "userbar";
+      bar.innerHTML = '<span class="who">' + esc(ST.auth.user) + "</span>" +
+        '<button type="button" class="signout" title="Sign out" aria-label="Sign out ' + esc(ST.auth.user) + '">' +
+        '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg></button>';
+      bar.querySelector("button").addEventListener("click", function () { api("/logout", {}).then(function () { location.reload(); }); });
+      document.querySelector(".shell").appendChild(bar);
+    }
     main.innerHTML = PAGES[page]();
     reattachInfo();
   }
@@ -1262,6 +1363,11 @@
     else if (act === "benchmark") { api("/api/benchmark", {}).then(function () { toast("Measuring disk speed…"); ST.benchmark.running = true; render(); }); }
     else if (act === "warmup-run") { api("/api/warmup/run", {}).then(function (r) { toast(r.started ? "Warm-up started" : "Already running"); load(); }); }
     else if (act === "warmup-stop") { api("/api/warmup/stop", {}).then(function () { toast("Stopping…"); }); }
+    else if (act === "mqtt-retry") {
+      flush().then(function () { return api("/api/mqtt/reconnect", {}); }).then(function () {
+        ST.mqtt = Object.assign({}, ST.mqtt, { state: "connecting", next_retry: null }); render(); setTimeout(load, 1500);
+      });
+    }
     else if (act === "retest") { flush().then(function () { return api("/api/test", {}); }).then(function () { ST.testing = true; render(); load(); }); }
     else if (act === "plex-signin") { signIn(); }
   }

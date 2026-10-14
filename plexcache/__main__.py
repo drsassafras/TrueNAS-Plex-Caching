@@ -94,6 +94,10 @@ def main() -> int:
     if not wait_for_config(config_dir, host, port, stopping):
         return 0
     app = App(config_dir)
+    if not app.auth.enabled:
+        log.warning("web UI login is off (PLEXCACHE_USERNAME / PLEXCACHE_PASSWORD not set): anyone on the network can use it")
+    elif app.auth.default_password:
+        log.warning("PLEXCACHE_PASSWORD is still the default; sign-in is refused until it's changed")
     app.start()
     httpd = serve(app, host, port)
 
@@ -101,6 +105,7 @@ def main() -> int:
         app.stopping.set()
         app.warmup_stop.set()
         app.monitor.stop.set()
+        app.ha.close()
         httpd.shutdown()
 
     signal.signal(signal.SIGTERM, lambda *a: threading.Thread(target=shutdown).start())

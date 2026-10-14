@@ -10,9 +10,13 @@
 #      your Plex app uses inside its container (Plex's own app settings show
 #      these mounts). Add one line per mount if Plex has several.
 #   3. Put your NAS's IP in x-portals at the bottom.
+#   4. Set your own PLEXCACHE_PASSWORD (and username) below. The web UI asks for
+#      them, and the example password is refused. Commenting both lines out
+#      turns the login off, leaving the web UI open to anyone on your network.
+#      Changing the password later signs everyone out.
 #
-# Everything else (Plex address, sign-in, TrueNAS API key, features) is set
-# in the web UI at http://<your-nas-ip>:8642 after it starts.
+# Everything else (Plex address, sign-in, TrueNAS API key, features, Home
+# Assistant) is set in the web UI at http://<your-nas-ip>:8642 after it starts.
 #
 # x-portals adds a "Web UI" button in TrueNAS. TrueNAS only reads it when the
 # app is first installed, so add it then (not by editing later).
@@ -26,6 +30,11 @@ services:
       - "8642:8642"
     environment:
       TZ: America/Toronto            # your time zone, so schedules run at local time
+      # Web UI login. CHANGE ME: the example password is refused until you set your own.
+      # Put a # in front of both lines to turn the login off (anyone on your network can then use it).
+      PLEXCACHE_USERNAME: plex-cache
+      PLEXCACHE_PASSWORD: "change-me"
+      # PLEXCACHE_URL: https://plexcache.example.com   # only behind a reverse proxy: the address links should use
     volumes:
       - /mnt/tank/apps/plex-cache:/config        # CHANGE ME: settings and history
       - /mnt/tank/plexfiles:/data:ro             # CHANGE ME: media, same container path as Plex
@@ -33,6 +42,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # The app only writes to /config, so the rest of the container is read-only:
+    # nothing (not even a bug) can change the app's own files. /tmp is a small scratch space.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
 
 x-portals:
   - name: Web UI

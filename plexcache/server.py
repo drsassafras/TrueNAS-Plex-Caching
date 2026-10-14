@@ -10,6 +10,7 @@ import re
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .auth import SESSION_DAYS, Auth
 from .config import SettingsError
 from .plex import PlexError, check_pin, create_pin
 
@@ -17,12 +18,22 @@ log = logging.getLogger("plexcache")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 PAGES = {"/", "/health", "/features", "/activity", "/settings"}
 MAX_BODY = 1024 * 1024
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+       "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
+
+
+# Reachable without signing in: the sign-in page's own files, the container health
+# check, and the record-size script (fetched with curl from the TrueNAS shell).
+OPEN_PATHS = {"/healthz", "/login", "/tools/rewrite_blocks.py"}
 
 
 def make_handler(app):
+    auth = getattr(app, "auth", None) or Auth()
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "PlexCache"
         sys_version = ""
+        timeout = 30  # drop connections that go quiet, so idle sockets can't pile up
 
         def log_message(self, fmt, *args):  # quiet access log unless debugging
             log.debug("%s - %s", self.address_string(), fmt % args)
@@ -33,8 +44,12 @@ def make_handler(app):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("X-Frame-Options", "SAMEORIGIN")
+            self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "no-referrer")
+            # Only this app's own files may run or load; nothing may frame the page (clickjacking).
+            self.send_header("Content-Security-Policy", CSP)
+            self.send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")  # keeps the plex.tv sign-in window
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
             self.end_headers()
@@ -62,9 +77,12 @@ def make_handler(app):
             # Only JSON is accepted, which also stops cross-site form posts.
             if not (self.headers.get("Content-Type") or "").startswith("application/json"):
                 raise SettingsError("expected application/json")
-            n = int(self.headers.get("Content-Length") or 0)
-            if n > MAX_BODY:
-                raise SettingsError("request too large")
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                raise SettingsError("bad Content-Length") from None
+            if n < 0 or n > MAX_BODY:
+                raise SettingsError("request too large" if n > 0 else "bad Content-Length")
             raw = self.rfile.read(n) if n else b"{}"
             try:
                 data = json.loads(raw or b"{}")
@@ -78,11 +96,26 @@ def make_handler(app):
         def do_HEAD(self):
             self.do_GET()
 
+        def _signed_in(self, path: str) -> bool:
+            """Let the request through, or answer it with the sign-in page / a 401."""
+            if not auth.enabled or path in OPEN_PATHS or path.startswith("/static/") or auth.request_ok(self.headers):
+                return True
+            if path in PAGES:
+                self._file(os.path.join(WEB_DIR, "login.html"))
+            else:
+                self._error("sign in first", 401)
+            return False
+
         def do_GET(self):
-            app.note_host(self.headers.get("Host"))
             path = self.path.split("?", 1)[0]
+            if not self._signed_in(path):
+                return
+            if path in PAGES or path.startswith("/api/"):  # not the open paths (/healthz, /login...)
+                app.note_host(self.headers.get("Host"))
             if path in PAGES:
                 return self._file(os.path.join(WEB_DIR, "index.html"))
+            if path == "/login":
+                return self._file(os.path.join(WEB_DIR, "login.html" if auth.enabled else "index.html"))
             if path.startswith("/static/"):
                 name = path[len("/static/"):]
                 if not re.fullmatch(r"[a-zA-Z0-9_.-]+", name) or name.startswith("."):
@@ -113,12 +146,31 @@ def make_handler(app):
             return self._error("not found", 404)
 
         def do_POST(self):
-            app.note_host(self.headers.get("Host"))
             path = self.path.split("?", 1)[0]
             try:
                 body = self._body()
             except SettingsError as e:
                 return self._error(str(e), 415 if "json" in str(e) else 400)
+            if path == "/login":
+                if not auth.enabled:
+                    return self._json({"ok": True})
+                if auth.check_password(body.get("username", ""), body.get("password", "")):
+                    if auth.default_password:
+                        app.activity.event("settings", "sign-in refused: the default password hasn't been changed", "warn")
+                        return self._error("The default password can't be used. Set your own PLEXCACHE_PASSWORD (and "
+                                           "username) in the app's YAML in TrueNAS — Apps → Plex Cache → Edit — then sign "
+                                           "in with it.", 403)
+                    app.activity.event("settings", "signed in to the web UI")
+                    return self._send(200, b'{"ok": true}', "application/json",
+                                      {"Set-Cookie": auth.cookie(auth.new_session(), SESSION_DAYS * 86400)})
+                app.activity.event("settings", f"failed sign-in from {self.address_string()}", "warn")
+                return self._error("wrong username or password", 401)
+            if path == "/logout":
+                auth.revoke(auth.cookie_value(self.headers))
+                return self._send(200, b'{"ok": true}', "application/json", {"Set-Cookie": auth.cookie("", 0)})
+            if not self._signed_in(path):
+                return
+            app.note_host(self.headers.get("Host"))
             try:
                 if path == "/api/settings":
                     for feature in ("warmup", "nowplaying", "nextepisode"):
@@ -128,6 +180,10 @@ def make_handler(app):
                             if not ok:
                                 raise SettingsError(why)
                     app.settings.update(body)
+                    if getattr(app, "ha", None):
+                        app.ha.wake.set()  # Home Assistant shows the change straight away
+                    if (body.get("general") or {}).get("update_check") is True and getattr(app, "updates", None):
+                        app.updates.wake.set()  # check now, rather than in a few hours
                     # Re-run the checks this setting affects, so the page shows whether it worked.
                     if any(k in body for k in ("plex", "truenas")):
                         app.test_connections_async(then_checks=True, rescan="plex" in body)
@@ -142,6 +198,9 @@ def make_handler(app):
                     return self._json({"started": True})
                 if path == "/api/blockscan":
                     return self._json({"started": app.run_block_scan(str(body.get("dataset", "")))})
+                if path == "/api/mqtt/reconnect":
+                    app.ha.retry()
+                    return self._json({"started": True})
                 if path == "/api/benchmark":
                     app.run_benchmark()
                     return self._json({"started": True})

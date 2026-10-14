@@ -16,13 +16,14 @@ import threading
 import uuid
 
 SECRET_MASK = "__unchanged__"
-SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"))
+SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"), ("mqtt", "password"))
 
 DEFAULTS: dict = {
     "plex": {"url": "", "token": ""},
     "truenas": {"url": "", "api_key": "", "verify_tls": False},
     "general": {
         "poll_seconds": 5,
+        "update_check": True,  # ask GitHub every few hours whether there's a newer version
         "hdd_mb_per_sec": 150,
         "hdd_measured_at": None,
         # Measured uncached read speed per dataset (or mount, when it isn't ZFS):
@@ -87,6 +88,23 @@ DEFAULTS: dict = {
         # by the artist/author). All within the RAM limit above.
         "library_modes": {},
     },
+    # MQTT (off until switched on): status on <base_topic>/state, commands on <base_topic>/set/<name>.
+    # With "discovery", Home Assistant (and openHAB, Domoticz...) create the entities themselves.
+    "mqtt": {
+        "enabled": False,
+        "host": "",
+        "port": 1883,
+        "username": "",
+        "password": "",
+        "tls": False,
+        "verify_tls": False,
+        "discovery": True,  # Home Assistant MQTT discovery messages
+        "discovery_prefix": "homeassistant",
+        "base_topic": "plexcache",
+        "interval": 30,  # seconds between status updates
+        "report_period": "week",  # what the "last N days" sensors cover: today | week | month
+        "allow_control": True,  # accept commands (switches, buttons, numbers and selects in Home Assistant)
+    },
 }
 
 TV_MODES = ("off", "next")
@@ -120,10 +138,13 @@ LIMITS = {
     ("nowplaying", "pacing_percent"): (1, 100),
     ("nextepisode", "ram_percent"): (1, 90),
     ("nextepisode", "pacing_percent"): (1, 100),
+    ("mqtt", "port"): (1, 65535),
+    ("mqtt", "interval"): (5, 600),
 }
 CHOICES = {
     ("warmup", "schedule"): ("daily", "weekly", "hours", "manual"),
     ("nextepisode", "start_at"): ("default", "after_nowplaying", "80", "90"),
+    ("mqtt", "report_period"): ("today", "week", "month"),
 }
 
 
@@ -204,6 +225,11 @@ def _coerce(section: str, key: str, value, current):
         if not isinstance(value, list):
             raise SettingsError("excluded_libraries must be a list")
         return [str(x) for x in value]
+    if key in ("base_topic", "discovery_prefix"):
+        value = str(value).strip().strip("/")
+        if not re.fullmatch(r"[A-Za-z0-9_\-]+(/[A-Za-z0-9_\-]+)*", value):
+            raise SettingsError(f"{key} may only use letters, numbers, - _ and /")
+        return value
     if key == "library_modes":
         if not isinstance(value, dict):
             raise SettingsError("library_modes must be an object")
