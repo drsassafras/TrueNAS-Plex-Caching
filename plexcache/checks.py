@@ -47,7 +47,7 @@ def check_plex(app) -> dict:
         elif mon.last_poll:
             poll = app.settings.section("general")["poll_seconds"]
             items.append(item("pass", "Now-playing feed",
-                              f"Checking what's playing every {poll} s — no Tautulli or Plex Pass needed"))
+                              f"Checking what's playing every {poll} s"))
     return {"id": "plex", "title": "Plex", "hint": "Where the app finds your libraries and sees what is playing.",
             "items": items}
 
@@ -129,8 +129,9 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
         text = ", ".join(d["libraries"]) + (" · not cached: " + ", ".join(d["off"]) if d["off"] else "")
         row["in_use"] = cell("pass", text)
     elif d["off"]:
+        # Nothing is cached from it, so its cache settings and L2ARC don't matter here.
+        # Its record size still does: that affects how well Plex itself reads the files.
         row["in_use"] = cell("info", ", ".join(d["off"]) + " · caching off")
-        return row  # nothing is cached from it, so nothing else to check
     else:
         row["in_use"] = cell("warn", "No Plex library")
         fixes.append(item("warn", f"{name} isn't used by any Plex library",
@@ -139,9 +140,12 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
                           "If a library should be using it, check where that library's folder is in Settings → Media "
                           "mappings. Otherwise remove the mount from this app (Apps → this app → Edit → Storage)."))
         return row
-    libs = _libs(d)
+    libs = _libs(d) if d["libraries"] else ", ".join(d["off"])
+    cached = bool(d["libraries"])
 
     if not d["dataset"]:
+        if not cached:
+            return row
         row["cache"] = cell("warn", f"Not ZFS ({d['fstype']})")
         fixes.append(item("warn", f"{libs}: not on ZFS here",
                           f"{d['mountpoint']} is a {d['fstype']} mount, so ZFS caching can't be checked or used for {libs}.",
@@ -151,9 +155,20 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
     props = d.get("props")
     pool = pools.get(d["pool"])
 
+    need = required_recordsize(d.get("kinds"))
+    # A finished "Check every file" beats the sample taken on each health check.
+    scan = (getattr(app, "block_scans", {}) or {}).get(ds) or {}
+    if scan.get("complete") and scan.get("checked"):
+        d = dict(d, blocks=dict(scan, full=True))
     # --- primarycache / secondarycache
     if not tn_ok or props is None:
-        row["cache"] = cell("info", "Not checked")
+        row["cache"] = cell("info", "Not checked") if cached else None
+        # Without the API the setting is unknown, but the files themselves still show how they were written.
+        note = _blocks_note(d.get("blocks"), need)
+        if note and not note.endswith("match"):
+            row["recordsize"] = cell("info", "Setting not checked" + note)
+    elif not cached:
+        pass  # only the record size below
     else:
         prim, sec = props.get("primarycache"), props.get("secondarycache")
         one = len(d["libraries"]) == 1
@@ -178,7 +193,9 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
                               f"cached. The app skips {'it' if one else 'them'} until this is all.",
                               "Run in the TrueNAS shell (ZFS still frees RAM for other things when it needs to):",
                               f"sudo zfs set primarycache=all {ds}"))
-        elif sec != "all" and warm_on:
+        # secondarycache only matters with an SSD cache (L2ARC) on the pool: without one there's
+        # nothing for it to allow into, so any value is fine.
+        elif sec != "all" and warm_on and (pool is None or pool["l2_online"]):
             row["cache"] = cell("warn", f"secondarycache={sec}")
             fixes.append(item("warn", f"Cache settings for {ds}",
                               f"primarycache=all, secondarycache={sec}. Library warm-up of {libs} needs file data "
@@ -187,14 +204,16 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
         else:
             row["cache"] = cell("pass", f"primarycache=all, secondarycache={sec}")
 
-        # --- recordsize
-        rs = props.get("recordsize")
-        if rs:
-            st, its = _recordsize_check(app, ds, rs, pool, libs)
-            row["recordsize"] = cell(st, _fmt_rs(rs))
-            fixes.extend(its)
+    # --- recordsize: checked for every library, cached or not (it's about how well the files read at all)
+    rs = (props or {}).get("recordsize") if tn_ok else None
+    if rs:
+        st, its = _recordsize_check(app, ds, rs, pool, libs, d.get("kinds"), d.get("blocks"))
+        row["recordsize"] = cell(st, _fmt_rs(rs) + _blocks_note(d.get("blocks"), need))
+        fixes.extend(its)
 
     # --- L2ARC on this dataset's pool
+    if not cached:
+        return row
     if pool is None:
         row["l2arc"] = cell("info", "Not checked")
     elif pool["l2_online"]:
@@ -236,8 +255,9 @@ def check_datasets(app) -> dict:
                           + (" (see TrueNAS & ZFS)." if tn_set else "."),
                           "Check Settings → TrueNAS."))
     return {"id": "datasets", "title": "Media datasets",
-            "hint": "Each dataset your libraries are on, checked on its own. Libraries unticked in Settings → Media "
-                    "mappings aren't cached, so their datasets aren't checked.",
+            "hint": "Each dataset your libraries are on, checked on its own. Record size is checked for every library, "
+                    "since it affects how well Plex reads the files whether or not they're cached. For libraries unticked "
+                    "in Settings → Media mappings, that's all that's checked.",
             "datasets": rows, "items": items}
 
 
@@ -306,34 +326,111 @@ PERSIST_HINT = ("To keep it after a reboot, add it (without sudo — these run a
                 "Init/Shutdown Scripts (Type: Command, When: Post Init).")
 
 
+def _blocks_note(blocks: dict | None, need: int) -> str:
+    """How the files compare with what the dataset needs, saying whether that's a sample:
+    " · 300 sampled files match", " · ~62% of a sample at 128K", " · all 21,604 files match",
+    " · 1,203 of 21,604 files at 128K"."""
+    if not blocks or not blocks.get("checked"):
+        return ""
+    multi = blocks["checked"] - blocks.get("single", 0)
+    old = {int(bs): n for bs, n in (blocks.get("sizes") or {}).items() if int(bs) < need}
+    if not multi:
+        return ""
+    full = blocks.get("full")
+    if not old:
+        return f" · all {blocks['checked']:,} files match" if full else f" · {blocks['checked']:,} sampled files match"
+    common = max(old, key=old.get)
+    if full:
+        return f" · {sum(old.values()):,} of {blocks['checked']:,} files at {_fmt_rs(common)}"
+    return f" · ~{round(sum(old.values()) / multi * 100)}% of a sample at {_fmt_rs(common)}"
+
+
 def _fmt_rs(n: int) -> str:
     return f"{n // (1024 * 1024)}M" if n >= 1024 * 1024 else f"{n // 1024}K"
 
 
+MiB = 1024 * 1024
+OLD_BLOCKS_WARN = 0.10  # share of (multi-block) files written with smaller blocks worth a warning
+
+
+def required_recordsize(kinds) -> int:
+    """Movies and TV need 1M; a dataset holding only audio is fine with 512K or 1M."""
+    kinds = set(kinds or ())
+    return 512 * 1024 if kinds and kinds <= {"audio"} else MiB
+
+
+def rewrite_cmd(ds: str) -> str:
+    # {APP} becomes this app's address in the browser, so the command fetches the matching script.
+    return f"curl -fsSO {{APP}}/tools/rewrite_blocks.py && sudo python3 rewrite_blocks.py {ds}"
+
+
 def _recordsize_check(app, ds: str, recordsize: int | None, pool: dict | None,
-                      libs: str = "") -> tuple[str, list[dict]]:
+                      libs: str = "", kinds=None, blocks: dict | None = None) -> tuple[str, list[dict]]:
     """Media files are big and read in order, so large records suit them: fewer blocks
     means less work per read and much less RAM spent indexing what's in L2ARC.
+    Video needs 1M; audio-only datasets may use 512K (tracks are small and warm-up caches
+    whole blocks, so 512K wastes less SSD on the first seconds of each song).
+
+    Also compares the files themselves with the setting: a new recordsize only applies to
+    files written after it was set.
 
     Returns the status for the datasets table and any problem to show below it."""
     if not recordsize:
         return "info", []
-    if recordsize >= 1024 * 1024:
-        return "pass", []
-    l2 = (pool or {}).get("l2_total") or 0
-    ram = ""
-    if l2:
-        now = l2 / recordsize * L2ARC_HEADER_BYTES
-        at_1m = l2 / (1024 * 1024) * L2ARC_HEADER_BYTES
-        ram = (f" With the pool's {_fmt_bytes(l2)} L2ARC full of this dataset, ZFS would need about "
-               f"{_fmt_bytes(now)} of RAM to index it (about {_fmt_bytes(at_1m)} at 1M).")
+    need = required_recordsize(kinds)
+    audio_only = need < MiB
     on = f" ({libs})" if libs else ""
-    return "warn", [item("warn", f"Record size for {ds}",
-                         f"recordsize={_fmt_rs(recordsize)}{on}. Media files are large and read start to finish, so 1M "
-                         f"records read faster and make L2ARC far cheaper to index in RAM.{ram}",
-                         "Run in the TrueNAS shell. It only affects files written afterwards; existing files keep their "
-                         "record size until they're copied again:",
-                         f"sudo zfs set recordsize=1M {ds}")]
+    # Files written with smaller blocks than this dataset needs, among those big enough to show it.
+    old, multi, old_bs = 0, 0, {}
+    if blocks and blocks.get("checked"):
+        multi = blocks["checked"] - blocks.get("single", 0)
+        for bs, n in (blocks.get("sizes") or {}).items():
+            if int(bs) < need:
+                old += n
+                old_bs[int(bs)] = n
+    share = old / multi if multi else 0
+    common = max(old_bs, key=old_bs.get) if old_bs else None
+    if not old:
+        old_text = ""
+    elif blocks.get("full"):
+        ex = (blocks.get("examples") or {}).get(str(common)) or []
+        old_text = (f"Of all {blocks['checked']:,} files, {old:,} ({round(share * 100)}%) were written with {_fmt_rs(common)} blocks — "
+                    "before the record size was changed — and keep them until they're copied again."
+                    + (f" For example: {', '.join(ex[:3])}." if ex else ""))
+    else:
+        old_text = (f"In a random sample of {blocks['checked']:,} files, about {round(share * 100)}% were written with "
+                    f"{_fmt_rs(common)} blocks — before the record size was changed — and keep them until they're "
+                    "copied again. “Check every file” in the table counts them all.")
+
+    if recordsize < need:
+        l2 = (pool or {}).get("l2_total") or 0
+        ram = ""
+        if l2:
+            now = l2 / recordsize * L2ARC_HEADER_BYTES
+            at_1m = l2 / MiB * L2ARC_HEADER_BYTES
+            ram = (f" With the pool's {_fmt_bytes(l2)} L2ARC full of this dataset, ZFS would need about "
+                   f"{_fmt_bytes(now)} of RAM to index it (about {_fmt_bytes(at_1m)} at 1M).")
+        why = ("Audio-only datasets work well with 512K or 1M records." if audio_only else
+               "Movies and TV need 1M: the files are large and read start to finish, so 1M records read faster "
+               "and make L2ARC far cheaper to index in RAM.")
+        target = "512K" if audio_only and recordsize < 512 * 1024 else "1M"
+        return "warn", [item("warn", f"Record size for {ds}",
+                             f"recordsize={_fmt_rs(recordsize)}{on}. {why}{ram}",
+                             f"1. Set it in the TrueNAS shell (only files written afterwards use it):",
+                             f"sudo zfs set recordsize={target} {ds}"),
+                        item("info", f"Then rewrite the existing files on {ds}",
+                             "Files already there keep their old block size until they're copied again. This script "
+                             "copies them one at a time, gently, and swaps each one in place; it only looks until you add --apply.",
+                             "2. Run in the TrueNAS shell:", rewrite_cmd(ds))]
+    if old and share >= OLD_BLOCKS_WARN:
+        return "warn", [item("warn", f"Older files on {ds} use smaller blocks",
+                             f"recordsize={_fmt_rs(recordsize)}{on} is right, but the files don't all match. {old_text}",
+                             "This script copies them one at a time, gently, and swaps each one in place; "
+                             "it only looks until you add --apply. Run in the TrueNAS shell:", rewrite_cmd(ds))]
+    if old:
+        return "info", [item("info", f"A few older files on {ds} use smaller blocks", old_text,
+                             "Not worth fixing on its own. If you want to, run in the TrueNAS shell:", rewrite_cmd(ds))]
+    return "pass", []
 
 
 def _l2arc_tuning_checks(app, params: dict) -> list[dict]:

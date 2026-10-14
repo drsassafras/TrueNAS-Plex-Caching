@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import os
 import random
 import threading
 import time
 
-from . import __version__, checks, mapping, report, zfs
+from . import __version__, checks, config, mapping, report, zfs
 from .activity import Activity
 from .config import PLEX_DEFAULT_PORT, Settings
 from .pauses import WarmupPauses
@@ -67,6 +68,7 @@ def index_summary(result: dict) -> str:
 
 class App:
     def __init__(self, config_dir: str):
+        self.config_dir = config_dir
         self.settings = Settings(config_dir)
         self.activity = Activity(config_dir)
         self.lock = threading.RLock()
@@ -99,6 +101,11 @@ class App:
         # Benchmark
         self.benchmarking = False
         self.benchmark: dict | None = None
+        self.benchmark_progress: dict | None = None  # {"dataset", "done", "total", "finished": [...]} while it runs
+        # "Check every file": dataset -> {"running", "checked", "single", "sizes", "examples", "at", ...}
+        self.block_scans: dict[str, dict] = self._load_json("blockscans.json") or {}
+        for v in self.block_scans.values():
+            v["running"] = False  # a scan cut short by a restart
         # Playback
         self.monitor = PlaybackMonitor(self)
         self._slots: dict = {}
@@ -186,7 +193,7 @@ class App:
                 lib_info.append(info)
             with self.lock:
                 self.files, self.libraries = files, lib_info
-                self.stats = LibraryStats.from_files(files)
+                self.stats = LibraryStats.from_files(files, {i["key"]: i["title"] for i in lib_info})
                 self.scan_error = None
         except PlexError as e:
             with self.lock:
@@ -219,9 +226,10 @@ class App:
             res["plex_token"] = {"status": "off", "text": "Plex sign-in: waiting for the server",
                                  "detail": "Sign-in is checked once the server is found."}
         elif not p["token"]:
-            res["plex_token"] = {"status": "warn", "text": "Plex sign-in needed",
-                                 "detail": "Plex only shares library and playback details with apps that have a "
-                                           "token for your account. Sign in to give this app one."}
+            # Without a token Plex shares nothing, so no feature can work: a failure, not a warning.
+            res["plex_token"] = {"status": "fail", "text": "Plex sign-in needed",
+                                 "detail": "Nothing works until you sign in: Plex only shares your libraries and "
+                                           "what's playing with apps that have a token for your account."}
         else:
             try:
                 info = self.plex(timeout=10).ping()
@@ -429,32 +437,48 @@ class App:
             return groups.setdefault(gid, {"dataset": m.get("dataset"), "pool": m.get("pool"),
                                            "mountpoint": m["mountpoint"], "fstype": m["fstype"],
                                            "libraries": [], "keys": [], "off": [], "folders": [],
+                                           "off_keys": [], "off_folders": [],
                                            "props": None, "unused": False})
 
-        for row in self.locations:
-            if row["status"] != "ok":
-                continue
-            m = zfs.mount_for(row["local_path"])
+        def attach(g: dict, row: dict, folder: str) -> None:
+            if row.get("excluded"):
+                if row["library"] not in g["off"]:
+                    g["off"].append(row["library"])
+                    g["off_keys"].append(row["key"])
+                g["off_folders"].append(folder)
+                return
+            if row["key"] not in g["keys"]:
+                g["keys"].append(row["key"])
+                g["libraries"].append(row["library"])
+            g["folders"].append(folder)
+
+        mlist = zfs.mounts()
+        ok_rows = [r for r in self.locations if r["status"] == "ok"]
+        for row in ok_rows:
+            m = zfs.mount_for(row["local_path"], mlist)
             if not m:
                 continue
             g = group(m)
             row["dataset"] = g["dataset"] or g["mountpoint"]
-            if row.get("excluded"):
-                if row["library"] not in g["off"]:
-                    g["off"].append(row["library"])
+            attach(g, row, row["local_path"])
+        # The mount that actually holds each library folder (the deepest one), so a parent
+        # dataset with a library on a child dataset mounted inside it doesn't count as used.
+        owners = {(zfs.mount_for(r["local_path"], mlist) or {}).get("mountpoint") for r in self.locations}
+        for mp in mapping.media_mounts(mlist):
+            if mp in owners:
                 continue
-            if row["key"] not in g["keys"]:
-                g["keys"].append(row["key"])
-                g["libraries"].append(row["library"])
-            g["folders"].append(row["local_path"])
-        # Mounted media folders no Plex library uses: usually a leftover or a typo.
-        lib_paths = [r["local_path"] for r in self.locations]
-        for mp in mapping.media_mounts():
-            if any(p == mp or p.startswith(mp.rstrip("/") + "/") for p in lib_paths):
+            m = zfs.mount_for(mp, mlist)
+            if not m or m["mountpoint"] != mp:
                 continue
-            m = zfs.mount_for(mp)
-            if m and m["mountpoint"] == mp:
-                group(m)["unused"] = True
+            # A dataset mounted inside a library folder: Plex scans into it, so its files are
+            # part of that library and its cache settings matter too.
+            inside = [r for r in ok_rows if mp.startswith(r["local_path"].rstrip("/") + "/")]
+            if inside:
+                for row in inside:
+                    attach(group(m), row, mp)
+                continue
+            # Mounted here, but no Plex library uses it: usually a leftover or a typo.
+            group(m)["unused"] = True
         return sorted(groups.values(), key=lambda g: (g["dataset"] is None, g["dataset"] or g["mountpoint"]))
 
     # Uncached disk speed: measured per dataset by the benchmark, else the general guess.
@@ -496,15 +520,40 @@ class App:
                             sizes = tn.disk_sizes(missing) if missing else {}
                             info["pools"][name] = describe_pool(pool, sizes)
                     for d in datasets:
-                        if d["dataset"] and d["keys"]:  # only datasets something is cached from
+                        if d["dataset"] and (d["keys"] or d["off"]):  # any dataset a Plex library is on
                             d["props"] = tn.dataset_cache_props(d["dataset"])
                             d["props_debug"] = list(getattr(tn, "last_props_raw", []) or [])
                 info["truenas_error"] = None
             except TrueNASError as e:
                 info["truenas_error"] = str(e)
+        self._survey_blocks(datasets)
         with self.lock:
             self.zfs = info
         return info
+
+    BLOCK_SAMPLE = 300  # files per dataset; a sample is enough to see how much was written before a change
+
+    def _survey_blocks(self, datasets: list[dict]) -> None:
+        """Sample each cached dataset's files for the block size they were written with,
+        so Health can tell when files predate a recordsize change."""
+        mlist = zfs.mounts()
+        kind_of = {lib["key"]: lib["kind"] for lib in self.libraries}
+        for d in datasets:
+            if not (d["keys"] or d["off"]) or d.get("fstype") != "zfs":
+                continue
+            mine = [f for f in self.files if f.library_key in d["keys"]]
+            candidates = [self.map_path(f.path) for f in random.sample(mine, min(len(mine), self.BLOCK_SAMPLE * 3))]
+            # Unticked libraries aren't listed from Plex, so sample their folders directly.
+            candidates += _sample_files(d.get("off_folders") or [], self.BLOCK_SAMPLE * 3)
+            paths = []
+            for path in candidates:
+                m = zfs.mount_for(path, mlist)
+                if m and m["mountpoint"] == d["mountpoint"]:  # not a file on a child dataset
+                    paths.append(path)
+                if len(paths) >= self.BLOCK_SAMPLE:
+                    break
+            d["blocks"] = zfs.block_sizes(paths)
+            d["kinds"] = sorted({kind_of[k] for k in d["keys"] + d["off_keys"] if kind_of.get(k)})
 
     # ---------------------------------------------------------------- checks
     def run_checks(self) -> dict:
@@ -582,7 +631,7 @@ class App:
             speeds = {f.library_key: self.disk_speed_for_library(f.library_key) for f in files}
             run = WarmupRun(files, p["seconds"], 100 if manual else w["pacing_percent"],
                             lambda f: speeds.get(f.library_key, g["hdd_mb_per_sec"]),
-                            self.warmup_stop, pause, zfs.arcstats, cache_index=w["cache_index"])
+                            self.warmup_stop, pause, zfs.arcstats)
             run.pacer.before_wait = pauses.mark_idle
             holder["run"] = run
             with self.lock:
@@ -633,6 +682,46 @@ class App:
         return None
 
     # ------------------------------------------------------------- benchmark
+    def _load_json(self, name: str):
+        try:
+            with open(os.path.join(self.config_dir, name), encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
+
+    def _save_json(self, name: str, data) -> None:
+        path = os.path.join(self.config_dir, name)
+        try:
+            with open(path + ".tmp", "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+            os.replace(path + ".tmp", path)
+        except OSError as e:
+            log.warning("couldn't save %s: %s", name, e)
+
+    def run_block_scan(self, dataset: str) -> bool:
+        """Check the block size of every file on a dataset (Health shows a sample otherwise)."""
+        d = next((d for d in (self.zfs or {}).get("datasets", []) if d.get("dataset") == dataset), None)
+        if d is None:
+            return False
+        with self.lock:
+            if (self.block_scans.get(dataset) or {}).get("running"):
+                return False
+            self.block_scans[dataset] = {"running": True, "checked": 0, "started": time.time()}
+
+        def work():
+            def progress(n):
+                self.block_scans[dataset]["checked"] = n
+            res = zfs.scan_block_sizes(d["mountpoint"], progress, lambda: self.stopping.is_set())
+            res.update(running=False, at=time.time(), started=self.block_scans[dataset]["started"])
+            with self.lock:
+                self.block_scans[dataset] = res
+                self._save_json("blockscans.json", self.block_scans)
+            self.activity.event("record size", f"{dataset}: checked {res['checked']:,} files")
+            self.run_checks()
+
+        threading.Thread(target=work, name="block-scan", daemon=True).start()
+        return True
+
     def run_benchmark(self):
         """Time reads of a few media files on each dataset to learn its uncached speed.
 
@@ -648,12 +737,14 @@ class App:
             try:
                 if not self.zfs.get("datasets"):
                     self.run_checks()
-                speeds = dict(self.settings.section("general")["disk_speeds"])
                 now = dt.datetime.now().isoformat(timespec="seconds")
-                for d in (self.zfs or {}).get("datasets", []):
-                    if not d["keys"]:
-                        continue
+                todo = [d for d in (self.zfs or {}).get("datasets", []) if d["keys"]]
+                finished: list[str] = []
+                # One dataset at a time (reading two at once would slow both and skew the result),
+                # and each one's speed is saved as soon as it's measured, so the page fills in row by row.
+                for i, d in enumerate(todo):
                     name = d["dataset"] or d["mountpoint"]
+                    self.benchmark_progress = {"dataset": name, "done": i, "total": len(todo), "finished": list(finished)}
                     mine = [f for f in self.files if f.library_key in d["keys"]]
                     pool = [f for f in mine if f.size >= 64 * MiB] or [f for f in mine if f.size >= MiB]
                     got = []
@@ -667,10 +758,13 @@ class App:
                     if got:
                         # The median, so one file that happened to be cached doesn't skew it.
                         median = sorted(got)[len(got) // 2]
+                        speeds = dict(self.settings.section("general")["disk_speeds"])
                         speeds[name] = {"mb_s": min(20000, max(10, median)), "measured_at": now}
+                        self.settings.update({"general": {"disk_speeds": speeds}})
                         results[name] = median
+                    finished.append(name)
                 if results:
-                    self.settings.update({"general": {"disk_speeds": speeds, "hdd_measured_at": now}})
+                    self.settings.update({"general": {"hdd_measured_at": now}})
                     self.activity.event("benchmark", "measured " + ", ".join(f"{k} {v} MB/s" for k, v in results.items()))
                     self.benchmark = {"rows": rows, "results": results, "at": time.time()}
                 else:
@@ -679,6 +773,7 @@ class App:
             finally:
                 with self.lock:
                     self.benchmarking = False
+                    self.benchmark_progress = None
             self.run_checks()
 
         self.benchmark_thread = threading.Thread(target=work, daemon=True)
@@ -697,6 +792,9 @@ class App:
         return {
             "version": self.version,
             "settings": self.settings.public(),
+            # Defaults of the tunable settings, for the page's "back to default" buttons.
+            "defaults": {sec: {k: v for k, v in config.DEFAULTS[sec].items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+                         for sec in ("general", "warmup", "nowplaying", "nextepisode")},
             "health": self.health,
             "checking": self.checking,
             "connections": self.connections,
@@ -722,8 +820,24 @@ class App:
                 "next_run": nxt.isoformat(timespec="minutes") if nxt else None,
                 "last_run": self.last_warmup.isoformat(timespec="minutes") if self.last_warmup else None,
             },
-            "benchmark": {"running": self.benchmarking, "last": self.benchmark},
+            "benchmark": {"running": self.benchmarking, "last": self.benchmark, "progress": self.benchmark_progress},
+            "block_scans": {k: {x: v.get(x) for x in ("running", "checked", "at", "complete", "error")}
+                            for k, v in self.block_scans.items()},
             "playback": {"sessions": self.monitor.snapshot(), "error": self.monitor.last_error, "last_poll": self.monitor.last_poll},
             "activity": self.activity.snapshot(),
             "reports": self.reports(),
         }
+
+
+def _sample_files(folders: list[str], limit: int, max_seen: int = 5000) -> list[str]:
+    """Up to ``limit`` random files from these folders (looking at no more than ``max_seen``)."""
+    seen: list[str] = []
+    for root in folders:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [n for n in dirnames if not n.startswith((".", "@"))]
+            seen.extend(os.path.join(dirpath, n) for n in filenames if not n.startswith("."))
+            if len(seen) >= max_seen:
+                break
+        if len(seen) >= max_seen:
+            break
+    return random.sample(seen, min(limit, len(seen)))

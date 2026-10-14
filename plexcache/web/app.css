@@ -153,7 +153,7 @@ summary{cursor:pointer;font-weight:600;color:var(--accent);min-height:32px;displ
 #mappings td{min-width:120px}
 #mappings td:last-child{min-width:280px}
 /* Secret fields are text inputs (so browsers don't treat them as passwords) masked here. */
-input.secret{-webkit-text-security:disc;font-family:var(--mono)}
+input.secret{font-family:var(--mono)}
 .cmd code{user-select:all}
 #mappings .tick{display:inline-flex;align-items:center;min-height:32px}
 #mappings .tick input{width:20px;height:20px;accent-color:var(--accent)}
@@ -193,3 +193,15 @@ h2 .info{vertical-align:2px}
 .infopop[hidden]{display:none}
 .infopop .mono{font-family:var(--mono);font-size:12px}
 .chk > .info{align-self:center;margin-left:-12px}  /* sit next to the checkbox's label, not a full gap away */
+.sizing .tbl tr.sum th,.sizing .tbl tr.sum td{font-weight:600;border-top:1px solid var(--line)}
+.sizing .tbl th[scope=row]{text-align:left;text-transform:none;letter-spacing:0;font-size:14px;color:var(--ink)}
+/* "Back to default" button beside a changed setting */
+.revert{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;margin-left:6px;padding:0;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--muted);font:600 13px/1 var(--sans);cursor:pointer;vertical-align:1px;position:relative}
+.revert::before{content:"";position:absolute;inset:-11px}
+.revert:hover{color:var(--accent);border-color:var(--accent)}
+.revert:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* Next-episode: one choice per library */
+.libmodes{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px 18px;margin-top:6px}
+.libmode{display:flex;flex-direction:column;gap:6px;font-size:14px;font-weight:500}
+.libmode select{font:inherit;font-size:14px;font-weight:400;min-height:44px;border:1px solid var(--line);border-radius:8px;padding:0 12px;background:var(--panel);color:var(--ink)}
+.scanctl{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;margin-top:6px}.scanctl .info{margin-left:0}

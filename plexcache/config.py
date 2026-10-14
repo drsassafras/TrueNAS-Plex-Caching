@@ -55,9 +55,6 @@ DEFAULTS: dict = {
         "reserve_gb": 100,
         "padding_video": 5,
         "padding_audio": 15,
-        # Also cache what a player reads at the end of a file when it opens it
-        # (the MKV/MP4 index, tags, attachments).
-        "cache_index": True,
         # When to pause (it carries on from where it was afterwards).
         "pause_buffering": True,   # a player reports buffering (and for a few minutes after)
         "pause_preload": True,     # Now-playing or Next-episode is reading
@@ -84,8 +81,17 @@ DEFAULTS: dict = {
         "start_at": "default",
         "ram_percent": 20,  # share of the usable RAM cache
         "pacing_percent": 50,
+        # Per library (Plex library key -> mode); libraries not listed use their type's default.
+        # TV: "off" | "next". Music and audiobooks: "off" | "10" | "20" | "60" (minutes ahead),
+        # "rest" (rest of the album/book), "album" (the whole album/book), "artist" (everything
+        # by the artist/author). All within the RAM limit above.
+        "library_modes": {},
     },
 }
+
+TV_MODES = ("off", "next")
+AUDIO_MODES = ("off", "10", "20", "60", "rest", "album", "artist")
+DEFAULT_MODE = {"tv": "next", "audio": "20"}
 
 # Basic validation: (min, max) for numeric fields.
 LIMITS = {
@@ -198,6 +204,15 @@ def _coerce(section: str, key: str, value, current):
         if not isinstance(value, list):
             raise SettingsError("excluded_libraries must be a list")
         return [str(x) for x in value]
+    if key == "library_modes":
+        if not isinstance(value, dict):
+            raise SettingsError("library_modes must be an object")
+        out = {}
+        for lib, mode in value.items():
+            if mode not in AUDIO_MODES and mode not in TV_MODES:
+                raise SettingsError(f"unknown preload choice: {mode}")
+            out[str(lib)] = str(mode)
+        return out
     if key == "disk_speeds":
         if not isinstance(value, dict):
             raise SettingsError("disk_speeds must be an object")
@@ -238,6 +253,12 @@ class Settings:
         os.makedirs(config_dir, exist_ok=True)
         self._data = self._load()
         changed = False
+        # 0.9.0 had per-library checkboxes for Next-episode; an unticked one becomes "Don't preload".
+        ne = self._data.get("nextepisode", {})
+        if ne.get("excluded_libraries"):
+            modes = ne.setdefault("library_modes", {})
+            for k in ne["excluded_libraries"]:
+                modes.setdefault(str(k), "off")
         for sec, values in DEFAULTS.items():
             for key in [k for k in self._data.get(sec, {}) if k not in values]:
                 del self._data[sec][key]  # settings retired in a later version

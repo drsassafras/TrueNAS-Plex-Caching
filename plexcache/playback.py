@@ -20,6 +20,9 @@ from .reader import MiB, Pacer, Stopped, is_cache_hit, read_range
 
 GiB = 1024 ** 3
 RECENT_TTL = 6 * 3600  # don't prefetch the same file twice within 6 hours
+SLICE_SEC = 10  # "first seconds" of a track read for other albums by the same artist
+MAX_CHAIN_JOBS = 60  # reads queued per top-up (more follow as tracks play)
+PLEX_CACHE_TTL = 600  # seconds to reuse an album's or artist's track list
 DEFAULT_KBPS = 25000  # when Plex doesn't say: a typical 4K stream (as the original script assumed)
 MIN_JOB = 64 * MiB  # not worth starting a read smaller than this
 SKIP_AHEAD = 512 * MiB  # a jump this far past the reader starts over from the new position
@@ -83,6 +86,7 @@ class Job:
     disk_mb_s: float = 150  # uncached speed of its dataset, to tell cache hits from disk reads
     cached_bytes: int = 0  # of what was read, how much came from cache already ...
     disk_bytes: int = 0  # ... and how much from the disks
+    slice: bool = False  # only the first seconds of a track (so it isn't "fully read" yet)
 
     def loaded(self, pos: int) -> bool:
         """Has the byte at ``pos`` been read (so it's in cache)?"""
@@ -227,6 +231,10 @@ class PlaybackMonitor:
         self.last_poll: float | None = None
         self.last_buffering: tuple[float, str] | None = None  # (when, what) a player last reported buffering
         self._prefetched: dict[str, Job] = {}  # rating key -> Next-episode job that got it ready
+        # Music and audiobooks: per player (Plex session id), the reads queued for what plays next.
+        # They outlive each track's session, so they're tracked here for the RAM limit.
+        self._chains: dict[str, list[Job]] = {}
+        self._plex_cache: dict[tuple, tuple[float, object]] = {}  # album/artist lookups, briefly
         self._retention: list[tuple[float, Job]] = []  # (when to check, job) still-cached checks
         self._disk_mark: tuple[float, dict] | None = None
         self.thread = threading.Thread(target=self._loop, name="playback", daemon=True)
@@ -251,11 +259,13 @@ class PlaybackMonitor:
     def ram_in_use(self) -> dict:
         """Bytes each feature has read, or is about to, for streams still playing."""
         out = {"nowplaying": 0, "nextepisode": 0}
+        seen = set()
         with self._lock:
-            for info in self.sessions.values():
-                for j in info["jobs"]:
-                    if j.state in ("waiting", "reading", "done") and not j.cancel:
-                        out[j.feature] += j.length
+            jobs = [j for info in self.sessions.values() for j in info["jobs"]] + [j for c in self._chains.values() for j in c]
+            for j in jobs:
+                if id(j) not in seen and j.state in ("waiting", "reading", "done") and not j.cancel:
+                    seen.add(id(j))
+                    out[j.feature] += j.length
         return out
 
     def snapshot(self) -> list[dict]:
@@ -284,10 +294,32 @@ class PlaybackMonitor:
         client = PlexClient(plex_cfg["url"], plex_cfg["token"], timeout=10)
         current = client.sessions()
         self.last_poll = time.time()
-        now_keys = set()
+        # A player that stopped altogether: drop what was queued for it.
+        players = {s.session_key for s in current}
+        with self._lock:
+            for pid in [p for p in self._chains if p not in players]:
+                for j in self._chains.pop(pid):
+                    if j.state == "waiting":
+                        j.state, j.cancel = "cancelled", True
+        # Streams that ended (including a player that moved on to its next track) are wrapped up
+        # first, so what they'd queued isn't counted twice against the RAM limits below.
+        now_keys = {f"{s.session_key}:{s.rating_key}" for s in current}
+        ended = []
+        with self._lock:
+            for key in list(self.sessions):
+                if key not in now_keys:
+                    for job in self.sessions[key]["jobs"]:
+                        # Next-episode/next-track reads are for what plays next, so they carry on.
+                        if job.state in ("waiting", "reading") and job.feature == "nowplaying":
+                            job.state = "cancelled"
+                    ended.append((self.sessions.pop(key), self._seen.pop(key, None) or {}))
+        for info, tr in ended:
+            busy = tr.get("busy") or []
+            self.app.activity.record("streamend", label=info["label"], seconds=round(time.time() - info["started"]),
+                                     busy_avg=round(sum(busy) / len(busy), 1) if busy else None,
+                                     busy_peak=round(max(busy), 1) if busy else None)
         for s in current:
             key = f"{s.session_key}:{s.rating_key}"
-            now_keys.add(key)
             with self._lock:
                 info = self.sessions.get(key)
                 if info is None:
@@ -316,19 +348,6 @@ class PlaybackMonitor:
                 self._maybe_nowplaying(key, s, settings)
                 self._maybe_nextepisode(key, s, settings, client)
         self._sample_disks()
-        ended = []
-        with self._lock:
-            for key in list(self.sessions):
-                if key not in now_keys:
-                    for job in self.sessions[key]["jobs"]:
-                        if job.state in ("waiting", "reading"):
-                            job.state = "cancelled"
-                    ended.append((self.sessions.pop(key), self._seen.pop(key, None) or {}))
-        for info, tr in ended:
-            busy = tr.get("busy") or []
-            self.app.activity.record("streamend", label=info["label"], seconds=round(time.time() - info["started"]),
-                                     busy_avg=round(sum(busy) / len(busy), 1) if busy else None,
-                                     busy_peak=round(max(busy), 1) if busy else None)
         self._check_retention()
         cutoff = time.time() - RECENT_TTL
         self._recent = {p: t for p, t in self._recent.items() if t >= cutoff}
@@ -449,6 +468,9 @@ class PlaybackMonitor:
             return  # wait until Plex has enough buffered to play
         path, size = s.files[0]
         path = self.app.map_path(path)
+        if s.type == "track" and path in self._recent and not self._seen[key]["now"]:
+            self._seen[key]["now"] = True  # the whole track was just read ahead by next-track prefetch
+            return
         pos = int(size * s.progress) if size else 0
         pos -= pos % MiB
         old = self._now_job(key)
@@ -491,7 +513,11 @@ class PlaybackMonitor:
 
     def _maybe_nextepisode(self, key, s, settings, client):
         cfg = settings["nextepisode"]
-        if not cfg["enabled"] or self._seen[key]["next"] or s.type != "episode" or not s.grandparent_rating_key:
+        if not cfg["enabled"] or self._seen[key]["next"] or library_mode(cfg, s) == "off":
+            return
+        if s.type == "track":
+            return self._maybe_next_tracks(key, s, settings, client)
+        if s.type != "episode" or not s.grandparent_rating_key:
             return
         with self._lock:
             jobs = list(self.sessions.get(key, {}).get("jobs", []))
@@ -526,6 +552,108 @@ class PlaybackMonitor:
             self._prefetched[job.rating_key] = job
             self._start(key, job, 0, cfg["pacing_percent"], 20)
 
+    def _maybe_next_tracks(self, key, s, settings, client):
+        """Music and audiobooks: read what's likely to play next, per the library's choice.
+
+        Starts once this track's own Now-playing read is done, tops up as each track
+        starts, and always stays within Next-episode's RAM limit — so with a big choice
+        (a whole album, everything by an artist) it may never get to the end."""
+        cfg = settings["nextepisode"]
+        if not s.parent_rating_key or s.state != "playing":
+            return
+        with self._lock:
+            jobs = list(self.sessions.get(key, {}).get("jobs", []))
+        if any(j.feature == "nowplaying" and j.state in ("waiting", "reading") for j in jobs):
+            return
+        self._seen[key]["next"] = True
+        mode = library_mode(cfg, s)
+        try:
+            plan = self._track_plan(client, s, mode)
+        except PlexError as e:
+            self.app.activity.event("next-episode", f"couldn't look up the tracks after {s.label}: {e}", "warn")
+            return
+        pid = s.session_key
+        wanted = [(self.app.map_path(path), size, t, sl) for t, sl in plan for path, size in t["files"] if size]
+        want_keys = {(p, sl) for p, _, _, sl in wanted}
+        with self._lock:
+            old = self._chains.get(pid, [])
+            # Keep what's being read, and what's done that's still ahead; re-plan everything else.
+            keep = [j for j in old if j.state == "reading" or (j.state == "done" and (j.path, j.slice) in want_keys)]
+            for j in old:
+                if j.state == "waiting":
+                    j.state, j.cancel = "cancelled", True
+            self._chains[pid] = keep
+        budget = self.app.ram_budget()
+        room = max(0, budget["nextepisode"] - budget["in_use"]["nextepisode"])
+        have = {(j.path, j.slice) for j in keep}
+        new_jobs = []
+        for path, size, t, sl in wanted:
+            if len(new_jobs) >= MAX_CHAIN_JOBS:
+                break
+            if (path, sl) in have or (path, False) in have or (not sl and path in self._recent):
+                continue
+            n = slice_bytes(size, t["duration_ms"]) if sl else size
+            if n > room:
+                break  # in order: nothing after this gets ahead of it
+            room -= n
+            have.add((path, sl))
+            label = f"{s.grandparent_title} · {t['title']}" if s.grandparent_title else t["title"]
+            new_jobs.append(Job("nextepisode", label + (" (first seconds)" if sl else ""), path, [(0, n)], size,
+                                rating_key=t["rating_key"], slice=sl,
+                                disk_mb_s=self.app.disk_speed_for_library(s.library_key)))
+        if not new_jobs:
+            return
+        with self._lock:
+            self._chains[pid] = keep + new_jobs
+            if key in self.sessions:
+                self.sessions[key]["jobs"].extend(new_jobs)
+        whole = sum(1 for j in new_jobs if not j.slice)
+        self.app.activity.event("next-episode", f"after {s.label}: reading {whole} track{'s' if whole != 1 else ''}"
+                                + (f" and the start of {len(new_jobs) - whole} more" if len(new_jobs) > whole else ""))
+
+        def run():
+            for job in new_jobs:
+                if self.stop.is_set():
+                    return
+                if job.state == "waiting":
+                    self._run_job(key, job, 0, cfg["pacing_percent"], 1)
+        threading.Thread(target=run, name="next-tracks", daemon=True).start()
+
+    def _cached(self, kind: str, rk: str, fetch):
+        hit = self._plex_cache.get((kind, rk))
+        if hit and time.time() - hit[0] < PLEX_CACHE_TTL:
+            return hit[1]
+        val = fetch(rk)
+        self._plex_cache[(kind, rk)] = (time.time(), val)
+        return val
+
+    def _track_plan(self, client, s, mode: str) -> list[tuple[dict, bool]]:
+        """What to read, in order: [(track, first_seconds_only), ...]."""
+        tracks = self._cached("album", s.parent_rating_key, client.album_tracks)
+        i = next((n for n, t in enumerate(tracks) if t["rating_key"] == s.rating_key), None)
+        if i is None:
+            return []
+        after, before = tracks[i + 1:], tracks[:i]
+        if mode.isdigit():
+            out, covered = [], 0
+            for t in after:
+                if covered >= int(mode) * 60_000:
+                    break
+                out.append((t, False))
+                covered += t["duration_ms"] or 0
+            return out
+        plan = [(t, False) for t in after]
+        if mode in ("album", "artist"):
+            plan += [(t, False) for t in before]  # the earlier tracks too, for going back or shuffle
+        if mode == "artist" and s.grandparent_rating_key:
+            others = [a for a in self._cached("artist", s.grandparent_rating_key, client.artist_albums) if a != s.parent_rating_key]
+            albums = [self._cached("album", a, client.album_tracks) for a in others]
+            # The first seconds of every other album first, so any of them starts instantly,
+            # then those albums in full, one after another.
+            plan += [(a[0], True) for a in albums if a]
+            plan += [(t, False) for a in albums for t in a]
+        return plan
+
     # ---------------------------------------------------------------- jobs
     def _start(self, key, job: Job, delay: float, pacing: float, max_parallel: int):
         with self._lock:
@@ -546,7 +674,7 @@ class PlaybackMonitor:
     def _run_job(self, key, job: Job, delay: float, pacing: float, max_parallel: int):
         if delay and self.stop.wait(delay):
             return
-        if not self._session_alive(key):
+        if not self._session_alive(key) and job.feature == "nowplaying":
             job.state = "cancelled"
             return
         # Limit concurrent jobs per feature.
@@ -600,9 +728,27 @@ class PlaybackMonitor:
                 self.app.activity.event(job.feature, f"couldn't read {job.path}: {res.error}", "warn")
                 return
             job.state = "done"
-            self._recent[job.path] = time.time()
+            if not job.slice:
+                self._recent[job.path] = time.time()
             self._record_read(job)
             self._retention.append((time.time() + RETENTION_AFTER, job))
             gb = res.bytes / 1e9
             self.app.activity.event(job.feature, f"{job.target}: {gb:.1f} GB cached in {took:.0f} s")
             self.app.activity.count(job.feature)
+
+
+def library_mode(cfg: dict, s) -> str:
+    """This library's Next-episode choice (its type's default unless set)."""
+    from .config import DEFAULT_MODE
+    mode = (cfg.get("library_modes") or {}).get(s.library_key)
+    return mode or DEFAULT_MODE["tv" if s.type == "episode" else "audio"]
+
+
+def slice_bytes(size: int, duration_ms: int) -> int:
+    """About SLICE_SEC seconds of a track, read in whole MiB."""
+    if not size:
+        return 0
+    if not duration_ms:
+        return min(size, MiB)
+    n = int(size * SLICE_SEC * 1000 / duration_ms)
+    return min(size, max(MiB, -(-n // MiB) * MiB))

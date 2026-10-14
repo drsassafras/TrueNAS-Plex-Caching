@@ -65,6 +65,7 @@ class Session:
     transcoding: bool
     credits_start_ms: int | None
     library_key: str = ""
+    parent_rating_key: str = ""  # the season, or for music and audiobooks the album
 
     @property
     def progress(self) -> float:
@@ -255,6 +256,7 @@ class PlexClient:
                     transcoding=item.find("TranscodeSession") is not None,
                     credits_start_ms=credits,
                     library_key=item.get("librarySectionID", ""),
+                    parent_rating_key=item.get("parentRatingKey", ""),
                 )
             )
         return out
@@ -285,6 +287,31 @@ class PlexClient:
                     }
                 return None
         return None
+
+
+    def album_tracks(self, album_rating_key: str) -> list[dict]:
+        """An album's (or audiobook's) tracks in Plex's order."""
+        root = self.get(f"/library/metadata/{album_rating_key}/children")
+        out = []
+        for tr in root.findall("Track"):
+            files = [(part.get("file"), _int(part.get("size")))
+                     for media in tr.findall("Media") for part in media.findall("Part") if part.get("file")]
+            out.append({"rating_key": tr.get("ratingKey", ""), "title": tr.get("title", ""),
+                        "duration_ms": _int(tr.get("duration")), "files": files})
+        return out
+
+    def next_tracks(self, rating_key: str, album_rating_key: str) -> list[dict]:
+        """The tracks after ``rating_key`` on its album (or audiobook), in Plex's order."""
+        tracks = self.album_tracks(album_rating_key)
+        for i, tr in enumerate(tracks):
+            if tr["rating_key"] == rating_key:
+                return tracks[i + 1:]
+        return []
+
+    def artist_albums(self, artist_rating_key: str) -> list[str]:
+        """Rating keys of an artist's (or author's) albums, in Plex's order."""
+        root = self.get(f"/library/metadata/{artist_rating_key}/children")
+        return [d.get("ratingKey", "") for d in root.findall("Directory") if d.get("ratingKey")]
 
 
 # ---------------------------------------------------------------------------

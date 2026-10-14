@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+#
+# tnsync — copy a project's code to a TrueNAS app and (optionally) restart it.
+#
+#   tnsync local     the files in your folder right now, uncommitted changes included
+#   tnsync master    the latest code on GitHub's default branch (main or master)
+#   tnsync release   the newest release tag, e.g. v1.2.0
+#   tnsync beta      the newest tag including pre-releases, e.g. v1.3.0-beta.1
+#   tnsync init      set up tnsync for the project you're in
+#
+# Options:
+#   -n, --dry-run    run the tests and show what would be copied; change nothing
+#   -y, --yes        restart the app afterwards without asking
+#   -N, --no-restart don't restart (and don't ask)
+#   --skip-tests     copy without running the project's tests (not recommended)
+#   -h, --help       this help
+#
+# If the project's .tnsync has TN_TEST, that command runs first, in the code
+# being copied. Nothing is copied unless it passes.
+#
+# Settings come from two files (KEY=value lines):
+#   ~/.config/tnsync/config   shared:      TN_HOST, TN_USER, TN_PORT
+#   <project>/.tnsync         per project: TN_APP, TN_DEST, TN_PATHS, TN_EXCLUDE, TN_TEST
+#                              (and may override any shared setting)
+#
+# Written for the bash 3.2 that ships with macOS.
+
+set -eo pipefail
+
+TNSYNC_VERSION="1.2.0"
+GLOBAL_CONF="${TNSYNC_CONFIG:-$HOME/.config/tnsync/config}"
+
+# ----------------------------------------------------------------- output
+if [ -t 1 ]; then
+    C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'; C_BLU=$'\033[34m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
+    C_BAD=$'\033[1;97;41m'   # bold white on red
+else
+    C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_DIM=""; C_OFF=""; C_BAD=""
+fi
+say()  { printf '%s\n' "$*"; }
+info() { printf '%s==>%s %s\n' "$C_BLU" "$C_OFF" "$*"; }
+ok()   { printf '%s✔%s %s\n' "$C_GRN" "$C_OFF" "$*"; }
+warn() { printf '%sWarning:%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
+die()  { printf '%stnsync:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
+
+usage() {
+    sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'
+    exit "${1:-0}"
+}
+
+# A loud red block that can't be missed in the terminal.
+red_banner() {
+    local line
+    printf '\n' >&2
+    for line in "" "$@" ""; do
+        printf '%s  %-66s  %s\n' "$C_BAD" "$line" "$C_OFF" >&2
+    done
+    printf '\n' >&2
+}
+
+# ----------------------------------------------------------------- args
+MODE=""
+DRY_RUN=0
+RESTART="ask"   # ask | yes | no
+SKIP_TESTS=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n|--dry-run)    DRY_RUN=1 ;;
+        -y|--yes)        RESTART="yes" ;;
+        -N|--no-restart) RESTART="no" ;;
+        --skip-tests)    SKIP_TESTS=1 ;;
+        -h|--help)       usage 0 ;;
+        --version)       say "tnsync $TNSYNC_VERSION"; exit 0 ;;
+        -*)              die "unknown option: $1 (see tnsync --help)" ;;
+        *)
+            [ -z "$MODE" ] || die "only one of local, master, release, beta or init"
+            MODE="$1" ;;
+    esac
+    shift
+done
+case "$MODE" in
+    local|master|main|release|beta|init) ;;
+    "") usage 1 ;;
+    *)  die "unknown command: $MODE (use local, master, release, beta or init)" ;;
+esac
+
+# ----------------------------------------------------------------- config
+TN_HOST=""; TN_USER="truenas_admin"; TN_PORT="22"
+TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""
+
+# Read KEY=value lines. The file is parsed, never executed.
+load_conf() {
+    local file="$1" line key val n=0
+    [ -f "$file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        line="${line%%#*}"                                   # strip comments
+        line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        [ -z "$line" ] && continue
+        case "$line" in
+            *=*) ;;
+            *) warn "$file line $n ignored: $line"; continue ;;
+        esac
+        key="${line%%=*}"; val="${line#*=}"
+        case "$val" in                                       # strip one pair of quotes
+            \"*\") val="${val#\"}"; val="${val%\"}" ;;
+            \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        esac
+        case "$key" in
+            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST) printf -v "$key" '%s' "$val" ;;
+            *) warn "$file line $n: unknown setting $key" ;;
+        esac
+    done < "$file"
+}
+
+find_project_root() {
+    local dir="$PWD"
+    while [ "$dir" != "/" ] && [ -n "$dir" ]; do
+        if [ -f "$dir/.tnsync" ]; then printf '%s' "$dir"; return 0; fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+# ----------------------------------------------------------------- init
+do_init() {
+    local root ans
+    root="$(git rev-parse --show-toplevel 2>/dev/null)" || root="$PWD"
+    if [ ! -f "$GLOBAL_CONF" ]; then
+        info "Shared settings ($GLOBAL_CONF)"
+        read -r -p "  TrueNAS address (e.g. 192.168.1.10): " ans
+        [ -n "$ans" ] || die "an address is needed"
+        local host="$ans"
+        read -r -p "  SSH user on TrueNAS [truenas_admin]: " ans
+        local user="${ans:-truenas_admin}"
+        mkdir -p "$(dirname "$GLOBAL_CONF")"
+        printf '# tnsync shared settings\nTN_HOST=%s\nTN_USER=%s\nTN_PORT=22\n' "$host" "$user" > "$GLOBAL_CONF"
+        ok "wrote $GLOBAL_CONF"
+    fi
+    if [ -f "$root/.tnsync" ]; then
+        ok "$root/.tnsync already exists"
+        return 0
+    fi
+    info "Project settings ($root/.tnsync)"
+    read -r -p "  TrueNAS app name to restart (e.g. myapp-dev): " ans
+    local app="$ans"
+    read -r -p "  Folder on TrueNAS to copy into (e.g. /mnt/tank/apps/$app/src): " ans
+    local dest="$ans"
+    read -r -p "  What to copy from this project [.]: " ans
+    local paths="${ans:-.}"
+    cat > "$root/.tnsync" <<EOF
+# tnsync settings for this project. See: tnsync --help
+TN_APP=$app
+TN_DEST=$dest
+# Folders/files in this project to copy, separated by spaces ("." = everything).
+TN_PATHS=$paths
+# Patterns never copied.
+TN_EXCLUDE=.git .DS_Store __pycache__ *.pyc
+# Command that must pass before anything is copied (run in the project folder).
+# e.g. TN_TEST=python3 -m unittest   or   TN_TEST=npm test
+TN_TEST=
+EOF
+    ok "wrote $root/.tnsync"
+}
+
+if [ "$MODE" = "init" ]; then
+    do_init
+    exit 0
+fi
+
+ROOT="$(find_project_root)" || die "no .tnsync file here or in any parent folder. Run 'tnsync init' in your project first."
+load_conf "$GLOBAL_CONF"
+load_conf "$ROOT/.tnsync"
+
+[ -n "$TN_HOST" ] || die "TN_HOST isn't set. Put it in $GLOBAL_CONF (or run 'tnsync init')."
+[ -n "$TN_APP" ]  || die "TN_APP isn't set in $ROOT/.tnsync"
+[ -n "$TN_DEST" ] || die "TN_DEST isn't set in $ROOT/.tnsync"
+[[ "$TN_APP" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "TN_APP '$TN_APP' doesn't look like a TrueNAS app name"
+[[ "$TN_DEST" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "TN_DEST must be an absolute path without spaces: '$TN_DEST'"
+[ "$TN_DEST" != "/" ] || die "TN_DEST can't be /"
+[[ "$TN_PORT" =~ ^[0-9]+$ ]] || die "TN_PORT must be a number"
+
+# ----------------------------------------------------------------- source
+TMP=""
+SSH_CTL="/tmp/tnsync-$(id -u)-%C"
+cleanup() {
+    if [ -n "$TMP" ]; then rm -rf "$TMP"; fi
+    ssh -o ControlPath="$SSH_CTL" -O exit -p "$TN_PORT" "$TN_USER@$TN_HOST" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+export_ref() {   # export_ref <ref> <label>
+    local ref="$1"
+    git -C "$ROOT" rev-parse --verify --quiet "$ref^{commit}" >/dev/null || die "can't find $ref in this repository"
+    TMP="$(mktemp -d "${TMPDIR:-/tmp}/tnsync.XXXXXX")"
+    git -C "$ROOT" archive "$ref" | tar -x -C "$TMP"
+    SRC="$TMP"
+    SRC_LABEL="$2 ($(git -C "$ROOT" rev-parse --short "$ref^{commit}"))"
+}
+
+newest_tag() {   # newest_tag <regex>
+    # versionsort.suffix=- makes 1.0.0-beta.1 sort before 1.0.0
+    git -C "$ROOT" -c versionsort.suffix=- tag -l --sort=-v:refname | grep -E "$1" | head -n 1 || true
+}
+
+case "$MODE" in
+    local)
+        SRC="$ROOT"
+        SRC_LABEL="your folder as it is now"
+        if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+            if [ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]; then
+                SRC_LABEL="$SRC_LABEL, including uncommitted changes"
+            fi
+            SRC_LABEL="$SRC_LABEL (on $(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null))"
+        fi
+        ;;
+    master|main|release|beta)
+        git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || die "'tnsync $MODE' needs a git repository; use 'tnsync local'"
+        info "Fetching from GitHub…"
+        git -C "$ROOT" fetch --quiet --tags origin || die "git fetch failed"
+        if [ "$MODE" = "master" ] || [ "$MODE" = "main" ]; then
+            ref="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+            if [ -z "$ref" ]; then
+                git -C "$ROOT" remote set-head origin --auto >/dev/null 2>&1 || true
+                ref="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+            fi
+            if [ -z "$ref" ]; then
+                for b in main master; do
+                    if git -C "$ROOT" rev-parse --verify --quiet "origin/$b" >/dev/null; then ref="origin/$b"; break; fi
+                done
+            fi
+            [ -n "$ref" ] || die "can't work out the default branch on origin"
+            export_ref "$ref" "$ref"
+        elif [ "$MODE" = "release" ]; then
+            tag="$(newest_tag '^v?[0-9]+(\.[0-9]+)*$')"
+            [ -n "$tag" ] || die "no release tags (like v1.2.0) yet"
+            export_ref "$tag" "release $tag"
+        else
+            tag="$(newest_tag '^v?[0-9]+(\.[0-9]+)*(-.+)?$')"
+            [ -n "$tag" ] || die "no version tags (like v1.3.0-beta.1) yet"
+            export_ref "$tag" "beta channel $tag"
+        fi
+        ;;
+esac
+
+# ----------------------------------------------------------------- copy
+REMOTE="$TN_USER@$TN_HOST"
+SSH_OPTS="-o ControlMaster=auto -o ControlPath=$SSH_CTL -o ControlPersist=120 -p $TN_PORT"
+ssh_run() { ssh $SSH_OPTS "$REMOTE" "$@"; }
+
+say ""
+say "  ${C_DIM}Project${C_OFF}  $ROOT"
+say "  ${C_DIM}Source${C_OFF}   $SRC_LABEL"
+say "  ${C_DIM}To${C_OFF}       $REMOTE:$TN_DEST"
+say "  ${C_DIM}App${C_OFF}      $TN_APP"
+[ "$DRY_RUN" = 1 ] && say "  ${C_YEL}Dry run: nothing will be changed${C_OFF}"
+say ""
+
+# ----------------------------------------------------------------- tests
+if [ "$SKIP_TESTS" = 1 ]; then
+    warn "--skip-tests: copying WITHOUT running the tests"
+elif [ -n "$TN_TEST" ]; then
+    info "Running tests: $TN_TEST"
+    # Run in the code being copied (for master/release/beta that's the exported
+    # copy, not your folder). Python's bytecode cache is kept out of the project.
+    # Straight to the terminal (not through a pipe), so a test runner can draw a progress bar.
+    if ( cd "$SRC" && PYTHONDONTWRITEBYTECODE=1 bash -c "$TN_TEST" ); then
+        ok "Tests passed"
+    else
+        red_banner "TESTS FAILED  -  NOTHING WAS COPIED TO $TN_HOST" \
+                   "" \
+                   "$TN_APP is still running the code it had before." \
+                   "Fix the failures above, then run 'tnsync $MODE' again." \
+                   "(--skip-tests copies anyway, if you really must.)"
+        exit 1
+    fi
+else
+    say "  ${C_DIM}No TN_TEST in .tnsync, so no tests were run.${C_OFF}"
+fi
+
+command -v rsync >/dev/null 2>&1 || die "rsync isn't installed (on a Mac: it normally is; try 'brew install rsync')"
+info "Connecting to ${TN_HOST}…"
+ssh_run "true" || die "can't SSH to $REMOTE. Check TrueNAS: System → Services → SSH is running, and your key is added to $TN_USER."
+
+set -f   # keep exclude patterns like *.pyc from expanding here
+RSYNC_ARGS=(-a --delete -e "ssh $SSH_OPTS")
+for pat in $TN_EXCLUDE; do RSYNC_ARGS+=(--exclude "$pat"); done
+[ "$DRY_RUN" = 1 ] && RSYNC_ARGS+=(-n -v) || RSYNC_ARGS+=(-v)
+PATHS_LIST=$TN_PATHS
+set +f
+
+COPIED=0
+for p in $PATHS_LIST; do
+    p="${p%/}"
+    if [ "$p" = "." ]; then
+        from="$SRC/"; to="$TN_DEST/"; parent="$TN_DEST"
+    elif [ -d "$SRC/$p" ]; then
+        from="$SRC/$p/"; to="$TN_DEST/$p/"; parent="$TN_DEST/$p"
+    elif [ -f "$SRC/$p" ]; then
+        from="$SRC/$p"; to="$TN_DEST/$p"; parent="$(dirname "$TN_DEST/$p")"
+    else
+        die "'$p' (from TN_PATHS) isn't in the source"
+    fi
+    case "$p" in ..*|/*) die "TN_PATHS entries must be inside the project: $p" ;; esac
+    [ "$DRY_RUN" = 1 ] || ssh_run "mkdir -p '$parent'" || die "can't create $parent on TrueNAS (does $TN_USER own it?)"
+    info "Copying $p"
+    # Indent rsync's file list and drop its summary lines.
+    if ! rsync "${RSYNC_ARGS[@]}" "$from" "$REMOTE:$to" 2>&1 \
+        | { grep -v -E '^(sending|building|sent |total size|created directory|$)' || true; } | sed 's/^/    /'; then
+        die "copy failed"
+    fi
+    COPIED=$((COPIED + 1))
+done
+if [ "$DRY_RUN" = 1 ]; then ok "Dry run: the files listed above would be copied"; else ok "Copied $COPIED path(s) to $TN_HOST"; fi
+
+# ----------------------------------------------------------------- restart
+[ "$DRY_RUN" = 1 ] && exit 0
+if [ "$RESTART" = "ask" ]; then
+    if [ -t 0 ]; then
+        read -r -p "Restart '$TN_APP' on $TN_HOST now? [y/N] " ans
+        case "$ans" in y|Y|yes|YES) RESTART="yes" ;; *) RESTART="no" ;; esac
+    else
+        RESTART="no"
+    fi
+fi
+[ "$RESTART" = "yes" ] || { say "Not restarted. Run 'tnsync $MODE -y' or restart it in TrueNAS when ready."; exit 0; }
+
+info "Restarting $TN_APP (this waits until TrueNAS has finished)…"
+REMOTE_RESTART="a='$TN_APP'
+out=\$(midclt call -j app.redeploy \"\$a\" 2>&1) && exit 0
+out2=\$(sudo -n /usr/bin/midclt call -j app.redeploy \"\$a\" 2>&1) && exit 0
+printf '%s\n%s\n' \"\$out\" \"\$out2\" | tail -n 6 >&2
+exit 1"
+if ssh_run "$REMOTE_RESTART"; then
+    ok "Restarted $TN_APP"
+else
+    die "couldn't restart $TN_APP. Check the app name, and that $TN_USER may run midclt (see the tnsync README)."
+fi

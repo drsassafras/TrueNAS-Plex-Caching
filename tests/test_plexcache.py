@@ -6,6 +6,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import socket
 import threading
 import time
 import unittest
@@ -30,6 +31,12 @@ os.environ["PLEXCACHE_SYS"] = fakes.make_sys(TMP, {"l2arc_noprefetch": 1, "l2arc
                                                     "l2arc_rebuild_enabled": 1, "l2arc_mfuonly": 0})
 
 from plexcache import config, scheduler, zfs  # noqa: E402
+
+# Test files sit on an ordinary filesystem, whose 4K blocks would look like files written
+# before a recordsize change. Report every sampled file as fitting in one block instead
+# (no information); BlockSizeTests checks the real function and what Health makes of it.
+REAL_BLOCK_SIZES = zfs.block_sizes
+zfs.block_sizes = lambda paths: (lambda n: {"checked": n, "single": n, "sizes": {}})(len(list(paths)))
 from plexcache.app import App  # noqa: E402
 from plexcache.plex import PlexClient, PlexError  # noqa: E402
 from plexcache.reader import MiB, ReadResult, is_cache_hit, read_range  # noqa: E402
@@ -293,6 +300,16 @@ class ReaderAndPlanTests(unittest.TestCase):
         st.count = {"movie": 1240, "tv": 14600, "audio": 9800}
         st.avg_kbps = {"movie": 18000, "tv": 6500, "audio": 128}
         return st
+
+    def test_stats_per_library(self):
+        from types import SimpleNamespace as F
+        files = [F(kind="audio", kbps=64, library_key="5"), F(kind="audio", kbps=96, library_key="5"),
+                 F(kind="audio", kbps=900, library_key="9"), F(kind="movie", kbps=20000, library_key="1")]
+        st = LibraryStats.from_files(files, {"5": "Audiobooks", "9": "Dr Music"})
+        self.assertEqual((st.count["audio"], st.avg_kbps["audio"]), (3, 353))
+        self.assertEqual([(l["name"], l["kind"], l["count"], l["avg_kbps"]) for l in st.libraries],
+                         [("Movies", "movie", 1, 20000), ("Audiobooks", "audio", 2, 80), ("Dr Music", "audio", 1, 900)])
+        self.assertEqual(st.to_dict()["libraries"][2]["name"], "Dr Music")
 
     def test_plan_fits_and_reduces(self):
         w = config.DEFAULTS["warmup"]
@@ -604,8 +621,7 @@ class LayoutTests(unittest.TestCase):
         stats = LibraryStats(count={"movie": 1000, "tv": 0, "audio": 0}, avg_kbps={"movie": 20000, "tv": 0, "audio": 0})
         w = dict(config.DEFAULTS["warmup"])
         with_idx = plan(stats, w, None)
-        without = plan(stats, dict(w, cache_index=False), None)
-        self.assertEqual(with_idx["need_max"] - without["need_max"], 1000 * DEFAULT_INDEX["movie"])
+        self.assertEqual(with_idx["need_max"], with_idx["need_by_kind"]["movie"] + 1000 * DEFAULT_INDEX["movie"])  # always counted
         measured = plan(stats, w, None, {"movie": 100_000})
         self.assertEqual(measured["index_by_kind"]["movie"], 100_000_000)
         self.assertTrue(measured["index_measured"])
@@ -789,9 +805,9 @@ class AppTests(unittest.TestCase):
         app.settings.update({"plex": {"url": PLEX.url}})
         c = app.test_connections()
         self.assertEqual(c["plex_server"]["status"], "ok")
-        self.assertEqual(c["plex_token"]["status"], "warn")
+        self.assertEqual(c["plex_token"]["status"], "fail")  # nothing works without it
         self.assertEqual(c["truenas_server"]["status"], "warn")
-        self.assertEqual(c["summary"]["status"], "warn")
+        self.assertEqual(c["summary"]["status"], "fail")
         app.settings.update({"plex": {"token": "wrong"}})
         self.assertEqual(app.test_connections()["plex_token"]["text"], "Plex token rejected")
         app.settings.update({"plex": {"url": "http://127.0.0.1:1"}})
@@ -888,6 +904,14 @@ class AppTests(unittest.TestCase):
         self.assertIn("about 5%", slow["fix"])
         self.assertIn("Init/Shutdown Scripts", slow["fix"])
         self.assertEqual(checks._recordsize_check(self.app, "tank/m", 1048576, {"l2_total": 960 * 10 ** 9}), ("pass", []))
+        # Movies and TV need 1M; audio-only datasets may use 512K or 1M
+        self.assertEqual(checks._recordsize_check(self.app, "tank/m", 512 * 1024, None, kinds=["audio"]), ("pass", []))
+        self.assertEqual(checks._recordsize_check(self.app, "tank/m", 1024 * 1024, None, kinds=["audio"]), ("pass", []))
+        st, its = checks._recordsize_check(self.app, "tank/m", 512 * 1024, None, kinds=["movie", "audio"])
+        self.assertEqual((st, its[0]["fix_cmd"]), ("warn", "sudo zfs set recordsize=1M tank/m"))
+        self.assertIn("rewrite_blocks.py tank/m", its[1]["fix_cmd"])  # then the files already there
+        st, its = checks._recordsize_check(self.app, "tank/m", 256 * 1024, None, kinds=["audio"])
+        self.assertEqual((st, its[0]["fix_cmd"]), ("warn", "sudo zfs set recordsize=512K tank/m"))
 
     def test_unavailable_features_cannot_be_enabled(self):
         # With every media dataset at primarycache=metadata nothing can be cached.
@@ -965,6 +989,36 @@ class AppTests(unittest.TestCase):
         status, r = self.post("/api/settings", {"warmup": {"enabled": True}})
         self.assertEqual(status, 200)
 
+    def test_nested_dataset_mounts(self):
+        """Which dataset really holds a library when datasets are mounted inside each other."""
+        from plexcache import mapping
+        root = tempfile.mkdtemp(dir=TMP)
+        for sub in ("music", "music/Mine", "data", "data/TV", "data/TV/Extra"):
+            os.makedirs(os.path.join(root, sub))
+        j = lambda *p: os.path.join(root, *p)  # noqa: E731
+        fake = [{"root": "/", "mountpoint": "/", "fstype": "overlay", "source": "overlay"},
+                # a parent dataset mounted at /music, and the library's own dataset mounted inside it
+                {"root": "/", "mountpoint": j("music"), "fstype": "zfs", "source": "tank/Parent"},
+                {"root": "/", "mountpoint": j("music", "Mine"), "fstype": "zfs", "source": "tank/Parent/Music"},
+                # a dataset mounted inside a library folder: Plex scans into it
+                {"root": "/", "mountpoint": j("data"), "fstype": "zfs", "source": "tank/plex"},
+                {"root": "/", "mountpoint": j("data", "TV", "Extra"), "fstype": "zfs", "source": "tank/plex/extra"}]
+        app = App(tempfile.mkdtemp(dir=TMP))
+        app.locations = [{"key": "9", "library": "Music", "status": "ok", "local_path": j("music", "Mine"), "excluded": False},
+                         {"key": "2", "library": "TV Shows", "status": "ok", "local_path": j("data", "TV"), "excluded": False}]
+        saved_mounts, saved_sys = zfs.mounts, mapping.SYSTEM_MOUNTS
+        zfs.mounts = lambda: fake
+        mapping.SYSTEM_MOUNTS = tuple(m for m in saved_sys if not (root == m or root.startswith(m + "/")))
+        try:
+            rows = {d["dataset"]: d for d in app.media_datasets()}
+        finally:
+            zfs.mounts, mapping.SYSTEM_MOUNTS = saved_mounts, saved_sys
+        self.assertEqual(rows["tank/Parent/Music"]["libraries"], ["Music"])
+        self.assertTrue(rows["tank/Parent"]["unused"])      # holds no library itself: flagged
+        self.assertEqual(rows["tank/plex"]["libraries"], ["TV Shows"])
+        self.assertEqual(rows["tank/plex/extra"]["libraries"], ["TV Shows"])  # inside the TV folder: part of TV
+        self.assertFalse(rows["tank/plex/extra"]["unused"])
+
     def test_unused_dataset_is_flagged(self):
         from plexcache import mapping
         saved = mapping.SYSTEM_MOUNTS
@@ -980,12 +1034,39 @@ class AppTests(unittest.TestCase):
         self.assertIsNone(rows["tank/spare"]["cache"])                 # nothing cached from it, so not checked
         self.assertIn("tank/spare isn't used by any Plex library", dataset_fixes(groups["datasets"]))
 
+    def test_benchmark_goes_one_dataset_at_a_time(self):
+        import plexcache.app as appmod
+        seen = []
+        real = appmod.benchmark_file
+
+        def spy(path, size):
+            p = self.app.benchmark_progress
+            saved = set(self.app.settings.section("general")["disk_speeds"])
+            seen.append((p["dataset"], p["done"], p["total"], tuple(p["finished"]), saved))
+            return real(path, size)
+        appmod.benchmark_file = spy
+        old = self.app.settings.section("general")["disk_speeds"]
+        try:
+            self.app.settings.update({"general": {"disk_speeds": {}}})
+            self.app.run_benchmark()
+            self.app.benchmark_thread.join(30)
+        finally:
+            appmod.benchmark_file = real
+            self.app.settings.update({"general": {"disk_speeds": old}})
+        order = [d for d, *_ in seen]
+        first, second = order[0], [d for d in order if d != order[0]][0]
+        self.assertEqual(order, sorted(order, key=lambda d: d != first))  # all of one, then all of the other
+        later = [x for x in seen if x[0] == second]
+        self.assertEqual(later[0][1:4], (1, 2, (first,)))
+        self.assertIn(first, later[0][4])  # the first dataset's speed was saved before the second began
+
     def test_benchmark_is_per_dataset(self):
         saved = self.app.settings.section("general")
         try:
             self.app.run_benchmark()
             # wait for all of it, including the health check it runs afterwards
             self.app.benchmark_thread.join(30)
+            self.assertIsNone(self.app.state()["benchmark"]["progress"])  # cleared once it's done
             speeds = self.app.settings.section("general")["disk_speeds"]
             self.assertEqual(set(speeds), {"tank/plexfiles", TV_DS})
             self.assertTrue(all(v["mb_s"] >= 10 and v["measured_at"] for v in speeds.values()))
@@ -1138,6 +1219,73 @@ class PlaybackMonitorTests(unittest.TestCase):
 
     def session(self, ep, offset, state="playing", sid="m1"):
         PLEX.sessions = [{"id": sid, "item": ep, "offset": offset, "duration": 1200000, "state": state}]
+
+    def test_next_tracks_for_music_and_audiobooks(self):
+        app, mon = self.app, self.app.monitor
+        app.library_cacheable = lambda *a, **k: True       # the audiobook dataset is left at primarycache=metadata in tests
+
+        def targets(sid):
+            return [j.target for j in mon._chains.get(sid, []) if not j.cancel]
+
+        def play(n, sid, mode):
+            app.settings.update({"nextepisode": {"library_modes": {"3": mode}}})
+            self.session(CAT["tracks"][n], 10000, sid=sid)
+            self.poll()
+            self.assertTrue(wait_for(lambda: all(j.state == "done" for j in mon._chains.get(sid, [])), 10))
+        try:
+            app.settings.update({"nowplaying": {"enabled": False}, "nextepisode": {"enabled": True}})
+            # Default for audiobooks: 20 minutes ahead — here, the rest of the book (two 2-minute chapters)
+            app.settings.update({"nextepisode": {"library_modes": {}}})
+            self.session(CAT["tracks"][0], 10000)
+            self.poll()
+            self.assertTrue(wait_for(lambda: len(mon._chains.get("m1", [])) == 2 and all(j.state == "done" for j in mon._chains["m1"]), 10))
+            self.assertEqual(targets("m1"), ["Author · Chapter 2", "Author · Chapter 3"])
+            self.assertTrue(all(j["whole"] for j in self.jobs("nextepisode")))
+            # Whole book, from the last chapter: the earlier chapter is read too (the others are already done)
+            mon._recent.pop(CAT["tracks"][0]["path"], None)
+            play(2, "m2", "album")
+            self.assertEqual(targets("m2"), ["Author · Chapter 1"])
+            # Everything by the author: the rest of this book, then the start of the other book, then all of it
+            mon._recent.clear()
+            play(0, "m3", "artist")
+            self.assertEqual(targets("m3"), ["Author · Chapter 2", "Author · Chapter 3", "Author · Book 2, chapter 1 (first seconds)",
+                                             "Author · Book 2, chapter 1", "Author · Book 2, chapter 2"])
+            self.assertEqual(mon._chains["m3"][2].length, 1024 * 1024)  # ~10 s, rounded up to a whole MiB
+            # Within the RAM limit, in order: here only the first chapter fits
+            mon._recent.clear()
+            real = app.ram_budget
+            app.ram_budget = lambda: dict(real(), nextepisode=3 * 1024 * 1024)
+            try:
+                play(0, "m4", "artist")
+            finally:
+                app.ram_budget = real
+            self.assertEqual(targets("m4"), ["Author · Chapter 2"])
+            # Don't preload: nothing
+            play(0, "m5", "off")
+            self.assertEqual(targets("m5"), [])
+            # a player that stops: what it had queued is dropped
+            PLEX.sessions = []
+            self.poll()
+            self.assertEqual(mon._chains, {})
+        finally:
+            del app.library_cacheable
+            app.settings.update({"nowplaying": {"enabled": True}, "nextepisode": {"library_modes": {}}})
+
+    def test_preload_choices_are_checked_and_old_checkboxes_carry_over(self):
+        import json
+        from plexcache.config import Settings, SettingsError
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "settings.json"), "w") as fh:
+            json.dump({"nextepisode": {"excluded_libraries": ["3"], "audio_ahead_min": 60}}, fh)
+        st = Settings(d)
+        self.assertEqual(st.section("nextepisode")["library_modes"], {"3": "off"})
+        self.assertNotIn("excluded_libraries", st.section("nextepisode"))
+        with self.assertRaises(SettingsError):
+            st.update({"nextepisode": {"library_modes": {"3": "forever"}}})
+        with self.assertRaises(SettingsError):
+            st.update({"nextepisode": {"library_modes": ["off"]}})
+        from plexcache.playback import slice_bytes
+        self.assertEqual((slice_bytes(0, 1000), slice_bytes(5 * 1024 * 1024, 0)), (0, 1024 * 1024))
 
     def test_buffering_is_noticed_and_preload_waits_for_playing(self):
         self.session(CAT["episodes"][0], 60000, state="buffering")
@@ -1553,6 +1701,192 @@ class ReportTests(unittest.TestCase):
         app.activity.record("stream", label="A")
         self.assertIsNot(app.reports(), first)
         self.assertEqual(app.reports()["week"]["streams"], 1)
+
+
+class BlockSizeTests(unittest.TestCase):
+    """Do the files on a dataset match its recordsize?"""
+
+    def test_block_sizes_of_files(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        small, big = os.path.join(d, "small"), os.path.join(d, "big")
+        with open(small, "wb") as fh:
+            fh.write(b"x" * 100)
+        with open(big, "wb") as fh:
+            fh.write(b"x" * (3 * 1024 * 1024))
+        r = REAL_BLOCK_SIZES([small, big, os.path.join(d, "gone")])
+        bs = os.stat(big).st_blksize
+        self.assertEqual((r["checked"], r["single"], r["sizes"]), (2, 1, {str(bs): 1}))
+
+    def test_sample_files_from_folders(self):
+        from plexcache.app import _sample_files
+        d = tempfile.mkdtemp(dir=TMP)
+        for sub in ("A", "B", ".hidden"):
+            os.makedirs(os.path.join(d, sub))
+            for i in range(4):
+                open(os.path.join(d, sub, f"f{i}.flac"), "w").close()
+        got = _sample_files([d], 5)
+        self.assertEqual(len(got), 5)
+        self.assertFalse(any("/.hidden/" in p for p in got))
+        self.assertEqual(len(_sample_files([d], 100, max_seen=3)), 4)  # stops looking after a folder passes the cap
+
+    def test_health_compares_files_with_the_setting(self):
+        from plexcache import checks
+        app = App(tempfile.mkdtemp(dir=TMP))
+        old = {"checked": 300, "single": 20, "sizes": {str(128 * 1024): 180, str(1024 * 1024): 100}}
+        st, its = checks._recordsize_check(app, "tank/tv", 1024 * 1024, None, "TV", ["tv"], old)
+        self.assertEqual((st, its[0]["title"]), ("warn", "Older files on tank/tv use smaller blocks"))
+        self.assertIn("In a random sample of 300 files, about 64% were written with 128K blocks", its[0]["detail"])
+        self.assertEqual(its[0]["fix_cmd"], "curl -fsSO {APP}/tools/rewrite_blocks.py && sudo python3 rewrite_blocks.py tank/tv")
+        self.assertEqual(checks._blocks_note(old, 1024 * 1024), " · ~64% of a sample at 128K")
+        # a few stragglers: a note, not a warning
+        few = {"checked": 300, "single": 0, "sizes": {str(128 * 1024): 3, str(1024 * 1024): 297}}
+        self.assertEqual(checks._recordsize_check(app, "tank/tv", 1024 * 1024, None, "", ["tv"], few)[0], "info")
+        # audio written at 512K is fine on an audio-only dataset, even if it's now 1M
+        music = {"checked": 300, "single": 50, "sizes": {str(512 * 1024): 250}}
+        self.assertEqual(checks._recordsize_check(app, "tank/music", 1024 * 1024, None, "", ["audio"], music), ("pass", []))
+        self.assertEqual(checks._blocks_note(music, 512 * 1024), " · 300 sampled files match")
+        self.assertEqual(checks._blocks_note(None, 1024 * 1024), "")
+        self.assertEqual(checks._blocks_note({"checked": 5, "single": 5, "sizes": {}}, 1024 * 1024), "")  # nothing to tell
+        # the page gets the defaults it needs for its "back to default" buttons
+        d = app.state()["defaults"]
+        self.assertEqual((d["general"]["poll_seconds"], d["general"]["ram_reserve_gb"], d["warmup"]["movie_sec"]), (5, 4, 60))
+        self.assertNotIn("cache_index", config.DEFAULTS["warmup"])  # file indexes are always cached now
+
+    def test_check_every_file(self):
+        from plexcache import checks
+        d = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(d, "Show", ".hidden"))
+        for name, n in (("Show/a.mkv", 3 * 1024 * 1024), ("Show/b.mkv", 3 * 1024 * 1024), ("small.nfo", 10), ("Show/.hidden/x", 9999)):
+            with open(os.path.join(d, name), "wb") as fh:
+                fh.write(b"x" * n)
+        seen = []
+        r = zfs.scan_block_sizes(d, progress=seen.append)
+        bs = str(os.stat(os.path.join(d, "Show/a.mkv")).st_blksize)
+        self.assertEqual((r["checked"], r["single"], r["sizes"], r["complete"]), (3, 1, {bs: 2}, True))
+        self.assertEqual(sorted(r["examples"][bs]), ["Show/a.mkv", "Show/b.mkv"])
+        self.assertFalse(zfs.scan_block_sizes(d, stop=lambda: True)["complete"])
+        self.assertIn("error", zfs.scan_block_sizes(os.path.join(d, "gone")))
+        # Health words a full count differently from a sample, and names a few of the files
+        full = {"checked": 1000, "single": 0, "sizes": {"131072": 600, "1048576": 400}, "full": True,
+                "examples": {"131072": ["TV/a.mkv", "TV/b.mkv"]}}
+        self.assertEqual(checks._blocks_note(full, 1024 * 1024), " · 600 of 1,000 files at 128K")
+        self.assertEqual(checks._blocks_note(dict(full, sizes={"1048576": 1000}), 1024 * 1024), " · all 1,000 files match")
+        st, its = checks._recordsize_check(App(tempfile.mkdtemp(dir=TMP)), "tank/tv", 1024 * 1024, None, "", ["tv"], full)
+        self.assertIn("Of all 1,000 files, 600 (60%) were written with 128K blocks", its[0]["detail"])
+        self.assertIn("For example: TV/a.mkv, TV/b.mkv.", its[0]["detail"])
+        # through the app: started from the API, kept across a restart, and used by Health
+        app = _new_app()
+        app.scan_library()
+        app.run_checks()
+        self.assertFalse(app.run_block_scan("no/such"))
+        self.assertTrue(app.run_block_scan(TV_DS))
+        self.assertTrue(wait_for(lambda: app.block_scans[TV_DS].get("complete"), 20))
+        self.assertTrue(wait_for(lambda: not app.checking, 20))
+        self.assertGreater(app.state()["block_scans"][TV_DS]["checked"], 0)
+        again = App(app.config_dir)
+        self.assertTrue(again.block_scans[TV_DS]["complete"])
+        rows = {r["dataset"]: r for g in app.health["groups"] if g["id"] == "datasets" for r in g["datasets"]}
+        self.assertIn("files", rows[TV_DS]["recordsize"]["text"])
+
+    def test_rewrite_script_is_served_and_rewrites_safely(self):
+        import subprocess
+        import urllib.request
+        srv_app = _new_app()
+        from plexcache.server import serve
+        httpd = serve(srv_app, "127.0.0.1", 0)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            body = urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/tools/rewrite_blocks.py", timeout=5).read()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        self.assertIn(b"def rewrite(", body)
+        # Run it against a folder, with a stand-in `zfs` command that reports recordsize=1M.
+        d = tempfile.mkdtemp(dir=TMP)
+        media, bin_dir = os.path.join(d, "media"), os.path.join(d, "bin")
+        os.makedirs(os.path.join(media, "Show"))
+        os.makedirs(bin_dir)
+        script = os.path.join(d, "rewrite_blocks.py")
+        with open(script, "wb") as fh:
+            fh.write(body)
+        with open(os.path.join(bin_dir, "zfs"), "w") as fh:
+            fh.write("#!/bin/sh\ncase \"$*\" in *recordsize*) echo 1048576;; *mountpoint*) echo " + media + ";; *) ;; esac\n")
+        os.chmod(os.path.join(bin_dir, "zfs"), 0o755)
+        f = os.path.join(media, "Show", "ep1.mkv")
+        data = os.urandom(300 * 1024)
+        with open(f, "wb") as fh:
+            fh.write(data)
+        os.utime(f, (1_600_000_000, 1_600_000_000))
+        os.chmod(f, 0o640)
+        env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"])
+        look = subprocess.run([sys.executable, script, "tank/media"], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(look.returncode, 0, look.stderr)
+        self.assertIn("1 to rewrite", look.stdout)
+        self.assertIn("Nothing was changed", look.stdout)
+        ino = os.stat(f).st_ino
+        run = subprocess.run([sys.executable, script, "tank/media", "--apply", "--yes", "--mb-per-sec", "0", "--min-free-gb", "0"],
+                             env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("Rewrote 1 file(s)", run.stdout)
+        st = os.stat(f)
+        with open(f, "rb") as fh:
+            self.assertEqual(fh.read(), data)                       # same content
+        self.assertNotEqual(st.st_ino, ino)                         # a new file…
+        self.assertEqual((st.st_mtime, st.st_mode & 0o777), (1_600_000_000, 0o640))  # …with the same details
+        self.assertEqual(os.listdir(os.path.join(media, "Show")), ["ep1.mkv"])        # no temporary file left
+
+
+class StartupTests(unittest.TestCase):
+    """An unwritable config folder: explain and wait, rather than crash and restart forever."""
+
+    def test_unwritable_config_waits_with_an_explanation(self):
+        import http.client
+        from plexcache import __main__ as entry
+        d = tempfile.mkdtemp(dir=TMP)
+        blocker = os.path.join(d, "config")
+        open(blocker, "w").close()  # a file where the folder should be: can't be written into
+        self.assertIn("Can't save settings in " + blocker, entry.config_problem(blocker))
+        self.assertIsNone(entry.config_problem(os.path.join(d, "ok")))
+        stop = threading.Event()
+        old = entry.RETRY_SECONDS
+        entry.RETRY_SECONDS = 0.2
+        result = []
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        t = threading.Thread(target=lambda: result.append(entry.wait_for_config(blocker, "127.0.0.1", port, stop)))
+        try:
+            t.start()
+            self.assertTrue(wait_for(lambda: _can_connect(port), 5))
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/healthz")
+            resp = conn.getresponse()
+            page = resp.read().decode()
+            conn.close()
+            self.assertEqual(resp.status, 503)
+            self.assertIn("give user", page)
+            os.remove(blocker)  # fixed: it carries on by itself
+            t.join(5)
+            self.assertEqual(result, [True])
+        finally:
+            entry.RETRY_SECONDS = old
+            stop.set()
+            t.join(5)
+        # stopped before it was fixed
+        blocker2 = os.path.join(d, "config2")
+        open(blocker2, "w").close()
+        stop = threading.Event()
+        stop.set()
+        self.assertFalse(entry.wait_for_config(blocker2, "127.0.0.1", 0, stop))
+
+
+def _can_connect(port):
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        return True
+    except OSError:
+        return False
 
 
 class AppEdgeTests(unittest.TestCase):
@@ -1996,6 +2330,16 @@ class HealthBranchTests(unittest.TestCase):
     def test_dataset_rows(self):
         r = self.row(self.ds(libraries=[], keys=[], off=["Music"]))
         self.assertEqual((r["in_use"]["text"], r["cache"]), ("Music · caching off", None))
+        # caching off, but the record size is still checked: it matters to Plex either way
+        r = self.row(self.ds(libraries=[], keys=[], off=["Films"], kinds=["movie"],
+                             props={"primarycache": "metadata", "secondarycache": "all", "recordsize": 131072},
+                             blocks={"checked": 10, "single": 0, "sizes": {"131072": 10}}))
+        self.assertEqual((r["cache"], r["l2arc"], r["recordsize"]["status"]), (None, None, "warn"))
+        self.assertEqual([f["title"] for f in r["fixes"]], ["Record size for tank/x", "Then rewrite the existing files on tank/x"])
+        self.assertIn("(Films)", r["fixes"][0]["detail"])
+        # no TrueNAS API: the setting is unknown, but the files still tell how they were written
+        r = self.row(self.ds(kinds=["tv"], blocks={"checked": 10, "single": 0, "sizes": {"131072": 8, "1048576": 2}}), tn_ok=False)
+        self.assertEqual(r["recordsize"], {"status": "info", "text": "Setting not checked · ~80% of a sample at 128K"})
         r = self.row(self.ds(dataset=None, fstype="nfs"))
         self.assertEqual(r["cache"]["text"], "Not ZFS (nfs)")
         self.assertIn("not on ZFS here", r["fixes"][0]["title"])
@@ -2004,6 +2348,11 @@ class HealthBranchTests(unittest.TestCase):
         r = self.row(self.ds(props={"primarycache": "all", "secondarycache": "metadata", "recordsize": None}))
         self.assertEqual(r["cache"]["text"], "secondarycache=metadata")
         self.assertEqual(r["fixes"][0]["fix_cmd"], "sudo zfs set secondarycache=all tank/x")
+        # no L2ARC on the pool: secondarycache doesn't matter, so no warning about it
+        r = self.row(self.ds(props={"primarycache": "all", "secondarycache": "metadata", "recordsize": 1048576}),
+                     pools={"tank": {"name": "tank", "l2_online": 0, "l2_total": 0, "cache_devices": []}})
+        self.assertEqual((r["cache"]["status"], r["cache"]["text"]), ("pass", "primarycache=all, secondarycache=metadata"))
+        self.assertFalse([f for f in r["fixes"] if "secondarycache" in f.get("fix_cmd", "")])
         r = self.row(self.ds(), pools={})
         self.assertEqual(r["l2arc"]["text"], "Not checked")
         r = self.row(self.ds(), pools={"tank": {"name": "tank", "l2_online": 0, "l2_total": 0, "cache_devices": [{}]}})

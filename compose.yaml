@@ -1,10 +1,15 @@
 # Plex Cache for TrueNAS — paste into Apps → Discover Apps → ⋮ → Install via YAML.
+# Name the app with lowercase letters and hyphens, e.g. plex-cache.
 #
-# Before installing, change the three paths marked CHANGE ME:
-#   1. A dataset for the app's settings (owned by user "apps", 568).
-#   2. Your media dataset(s), mounted at the SAME path your Plex app uses
-#      inside its container. Plex's own app settings show these mounts.
-#      Add one line per mount if Plex has several (Movies, TV, Music...).
+# Before installing:
+#   1. Create a dataset for the app's settings (Datasets → Add Dataset, Dataset
+#      Preset "Apps"), and make sure user "apps" (568) can read and write it.
+#      Put its path on the /config line below. If the app can't write there,
+#      its web page says so and it waits until that's fixed.
+#   2. Put your media dataset(s) on the /data line, mounted at the SAME path
+#      your Plex app uses inside its container (Plex's own app settings show
+#      these mounts). Add one line per mount if Plex has several.
+#   3. Put your NAS's IP in x-portals at the bottom.
 #
 # Everything else (Plex address, sign-in, TrueNAS API key, features) is set
 # in the web UI at http://<your-nas-ip>:8642 after it starts.

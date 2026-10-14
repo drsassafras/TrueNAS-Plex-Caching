@@ -88,6 +88,9 @@ def make_handler(app):
                 if not re.fullmatch(r"[a-zA-Z0-9_.-]+", name) or name.startswith("."):
                     return self._error("not found", 404)
                 return self._file(os.path.join(WEB_DIR, name))
+            if path == "/tools/rewrite_blocks.py":
+                # The re-copy script Health points to, served so it always matches this version.
+                return self._file(os.path.join(os.path.dirname(WEB_DIR), "tools", "rewrite_blocks.py"))
             if path == "/healthz":
                 return self._json({"ok": True, "version": app.version})
             if path == "/api/state":
@@ -137,6 +140,8 @@ def make_handler(app):
                 if path == "/api/checks":
                     app.run_checks_async(rescan=bool(body.get("rescan", True)))
                     return self._json({"started": True})
+                if path == "/api/blockscan":
+                    return self._json({"started": app.run_block_scan(str(body.get("dataset", "")))})
                 if path == "/api/benchmark":
                     app.run_benchmark()
                     return self._json({"started": True})

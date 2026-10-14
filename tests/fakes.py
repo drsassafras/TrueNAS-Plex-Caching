@@ -81,7 +81,7 @@ def make_mp4(path: str, size: int, moov_size: int = 300_000, faststart: bool = F
 
 def make_media(root: str, movies: int = 4, seasons: int = 2, episodes: int = 3, tracks: int = 3) -> dict:
     """Create small sparse media files. Returns a catalogue for FakePlex."""
-    cat = {"movies": [], "episodes": [], "tracks": [], "root": root}
+    cat = {"movies": [], "episodes": [], "tracks": [], "tracks_b": [], "root": root}
 
     def mk(path, size):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -104,6 +104,11 @@ def make_media(root: str, movies: int = 4, seasons: int = 2, episodes: int = 3, 
         mk(p, 2 * MiB)
         # Audiobooks often have no bitrate in Plex; the client falls back to size/duration.
         cat["tracks"].append({"path": p, "size": 2 * MiB, "kbps": 0, "duration": 120000, "key": str(5000 + t)})
+    # A second book by the same author (not in the library listing; only reached through the author).
+    for t in range(2):
+        p = os.path.join(root, "Audiobooks", "Author", "Book 2", f"{t:02d}.m4b")
+        mk(p, 2 * MiB)
+        cat["tracks_b"].append({"path": p, "size": 2 * MiB, "kbps": 0, "duration": 120000, "key": str(5100 + t)})
     return cat
 
 
@@ -113,6 +118,9 @@ class FakePlex:
         self.token = token
         # Pretend Plex sees the media under a different folder (like /data inside its own app).
         self.report_root = report_root
+        # Names shown in the UI (the demo swaps in nicer ones for screenshots).
+        self.show_name = "Show's Name"
+        self.author = "Author"
         self.sessions: list[dict] = []
         self.requests: list[str] = []
         root = cat["root"]
@@ -174,8 +182,8 @@ class FakePlex:
                 f' duration="{dur}"/></Media>{extra}')
 
     def _episode_xml(self, ep, extra_attrs=""):
-        return (f'<Video type="episode" ratingKey="{ep["key"]}" grandparentRatingKey="500" grandparentTitle="Show&apos;s Name" '
-                f'parentIndex="{ep["season"]}" index="{ep["episode"]}" title="Episode {ep["episode"]}" {extra_attrs}>'
+        return (f'<Video type="episode" ratingKey="{ep["key"]}" grandparentRatingKey="500" grandparentTitle={quoteattr(self.show_name)} '
+                f'parentIndex="{ep["season"]}" index="{ep["episode"]}" title={quoteattr(ep.get("title") or "Episode " + str(ep["episode"]))} {extra_attrs}>'
                 f'{self._part(ep)}</Video>')
 
     def route(self, path, headers):
@@ -197,7 +205,7 @@ class FakePlex:
             key = u.path.split("/")[3]
             typ = q.get("type", [""])[0]
             if key == "1" and typ == "1":
-                items = [f'<Video type="movie" ratingKey="{m["key"]}" title="Movie">{self._part(m)}</Video>' for m in self.cat["movies"]]
+                items = [f'<Video type="movie" ratingKey="{m["key"]}" title={quoteattr(m.get("title", "Movie"))}>{self._part(m)}</Video>' for m in self.cat["movies"]]
             elif key == "2" and typ == "4":
                 items = [self._episode_xml(e) for e in self.cat["episodes"]]
             elif key == "3" and typ == "10":
@@ -210,6 +218,13 @@ class FakePlex:
             size = int(headers.get("X-Plex-Container-Size", 10 ** 9))
             page = items[start:start + size]
             return f'<MediaContainer size="{len(page)}" totalSize="{len(items)}" offset="{start}">{"".join(page)}</MediaContainer>'
+        if u.path in ("/library/metadata/600/children", "/library/metadata/601/children"):  # a book's tracks, in order
+            book, name = (self.cat["tracks"], "Chapter") if "600" in u.path else (self.cat["tracks_b"], "Book 2, chapter")
+            return "<MediaContainer>" + "".join(
+                f'<Track type="track" ratingKey="{t["key"]}" index="{i + 1}" title="{name} {i + 1}" '
+                f'duration="{t["duration"]}">{self._part(t)}</Track>' for i, t in enumerate(book)) + "</MediaContainer>"
+        if u.path == "/library/metadata/700/children":  # the author's books
+            return '<MediaContainer><Directory type="album" ratingKey="600"/><Directory type="album" ratingKey="601"/></MediaContainer>'
         if u.path == "/library/metadata/500/allLeaves":
             return f'<MediaContainer>{"".join(self._episode_xml(e) for e in self.cat["episodes"])}</MediaContainer>'
         if u.path == "/status/sessions":
@@ -226,8 +241,12 @@ class FakePlex:
                          f'librarySectionID="{section}"')
                 if "season" in item:
                     out.append(self._episode_xml(item, attrs).replace("</Video>", player + markers + "</Video>"))
+                elif item["path"].endswith(".m4b"):
+                    attrs = attrs.replace('librarySectionID="1"', 'librarySectionID="3"')
+                    out.append(f'<Track type="track" ratingKey="{item["key"]}" parentRatingKey="600" grandparentRatingKey="700" grandparentTitle={quoteattr(self.author)} '
+                               f'title="Chapter" {attrs}>{self._part(item)}{player}</Track>')
                 else:
-                    out.append(f'<Video type="movie" ratingKey="{item["key"]}" title="A Movie" {attrs}>{self._part(item)}{player}</Video>')
+                    out.append(f'<Video type="movie" ratingKey="{item["key"]}" title={quoteattr(item.get("title", "A Movie"))} {attrs}>{self._part(item)}{player}</Video>')
             return f'<MediaContainer size="{len(out)}">{"".join(out)}</MediaContainer>'
         return None
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 
 PROC = os.environ.get("PLEXCACHE_PROC", "/proc")
 SYS = os.environ.get("PLEXCACHE_SYS", "/sys")
@@ -123,3 +124,68 @@ def mount_for(path: str, mount_list: list[dict] | None = None) -> dict | None:
     if best and best["fstype"] == "zfs":
         best = dict(best, dataset=best["source"], pool=best["source"].split("/")[0])
     return best
+
+
+def block_sizes(paths) -> dict:
+    """How the given files are stored: ZFS reports each file's block size as st_blksize.
+
+    Files that fit in one block are stored in one block sized to fit, so they're
+    counted apart (``single``): their block size says nothing about the recordsize
+    they were written with. The rest are counted by block size."""
+    out = {"checked": 0, "single": 0, "sizes": {}}
+    for p in paths:
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        out["checked"] += 1
+        if st.st_size <= st.st_blksize:
+            out["single"] += 1
+        else:
+            key = str(st.st_blksize)
+            out["sizes"][key] = out["sizes"].get(key, 0) + 1
+    return out
+
+
+def scan_block_sizes(root: str, progress=None, stop=None, examples: int = 5) -> dict:
+    """Every file under ``root`` on the same dataset (child datasets are skipped: they
+    have their own recordsize), counted like block_sizes(), with a few example paths
+    per block size. ``progress(n)`` is called now and then; ``stop()`` ends it early."""
+    out = {"checked": 0, "single": 0, "sizes": {}, "examples": {}, "complete": False}
+    try:
+        dev = os.stat(root).st_dev
+    except OSError as e:
+        out["error"] = str(e)
+        return out
+    for dirpath, dirnames, filenames in os.walk(root):
+        if stop and stop():
+            return out
+        keep = []
+        for n in dirnames:
+            try:
+                if not n.startswith(".") and os.lstat(os.path.join(dirpath, n)).st_dev == dev:
+                    keep.append(n)
+            except OSError:
+                continue
+        dirnames[:] = keep
+        for n in filenames:
+            p = os.path.join(dirpath, n)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            out["checked"] += 1
+            if st.st_size <= st.st_blksize:
+                out["single"] += 1
+            else:
+                key = str(st.st_blksize)
+                out["sizes"][key] = out["sizes"].get(key, 0) + 1
+                ex = out["examples"].setdefault(key, [])
+                if len(ex) < examples:
+                    ex.append(os.path.relpath(p, root))
+            if progress and out["checked"] % 500 == 0:
+                progress(out["checked"])
+    out["complete"] = True
+    return out

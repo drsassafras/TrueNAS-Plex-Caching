@@ -62,7 +62,7 @@
   }
   function fmtBytes(n) {
     if (n == null) return "unknown";
-    var u = [["TB", 1e12], ["GB", 1e9], ["MB", 1e6]];
+    var u = [["TB", 1e12], ["GB", 1e9], ["MB", 1e6], ["KB", 1e3]];
     for (var i = 0; i < u.length; i++) if (n >= u[i][1]) return (n / u[i][1]).toFixed(n < 10 * u[i][1] ? 1 : 0) + " " + u[i][0];
     return Math.round(n) + " B";
   }
@@ -118,8 +118,10 @@
     if (!sum) return "";
     return '<div class="banner bn-' + esc(sum.status) + '" role="status"><span class="light l-' + esc(sum.status) + '" aria-hidden="true"></span>' + esc(sum.text) + "</div>";
   }
-  function details(key, summary, body) {
-    return '<details data-key="' + esc(key) + '"' + (openDetails[key] ? " open" : "") + "><summary>" + summary + "</summary>" + body + "</details>";
+  // openByDefault: shown open until you close it (e.g. the API-key steps while there's no working key).
+  function details(key, summary, body, openByDefault) {
+    var open = key in openDetails ? openDetails[key] : !!openByDefault;
+    return '<details data-key="' + esc(key) + '" data-def="' + (openByDefault ? 1 : 0) + '"' + (open ? " open" : "") + "><summary>" + summary + "</summary>" + body + "</details>";
   }
   function badge(status, text) { return '<span class="badge b-' + esc(status) + '">' + esc(text) + "</span>"; }
   var STATUS_TEXT = { pass: "Pass", warn: "Warn", fail: "Fail", info: "Info" };
@@ -155,7 +157,7 @@
       var perSec = (stats.avg_kbps[k] || 0) * 125 * (stats.count[k] || 0);
       mx[k] = perSec * w[k + "_sec"] * (100 + pad[k]) / 100;
       mn[k] = perSec * w[k + "_min_sec"] * (100 + pad[k]) / 100;
-      idx[k] = w.cache_index ? (stats.count[k] || 0) * (measured[k] != null ? measured[k] : DEFAULT_INDEX[k]) : 0;
+      idx[k] = (stats.count[k] || 0) * (measured[k] != null ? measured[k] : DEFAULT_INDEX[k]);  // always cached
       needMax += mx[k] + idx[k]; needMin += mn[k] + idx[k];
     });
     var reserve = w.reserve_gb * GB, seconds = {}, status = "unknown";
@@ -172,7 +174,8 @@
       } else { KINDS.forEach(function (k) { seconds[k] = w[k + "_min_sec"]; }); status = "insufficient"; }
     }
     var used = {};
-    KINDS.forEach(function (k) { used[k] = w[k + "_sec"] ? mx[k] * seconds[k] / w[k + "_sec"] : 0; });
+    // Each type's share includes its files' indexes (the end of each file players read first).
+    KINDS.forEach(function (k) { used[k] = (w[k + "_sec"] ? mx[k] * seconds[k] / w[k + "_sec"] : 0) + idx[k]; });
     var index = idx.movie + idx.tv + idx.audio;
     return { needMax: needMax, need: mx, used: used, index: index, indexMeasured: !!ST.index_avg, reserve: reserve, l2: l2, seconds: seconds, status: status };
   }
@@ -212,7 +215,7 @@
         out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">Dataset</th><th scope="col">In use</th><th scope="col">Cache settings</th><th scope="col">Record size</th><th scope="col">L2ARC</th></tr></thead><tbody>';
         g.datasets.forEach(function (r) {
           var c = function (x) { return x ? badge(x.status, x.badge || STATUS_TEXT[x.status] || x.status) + (x.text ? '<div class="det">' + esc(x.text) + "</div>" : "") : '<span class="muted">—</span>'; };
-          out += '<tr><td class="mono nw">' + esc(r.dataset) + (r.mountpoint !== r.dataset ? '<div class="det">at ' + esc(r.mountpoint) + "</div>" : "") + "</td><td>" + c(r.in_use) + "</td><td>" + c(r.cache) + "</td><td>" + c(r.recordsize) + "</td><td>" + c(r.l2arc) + "</td></tr>";
+          out += '<tr><td class="mono nw">' + esc(r.dataset) + (r.mountpoint !== r.dataset ? '<div class="det">at ' + esc(r.mountpoint) + "</div>" : "") + "</td><td>" + c(r.in_use) + "</td><td>" + c(r.cache) + "</td><td>" + c(r.recordsize) + (r.recordsize ? scanCtl(r.dataset) : "") + "</td><td>" + c(r.l2arc) + "</td></tr>";
         });
         out += "</tbody></table></div>";
         g.datasets.forEach(function (r) { r.fixes.forEach(function (it) { out += itemRow(it); }); });
@@ -224,12 +227,26 @@
     return out;
   }
 
+  // "Check every file" for a dataset: Health otherwise looks at a random sample on each check.
+  function scanCtl(ds) {
+    var sc = (ST.block_scans || {})[ds];
+    if (sc && sc.running) return '<div class="det">Checking every file… ' + fmtNum(sc.checked) + " so far</div>";
+    var when = sc && sc.at && sc.complete ? '<span class="muted">checked ' + esc(ago(sc.at)) + "</span>" : "";
+    return '<div class="det scanctl"><button class="link" type="button" data-act="blockscan" data-ds="' + esc(ds) + '">' +
+      (when ? "Check again" : "Check every file") + "</button>" + when + info(
+        "Health looks at a random sample of about 300 files on each check, so a few older files can go unnoticed. " +
+        "This reads the details (not the contents) of every file on the dataset, which takes a minute or two for a large library, and changes nothing.",
+        "checking every file") + "</div>";
+  }
+
   function itemRow(it, extra) {
     var out = '<div class="row">' + badge(it.status, STATUS_TEXT[it.status] || it.status) + '<div class="grow"><div class="what">' + esc(it.title) +
       '</div><div class="det">' + esc(it.detail) + "</div>";
     if (it.fix || it.fix_cmd) {
+      // {APP} in a command is this app's own address (e.g. to download a script it serves).
+      var cmd = it.fix_cmd ? it.fix_cmd.split("{APP}").join(location.origin) : "";
       out += '<div class="fix">' + esc(it.fix);
-      if (it.fix_cmd) out += '<div class="cmd"><code style="white-space:pre-wrap">' + esc(it.fix_cmd) + '</code><button class="btn" data-copy="' + esc(it.fix_cmd) + '">Copy</button></div>';
+      if (cmd) out += '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) + '</code><button class="btn" data-copy="' + esc(cmd) + '">Copy</button></div>';
       out += "</div>";
     }
     return out + (extra || "") + "</div></div>";
@@ -253,12 +270,22 @@
     var r = ST.health && ST.health.recommendations.filter(function (x) { return x.feature === feature; })[0];
     return r && r.verdict === "avoid" ? r.reason : "";
   }
-  function toggle(sec, label, disabled) {
-    disabled = disabled || unavailable(sec);
-    // An unavailable feature can still be switched off, just not on.
-    var lock = disabled && !S[sec].enabled;
-    return '<button class="sw" type="button" aria-pressed="' + (S[sec].enabled ? "true" : "false") + '" aria-label="' + esc(label) + '" data-toggle="' + sec + '"' +
-      (lock ? ' disabled title="' + esc(disabled) + '"' : "") + "><span></span></button>";
+  // Why a feature can't run on this NAS right now ("" if it can).
+  function blocked(sec) {
+    if (sec === "warmup" && ST.l2arc === "absent") return "Needs an L2ARC (SSD cache) on the media pool";
+    return unavailable(sec);
+  }
+  // On means switched on AND able to run. An unavailable feature shows as off and can't be
+  // switched on; its saved choice is kept, so it comes back by itself once the problem is fixed.
+  function isOn(sec) { return !!S[sec].enabled && !blocked(sec); }
+  function toggle(sec, label) {
+    var why = blocked(sec);
+    return '<button class="sw" type="button" aria-pressed="' + (isOn(sec) ? "true" : "false") + '" aria-label="' + esc(label) + '" data-toggle="' + sec + '"' +
+      (why ? ' disabled title="' + esc(why) + '"' : "") + "><span></span></button>";
+  }
+  function unavailableNote(sec, html) {
+    return '<div class="note"><strong>Not available:</strong> ' + html +
+      (S[sec].enabled ? " It switches back on by itself once that’s fixed." : "") + "</div>";
   }
   function guideBtn(sec) {
     return '<button class="link" type="button" data-guide="' + sec + '" aria-expanded="' + guides[sec] + '">' + (guides[sec] ? "Hide how it works" : "How it works") + "</button>";
@@ -267,23 +294,41 @@
     if (!guides[sec]) return "";
     return '<div class="guide">' + cols.map(function (c) { return "<div><h3>" + c[0] + "</h3><p>" + c[1] + "</p></div>"; }).join("") + "</div>";
   }
+  // A small "↺" that puts a setting back to its default; only shown once it's been changed.
+  // Sliders always get one; other fields only when listed here.
+  var REVERT = { "general.poll_seconds": 1, "general.ram_reserve_gb": 1, "warmup.pause_disk_busy": 1 };
+  function revertInner(sec, key, unit) {
+    var d = ST.defaults && ST.defaults[sec] ? ST.defaults[sec][key] : undefined;
+    if (d === undefined || Number(S[sec][key]) === Number(d)) return "";
+    var shown = d === 0 && sec + "." + key === "warmup.pause_disk_busy" ? "off" : d + (unit ? " " + unit : "");
+    return '<button type="button" class="revert" data-revert="' + sec + "." + key + '" title="Back to the default (' + esc(shown) +
+      ')" aria-label="Reset to the default, ' + esc(shown) + '">↺</button>';
+  }
+  // A slot that's always there, so the button can appear the moment a value changes (no redraw needed).
+  function revertBtn(sec, key, unit) {
+    return '<span class="rv-slot" data-rv="' + sec + "." + key + '" data-unit="' + esc(unit || "") + '">' + revertInner(sec, key, unit) + "</span>";
+  }
+  function refreshRevert(sec, key) {
+    var slot = main.querySelector('.rv-slot[data-rv="' + sec + "." + key + '"]');
+    if (slot) slot.innerHTML = revertInner(sec, key, slot.dataset.unit);
+  }
   function range(sec, key, label, min, max, step, unit, help) {
     var id = "f-" + sec + "-" + key;
     var h = splitHelp(help);
-    return '<div class="fld"><label for="' + id + '">' + esc(label) + info(h.more, label) + '<span class="val" data-val="' + id + '">' + esc(S[sec][key]) + " " + unit + "</span></label>" +
+    return '<div class="fld"><label for="' + id + '">' + esc(label) + info(h.more, label) + '<span class="val" data-val="' + id + '">' + esc(S[sec][key]) + " " + unit + "</span>" + revertBtn(sec, key, unit) + "</label>" +
       '<input id="' + id + '" type="range" min="' + min + '" max="' + max + '" step="' + step + '" value="' + esc(S[sec][key]) + '" data-set="' + sec + "." + key + '" data-unit="' + unit + '">' +
       helpDiv(h) + "</div>";
   }
   function select(sec, key, label, options, help) {
     var id = "f-" + sec + "-" + key;
     var cur = String(S[sec][key]), h = splitHelp(help);
-    return '<div class="fld"><label for="' + id + '">' + esc(label) + info(h.more, label) + '</label><select id="' + id + '" data-set="' + sec + "." + key + '">' +
+    return '<div class="fld"><label for="' + id + '">' + esc(label) + info(h.more, label) + (REVERT[sec + "." + key] ? revertBtn(sec, key, "") : "") + '</label><select id="' + id + '" data-set="' + sec + "." + key + '">' +
       options.map(function (o) { return '<option value="' + esc(o[0]) + '"' + (String(o[0]) === cur ? " selected" : "") + ">" + esc(o[1]) + "</option>"; }).join("") +
       "</select>" + helpDiv(h) + "</div>";
   }
   function number(sec, key, label, min, max, help) {
     var id = "f-" + sec + "-" + key, h = splitHelp(help);
-    return '<div class="fld"><label for="' + id + '">' + esc(label) + info(h.more, label) + '</label><input id="' + id + '" type="number" min="' + min + '" max="' + max + '" value="' + esc(S[sec][key]) + '" data-set="' + sec + "." + key + '">' +
+    return '<div class="fld"><label for="' + id + '">' + esc(label) + info(h.more, label) + (REVERT[sec + "." + key] ? revertBtn(sec, key, "") : "") + '</label><input id="' + id + '" type="number" min="' + min + '" max="' + max + '" value="' + esc(S[sec][key]) + '" data-set="' + sec + "." + key + '">' +
       helpDiv(h) + "</div>";
   }
 
@@ -303,11 +348,10 @@
     var out = '<div class="est"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:baseline"><div style="font-weight:600">' + esc(head) + "</div>" + badge(cls[0], cls[1]) + "</div>";
     out += '<div class="bar" role="img" aria-label="L2ARC space estimate">' +
       '<div style="width:' + pct(p.used.movie) + '%;background:var(--c-movie)"></div><div style="width:' + pct(p.used.tv) + '%;background:var(--c-tv)"></div>' +
-      '<div style="width:' + pct(p.used.audio) + '%;background:var(--c-audio)"></div><div style="width:' + pct(p.index) + '%;background:var(--c-idx)"></div>' +
+      '<div style="width:' + pct(p.used.audio) + '%;background:var(--c-audio)"></div>' +
       '<div style="width:' + pct(p.reserve) + '%;background:var(--c-res)"></div></div>';
     out += '<div class="legend"><span><i style="background:var(--c-movie)"></i>Movies ' + fmtBytes(p.used.movie) + "</span><span><i style=\"background:var(--c-tv)\"></i>TV " + fmtBytes(p.used.tv) +
       '</span><span><i style="background:var(--c-audio)"></i>Audio ' + fmtBytes(p.used.audio) + "</span>" +
-      (w.cache_index ? '<span><i style="background:var(--c-idx)"></i>Indexes ' + fmtBytes(p.index) + (p.indexMeasured ? "" : " (estimate)") + "</span>" : "") +
       '<span><i style="background:var(--c-res)"></i>Kept free ' + w.reserve_gb + " GB</span>" +
       (p.l2 != null ? "<span>Unused " + fmtBytes(Math.max(0, p.l2 - p.needMax - p.reserve)) + "</span>" : "") + "</div>";
     if (p.status === "reduced" || p.status === "insufficient") {
@@ -317,6 +361,87 @@
       fmtNum(st.count.tv) + " episodes (" + (st.avg_kbps.tv / 1000).toFixed(1) + " Mbps) and " + fmtNum(st.count.audio) + " tracks (" + st.avg_kbps.audio +
       " kbps), plus a small safety margin. Each file is read using its own bitrate.</div></div>";
     return out;
+  }
+
+  // How big an L2ARC Library warm-up needs, worked out from your library like the original script:
+  // titles × average bitrate × seconds of the start, plus a safety margin, file indexes and the
+  // space kept free. Shown even without an L2ARC, since that's when it's most useful.
+  var SSD_SIZES = [128, 256, 500, 1000, 2000, 4000, 8000];  // GB, as drives are sold
+  var GROWTH = 0.25;  // room for the library to grow
+  function sizingHtml(standalone) {
+    var st = ST.library.stats, w = S.warmup;
+    if (!st || !st.scanned_at) return standalone ? '<div class="sizing"><p class="muted" style="margin:14px 0 0">' +
+      (ST.library.scanning ? "Reading your libraries to work out how big an L2ARC you’d need…" : "Connect Plex to see how big an L2ARC you’d need.") + "</p></div>" : "";
+    var pad = { movie: w.padding_video, tv: w.padding_video, audio: w.padding_audio }, measured = ST.index_avg || {};
+    var rows = [], tot = { min: 0, set: 0 };
+    // One row per library (audiobooks and music have very different bitrates), using its type's seconds.
+    var libs = st.libraries && st.libraries.length ? st.libraries :
+      KINDS.map(function (k) { return { name: KIND_NAME[k], kind: k, count: st.count[k] || 0, avg_kbps: st.avg_kbps[k] || 0 }; });
+    libs.forEach(function (l) {
+      var k = l.kind, perSec = (l.avg_kbps || 0) * 125 * l.count * (100 + pad[k]) / 100;
+      var idx = l.count * (measured[k] != null ? measured[k] : DEFAULT_INDEX[k]);  // each file's index, always cached
+      var r = { name: l.name, n: l.count, kbps: l.avg_kbps || 0, min: perSec * w[k + "_min_sec"] + idx, set: perSec * w[k + "_sec"] + idx,
+        minSec: w[k + "_min_sec"], setSec: w[k + "_sec"], kind: KIND_NAME[k] };
+      tot.min += r.min; tot.set += r.set;
+      rows.push(r);
+    });
+    var reserve = w.reserve_gb * GB;
+    var need = { min: tot.min + reserve, set: tot.set + reserve };
+    var advise = need.set * (1 + GROWTH);
+    var ssd = SSD_SIZES.filter(function (g) { return g * GB >= advise; })[0];
+    // L2ARC keeps a small record in RAM for every block it holds (about 100 bytes each).
+    var rs = ((ST.zfs.datasets || []).map(function (d) { return d.props && d.props.recordsize; }).filter(Boolean)[0]) || 131072;
+    var headerRam = advise / rs * 100;
+    var kbps = function (v) { return v >= 1000 ? (v / 1000).toFixed(1) + " Mbps" : Math.round(v) + " kbps"; };
+    var table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">Titles</th><th scope="col">Avg bitrate</th>' +
+      '<th scope="col">Minimum</th><th scope="col">Your settings</th></tr></thead><tbody>';
+    rows.forEach(function (r) {
+      table += "<tr><td>" + esc(r.name) + (r.name.toLowerCase().indexOf(r.kind.toLowerCase()) < 0 ? ' <span class="muted">· ' + esc(r.kind) + "</span>" : "") + '</td><td class="nw">' + fmtNum(r.n) + '</td><td class="nw">' + (r.n ? kbps(r.kbps) : "—") +
+        '</td><td class="nw">' + esc(fmtBytes(r.min)) + ' <span class="muted">· ' + r.minSec + ' s</span></td><td class="nw">' + esc(fmtBytes(r.set)) +
+        ' <span class="muted">· ' + r.setSec + " s</span></td></tr>";
+    });
+    var both = function (v, note) { var c = '<td class="nw">' + esc(fmtBytes(v)) + (note ? ' <span class="muted">· ' + note + "</span>" : "") + "</td>"; return c + c; };
+    table += "<tr><td>Kept free</td><td></td><td></td>" + both(reserve) + "</tr>" +
+      '<tr class="sum"><th scope="row">Total</th><td></td><td></td><td class="nw">' + esc(fmtBytes(need.min)) + '</td><td class="nw">' + esc(fmtBytes(need.set)) + "</td></tr></tbody></table></div>";
+    var l2 = ST.zfs.l2_total, head;
+    if (ST.l2arc === "absent" || !l2) {
+      head = "For Library warm-up, add an L2ARC of at least " + fmtBytes(need.set) + (ssd ? " — a " + (ssd >= 1000 ? ssd / 1000 + " TB" : ssd + " GB") + " SSD leaves room to grow." : ".");
+    } else {
+      head = "Your " + fmtBytes(l2) + " L2ARC " + (l2 >= advise ? "holds your settings with room for the library to grow." :
+        l2 >= need.set ? "holds your settings, with a little room to grow." : l2 >= need.min ? "holds the minimum; seconds are reduced to fit." :
+        "is smaller than the minimum (" + fmtBytes(need.min) + ").");
+    }
+    var why = "Each title’s first seconds × its library’s average bitrate (" + w.padding_video + "% extra for video, " + w.padding_audio + "% for audio, for bitrate spikes)" +
+", plus each file’s seek index (" + (ST.index_avg ? "measured by warm-up" : "estimated until warm-up has measured yours") +
+      "), plus the space kept free for everything else ZFS caches. " +
+      "<strong>Minimum</strong> is the least warm-up will cache (" + w.movie_min_sec + " s / " + w.tv_min_sec + " s / " + w.audio_min_sec + " s); <strong>Your settings</strong> is what it aims for. " +
+      "The suggested SSD adds " + Math.round(GROWTH * 100) + "% for the library to grow. " +
+      "An L2ARC also uses a little RAM to keep track of what it holds — about " + fmtBytes(headerRam) + " for " + fmtBytes(advise) + " at this dataset’s " +
+      Math.round(rs / 1024) + " KiB record size.";
+    var body = '<p style="font-weight:600;margin:12px 0 8px">' + esc(head) + info(why, "L2ARC sizing") + "</p>" + table +
+      '<p class="muted" style="font-size:13px;margin:8px 0 0">From ' + fmtNum(st.count.movie + st.count.tv + st.count.audio) + " titles in the libraries you’re caching.</p>";
+    if (standalone) return '<div class="sizing">' + body + "</div>";
+    return '<div class="sizing">' + details("l2-sizing", "L2ARC sizing", body) + "</div>";
+  }
+
+  // The settings that decide the size, for when warm-up's own controls aren't shown (no L2ARC yet).
+  // They're the real settings: what you pick here is what warm-up uses once it can run.
+  function sizingControls() {
+    return '<div class="grid">' +
+      range("warmup", "movie_sec", "Movies — seconds to cache", 3, 180, 1, "s", "") +
+      range("warmup", "tv_sec", "TV episodes — seconds to cache", 3, 180, 1, "s", "") +
+      range("warmup", "audio_sec", "Audio — seconds to cache", 1, 60, 1, "s", "") +
+      range("warmup", "reserve_gb", "Keep free in L2ARC", 0, 500, 10, "GB", "Room left for everything else ZFS wants to cache.") + "</div>";
+  }
+  function sizingAdvanced() {
+    return details("l2-advanced", "Minimums and safety margins",
+      '<p class="help" style="margin:8px 0 0">When the L2ARC is too small for your seconds, warm-up cuts them back, but never below these.</p>' +
+      '<div class="grid" style="margin-top:8px">' +
+      number("warmup", "movie_min_sec", "Movies — minimum seconds", 1, 600, "") +
+      number("warmup", "tv_min_sec", "TV episodes — minimum seconds", 1, 600, "") +
+      number("warmup", "audio_min_sec", "Audio — minimum seconds", 1, 600, "") +
+      number("warmup", "padding_video", "Video safety margin (%)", 0, 100, "Extra on top of the average bitrate, for scenes that run higher.") +
+      number("warmup", "padding_audio", "Audio safety margin (%)", 0, 100, "") + "</div>");
   }
 
   function checkbox(sec, key, label, help) {
@@ -329,7 +454,7 @@
   function pauseCard() {
     var w = S.warmup, timed = w.schedule === "daily" || w.schedule === "weekly";
     var state = ST.l2arc === "absent" ? "Library warm-up is unavailable on this NAS (it needs an L2ARC), so these only matter once one is added." :
-      (w.enabled ? "" : "Library warm-up is switched off in Features; these apply whenever it runs.");
+      (isOn("warmup") ? "" : "Library warm-up is switched off in Features; these apply whenever it runs.");
     return '<section class="card" id="warmup-pauses">' + heading("Library warm-up pauses", "Warm-up steps aside for any of these, then carries on where it left off.") +
       (state ? '<div class="note" style="background:var(--guide-bg);border-color:var(--guide-line);color:var(--ink)">' + esc(state) + "</div>" : "") +
       checkbox("warmup", "pause_buffering", "A player is buffering", "Plex reports a stream waiting for data. Stays paused for 3 minutes after it clears.") +
@@ -388,8 +513,8 @@
     // ---- warm-up
     var w = S.warmup;
     var noL2 = ST.l2arc === "absent";
-    out += '<div class="stack"><section class="card' + (w.enabled ? "" : " off") + '"><div class="head">' +
-      toggle("warmup", "Library warm-up", noL2 ? "Needs an L2ARC (SSD cache) on the media pool" : "") +
+    out += '<div class="stack"><section class="card' + (isOn("warmup") ? "" : " off") + '"><div class="head">' +
+      toggle("warmup", "Library warm-up") +
       "<h2>Library warm-up</h2>" + rec("warmup") + '<span style="flex:1"></span>' + guideBtn("warmup") + "</div>" +
       '<p class="lede">On a schedule, reads the first few seconds of every movie, episode and track so they land in the SSD cache (L2ARC). Playback then starts at SSD speed instead of waiting for the hard drives.</p>' +
       guide("warmup", [
@@ -397,15 +522,20 @@
         ["What it needs", "An L2ARC (SSD cache) on the media pool, and <span class=\"mono\">primarycache=all</span> plus <span class=\"mono\">secondarycache=all</span> on the media dataset — ZFS only fills L2ARC from data that passed through RAM. Health checks all three."],
         ["Cost", "Disk time while it runs (paced below) and L2ARC space (estimated below). Re-runs keep cached starts from being evicted."]]);
     if (noL2) {
-      out += '<div class="note"><strong>Not available: no L2ARC found.</strong> This feature stores the start of each title on an SSD cache (L2ARC), and the media pool doesn’t have one. ' +
-        "To add one in TrueNAS: Storage → your media pool → Manage Devices → Add VDEV → Cache, and pick an SSD." + (w.enabled ? " Turn this off for now." : "") + "</div>";
+      out += unavailableNote("warmup", "no L2ARC found. This feature stores the start of each title on an SSD cache (L2ARC), and the media pool doesn’t have one. " +
+        "To add one in TrueNAS: Storage → your media pool → Manage Devices → Add VDEV → Cache, and pick an SSD.");
     } else if (unavailable("warmup")) {
-      out += '<div class="note"><strong>Not available:</strong> ' + esc(unavailable("warmup")) + "</div>";
+      out += unavailableNote("warmup", esc(unavailable("warmup")));
     } else if (ST.l2arc === "unknown") {
       out += '<div class="note">Couldn’t confirm the media pool has an L2ARC. <a href="/settings" data-nav>Connect TrueNAS in Settings</a> to check.</div>';
     }
     out += warmupStatus();
-    if (w.enabled) {
+    if (!isOn("warmup")) {
+      out += '<h3 style="margin:18px 0 0;font-size:15px">How big an L2ARC you’d need</h3>' +
+        '<p class="help" style="margin:4px 0 0">Try different settings to see what size of SSD to get. They’re saved, so warm-up uses them once it can run.</p>' +
+        sizingControls() + sizingHtml(true) + sizingAdvanced();
+    }
+    if (isOn("warmup")) {
       var sched = select("warmup", "schedule", "Schedule", [["daily", "Daily"], ["weekly", "Weekly"], ["hours", "Every few hours"], ["manual", "Manual only"]]);
       var when = "";
       if (w.schedule === "daily" || w.schedule === "weekly") {
@@ -426,23 +556,20 @@
         range("warmup", "movie_sec", "Movies — how much of the start to cache", 3, 180, 1, "s of playback", "Playback time from the start of each movie — not a wait before loading. Plex buffers 3–15 s locally, up to 60 s for remote or transcoded streams.") +
         range("warmup", "tv_sec", "TV episodes — how much of the start to cache", 3, 180, 1, "s of playback", "Playback time from the start of each episode. Episodes are usually lower bitrate, so more costs less.") +
         range("warmup", "audio_sec", "Audio — how much of the start to cache", 1, 60, 1, "s of playback", "Playback time from the start of each track or book. Tiny; rarely matters for space.") +
-        range("warmup", "reserve_gb", "Keep free in L2ARC", 0, 500, 10, "GB", "Room left for everything else ZFS wants to cache.") +
-        '<div class="fld" style="grid-column:1/-1">' + checkbox("warmup", "cache_index", "Also cache each file’s index at the end",
-          "Many MKVs (and MP4s made without “fast start”) keep their seek index at the end, and players read it before playing — one more trip to the disks. " +
-          "The app finds it in the file’s own layout, so only those bytes are read: usually a few hundred KB per film. Each run reports what it found under Activity.") + "</div>";
+        range("warmup", "reserve_gb", "Keep free in L2ARC", 0, 500, 10, "GB", "Room left for everything else ZFS wants to cache.");
       var libsOn = (ST.locations || []).filter(function (l) { return !l.excluded; });
       var keys = {}; libsOn.forEach(function (l) { keys[l.key] = l.library; });
       var names = Object.keys(keys).map(function (k) { return keys[k]; });
       out += '<div class="fld" style="grid-column:1/-1"><span class="lbl">Libraries</span><div class="help" style="margin-top:0">' +
         (names.length ? "Caching " + esc(names.join(", ")) + ". " : "") + 'Choose libraries in <a href="/settings#mappings" data-nav>Settings → Media mappings</a>.</div></div>';
-      out += "</div>" + estimateHtml() +
+      out += "</div>" + estimateHtml() + sizingHtml(false) + sizingAdvanced() +
         '<p class="help" style="margin-top:14px">When it pauses (buffering, scrubs, busy disks, a finish-by time) is set in <a href="/settings#warmup-pauses" data-nav>Settings → Library warm-up pauses</a>.</p>';
     }
     out += "</section>";
 
     // ---- now playing
     var n = S.nowplaying;
-    out += '<section class="card' + (n.enabled ? "" : " off") + '"><div class="head">' + toggle("nowplaying", "Now-playing preload") +
+    out += '<section class="card' + (isOn("nowplaying") ? "" : " off") + '"><div class="head">' + toggle("nowplaying", "Now-playing preload") +
       "<h2>Now-playing preload</h2>" + rec("nowplaying") + '<span style="flex:1"></span>' + guideBtn("nowplaying") + "</div>" +
       '<p class="lede">Reads ahead of whoever is watching, so skipping forward or back comes from cache instead of the hard drives.</p>' +
       guide("nowplaying", [
@@ -450,8 +577,8 @@
         ["What it needs", "<span class=\"mono\">primarycache=all</span> on the media dataset, so what’s read stays in RAM. With <span class=\"mono\">metadata</span> nothing is cached and this has no effect."],
         ["How it reads", "Once Plex reports the stream playing and its start-up buffer has had time to fill, it reads from the play position to the end, then the beginning — the whole file if it fits the RAM limit, otherwise as much as fits ahead of the viewer. If they jump past that, it starts again from there."],
         ["Cost", "RAM (the ZFS cache), up to the limit below for all streams together. Older one-off reads are what make room; data other apps use often stays."]]);
-    if (unavailable("nowplaying") && !n.enabled) out += '<div class="note"><strong>Not available:</strong> ' + esc(unavailable("nowplaying")) + "</div>";
-    if (n.enabled) {
+    if (unavailable("nowplaying")) out += unavailableNote("nowplaying", esc(unavailable("nowplaying")));
+    if (isOn("nowplaying")) {
       if (badDs.length) {
         out += '<div class="note"><strong>From Health:</strong> ' + badDs.map(function (d) {
           return esc(d.libraries.join(", ")) + ' (on <span class="mono">' + esc(d.dataset) + "</span>, primarycache=" + esc(d.props.primarycache) + ")";
@@ -480,15 +607,16 @@
 
     // ---- next episode
     var x = S.nextepisode;
-    out += '<section class="card' + (x.enabled ? "" : " off") + '"><div class="head">' + toggle("nextepisode", "Next-episode prefetch") +
+    out += '<section class="card' + (isOn("nextepisode") ? "" : " off") + '"><div class="head">' + toggle("nextepisode", "Next-episode prefetch") +
       "<h2>Next-episode prefetch</h2>" + rec("nextepisode") + '<span style="flex:1"></span>' + guideBtn("nextepisode") + "</div>" +
-      '<p class="lede">While a TV episode plays, reads the start of the next one so it starts instantly. Uses Plex’s own episode order, so it crosses seasons and works with any folder layout.</p>' +
+      '<p class="lede">While a TV episode plays, reads the start of the next one so it starts instantly. For music and audiobooks, reads ahead in the album or book — how far is chosen per library below. ' +
+      "Uses Plex’s own order, so it crosses seasons and works with any folder layout.</p>" +
       guide("nextepisode", [
-        ["When it helps", "Binge watching. Removes the pause between episodes, even without L2ARC."],
+        ["When it helps", "Binge watching, and listening to an album or audiobook straight through. Removes the pause before the next episode or track, even without L2ARC."],
         ["What it needs", "<span class=\"mono\">primarycache=all</span> on the media dataset so the read stays cached. Plex tells the app what’s playing — no Tautulli, no scripts, no Plex Pass."],
         ["Cost", "One read of up to the limit below per episode watched, at a gentle pace."]]);
-    if (unavailable("nextepisode")) out += '<div class="note"><strong>Not available:</strong> ' + esc(unavailable("nextepisode")) + "</div>";
-    if (x.enabled) {
+    if (unavailable("nextepisode")) out += unavailableNote("nextepisode", esc(unavailable("nextepisode")));
+    if (isOn("nextepisode")) {
       out += '<div class="grid">' +
         select("nextepisode", "start_at", "Start prefetching the next episode", [
           ["default", "Default (" + (ST.l2arc === "present" ? "after Now-playing preload finishes" : "at 90%") + ")"],
@@ -496,10 +624,40 @@
           ["80", "At 80%"],
           ["90", "At 90% (about when Plex marks it watched)"]], startHelp(x.start_at)) +
         range("nextepisode", "ram_percent", "RAM limit", 5, 90, 5, "%", ramHelp("nextepisode", "Reads from the start of the episode, so the opening is cached first; the whole episode if it fits.")) +
-        "</div>";
+        nextLibraries() + "</div>";
     }
     out += "</section></div>";
     return out;
+  }
+
+  // What Next-episode does for each TV, music and audiobook library.
+  var TV_CHOICES = [["off", "Don’t preload"], ["next", "Next episode (default)"]];
+  var AUDIO_CHOICES = [["off", "Don’t preload"], ["10", "10 minutes ahead"], ["20", "20 minutes ahead (default)"], ["60", "1 hour ahead"],
+    ["rest", "Rest of the album / book"], ["album", "Whole album / book"], ["artist", "Everything by the artist / author"]];
+  var PRELOAD_HELP =
+    "<strong>Everything here stays within the RAM limit above</strong>, shared with every other stream — the bigger choices often won’t finish, and that’s fine: " +
+    "they always read in order of what’s most likely to play next.<br><br>" +
+    "<strong>Don’t preload</strong> — leave this library alone.<br>" +
+    "<strong>10 / 20 minutes, 1 hour ahead</strong> — the next tracks in album order, whole files. A few tracks ahead is enough for the next one to start instantly; " +
+    "10 minutes suits systems short on RAM, 20 is a good default.<br>" +
+    "<strong>Rest of the album / book</strong> — everything after the current track. Good for audiobooks, which are rarely played out of order, and albums played start to finish.<br>" +
+    "<strong>Whole album / book</strong> — the rest, then the tracks before this one too. For albums played on shuffle, where any track can come next.<br>" +
+    "<strong>Everything by the artist / author</strong> — the rest of this album, then the first seconds of every other album (so any of them starts instantly), " +
+    "then those albums in full. Only worth it if you hop between someone’s albums, and with plenty of RAM; with shuffle across a whole library it rarely pays off.<br><br>" +
+    "TV libraries just read the start of the next episode. It tops up as each track starts, and skips anything read in the last few hours.";
+  function nextLibraries() {
+    var libs = ((ST.library && ST.library.libraries) || []).filter(function (l) { return !l.excluded && (l.kind === "tv" || l.kind === "audio"); });
+    if (!libs.length) return "";
+    var modes = S.nextepisode.library_modes || {};
+    return '<div class="fld" style="grid-column:1/-1"><span class="lbl">What to preload, per library' + info(PRELOAD_HELP, "preload choices") + "</span>" +
+      '<div class="libmodes">' + libs.map(function (l) {
+        var opts = l.kind === "tv" ? TV_CHOICES : AUDIO_CHOICES, def = l.kind === "tv" ? "next" : "20", cur = modes[l.key] || def;
+        return '<label class="libmode"><span>' + esc(l.title) + ' <span class="muted">· ' + (l.kind === "tv" ? "TV" : "music / audiobooks") + "</span>" +
+          (cur !== def ? '<button type="button" class="revert" data-mode-revert="' + esc(l.key) + '" title="Back to the default" aria-label="Reset ' + esc(l.title) + ' to the default">↺</button>' : "") +
+          '</span><select data-nemode="' + esc(l.key) + '" aria-label="' + esc("Preload for " + l.title) + '">' +
+          opts.map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === cur ? " selected" : "") + ">" + esc(o[1]) + "</option>"; }).join("") +
+          "</select></label>";
+      }).join("") + "</div></div>";
   }
 
   function pageActivity() {
@@ -516,7 +674,19 @@
       out += '<div class="sess"><div><div class="what">' + esc(s.label) + '</div><div class="muted" style="font-size:13px">' + esc(s.player || "Unknown player") + " · " +
         (s.local === false ? "remote" : "local") + " · " + (s.transcoding ? "transcoding" : "direct play") + " · " + esc(s.progress) + "% watched</div></div><div>";
       if (!s.jobs.length) out += '<span class="muted" style="font-size:13px">No cache work for this stream yet</span>';
-      s.jobs.forEach(function (j) {
+      var nextJobs = s.jobs.filter(function (j) { return j.feature === "nextepisode" && j.state !== "cancelled"; });
+      var shown = s.jobs;
+      if (nextJobs.length > 3) {
+        // A long queue (music, audiobooks): one line for it, plus what's being read now.
+        var doneN = nextJobs.filter(function (j) { return j.state === "done"; }).length;
+        var bytes = nextJobs.reduce(function (t, j) { return t + (j.read || 0); }, 0);
+        var now = nextJobs.filter(function (j) { return j.state === "reading"; })[0];
+        out += '<div class="muted" style="font-size:13px">Next-episode prefetch</div><div style="display:flex;gap:10px;align-items:center;margin:4px 0 8px;flex-wrap:wrap">' +
+          badge(doneN === nextJobs.length ? "done" : "running", doneN === nextJobs.length ? "Done" : "Reading") + "<span>" + fmtNum(doneN) + " of " + fmtNum(nextJobs.length) +
+          " tracks ready · " + esc(fmtBytes(bytes)) + (now ? " · now: " + esc(now.target) : "") + "</span></div>";
+        shown = s.jobs.filter(function (j) { return j.feature !== "nextepisode"; });
+      }
+      shown.forEach(function (j) {
         var label = { waiting: "Waiting", reading: "Reading", done: "Done", failed: "Failed", cancelled: "Stopped" }[j.state];
         var feat = j.feature === "nextepisode" ? "Next-episode prefetch" : "Now-playing preload";
         var of = j.whole ? " (whole file)" : (j.size ? " (" + Math.round(j.length / j.size * 100) + "% of the file)" : "");
@@ -532,7 +702,7 @@
     // runs
     out += '<section class="card" style="margin-bottom:20px"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline"><h2>Library warm-up runs' + info("“L2ARC grew” compares cache size before and after each run. ZFS fills L2ARC gradually, so it can lag a little. " +
       "If it stays near zero and “Already cached” stays low on repeat runs, reads aren’t landing in L2ARC — Health will flag it.", "warm-up runs") + '</h2><span class="muted" style="font-size:13px">' +
-      (S.warmup.enabled ? (ST.warmup.next_run ? "Next run " + esc(fmtIso(ST.warmup.next_run)) : "Manual only") : "Library warm-up is off") + "</span></div>" + warmupStatus();
+      (isOn("warmup") ? (ST.warmup.next_run ? "Next run " + esc(fmtIso(ST.warmup.next_run)) : "Manual only") : "Library warm-up is off") + "</span></div>" + warmupStatus();
     if (!a.runs.length) out += '<p class="muted">No runs yet.</p>';
     else {
       out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">Started</th><th scope="col">Files</th><th scope="col">Read</th><th scope="col">Already cached</th><th scope="col">L2ARC grew</th><th scope="col">Took</th><th scope="col">Result</th></tr></thead><tbody>';
@@ -648,7 +818,7 @@
       !t.skips.total ? "none" : (t.skips.cached / t.skips.total >= 0.9 ? "ok" : "warn"),
       "When someone jumps ahead or back, was that part already loaded? Those skips start straight away instead of waiting on the disks.");
     out += rtile("Next episodes ready", frac(t.next.ready, t.next.total),
-      t.next.total ? (t.next.lead_min != null ? "on average " + t.next.lead_min + " min early" : "&nbsp;") : (S.nextepisode.enabled ? "no episode changes yet" : "Next-episode is off"),
+      t.next.total ? (t.next.lead_min != null ? "on average " + t.next.lead_min + " min early" : "&nbsp;") : (isOn("nextepisode") ? "no episode changes yet" : "Next-episode is off"),
       !t.next.total ? "none" : (t.next.ready === t.next.total ? "ok" : "warn"),
       "Was the next episode fully loaded before it started? Ready means no pause between episodes.");
     out += rtile("Still cached 30 min later", t.retention.pct == null ? "—" : t.retention.pct + "%",
@@ -692,9 +862,10 @@
 
   function secretInput(sec, key, label, id) {
     var set = S[sec][key + "_set"];
-    // type="text" (not "password") so browsers don't offer to save it as a login; CSS masks it.
+    // A plain text field, not a password field or one masked with CSS: browsers treat either as a
+    // login and offer to save it. It's cleared the moment it's saved, so the key isn't left on screen.
     return '<div class="fld"><label for="' + id + '">' + esc(label) + '</label><input id="' + id + '" type="text" class="secret" autocomplete="off" autocapitalize="off" spellcheck="false" ' +
-      'data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" placeholder="' + (set ? "Saved — type to replace" : "") +
+      'data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" placeholder="' + (set ? "Saved — paste to replace" : "Paste it here") +
       '" value="" data-secret="' + sec + "." + key + '"></div>';
   }
   function textInput(sec, key, label, id, help, placeholder) {
@@ -736,7 +907,8 @@
       details("apikey", "How to create an API key",
         "<ol style=\"margin:8px 0 0;padding-left:20px\"><li>In TrueNAS, open your user menu (top right) → <strong>API Keys</strong>.</li>" +
         "<li>Choose <strong>Add</strong>, name it “plex-cache”, and save.</li>" +
-        "<li>Copy the key it shows (it’s only shown once) and paste it above.</li></ol>") +
+        "<li>Copy the key it shows (it’s only shown once) and paste it above.</li></ol>",
+        !(c.truenas_key && c.truenas_key.status === "ok")) +
       "</section>";
 
     // ---- Media mappings
@@ -745,7 +917,14 @@
     // ---- Behaviour
     var g = S.general;
     out += '<section class="card"><h2>Behaviour</h2><p class="hint">Applies to all features.</p><div class="grid" style="margin-top:0">' +
-      select("general", "poll_seconds", "Check what’s playing every", [[5, "5 seconds"], [10, "10 seconds"], [30, "30 seconds"]], "Drives Now-playing and Next-episode.") +
+      select("general", "poll_seconds", "Check what’s playing every", [[3, "3 seconds"], [5, "5 seconds (default)"], [10, "10 seconds"], [30, "30 seconds"]],
+        { s: "Drives Now-playing and Next-episode.", more: "How often the app asks Plex what’s playing. Each check is one small request on your own network, so the load is tiny at any of these. " +
+          "What changes is how quickly it reacts: when a stream starts, when someone skips (Now-playing then reads from the new spot), and when a player buffers (warm-up pauses for it).<br><br>" +
+          "<strong>3 seconds</strong> — a lot of music, or viewers who skip around: reacts a little sooner.<br>" +
+          "<strong>5 seconds</strong> — the best fit for most people.<br>" +
+          "<strong>10 seconds</strong> — fine for mostly movies and TV watched straight through.<br>" +
+          "<strong>30 seconds</strong> — the fewest requests, but streams and skips can be noticed up to half a minute late; short songs may be half over, and brief buffering can be missed.<br><br>" +
+          "Faster than 3 seconds gains little: Now-playing waits for Plex’s own start-up buffer anyway." }) +
       number("general", "ram_reserve_gb", "ZFS cache to leave for the rest of the NAS (GB)", 0, 4096, reserveHelp()) +
       "</div></section>";
     out += pauseCard();
@@ -754,11 +933,18 @@
     return out;
   }
 
+  // While a benchmark runs: which dataset it's reading now, and which are still to come.
+  function benchState(name) {
+    var p = ST.benchmark.running && ST.benchmark.progress;
+    if (!p || p.finished.indexOf(name) >= 0) return "";
+    return p.dataset === name ? badge("running", "Measuring…") : badge("info", "Waiting");
+  }
   function diskSpeedCard() {
     var g = S.general, b = ST.benchmark, speeds = g.disk_speeds || {};
     var ds = (ST.zfs.datasets || []).filter(function (d) { return d.keys.length; });
     var out = '<section class="card" id="disk-speed"><div class="head"><h2>Disk speed</h2><span style="flex:1"></span>' +
-      '<button class="btn" data-act="benchmark"' + (b.running || !ds.length ? " disabled" : "") + ">" + (b.running ? "Measuring…" : "Benchmark now") + "</button></div>" +
+      '<button class="btn" data-act="benchmark"' + (b.running || !ds.length ? " disabled" : "") + ">" +
+      (b.running ? (b.progress ? "Measuring " + (b.progress.done + 1) + " of " + b.progress.total + "…" : "Measuring…") : "Benchmark now") + "</button></div>" +
       '<p class="hint">How fast each dataset reads when nothing is cached.' + info("The app uses it to tell a cache hit from a disk read " +
       "(a read at least 4× faster came from cache) — that’s how warm-up reports what was already cached — to time Now-playing’s automatic start, and to work out how hard background " +
       "warm-up is working your disks. Datasets on different disks (HDD, SSD, mixed) get their own speed.<br><br>" +
@@ -773,7 +959,7 @@
         var name = d.dataset || d.mountpoint, row = speeds[name];
         out += '<tr><td class="mono nw">' + esc(name) + "</td><td>" + esc(d.libraries.join(", ")) + '</td><td class="nw"><input type="number" min="10" max="20000" aria-label="Speed of ' + esc(name) +
           ' in MB/s" data-speed="' + esc(name) + '" value="' + esc(row ? row.mb_s : g.hdd_mb_per_sec) + '"> MB/s</td><td class="muted">' +
-          (row && row.measured_at ? esc(row.measured_at.replace("T", " ")) : (row ? "Set by hand" : "Not yet — using the default")) + "</td></tr>";
+          (benchState(name) || (row && row.measured_at ? esc(row.measured_at.replace("T", " ")) : (row ? "Set by hand" : "Not yet — using the default"))) + "</td></tr>";
       });
       out += "</tbody></table></div>";
     }
@@ -1004,6 +1190,23 @@
   window.addEventListener("resize", function () { if (popFor) reattachInfo(); });
 
   document.addEventListener("click", function (e) {
+    var mr = e.target.closest("[data-mode-revert]");
+    if (mr) {
+      e.preventDefault();
+      var lm2 = JSON.parse(JSON.stringify(S.nextepisode.library_modes || {}));
+      delete lm2[mr.dataset.modeRevert];
+      queueSave("nextepisode", "library_modes", lm2, true);
+      render();
+      return;
+    }
+    var rv = e.target.closest("[data-revert]");
+    if (rv) {
+      e.preventDefault();  // it sits inside a <label>
+      var rp = rv.dataset.revert.split(".");
+      queueSave(rp[0], rp[1], ST.defaults[rp[0]][rp[1]], true);
+      render();
+      return;
+    }
     var ib = e.target.closest(".info");
     if (ib) {
       e.preventDefault();  // inside a <label>, don't also toggle its checkbox
@@ -1048,6 +1251,14 @@
 
   function action(act, el) {
     if (act === "recheck") { api("/api/checks", { rescan: true }).then(function () { toast("Checking…"); ST.checking = true; render(); }); }
+    else if (act === "blockscan") {
+      api("/api/blockscan", { dataset: el.dataset.ds }).then(function (r) {
+        toast(r.started ? "Checking every file…" : "Already checking");
+        ST.block_scans = ST.block_scans || {};
+        ST.block_scans[el.dataset.ds] = { running: true, checked: 0 };
+        render();
+      });
+    }
     else if (act === "benchmark") { api("/api/benchmark", {}).then(function () { toast("Measuring disk speed…"); ST.benchmark.running = true; render(); }); }
     else if (act === "warmup-run") { api("/api/warmup/run", {}).then(function (r) { toast(r.started ? "Warm-up started" : "Already running"); load(); }); }
     else if (act === "warmup-stop") { api("/api/warmup/stop", {}).then(function () { toast("Stopping…"); }); }
@@ -1088,7 +1299,8 @@
   // Keep <details> boxes open across the automatic refreshes ("toggle" doesn't bubble, so capture it).
   document.addEventListener("toggle", function (e) {
     var d = e.target;
-    if (d.tagName === "DETAILS" && d.dataset.key) openDetails[d.dataset.key] = d.open;
+    // Only remember a choice: the box opening itself by default isn't one.
+    if (d.tagName === "DETAILS" && d.dataset.key && (d.dataset.key in openDetails || d.open !== (d.dataset.def === "1"))) openDetails[d.dataset.key] = d.open;
   }, true);
 
   function signIn() {
@@ -1117,14 +1329,31 @@
 
   main.addEventListener("input", function (e) {
     var el = e.target;
+    if (el.type === "number" && el.dataset.set && el.value !== "") {
+      var np = el.dataset.set.split("."), n = Number(el.value), lo = Number(el.min), hi = Number(el.max);
+      if (n >= lo && n <= hi) {
+        setLocal(np[0], np[1], n);
+        refreshRevert(np[0], np[1]);
+        if (np[0] === "warmup") {  // the sizing table follows as you type
+          var siz2 = main.querySelector(".sizing");
+          if (siz2) siz2.outerHTML = sizingHtml(!isOn("warmup"));
+          var est2 = main.querySelector(".est");
+          if (est2) est2.outerHTML = estimateHtml();
+        }
+      }
+      return;
+    }
     if (el.type === "range" && el.dataset.set) {
       var parts = el.dataset.set.split(".");
       setLocal(parts[0], parts[1], Number(el.value));
       var lab = main.querySelector('[data-val="' + el.id + '"]');
       if (lab) lab.textContent = el.value + " " + el.dataset.unit;
+      refreshRevert(parts[0], parts[1]);
       if (parts[0] === "warmup") {
         var est = main.querySelector(".est");
         if (est) est.outerHTML = estimateHtml();
+        var siz = main.querySelector(".sizing");
+        if (siz) siz.outerHTML = sizingHtml(!isOn("warmup"));
       }
     }
   });
@@ -1134,10 +1363,21 @@
     if (el.dataset.set) {
       var p = el.dataset.set.split(".");
       queueSave(p[0], p[1], parseVal(p[0], p[1], el), el.tagName === "SELECT");
+      refreshRevert(p[0], p[1]);
       if (el.tagName === "SELECT") render();
     } else if (el.dataset.secret) {
       var q = el.dataset.secret.split(".");
-      if (el.value) { queueSave(q[0], q[1], el.value.trim(), true); }
+      if (el.value) {
+        queueSave(q[0], q[1], el.value.trim(), true);
+        // Don't leave it in the page: browsers offer to save fields that still hold a key.
+        el.value = "";
+        el.placeholder = "Saved — paste to replace";
+      }
+    } else if (el.dataset.nemode !== undefined) {
+      var lm = JSON.parse(JSON.stringify(S.nextepisode.library_modes || {}));
+      lm[el.dataset.nemode] = el.value;
+      queueSave("nextepisode", "library_modes", lm, true);
+      render();
     } else if (el.dataset.check) {
       var c = el.dataset.check.split(".");
       queueSave(c[0], c[1], el.checked, true);

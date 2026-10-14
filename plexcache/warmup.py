@@ -16,6 +16,7 @@ from .reader import MiB, Pacer, Stopped, is_cache_hit, read_range
 
 GB = 1000 ** 3
 KINDS = ("movie", "tv", "audio")
+KIND_LABEL = {"movie": "Movies", "tv": "TV", "audio": "Audio"}
 
 
 def preload_bytes(kbps: int, seconds: float, size: int = 0) -> int:
@@ -32,21 +33,33 @@ class LibraryStats:
     count: dict = field(default_factory=lambda: {k: 0 for k in KINDS})
     avg_kbps: dict = field(default_factory=lambda: {k: 0 for k in KINDS})
     scanned_at: float | None = None
+    # The same per library, so the sizing table can show e.g. audiobooks and music apart
+    # (their bitrates differ a lot): [{"key", "name", "kind", "count", "avg_kbps"}]
+    libraries: list = field(default_factory=list)
 
     @classmethod
-    def from_files(cls, files) -> "LibraryStats":
+    def from_files(cls, files, names: dict | None = None) -> "LibraryStats":
         st = cls()
         totals = {k: 0 for k in KINDS}
+        per: dict[str, dict] = {}
         for f in files:
             st.count[f.kind] += 1
             totals[f.kind] += f.kbps
+            key = getattr(f, "library_key", "") or ""
+            lib = per.setdefault(key, {"key": key, "name": (names or {}).get(key) or KIND_LABEL.get(f.kind, f.kind),
+                                       "kind": f.kind, "count": 0, "total": 0})
+            lib["count"] += 1
+            lib["total"] += f.kbps
         for k in KINDS:
             st.avg_kbps[k] = int(totals[k] / st.count[k]) if st.count[k] else 0
+        st.libraries = [{"key": v["key"], "name": v["name"], "kind": v["kind"], "count": v["count"],
+                         "avg_kbps": int(v["total"] / v["count"])}
+                        for v in sorted(per.values(), key=lambda v: (KINDS.index(v["kind"]), v["name"].lower()))]
         st.scanned_at = time.time()
         return st
 
     def to_dict(self) -> dict:
-        return {"count": self.count, "avg_kbps": self.avg_kbps, "scanned_at": self.scanned_at}
+        return {"count": self.count, "avg_kbps": self.avg_kbps, "scanned_at": self.scanned_at, "libraries": self.libraries}
 
 
 # Index (and other end-of-file parts) per file, until a run has measured your library.
@@ -67,7 +80,7 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | N
         mn[k] = per_sec * w[f"{k}_min_sec"] * (100 + pad[k]) / 100
     # The index etc. at the end of each file: a fixed amount whatever the seconds.
     idx_avg = dict(DEFAULT_INDEX, **(index_avg or {}))
-    index = {k: (stats.count[k] * idx_avg[k] if w.get("cache_index", True) else 0) for k in KINDS}
+    index = {k: stats.count[k] * idx_avg[k] for k in KINDS}  # always cached: players read it before playing
     reserve = w["reserve_gb"] * GB
     need_max = sum(mx.values()) + sum(index.values())
     need_min = sum(mn.values()) + sum(index.values())
