@@ -125,6 +125,8 @@ What Home Assistant gets — a main **Plex Cache** device with three linked ones
 | **Plex Cache Library warm-up** | state (off / idle / preparing / running / paused), progress, why it's paused, next and last run, last result, already cached, L2ARC growth | files done / total, data read, files in the last run |
 | **Plex Cache RAM & ZFS** | Now-playing and Next-episode RAM in use, ARC size and hit ratio, L2ARC filled | RAM limits, ZFS cache available, L2ARC size |
 
+Open any entity and its **Attributes** say what it measures or does, in a sentence or two.
+
 The main device also has the **controls** — switches for the three features; buttons to run or stop warm-up, re-run checks and benchmark disks; RAM limits, pacing and reserve; poll interval, next-episode start, and the preload choice for each TV, music and audiobook library — and an **update** entity that shows when a newer version is on GitHub, with a link to the project.
 
 The **Visit** link uses the address and port your browser last used to open Plex Cache. Behind a reverse proxy, set `PLEXCACHE_URL` (e.g. `https://plexcache.example.com`) in the app's YAML instead.
@@ -138,6 +140,7 @@ Node-RED, openHAB, ioBroker, Telegraf and the like can use the topics directly (
 | `plexcache/state` | everything, as one retained JSON message — sent every 30 s and straight away after a change |
 | `plexcache/availability` | `online`, or `offline` (also sent by the broker if the app disappears) |
 | `plexcache/update` | the installed and newest version, for Home Assistant's update entity |
+| `plexcache/info` | a short description of every entity (retained, sent once per connection); Home Assistant shows it under **Attributes** when you open an entity |
 | `plexcache/set/<name>` | commands, when **Allow control** is on: `warmup_enabled`, `nowplaying_enabled`, `nextepisode_enabled` (`ON`/`OFF`); `run_warmup`, `stop_warmup`, `recheck`, `benchmark` (any payload); `nowplaying_ram_percent`, `nextepisode_ram_percent`, `warmup_pacing_percent`, `ram_reserve_gb` (a whole number, in the same range as the web UI); `poll_seconds` (`3`, `5`, `10`, `30`); `start_at` (`default`, `after_nowplaying`, `80`, `90`); `library_<key>_preload` (`off`, `next`, `10`, `20`, `60`, `rest`, `album`, `artist`) |
 | `homeassistant/…/config` | Home Assistant discovery (openHAB and Domoticz read it too) |
 

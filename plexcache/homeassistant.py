@@ -232,6 +232,105 @@ def build_state(app, period: str = "week") -> dict:
 
 
 # ---------------------------------------------------------------- discovery
+# Shown in Home Assistant when you open an entity (its "description" attribute), from one
+# retained message on <base>/info. Plain text, a sentence or two: the web UI's ⓘ, shortened.
+DESCRIPTIONS = {
+    # Plex Cache
+    "health": "Overall result of the health checks: ok, warning (features still run), problem (something needs fixing) or checking.",
+    "health_text": "A one-line summary of the health checks. The Health page in Plex Cache lists every check with its fix.",
+    "problem": "On when a health check failed: something needs fixing before every feature can work.",
+    "streams": "How many Plex streams are playing right now.",
+    "streaming": "On while anything is playing on Plex.",
+    "preloading": "What Now-playing preload or Next-episode prefetch is reading right now, or Idle.",
+    "preloading_active": "On while Now-playing or Next-episode is reading from the disks.",
+    "health_passed": "How many health checks passed.",
+    "health_warnings": "How many health checks gave a warning. Features still run; the Health page says what could be better.",
+    "health_failures": "How many health checks failed. The Health page says how to fix each one.",
+    "health_checked": "When the health checks last ran. They run at startup, every 6 hours and whenever settings change.",
+    "plex_connected": "On when Plex Cache can reach your Plex server with a working sign-in.",
+    "truenas_connected": "On when Plex Cache can reach the TrueNAS API with its (read-only) API key.",
+    "checking": "On while the health checks are running.",
+    "benchmarking": "On while the disk benchmark is measuring each dataset's uncached read speed.",
+    "version": "The version of Plex Cache that's running.",
+    "update": "Whether a newer Plex Cache is on GitHub (checked every 6 hours, if switched on in Settings). Update the app in TrueNAS.",
+    # Activity
+    "report_verdict": "The Activity report's verdict for the chosen period (Settings → MQTT): what could be better, or that all went well.",
+    "report_streams": "Streams played in the report period.",
+    "skips": "Times someone jumped more than 30 seconds within a title, in the report period.",
+    "skips_cached": "Skips that landed on a part Now-playing had already loaded, so they played from cache.",
+    "skips_cached_pct": "Share of skips that played from cache. Higher is better.",
+    "next_total": "Next episodes (and next tracks or chapters) started in the report period.",
+    "next_ready": "Next episodes that Next-episode prefetch had finished loading before they started.",
+    "next_ready_pct": "Share of next episodes that were ready in time. Higher is better.",
+    "next_lead_min": "On average, how long before it started a next episode was ready.",
+    "still_cached_pct": "About 30 minutes after a preload, how much of it was still in RAM. Low means other work pushes it out too soon.",
+    "preloaded": "How much data Now-playing and Next-episode read in the report period.",
+    "preloaded_already_cached_pct": "Share of what they read that was already cached (it read much faster than the disks can).",
+    "disk_busy_avg": "How busy the media pool's disks were, on average, while people watched.",
+    "disk_busy_peak": "The busiest the media pool's disks got while people watched. Near 100% leaves little room for skips that miss the cache.",
+    "attention": "How many items the Activity page's Needs attention list has for the report period.",
+    "total_streams": "Streams played since Plex Cache started counting. Only goes up, for long-term statistics.",
+    "total_skips": "Skips since Plex Cache started counting. Only goes up.",
+    "total_skips_cached": "Skips that played from cache, since Plex Cache started counting. Only goes up.",
+    "total_next": "Next episodes started, since Plex Cache started counting. Only goes up.",
+    "total_next_ready": "Next episodes that were ready in time, since Plex Cache started counting. Only goes up.",
+    "total_preloaded": "Data read by Now-playing and Next-episode, since Plex Cache started counting. Only goes up.",
+    # Library warm-up
+    "warmup_state": "Library warm-up: off, idle (waiting for its next run), preparing, running or paused.",
+    "warmup_running": "On while a warm-up run is going (including while it's paused).",
+    "warmup_progress": "How far through its files the current warm-up run is.",
+    "warmup_pause_reason": "Why warm-up is paused (a player buffering, a preload reading, a scrub, busy disks or the finish-by time). It carries on afterwards.",
+    "warmup_next_run": "When the next scheduled warm-up starts.",
+    "warmup_last_run": "When the last warm-up started.",
+    "warmup_last_result": "How the last warm-up ended.",
+    "warmup_last_cached": "Share of files that were already cached when the last warm-up read them. Climbs as the SSD cache fills.",
+    "warmup_last_l2arc_growth": "How much the SSD cache (L2ARC) grew during the last warm-up. ZFS fills it gradually, so this can lag a little.",
+    "warmup_files_done": "Files the current warm-up run has finished.",
+    "warmup_files_total": "Files the current warm-up run will read.",
+    "warmup_read": "Data the current warm-up run has read so far.",
+    "warmup_last_files": "Files the last warm-up run read.",
+    # RAM & ZFS
+    "nowplaying_ram_used": "RAM Now-playing preload is using for the streams playing now.",
+    "nextepisode_ram_used": "RAM Next-episode prefetch is using for the streams playing now.",
+    "arc_size": "How much RAM the ZFS cache (ARC) holds right now, for everything on the NAS.",
+    "l2arc_cached": "How much data the SSD cache (L2ARC) holds right now.",
+    "nowplaying_ram_limit": "The most RAM Now-playing may use, shared by all streams: its share of the ZFS cache that's available, after the reserve.",
+    "nextepisode_ram_limit": "The most RAM Next-episode may use, shared by all streams.",
+    "zfs_cache_available": "How much RAM the ZFS cache can use right now (up to its maximum). The two RAM limits are shares of this, after the reserve.",
+    "l2arc_size": "Total size of the SSD cache (L2ARC) devices on the media pools.",
+    "arc_hit_ratio": "Share of all reads on the NAS answered from RAM since it started (ZFS's own count, not just Plex).",
+    # Controls
+    "warmup_enabled": "Library warm-up: on a schedule, read the start of every movie, episode and track so it sits on the SSD cache. Needs an L2ARC.",
+    "nowplaying_enabled": "Now-playing preload: once a stream is playing, read the file into RAM ahead of the viewer, so skips play from cache.",
+    "nextepisode_enabled": "Next-episode prefetch: while an episode plays, read the start of the next one (or read ahead in an album or audiobook).",
+    "run_warmup": "Start a warm-up now, at full speed (it ignores the busy-disks and finish-by pauses).",
+    "stop_warmup": "Stop the current warm-up. The next scheduled run starts as usual.",
+    "recheck": "Run all the health checks again.",
+    "benchmark": "Measure each dataset's uncached read speed. Used to tell cache hits from disk reads, and to time preloads.",
+    "nowplaying_ram_percent": "Now-playing's RAM limit, as a share of the ZFS cache available after the reserve. Shared by all streams.",
+    "nextepisode_ram_percent": "Next-episode's RAM limit, as a share of the ZFS cache available after the reserve. The two limits together can't pass 100%.",
+    "warmup_pacing_percent": "Share of disk time background warm-up may use. Lower is gentler on other work; Run now ignores it.",
+    "ram_reserve_gb": "ZFS cache kept for the rest of the NAS (TrueNAS, other apps, ZFS itself). The RAM limits are shares of what's left.",
+    "poll_seconds": "How often Plex Cache asks Plex what's playing. 5 seconds suits most people; 3 reacts sooner to skips and short tracks.",
+    "start_at": "When Next-episode prefetch starts: Default picks for you; After Now-playing waits for that preload to finish; 80% or 90% waits until then.",
+}
+
+
+def describe(oid: str) -> str:
+    """The description for an entity, including the per-dataset and per-library ones."""
+    if oid in DESCRIPTIONS:
+        return DESCRIPTIONS[oid]
+    if oid.startswith("dataset_") and oid.endswith("_record_size"):
+        return "This dataset's ZFS record size, and whether its files match it. 1M suits movies and TV; 512K or 1M suits audio."
+    if oid.startswith("dataset_") and oid.endswith("_cache"):
+        return ("This dataset's cache settings. primarycache=all is needed for any caching; secondarycache=all lets data go on to "
+                "the SSD cache, which Library warm-up needs.")
+    if oid.startswith("library_") and oid.endswith("_preload"):
+        return ("What Next-episode prefetch reads for this library: for TV, the next episode; for music and audiobooks, "
+                "minutes ahead, the rest of the album or book, the whole album, or everything by the artist. Or nothing.")
+    return ""
+
+
 # Entities dropped in an update, removed from Home Assistant if they're still there.
 RETIRED = [("sensor", "arc_max"), ("sensor", "l2arc_needed")]
 
@@ -580,6 +679,8 @@ class HomeAssistantBridge:
         devices = self._devices(node)
         topics = set()
         ents = entities(state, cfg["allow_control"])
+        # Every entity's description, in one retained message (sent with discovery, not with each update)
+        c.publish(f"{base}/info", json.dumps({oid: describe(oid) for _, oid, _ in ents}), retain=True)
         for component, oid, conf in ents:
             if self.stop.is_set() or self.retry_now.is_set():
                 return  # shutting down or reconnecting: the rest is sent next time
@@ -592,6 +693,9 @@ class HomeAssistantBridge:
                 conf["state_topic"] = state_topic
             if component in ("switch", "button", "number", "select"):
                 conf["command_topic"] = f"{set_topic}/{oid}"
+            # Its description, shown under Attributes when the entity is opened in Home Assistant
+            conf["json_attributes_topic"] = f"{base}/info"
+            conf["json_attributes_template"] = "{{ {'description': value_json['%s']} | tojson }}" % oid
             topic = f"{cfg['discovery_prefix']}/{component}/{node}/{oid}/config"
             c.publish(topic, json.dumps(conf), retain=True)
             topics.add(topic)

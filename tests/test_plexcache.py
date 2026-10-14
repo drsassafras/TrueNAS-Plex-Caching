@@ -3241,6 +3241,16 @@ class MQTTTests(unittest.TestCase):
         self.assertEqual(sub["device"]["via_device"], health["device"]["identifiers"][0])
         self.assertFalse(any("_device" in v for v in disc.values()))
         self.assertEqual(next(v for t, v in disc.items() if "/health_passed/" in t)["entity_category"], "diagnostic")
+        # Every entity has a description, read from one retained message as its "description" attribute
+        self.assertTrue(wait_for(lambda: self.broker.state("plexcache/info") is not None))
+        info = json.loads(self.broker.state("plexcache/info"))
+        for t, v in disc.items():
+            oid = t.split("/")[3]
+            self.assertEqual(v["json_attributes_topic"], "plexcache/info", t)
+            self.assertEqual(v["json_attributes_template"], "{{ {'description': value_json['%s']} | tojson }}" % oid)
+            self.assertTrue(info.get(oid), f"{oid} has no description")
+            self.assertNotIn("<", info[oid])  # plain text: Home Assistant shows attributes as-is
+        self.assertLess(len(self.broker.state("plexcache/info")), 20000)
         # Number controls show their value and unit (a slider wouldn't, on the device page)
         numbers = [v for t, v in disc.items() if t.startswith("homeassistant/number/")]
         self.assertEqual(len(numbers), 4)
