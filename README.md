@@ -22,22 +22,36 @@ Everything is set up in a web UI: what to cache, how much, and when. Health chec
 
 ## Features
 
-### Three ways to cache
+The web UI has five pages: **Health**, **Caching** (what gets cached and how much RAM it may use), **SSD Cache** (your L2ARC and how big it needs to be), **Activity** and **System** (connections, media mappings, disk speed, MQTT, updates).
 
-- **Library warm-up** (needs an SSD cache, L2ARC) — on a schedule, reads the first seconds of every movie, episode and track so they sit on the SSD. Press play on anything and it starts at SSD speed.
-  - Daily, weekly, every few hours, or manual — with "Run now".
-  - Seconds to cache per type (movies, TV, audio), scaled by each file's own bitrate, so a 4K remux gets more bytes than a 720p episode.
-  - Also caches each file's seek index (MKV Cues, MP4 `moov`), found from the file's own layout — players read it before they start.
-  - Paced to a share of disk time, and steps aside — then carries on from the same file — while a player is buffering, while a preload is reading, during a scrub or resilver, when the disks are busy with other work, or after a finish-by time.
-  - If your settings don't fit the SSD, seconds are reduced automatically.
-- **Now-playing preload** — once a stream is playing and Plex's own buffer has had time to fill, reads the file into RAM from the play position onwards, then the beginning, so skips land in cache.
+### L2ARC or RAM only
+
+Caching is planned around an SSD cache (L2ARC) on the media pool, and Health warns when there isn't one. To run on RAM only, tick **I won't use an L2ARC** on the SSD Cache page. Dropdowns start with an explicit **Default** choice that names what it means right now (e.g. *Default — At 90%*), and mark the other choices: a green RAM icon on the default used without an L2ARC, a blue SSD icon on the default used with one, a grey SSD icon on L2ARC options (they fall back to the RAM default without an L2ARC), and a grey RAM icon on RAM options (ignored when there's an L2ARC). The same icons sit beside settings that are wholly one kind, and a legend at the top of the Caching page explains them. Defaults are looked up every time caching runs, so they change by themselves when an L2ARC is added or lost. A choice that needs an L2ARC falls back to its RAM-only default when there isn't one, and Health lists any setting that had to fall back.
+
+### Three caches, one page each
+
+The Caching page has a card for each cache, with each library's choices on it, and help behind "How it works".
+
+- **Now Playing Cache** — once a stream is playing and Plex's own buffer has had time to fill, reads the file being played into RAM from the play position onwards, then the beginning, so skips land in cache.
   - Start timing worked out from the file's bitrate and your disks' measured speed (direct play and transcoding buffer differently), or a fixed delay.
   - The whole file if it fits its RAM limit, otherwise as much as fits ahead of the viewer — and it starts again from the new spot after a big skip.
   - Reads a set number of files at a time, so hard drives aren't asked to seek between many streams at once.
-- **Next-episode prefetch** — while an episode plays, reads the start of the next one in Plex's own order, across seasons and any folder layout.
-  - For music and audiobooks, reads ahead in the album or book, chosen per library: 10, 20 or 60 minutes ahead, the rest of the album, the whole album (for shuffle), or everything by the artist (the rest of this album, the opening seconds of every other album, then the rest).
-  - Any library can be set to "Don't preload".
-- **RAM limits that respect your NAS** — Now-playing and Next-episode each get a share of the ZFS cache that's actually available (never more than its maximum), minus a reserve left for the rest of the NAS. Every read stays within them.
+- **Lead-in Cache** — a file's *lead-in* is its first seconds plus its seek index: everything a player needs to start it instantly. Per library: the lead-in length, a warm-up schedule, and how far Prefetch reaches.
+  - **Warm-up** (needs an SSD cache, L2ARC) puts the lead-in of every movie, episode and track in a library on the SSD: at boot only, or at boot plus twice monthly (the 1st and 15th), weekly, twice weekly (the chosen day and three days later) or daily, at one shared time — or not at all, with "Run now" for any time. There's no on/off switch: warm-up runs for every library that has a schedule. Default follows the caching mode: at boot only with an L2ARC, no warm-up without one.
+  - **Prefetch**, once Now Playing Cache is done, loads the lead-ins of what's likely to play next, in Plex's own order (across seasons and any folder layout): don't prefetch · next episode · rest of the season · whole season · next season · all seasons · the whole library (from "whole season" on, an L2ARC is needed). Music and audiobooks use the same ladder for tracks and chapters, albums and books (music has no "next album"); movies follow their Plex collections.
+  - Lead-in length is in seconds of playback (by default 60 for movies, 30 for TV and 10 for audio), scaled by each file's own bitrate, so a 4K remux gets more bytes than a 720p episode. The seek index (MKV Cues, MP4 `moov`) is found from the file's own layout. If your settings don't fit the SSD, lead-ins are shortened automatically.
+- **Whole File Cache** — near the end of what's playing (at 80% or 90%), Prefetch loads whole files, per library: nothing · next episode · rest of the season. On RAM only, music's default is nothing: RAM is scarce and tracks are short; with an L2ARC it's the rest of the album, like the others. Episodes already watched aren't offered in full: they'd only push lead-ins off the SSD.
+- Each Prefetch step includes the ones before it, read in order, so the next episode always comes first. The season is that of what plays next: at the last episode of season 1, "rest of the season" means season 2.
+- **Needed soon → RAM, needed later → SSD.** RAM keeps one-off reads for hours at most, so only the next episode in full and the rest of the season's lead-ins are read straight into it. Everything further ahead — earlier episodes' and the next season's lead-ins, all seasons, the whole library, the rest of the season in full — needs an L2ARC and goes to the SSD in the background, at the L2ARC pacing and outside the RAM limit; without one it falls back to the RAM default. Each choice in the dropdowns says which way it's read. Defaults follow the caching mode (with an L2ARC: lead-ins of the whole library and the rest of the season in full; on RAM only: the rest of the season's lead-ins and the next episode in full).
+
+### Cache Settings and RAM Only Settings
+
+- **RAM limits that respect your NAS** — Now Playing Cache and Prefetch each get a share of the ZFS cache that's actually available (never more than its maximum), minus a reserve left for the rest of the NAS. They cover what's meant to stay in RAM — Now Playing Cache and whole files, and without an L2ARC lead-ins too — with or without an L2ARC. With one, lead-ins only pass through RAM on their way to the SSD (that's how ZFS fills an L2ARC), so they don't count; the L2ARC pacing keeps them gentle.
+- **Cooldown** — everything cached is logged, lead-ins in one log and whole files in another, and isn't read again until its cooldown has passed, whichever feature asks. A whole file counts as a lead-in too, so warm-up skips files Prefetch just read, and Now Playing Cache doesn't re-read a file Prefetch loaded near the end of the last one. RAM keeps one-off reads for hours at most, so on RAM only the cooldowns in RAM Only Settings apply (2 hours for lead-ins and 3 for whole files, by default; from none or 10 minutes up); with an L2ARC everything read is taken to be on the SSD, and the L2ARC cooldowns on the SSD Cache page apply instead (1 day for lead-ins and 6 hours for whole files). Timed warm-ups only skip lead-ins Prefetch cached since the last warm-up, so they always re-check their own — what's still on the SSD is a quick hit, and what the L2ARC has since overwritten (it reuses its space oldest first) is read again; "Run now" reads everything.
+
+### L2ARC Cache Settings: big jobs in the background
+
+On the SSD Cache page. Everything that needs an L2ARC — warm-up, and the Prefetch choices with the grey SSD icon (all seasons, the whole library, the rest of a season in full...) — reads in the background at the L2ARC pacing. By default that's just under how fast ZFS copies to the SSD (`l2arc_write_max`): anything read from the disks faster leaves RAM before it's copied, while reads that come from the SSD already aren't held back. It also steps aside, then carries on from the same file, while a player is buffering, while Now Playing Cache or Prefetch is reading for someone, during a scrub or resilver, or when the disks are busy with other work. Caching that works on RAM alone — Now Playing Cache, and Prefetch's smaller steps like the next episode — never waits, so the reads that help most always happen, while large ones can't get in the way. Prefetch's L2ARC-only reads share one queue for every player: the newest request goes to the front (after the file being read finishes), and everything in it is read in the end, even after its player stops.
 
 ### Health checks that explain themselves
 
@@ -46,24 +60,29 @@ Everything is set up in a web UI: what to cache, how much, and when. Health chec
 - **Media datasets** — for every dataset a library is on: cache settings (`primarycache`, `secondarycache`), record size (1M for video; 512K or 1M for audio) and the SSD cache on its pool. Also flags datasets mounted in the app that no library uses, and works out which dataset really holds a library when datasets are mounted inside one another.
 - **Record size, file by file** — a new record size only applies to files written afterwards, so Health samples the files themselves and says how many still use smaller blocks; "Check every file" counts them all. A built-in script rewrites them safely (see below).
 - **ZFS and RAM** — how much RAM is free for preloading, and whether ZFS settings would stop warm-up from landing on the SSD (for example, warm-up reading faster than ZFS copies to the SSD).
-- **Is it working?** — compares warm-up runs to show how much was already cached.
+- **Is it working?** — compares warm-up runs to show how much was already cached, and a day after each run checks a sample of its lead-ins: how many are still on the SSD. The L2ARC reuses its space oldest first, so that's how long lead-ins really last on your NAS.
 - Every problem comes with the fix — a setting to change or a command to copy — and features that can't work on your system are switched off with the reason, coming back on by themselves once it's fixed.
 
 ### Activity: is it actually helping?
 
-- A report card for today, the last 7 days, 30 days or 12 months: skips served from cache, next episodes ready in time, how much preloaded data is still in RAM 30 minutes later, and how much was preloaded.
+- A report card for today, the last 7 days, 30 days or 12 months:
+  - **Skips served from cache** — jumps of more than 30 seconds that landed in cached data: read by Now Playing Cache, a whole file that was cached (Whole File Cache, or an earlier play), or a jump back into the cached lead-in.
+  - **Next episodes ready** — when what Prefetch picked as next starts: whether it started instantly (its lead-in or all of it cached) and whether it was fully cached, however it got there (this time, or within the cooldown).
+  - **Still cached 30 min later** — half an hour after each read into RAM, eight 1 MiB reads across it are timed; back within 4 ms means it came from cache (RAM, or the SSD if it moved there), since a hard drive takes longer just to reach the data. Reads on their way to the SSD aren't checked here; the next-day check after each warm-up covers the SSD.
+  - **How long cached data lasts** — every time something cached is read again, the read is timed, so it says whether what was cached that long ago was still there. Added up by age, in RAM and on the SSD apart, that's how long cached data really lasts on your NAS, and the app suggests cooldowns from it. Ages count from the last time the app read that data, as the cooldown does; RAM reads from before a reboot are left out. A short cooldown (down to none) collects data fastest; the write history is kept for 6 months, across restarts.
+  - **Data cached ahead** — what Now Playing Cache and Prefetch read into RAM for viewers, and how much of it was in cache already (each 32 MiB is timed); Prefetch's background reads to the SSD are shown separately.
 - An "Over time" chart for each measure (by hour, day or month, with a table view), and a "Needs attention" list that names the cause and the setting to change.
 - RAM-limit use, how busy the disks were while people watched, what's playing and being cached now, warm-up runs and a live event log. History is kept for a year.
 
 ### Easy to set up and live with
 
 - **Sign in with Plex** — no token hunting. Plex and TrueNAS addresses are filled in when they run on the same NAS.
-- **L2ARC sizing** — tells you how big an SSD you'd need from your own library (titles × bitrate × seconds), and lets you try settings before you buy one.
+- **L2ARC Sizing Estimator** — tells you how big an SSD you'd need to hold the lead-in of everything in your libraries (titles × bitrate × seconds), with sliders that work out an Estimate column for other lead-in lengths without saving them, so you can try settings before you buy one.
 - **Disk speed benchmark** per dataset, so cache hits and preload timing are judged against your actual disks.
 - Help behind small ⓘ buttons instead of walls of text, a ↺ to put any setting back to its default, changes saved as you go, dark mode, and a layout that works on a phone.
-- **MQTT, for Home Assistant and more** (optional) — publishes health, streams, RAM in use, ARC and L2ARC, warm-up progress, the Activity report and lifetime totals, and takes commands. In Home Assistant a "Plex Cache" device appears on its own with 60–80 entities, including switches, buttons and sliders; Node-RED, openHAB and other MQTT tools can use the same topics. Status lights show each step of the connection. See [MQTT](#mqtt-home-assistant-node-red-and-more).
+- **MQTT, for Home Assistant and more** (optional) — publishes health, streams, RAM in use, ARC and L2ARC, warm-up progress, the Activity report and lifetime totals, and takes commands. In Home Assistant a "Plex Cache" device appears on its own with 60–80 entities, including switches, buttons and sliders; Node-RED, openHAB and other MQTT tools can use the same topics. Status lights show each step of the connection. Follows the MQTT 3.1.1 and Home Assistant discovery standards, checked by its tests ([Standards](#standards)). See [MQTT](#mqtt-home-assistant-node-red-and-more).
 - **Login** for the web UI — a username and password set in the app's YAML (on by default; the example password is refused).
-- **Update notices** — checks GitHub every 6 hours (can be switched off in Settings) and says when there's a newer version, in the web UI and in Home Assistant.
+- **Update notices** — checks GitHub every 6 hours (can be switched off in System) and says when there's a newer version, in the web UI and in Home Assistant.
 - **Safe by design** — runs as TrueNAS's unprivileged `apps` user in a read-only container, with media mounted read-only and all extra permissions dropped; it writes only to its settings folder. Pure Python with no third-party dependencies. If its settings folder isn't writable it says how to fix it, rather than restarting endlessly.
 
 ## Install on TrueNAS
@@ -77,9 +96,9 @@ TrueNAS doesn't support third-party app catalogs since 24.10, so this installs a
    - each media host path → **the same mount path Plex uses**, read-only. Add a line per mount if Plex has several.
    - `PLEXCACHE_PASSWORD` (and the username, if you like) → your own; the example password is refused. See [the web UI login](#the-web-ui-login).
 4. Open `http://<your-nas-ip>:8642` and sign in.
-5. Open **Settings**. If Plex and TrueNAS run on the same NAS, their addresses are filled in for you; otherwise enter your NAS's IP (Plex's port 32400 is added automatically). Choose **Sign in with Plex** — Plex only shares library and playback details with apps that hold a token. Optionally add a TrueNAS API key (user menu → API Keys) so Health can see your cache devices and dataset settings. The app only reads from the API. Status lights on the page show what's working.
-6. If a library shows as not found, either mount it at the same path Plex uses, or mount it anywhere and pick the folder under **Settings → Media mappings**. Folders that contain the library's files are marked ✓.
-7. Check **Health** — it should say “Everything is OK” — then switch features on in **Features**.
+5. Open **System**. If Plex and TrueNAS run on the same NAS, their addresses are filled in for you; otherwise enter your NAS's IP (Plex's port 32400 is added automatically). Choose **Sign in with Plex** — Plex only shares library and playback details with apps that hold a token. Optionally add a TrueNAS API key (user menu → API Keys) so Health can see your cache devices and dataset settings. The app only reads from the API. Status lights on the page show what's working.
+6. If a library shows as not found, either mount it at the same path Plex uses, or mount it anywhere and pick the folder under **System → Media mappings**. Folders that contain the library's files are marked ✓.
+7. Check **Health** — it should say “Everything is OK” — then switch features on in **Caching**. If the media pool has no SSD cache (L2ARC), see **SSD Cache**.
 
 ### The web UI login
 
@@ -98,7 +117,7 @@ The browser stays signed in for 30 days (a signed, HttpOnly cookie; the signing 
 
 ## MQTT (Home Assistant, Node-RED and more)
 
-Off until you switch it on in **Settings → MQTT**. MQTT is the common language of home-automation and monitoring tools: everything connects to a *broker*, which passes messages along. Plex Cache connects to your broker as a client.
+Off until you switch it on in **System → MQTT**. MQTT is the common language of home-automation and monitoring tools: everything connects to a *broker*, which passes messages along. Plex Cache connects to your broker as a client.
 
 The settings card shows a light for each step — broker found, TLS, login accepted, publishing — with the reason when one fails, and a **Reconnect now** button. Turn off **Allow control** for a watch-only connection. Broker ACLs can limit the app's login to the `plexcache/#` and `homeassistant/#` topics.
 
@@ -122,12 +141,12 @@ What Home Assistant gets — a main **Plex Cache** device with three linked ones
 | --- | --- | --- |
 | **Plex Cache** | health (ok / warning / problem) and summary, *Problem*, streams playing, *Streaming*, what's being preloaded | checks passed / warnings / failures, last check, Plex and TrueNAS connected, health check / benchmark running, version, record size and cache settings per dataset |
 | **Plex Cache Activity** | the Activity report for today, 7 or 30 days: verdict, streams, skips (and from cache), next episodes (and ready in time, how early), still cached 30 min later, data preloaded, disks busy, items needing attention; lifetime totals for long-term statistics | |
-| **Plex Cache Library warm-up** | state (off / idle / preparing / running / paused), progress, why it's paused, next and last run, last result, already cached, L2ARC growth | files done / total, data read, files in the last run |
-| **Plex Cache RAM & ZFS** | Now-playing and Next-episode RAM in use, ARC size and hit ratio, L2ARC filled | RAM limits, ZFS cache available, L2ARC size |
+| **Plex Cache Warm-up** | state (off / idle / preparing / running / paused), progress, why it's paused, next and last run, last result, already cached, L2ARC growth | files done / total, data read, files in the last run |
+| **Plex Cache RAM & ZFS** | Now Playing Cache and Prefetch RAM in use, ARC size and hit ratio, L2ARC filled | RAM limits, ZFS cache available, L2ARC size |
 
 Open any entity and its **Attributes** say what it measures or does, in a sentence or two.
 
-The main device also has the **controls** — switches for the three features; buttons to run or stop warm-up, re-run checks and benchmark disks; RAM limits, pacing and reserve; poll interval, next-episode start, and the preload choice for each TV, music and audiobook library — and an **update** entity that shows when a newer version is on GitHub, with a link to the project.
+The main device also has the **controls** — a switch for Now Playing Cache (warm-up and Prefetch follow each library's choices); buttons to run or stop warm-up, re-run checks and benchmark disks; RAM limits, L2ARC pacing and reserve; poll interval, and the two Prefetch choices for each library — and an **update** entity that shows when a newer version is on GitHub, with a link to the project.
 
 The **Visit** link uses the address and port your browser last used to open Plex Cache. Behind a reverse proxy, set `PLEXCACHE_URL` (e.g. `https://plexcache.example.com`) in the app's YAML instead.
 
@@ -141,23 +160,32 @@ Node-RED, openHAB, ioBroker, Telegraf and the like can use the topics directly (
 | `plexcache/availability` | `online`, or `offline` (also sent by the broker if the app disappears) |
 | `plexcache/update` | the installed and newest version, for Home Assistant's update entity |
 | `plexcache/info` | a short description of every entity (retained, sent once per connection); Home Assistant shows it under **Attributes** when you open an entity |
-| `plexcache/set/<name>` | commands, when **Allow control** is on: `warmup_enabled`, `nowplaying_enabled`, `nextepisode_enabled` (`ON`/`OFF`); `run_warmup`, `stop_warmup`, `recheck`, `benchmark` (any payload); `nowplaying_ram_percent`, `nextepisode_ram_percent`, `warmup_pacing_percent`, `ram_reserve_gb` (a whole number, in the same range as the web UI); `poll_seconds` (`3`, `5`, `10`, `30`); `start_at` (`default`, `after_nowplaying`, `80`, `90`); `library_<key>_preload` (`off`, `next`, `10`, `20`, `60`, `rest`, `album`, `artist`) |
+| `plexcache/set/<name>` | commands, when **Allow control** is on: `nowplaying_enabled` (`ON`/`OFF`, for Now Playing Cache); `warmup_pacing_auto` (`ON`/`OFF`, automatic L2ARC pacing); `run_warmup`, `stop_warmup`, `recheck`, `benchmark` (any payload); `nowplaying_ram_percent`, `nextepisode_ram_percent`, `ram_reserve_gb`, and `warmup_pacing_percent` while automatic pacing is off (a whole number, in the same range as the web UI); `poll_seconds` (`3`, `5`, `10`, `30`); `library_<key>_prefetch_start` and `library_<key>_prefetch_end` (a choice's value, such as `default`, `off`, `none`, `next`, `rest` or `library`, or its name as Home Assistant shows it) |
 | `homeassistant/…/config` | Home Assistant discovery (openHAB and Domoticz read it too) |
+
+Home Assistant offers the same settings the web UI does, under the same conditions — L2ARC pacing's share of disk time, for example, only while automatic pacing is off — and the tests check they stay in sync.
+
+### Standards
+
+Plex Cache's MQTT follows the published standards, and its tests check each rule, so an update can't quietly break them:
+
+- **[MQTT 3.1.1](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html) (OASIS)** — the client rules for connecting (the login fields in the right order, a last will, a client ID of letters and digits that every broker accepts), topic names and filters (no wildcards when publishing, `#` and `+` only as whole levels, valid UTF-8, no null characters, 65,535 bytes at most), answering each QoS as the standard says, keep-alive pings, and a clean disconnect. A broker that breaks the rules (a malformed message, say) is disconnected from, as the standard requires.
+- **[Home Assistant MQTT discovery](https://www.home-assistant.io/integrations/mqtt/)** — every discovery message names its software (`origin`), has a unique ID and a device, suggests its entity ID with `default_entity_id`, uses topic IDs Home Assistant allows, and reports availability with a last will; sensors pair device classes, units and state classes the way Home Assistant expects; controls have command topics; entities that go away are removed (an empty retained message); and when Home Assistant restarts (its `homeassistant/status` birth message) everything is announced again.
 
 ## How it works
 
 Plex doesn't read a whole file at once — it buffers a little ahead of playback and reads more as needed. The disk delays you feel are seeks: starting a title, skipping, moving to the next episode. Plex Cache reads those parts *before* Plex asks for them, so ZFS already has them in RAM or on SSD.
 
 - Bitrates come from Plex per file (or are calculated from size and duration when Plex has none), so a 4K remux gets more bytes cached than a 720p episode for the same number of seconds.
-- Background work is paced (by default 10% of disk time) and pauses for anything more important (see Library warm-up above). "Run now" runs at full speed and ignores the busy-disks and finish-by pauses, but still steps aside for buffering, preloads and scrubs.
-- **Disk speed** (Settings) is measured per dataset by *Benchmark now*, which times reads of a few media files on each one. A read counts as "already cached" when it runs at least 4× faster than its dataset's speed. Unreadable files are reported, never counted as hits.
+- Caching that needs an L2ARC is paced (by default 10% of disk time) and pauses for anything more important (see L2ARC Cache Settings above). "Run now" runs at full speed and ignores the busy-disks pause, but still steps aside for buffering, Now Playing Cache and Prefetch reads, and scrubs.
+- **Disk speed** (System) is measured per dataset by *Benchmark now*, which times reads of a few media files on each one. A read counts as "already cached" when it runs at least 4× faster than its dataset's speed. Unreadable files are reported, never counted as hits.
 - L2ARC fills gradually and is evicted over time, which is why warm-up runs on a schedule. Size your L2ARC larger than the estimate so cached data lasts longer — even a modest SSD helps.
 
 ## Languages
 
 The web UI follows your browser's language. To pick another one, use the language button at the top right (it's also on the sign-in page). English is the original, written in Canadian English, with US and UK spellings available. The other languages are Spanish, French, German, Portuguese (Brazil), Italian, Dutch, Polish, Russian, Ukrainian, Japanese, Korean, Chinese (Simplified and Traditional), Swedish and Turkish.
 
-Home Assistant entity names, descriptions and state text follow **Language in Home Assistant** in **Settings → MQTT** (English by default). Entity IDs and enum states (`ok`, `warning`, `running` …) stay in English, so automations keep working when you change it.
+Home Assistant entity names, descriptions and state text follow **Language in Home Assistant** in **System → MQTT** (English by default). Entity IDs and enum states (`ok`, `warning`, `running` …) stay in English, so automations keep working when you change it.
 
 The translations were made with AI and haven't been reviewed by native speakers yet, and some are still in progress. Anything not translated yet shows in English. To suggest a fix, use **Suggest a fix** in the language menu or open an issue.
 
@@ -166,7 +194,7 @@ The translations were made with AI and haven't been reviewed by native speakers 
 - TrueNAS SCALE / Community Edition 24.10 or later (Docker-based apps)
 - Plex Media Server reachable from the NAS
 - `primarycache=all` on each media dataset for any feature to work there: ZFS only fills L2ARC from data that passed through RAM, so `primarycache=metadata` means nothing gets cached (the old scripts recommended that — it doesn't work)
-- For Library warm-up: at least one cache (L2ARC) device on the media pool, and `secondarycache=all` on the media dataset
+- For warm-up (and Prefetch's L2ARC-only choices): at least one cache (L2ARC) device on the media pool, and `secondarycache=all` on the media dataset
 - `recordsize=1M` on datasets holding movies or TV; audio-only datasets can use `512K` or `1M`. A new record size only applies to files written afterwards, so Health also samples the files themselves and says when many were written with smaller blocks.
 
 ### Rewriting files after a record size change

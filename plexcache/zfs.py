@@ -45,6 +45,18 @@ def arc_summary(stats: dict | None) -> dict | None:
     }
 
 
+def boot_time() -> float | None:
+    """When the system last booted (epoch seconds), from /proc/stat; None if unreadable."""
+    try:
+        with open(os.path.join(PROC, "stat"), encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("btime "):
+                    return float(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def meminfo() -> dict:
     """/proc/meminfo in bytes ({"MemTotal": ..., "MemAvailable": ...}); empty if unreadable."""
     out = {}

@@ -1,4 +1,4 @@
-"""Is there a newer version? Asks GitHub every few hours (can be switched off in Settings).
+"""Is there a newer version? Asks GitHub every few hours (can be switched off in System).
 
 Reads the version number from plexcache/__init__.py on the main branch, which is what
 the published :latest image is built from. Nothing is sent but an ordinary download.

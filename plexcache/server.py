@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import mimetypes
@@ -18,10 +19,31 @@ from .plex import PlexError, check_pin, create_pin
 
 log = logging.getLogger("plexcache")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
-PAGES = {"/", "/health", "/features", "/activity", "/settings"}
+PAGES = {"/", "/health", "/caching", "/ssd", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
 MAX_BODY = 1024 * 1024
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
+
+
+def _build_id() -> str:
+    """A short fingerprint of the web UI's files. It changes whenever they do (after tnsync or an
+    update), so pages ask for the new files by name and open tabs know to reload themselves."""
+    h = hashlib.sha1()
+    for root, dirs, files in os.walk(WEB_DIR):
+        dirs.sort()
+        for name in sorted(files):
+            try:
+                with open(os.path.join(root, name), "rb") as fh:
+                    h.update(name.encode() + b"\0" + fh.read())
+            except OSError:
+                pass
+    return h.hexdigest()[:12]
+
+
+BUILD = _build_id()
+# In the HTML pages, /static/x.js and /static/x.css get "?v=<build>" so a browser can't keep using
+# the files from before.
+_ASSET = re.compile(r'(/static/[A-Za-z0-9_.-]+\.(?:js|css))"')
 
 
 # Reachable without signing in: the sign-in page's own files, the container health
@@ -76,9 +98,15 @@ def make_handler(app):
             except OSError:
                 return self._error("not found", 404)
             ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            if ctype == "text/html":
+                body = _ASSET.sub(lambda m: f'{m.group(1)}?v={BUILD}"', body.decode("utf-8")).encode("utf-8")
             if ctype.startswith("text/") or ctype in ("application/javascript",):
                 ctype += "; charset=utf-8"
-            self._send(200, body, ctype, {"Cache-Control": "no-cache"})
+            # Always checked with the server; unchanged files are answered with a short 304.
+            etag = '"' + hashlib.sha1(body).hexdigest()[:16] + '"'
+            if etag in (self.headers.get("If-None-Match") or ""):
+                return self._send(304, b"", ctype, {"Cache-Control": "no-cache", "ETag": etag})
+            self._send(200, body, ctype, {"Cache-Control": "no-cache", "ETag": etag})
 
         def _body(self) -> dict:
             # Only JSON is accepted, which also stops cross-site form posts.
@@ -134,7 +162,15 @@ def make_handler(app):
             if path == "/healthz":
                 return self._json({"ok": True, "version": app.version})
             if path == "/api/state":
-                return self._json(app.state())
+                return self._json(dict(app.state(), build=BUILD))  # (build: see app.js load())
+            if path == "/api/coverage":
+                # How much of each library was cached, hour by hour (asked for when the card is shown)
+                return self._json(app.coverage.series({lib["key"]: lib.get("title") for lib in app.libraries}))
+            if path == "/api/cachelog/export":
+                # The whole cache log (what was cached when, and every count), to look into problems
+                body = json.dumps(jsonable(app.diagnostics()), indent=1, default=str).encode()
+                return self._send(200, body, "application/json",
+                                  {"Content-Disposition": 'attachment; filename="plex-cache-cachelog.json"', "Cache-Control": "no-store"})
             if path == "/api/export":
                 body = json.dumps(app.settings.export(), indent=2).encode()
                 return self._send(200, body, "application/json",
@@ -185,10 +221,10 @@ def make_handler(app):
             app.note_host(self.headers.get("Host"))
             try:
                 if path == "/api/settings":
-                    modes = (body.get("nextepisode") or {}).get("library_modes") if isinstance(body.get("nextepisode"), dict) else None
-                    if modes is not None:
-                        app.check_library_modes(modes)
-                    for feature in ("warmup", "nowplaying", "nextepisode"):
+                    libs = (body.get("nextepisode") or {}).get("libraries") if isinstance(body.get("nextepisode"), dict) else None
+                    if libs is not None:
+                        app.check_prefetch_libraries(libs)
+                    for feature in ("warmup", "nowplaying"):
                         sec = body.get(feature)
                         if isinstance(sec, dict) and sec.get("enabled") is True:
                             ok, why = app.feature_available(feature)
@@ -227,6 +263,11 @@ def make_handler(app):
                     return self._json({"started": True})
                 if path == "/api/warmup/run":
                     return self._json({"started": app.start_warmup(manual=True)})
+                if path == "/api/cachelog/reset":
+                    app.cachelog.reset_stats()
+                    app.cachelog.save(force=True)
+                    app.activity.event("settings", M("“How long cached data lasts” started again"))
+                    return self._json({"reset": True})
                 if path == "/api/warmup/stop":
                     app.stop_warmup()
                     return self._json({"stopping": True})

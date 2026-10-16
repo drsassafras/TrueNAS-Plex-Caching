@@ -108,10 +108,10 @@ class ConfigTests(unittest.TestCase):
 
     def test_defaults_and_persistence(self):
         s = config.Settings(self.dir)
-        s.update({"warmup": {"tv_sec": 20, "enabled": True}})
+        s.update({"warmup": {"reserve_gb": 20}})
         again = config.Settings(self.dir)
-        self.assertEqual(again.section("warmup")["tv_sec"], 20)
-        self.assertTrue(again.section("warmup")["enabled"])
+        self.assertEqual(again.section("warmup")["reserve_gb"], 20)
+        self.assertNotIn("enabled", again.section("warmup"))            # warm-up is set per library now
         self.assertEqual(oct(os.stat(again.path).st_mode & 0o777), "0o600")
 
     def test_secrets_are_masked_and_kept(self):
@@ -132,15 +132,16 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(config.SettingsError):
             s.update({"warmup": {"nope": 1}})
         with self.assertRaises(config.SettingsError):
-            s.update({"nextepisode": {"start_at": "99"}})
-        s.update({"warmup": {"movie_sec": 5, "movie_min_sec": 10}})
-        self.assertEqual(s.section("warmup")["movie_min_sec"], 5)
+            s.update({"nextepisode": {"libraries": {"2": {"start": "forever"}}}})
+        # A minimum above a library's lead-in length uses the lead-in length (warmup.plan)
+        s.update({"warmup": {"movie_min_sec": 100}})
+        self.assertEqual(s.section("warmup")["movie_min_sec"], 100)
 
     def test_broken_file_is_set_aside(self):
         with open(os.path.join(self.dir, "settings.json"), "w") as fh:
             fh.write("{not json")
         s = config.Settings(self.dir)
-        self.assertEqual(s.section("warmup")["tv_sec"], 30)
+        self.assertEqual(s.section("warmup")["reserve_gb"], 100)
         self.assertTrue(os.path.exists(os.path.join(self.dir, "settings.json.broken")))
 
     def test_url_defaults(self):
@@ -307,6 +308,9 @@ class ReaderAndPlanTests(unittest.TestCase):
         st = LibraryStats()
         st.count = {"movie": 1240, "tv": 14600, "audio": 9800}
         st.avg_kbps = {"movie": 18000, "tv": 6500, "audio": 128}
+        st.libraries = [{"key": "1", "name": "Movies", "kind": "movie", "count": 1240, "avg_kbps": 18000},
+                        {"key": "2", "name": "TV", "kind": "tv", "count": 14600, "avg_kbps": 6500},
+                        {"key": "3", "name": "Music", "kind": "audio", "count": 9800, "avg_kbps": 128}]
         return st
 
     def test_stats_per_library(self):
@@ -326,13 +330,19 @@ class ReaderAndPlanTests(unittest.TestCase):
         self.assertAlmostEqual(p["need_by_kind"]["movie"] / 1e9, 18000 * 125 * 60 * 1240 * 1.05 / 1e9)
         p = plan(self._stats(), w, 400 * 10 ** 9)
         self.assertEqual(p["status"], "reduced")
-        self.assertLess(p["seconds"]["movie"], 60)
-        self.assertGreaterEqual(p["seconds"]["movie"], 3)
+        self.assertLess(p["seconds"]["1"], 60)                     # seconds are per library now
+        self.assertGreaterEqual(p["seconds"]["1"], 3)
         planned = sum(p["planned_by_kind"].values())
         self.assertLessEqual(planned, 400 * 10 ** 9 - 100 * 10 ** 9 + 1)
         self.assertEqual(plan(self._stats(), w, 0)["status"], "none")
         self.assertEqual(plan(self._stats(), w, None)["status"], "unknown")
         self.assertEqual(plan(self._stats(), w, 101 * 10 ** 9)["status"], "insufficient")
+        # Each library's own seconds, and only the libraries warm-up covers
+        w2 = dict(w, libraries={"1": {"seconds": 30}})
+        p = plan(self._stats(), w2, 960 * 10 ** 9)
+        self.assertAlmostEqual(p["need_by_kind"]["movie"] / 1e9, 18000 * 125 * 30 * 1240 * 1.05 / 1e9)
+        self.assertEqual([r["set_sec"] for r in p["libraries"]], [30, 30, 10])
+        self.assertEqual([r["key"] for r in plan(self._stats(), w2, None, keys={"2"})["libraries"]], ["2"])
 
     def test_warmup_run_counts_errors_separately(self):
         import threading
@@ -346,6 +356,41 @@ class ReaderAndPlanTests(unittest.TestCase):
         self.assertEqual(r["by_kind"]["movie"]["hits"] + r["by_kind"]["movie"]["reads"], 4)
         self.assertEqual(r["result"], "ok")
         self.assertEqual(r["l2_growth"], 0)
+
+    def test_next_day_check(self):
+        import threading
+        from plexcache.plex import MediaFile
+        from plexcache.warmup import next_day_check
+        files = [MediaFile(m["path"], m["kbps"], m["size"], "movie") for m in CAT["movies"]]
+        r = WarmupRun(files, {"movie": 2}, 100, 150, threading.Event()).run()
+        self.assertEqual(sorted(r["sample"]), sorted(f.path for f in files))     # a few files it read, kept for tomorrow
+        check = next_day_check(r["sample"] + ["/missing/file.mkv"])
+        self.assertEqual(check["checked"], 4)                                      # unreadable files don't count
+        self.assertTrue(0 <= check["pct"] <= 100)
+        # The app checks each run a day after it finished, then forgets the sample
+        app = _new_app()
+        r.update(started=time.time() - 90000, finished=time.time() - 87000)
+        app.activity.add_run(r)
+        self.assertNotIn("sample", app.activity.snapshot()["runs"][0])            # the page doesn't get the paths
+        app.check_next_day()
+        self.assertTrue(wait_for(lambda: app.activity.snapshot()["runs"][0].get("next_day") is not None, 10))
+        self.assertEqual(app.activity.runs_due(time.time(), 0), [])
+        self.assertTrue(any("still on the SSD" in e["message"] for e in app.activity.snapshot()["events"]))
+
+    def test_warmup_skips_lead_ins_in_their_cooldown(self):
+        import threading
+        from plexcache.cachelog import CacheLog
+        from plexcache.plex import MediaFile
+        files = [MediaFile(m["path"], m["kbps"], m["size"], "movie") for m in CAT["movies"]]
+        log = CacheLog()
+        log.note(files[0].path, whole=True)   # Prefetch read this one whole: its lead-in is cached too
+        run = WarmupRun(files, {"movie": 2}, 100, 150, threading.Event(),
+                        skip=lambda f: log.recent(f.path, False, 12), note=lambda f, hit: log.note(f.path, False, route="ssd", hit=hit))
+        r = run.run()
+        self.assertEqual((r["files"], r["skipped"]), (4, 1))
+        self.assertTrue(all(log.recent(f.path, False, 12) for f in files))   # each one is logged now
+        self.assertEqual(WarmupRun(files, {"movie": 2}, 100, 150, threading.Event(),
+                                   skip=lambda f: log.recent(f.path, False, 12)).run()["skipped"], 4)
 
 
 class MappingTests(unittest.TestCase):
@@ -421,49 +466,376 @@ class MappingTests(unittest.TestCase):
         self.assertIsNone(_host_only("evil<script>"))
 
 
-class NextEpisodeTimingTests(unittest.TestCase):
-    def _s(self, progress, credits=None):
-        from types import SimpleNamespace
-        return SimpleNamespace(progress=progress, view_offset_ms=int(progress * 1_200_000),
-                               credits_start_ms=credits)
+class PrefetchPlanTests(unittest.TestCase):
+    """The per-library ladders: each step includes the ones before it, in order."""
 
-    def _job(self, state):
-        from plexcache.playback import Job
-        j = Job("nowplaying", "x", "/x", 0, 1)
-        j.state = state
-        return j
+    @staticmethod
+    def show():
+        eps = [{"rating_key": "sp", "season": 0, "episode": 1, "files": [("/s0", 1, 1)]}]
+        for se in (1, 2, 3):
+            for e in (1, 2, 3):
+                eps.append({"rating_key": f"{se}{e}", "season": se, "episode": e, "files": [(f"/{se}{e}", 1, 1)]})
+        return eps
 
-    def test_default_depends_on_l2arc(self):
-        from plexcache.playback import next_episode_due as due
-        reading, done = [self._job("reading")], [self._job("done")]
-        # With an L2ARC: after Now-playing preload finishes
-        self.assertFalse(due("default", self._s(0.1), reading, True, "present"))
-        self.assertTrue(due("default", self._s(0.1), done, True, "present"))
-        self.assertTrue(due("default", self._s(0.1), [], True, "present"))     # now-playing skipped this stream
-        self.assertTrue(due("default", self._s(0.0), [], False, "present"))    # now-playing off: right away
-        # Without one (or unknown): at 90%
-        for l2 in ("absent", "unknown"):
-            self.assertFalse(due("default", self._s(0.85), done, True, l2))
-            self.assertTrue(due("default", self._s(0.9), done, True, l2))
+    def keys(self, items):
+        return [i["rating_key"] for i in items]
 
-    def test_explicit_choices(self):
-        from plexcache.playback import next_episode_due as due
-        self.assertFalse(due("after_nowplaying", self._s(0.5), [self._job("waiting")], True, "absent"))
-        self.assertTrue(due("after_nowplaying", self._s(0.0), [], False, "absent"))
-        self.assertFalse(due("80", self._s(0.79), [], False))
-        self.assertTrue(due("80", self._s(0.8), [], False))
-        self.assertTrue(due("90", self._s(0.9), [], False))
+    def test_tv_ladder(self):
+        from plexcache import prefetch as pf
+        steps = pf.tv_steps(self.show(), "12")                     # S01E02
+        self.assertEqual(self.keys(pf.plan(steps, "next")), ["13"])
+        self.assertEqual(self.keys(pf.plan(steps, "rest")), ["13"])
+        self.assertEqual(self.keys(pf.plan(steps, "whole")), ["13", "11"])           # the rest first, then the earlier one
+        self.assertEqual(self.keys(pf.plan(steps, "next_group")), ["13", "11", "21", "22", "23"])
+        self.assertEqual(self.keys(pf.plan(steps, "all_groups")), ["13", "11", "21", "22", "23", "31", "32", "33"])  # no specials
+        lib = [{"rating_key": "", "files": [("/other/show.mkv", 1, 1)]}]
+        self.assertEqual(self.keys(pf.plan(steps, "library", lib))[-1], "")
+        self.assertEqual(pf.plan(steps, "off"), [])
+
+    def test_season_of_what_plays_next(self):
+        from plexcache import prefetch as pf
+        # At the last episode of season 1, the next one is S02E01, so "the season" is season 2
+        steps = pf.tv_steps(self.show(), "13")
+        self.assertEqual(self.keys(pf.plan(steps, "next")), ["21"])
+        self.assertEqual(self.keys(pf.plan(steps, "rest")), ["21", "22", "23"])
+        self.assertEqual(self.keys(pf.plan(steps, "whole")), ["21", "22", "23"])
+        self.assertEqual(self.keys(pf.plan(steps, "next_group")), ["21", "22", "23", "31", "32", "33"])
+        # The last episode of the show: nothing comes next
+        self.assertEqual(pf.plan(pf.tv_steps(self.show(), "33"), "rest"), [])
+        self.assertIsNone(pf.tv_steps(self.show(), "missing"))
+
+    def test_audio_ladders(self):
+        from plexcache import prefetch as pf
+
+        def album(name, n):
+            return [{"rating_key": f"{name}{i}", "files": [(f"/{name}{i}", 1)], "duration_ms": 1000} for i in range(1, n + 1)]
+        a, b, c = album("a", 3), album("b", 2), album("c", 2)
+        steps = pf.audio_steps(a, "a2", b, [a, b, c], "books")
+        self.assertEqual(self.keys(pf.plan(steps, "next")), ["a3"])
+        self.assertEqual(self.keys(pf.plan(steps, "whole")), ["a3", "a1"])
+        self.assertEqual(self.keys(pf.plan(steps, "next_group")), ["a3", "a1", "b1", "b2"])
+        self.assertEqual(self.keys(pf.plan(steps, "all_groups")), ["a3", "a1", "b1", "b2", "c1", "c2"])
+        # The last chapter: the next book is the one in focus
+        steps = pf.audio_steps(a, "a3", b, [a, b, c], "books")
+        self.assertEqual(self.keys(pf.plan(steps, "rest")), ["b1", "b2"])
+        self.assertEqual(self.keys(pf.plan(steps, "next_group")), ["b1", "b2", "c1", "c2"])
+        # Music has no next album
+        steps = pf.audio_steps(a, "a3", None, [a, b], "music")
+        self.assertEqual(self.keys(pf.plan(steps, "rest")), [])
+        self.assertEqual(self.keys(pf.plan(steps, "whole")), ["a1", "a2"])
+        self.assertNotIn("next_group", [n for n, _ in steps])
+
+    def test_defaults_follow_the_mode_and_fall_back(self):
+        from plexcache import cachemode as cm, prefetch as pf
+        self.assertEqual(pf.resolve(cm.L2ARC, "2", "start", "default", "tv"), "library")
+        self.assertEqual(pf.resolve(cm.RAM, "2", "start", "default", "tv"), "rest")
+        self.assertEqual(pf.resolve(cm.L2ARC, "2", "end", "default", "tv"), "rest")
+        self.assertEqual(pf.resolve(cm.RAM, "2", "end", "default", "tv"), "next")
+        self.assertEqual(pf.resolve(cm.RAM, "2", "start", "all_groups", "tv"), "rest")    # needs an L2ARC
+        # RAM keeps one-off reads for hours: only what's needed soon is worth reading into it
+        self.assertEqual(pf.resolve(cm.RAM, "2", "start", "next_group", "tv"), "rest")
+        self.assertEqual(pf.resolve(cm.RAM, "2", "start", "whole", "tv"), "rest")
+        self.assertNotIn("whole", pf.END_LEVELS)       # episodes already watched, in full: never worth it
+        # Music on RAM only: no whole files by default; with an L2ARC, as for the rest
+        self.assertEqual(pf.resolve(cm.L2ARC, "4", "end", "default", "music"), "rest")
+        self.assertEqual(pf.resolve(cm.RAM, "4", "end", "default", "music"), "none")
+        self.assertEqual(pf.resolve(cm.RAM, "4", "end", "default", "tv"), "next")
+        self.assertEqual(pf.resolve(cm.L2ARC, "4", "end", "next", "music"), "next")       # still a choice
+        self.assertEqual(pf.resolve(cm.L2ARC, "3", "end", "default", "books"), "rest")
+        self.assertEqual(pf.resolve(cm.L2ARC, "4", "start", "next_group", "music"), "whole")  # not offered for music
+
+    def test_whole_file_choices(self):
+        from plexcache import cachemode as cm, prefetch as pf
+        self.assertEqual(pf.resolve(cm.RAM, "2", "end", "rest", "tv"), "next")       # needs an L2ARC now
+        self.assertEqual(pf.resolve(cm.L2ARC, "2", "end", "rest", "tv"), "rest")
+        self.assertEqual(pf.resolve(cm.RAM, "2", "end", "none", "tv"), "none")
+        self.assertEqual(pf.plan(pf.tv_steps(self.show(), "12"), "none"), [])
+        # From the 0.15 betas: "off" near the end becomes Nothing; warm-up switched off becomes no warm-up
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "settings.json"), "w") as fh:
+            json.dump({"nextepisode": {"libraries": {"2": {"end_at": "off", "start": "next"}}}, "warmup": {"enabled": False}}, fh)
+        st = config.Settings(d)
+        self.assertEqual(st.section("nextepisode")["libraries"]["2"], {"start": "next", "end": "none"})
+        self.assertEqual(st.section("warmup")["libraries"], {"*": {"schedule": "none"}})
+        self.assertNotIn("enabled", st.section("warmup"))
+        # Prefetch's switch, turned off, becomes Don't prefetch and Nothing for every library without choices of its own
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "settings.json"), "w") as fh:
+            json.dump({"nextepisode": {"enabled": False, "libraries": {"2": {"start": "next"}}}}, fh)
+        st = config.Settings(d)
+        self.assertNotIn("enabled", st.section("nextepisode"))
+        self.assertEqual(st.section("nextepisode")["libraries"]["*"], {"start": "off", "end": "none"})
+        self.assertEqual(pf.library_settings(st.section("nextepisode"), "7")["start"], "off")  # until it's shared out
+        self.assertEqual(pf.library_settings(st.section("nextepisode"), "2")["start"], "next")
+
+    def test_l2arc_only_steps_are_background(self):
+        from plexcache import prefetch as pf
+        steps = pf.tv_steps(self.show(), "12")
+        tagged = pf.plan_steps(steps, "library", [{"rating_key": "x", "files": [("/x", 1, 1)]}])
+        bg = {it["rating_key"]: pf.background("start", st) for st, it in tagged}
+        self.assertFalse(bg["13"])                          # the next episode reads straight away, into RAM
+        self.assertTrue(bg["11"] and bg["21"])              # what's needed later goes to the SSD in the background:
+        self.assertTrue(bg["31"] and bg["x"])               # earlier episodes, the next season, all seasons, the library
+        ends = [(it["rating_key"], pf.background("end", st)) for st, it in pf.plan_steps(pf.tv_steps(self.show(), "11"), "rest")]
+        self.assertEqual(ends, [("12", False), ("13", True)])   # in full: the next one into RAM, the rest to the SSD
+
+    def test_report_splits_reads_and_next_episodes(self):
+        from plexcache import report
+        s = report.summarize([{"what": "read", "cached": 10, "disk": 30},
+                              {"what": "read", "cached": 5, "disk": 95, "route": "ssd"},
+                              {"what": "next", "ready": True, "full": False, "label": "a"},
+                              {"what": "next", "ready": True, "label": "b"},          # older history: ready = in full
+                              {"what": "next", "ready": False, "full": False, "label": "c"}])
+        self.assertEqual((s["read_cached"], s["read_disk"], s["read_ssd"]), (10, 30, 100))
+        self.assertEqual((s["next"], s["next_ready"], s["next_full"]), (3, 2, 1))
+
+    def test_cache_log(self):
+        from plexcache.cachelog import CacheLog
+        log, now = CacheLog(), 1_000_000.0
+        log.note("/a", whole=True, at=now)
+        log.note("/b", whole=False, at=now - 2 * 3600)
+        self.assertTrue(log.recent("/a", whole=False, cooldown_hours=1, now=now + 60))   # a whole file is a lead-in too
+        self.assertTrue(log.recent("/a", whole=True, cooldown_hours=1, now=now + 60))
+        self.assertFalse(log.recent("/b", whole=True, cooldown_hours=6, now=now))         # a lead-in isn't a whole file
+        self.assertTrue(log.recent("/b", whole=False, cooldown_hours=6, now=now))
+        self.assertFalse(log.recent("/b", whole=False, cooldown_hours=1, now=now))        # past its cooldown
+        self.assertEqual(log.counts(6, 1, now=now + 60), {"lead_ins": 2, "whole_files": 1})
+        # Writes are kept for 6 months, well past any cooldown (they're what re-reads are measured against)
+        log.prune(now=now + 60)
+        self.assertEqual(log.counts(6, 6, now=now + 60), {"lead_ins": 2, "whole_files": 1})
+        log.prune(now=now + 31 * 86400)
+        self.assertEqual(log.counts(10 ** 6, 10 ** 6, now=now + 31 * 86400)["lead_ins"], 2)       # still there after a month
+        log.prune(now=now + 181 * 86400)
+        self.assertEqual(log.counts(10 ** 6, 10 ** 6, now=now + 181 * 86400), {"lead_ins": 0, "whole_files": 0})
+
+    def test_how_long_cached_data_lasts(self):
+        from plexcache import cachelog as cl
+        d = tempfile.mkdtemp(dir=TMP)
+        log, t = cl.CacheLog(os.path.join(d, "cachelog.json")), 1_000_000.0
+        log.boot_time = t - 100
+        log.note("/a", False, at=t, route="ram", hit=False)                  # first time: from the disks
+        log.note("/a", False, at=t + 20 * 60, route="ram", hit=True)         # 20 min later: still in RAM
+        log.note("/a", False, at=t + 40 * 60, route="ram", hit=True)         # counted too: 20 min since the last read (a hit touches it)
+        log.note("/b", True, at=t, route="ram", hit=False)
+        log.note("/b", True, at=t + 5 * 3600, route="ram", hit=False)        # 5 h later: gone
+        log.note("/c", False, at=t - 1000, route="ram", hit=False)           # written before the last boot:
+        log.note("/c", False, at=t + 600, route="ram", hit=False)            # not counted (a reboot empties RAM)
+        log.note("/s", False, at=t, route="ssd", hit=False)
+        log.note("/s", False, at=t + 3600, route="ssd", hit=True)            # SSD: every re-read counts
+        log.note("/s", False, at=t + 2 * 3600, route="ssd", hit=True)
+        sv = log.survival()
+        ram, ssd = sv["routes"]["ram"], sv["routes"]["ssd"]
+        self.assertEqual(ram["first"], 3)
+        kept = {r["upto"]: (r["kept"], r["gone"]) for r in ram["rows"] if r["kept"] + r["gone"]}
+        self.assertEqual(kept, {30 * 60: (2, 0), 6 * 3600: (0, 1)})
+        self.assertEqual(sum(r["kept"] for r in ssd["rows"]), 2)
+        # A whole file holds its lead-in: a lead-in read is measured against the later write
+        log.note("/w", True, at=t, route="ram", hit=False)
+        self.assertEqual(log.last("/w", False), t)
+        # Kept across restarts of the app
+        sv = log.survival()
+        log.save()
+        again = cl.CacheLog(os.path.join(d, "cachelog.json"))
+        self.assertEqual(again.survival()["routes"], sv["routes"])
+        self.assertEqual(again.last("/w", True), t)
+        again.reset_stats()
+        self.assertEqual(again.survival()["routes"]["ram"]["first"], 0)
+        self.assertEqual(again.last("/w", True), t)                         # the history stays
+        # Suggested cooldown: the longest age still cached ≥98% of the time, with ≥3 reads at each age
+        rows = [{"upto": 600, "kept": 20, "gone": 0}, {"upto": 1800, "kept": 2, "gone": 0},     # (too few: skipped)
+                {"upto": 3600, "kept": 50, "gone": 1}, {"upto": 7200, "kept": 19, "gone": 1}, {"upto": 14400, "kept": 30, "gone": 0}]
+        self.assertEqual(cl.suggest(rows), 3600)
+
+    def test_cached_data_lasts_per_library(self):
+        from plexcache import cachelog as cl
+        d = tempfile.mkdtemp(dir=TMP)
+        log, t = cl.CacheLog(os.path.join(d, "cachelog.json")), 1_000_000.0
+        log.boot_time = t - 100
+        log.note("/m1", False, at=t, route="ram", hit=False, library="1")         # first time, a miss
+        log.note("/m1", False, at=t + 20 * 60, route="ram", hit=True, library="1")  # 20 min later: hit
+        log.note("/m2", False, at=t, route="ram", hit=True, library="1")          # first time, already cached
+        log.note("/m2", False, at=t + 5 * 3600, route="ram", hit=False, library="1")  # 5 h later: gone
+        log.note("/t1", False, at=t, route="ssd", hit=False, library="2")
+        log.note("/t1", False, at=t + 3 * 86400, route="ssd", hit=False, library="2")  # 3 days later: gone
+        sv = log.survival({"1": "Movies", "2": "TV Shows"})
+        self.assertEqual(len(sv["fine"]), len(cl.FINE))
+        ram = {lib["name"]: lib for lib in sv["routes"]["ram"]["libs"]}
+        self.assertEqual(list(ram), ["Movies", "TV Shows"])                          # TV Shows: nothing in RAM, still listed
+        self.assertEqual(ram["TV Shows"]["first"], [0, 0])
+        self.assertEqual(ram["Movies"]["first"], [1, 1])                           # [hit, miss]
+        self.assertEqual(sum(h for h, _ in ram["Movies"]["fine"]), 1)
+        self.assertEqual(ram["Movies"]["fine"][cl._bucket(cl.FINE, 20 * 60)], [1, 0])
+        self.assertEqual(sum(r["kept"] for r in ram["Movies"]["rows"]), 1)
+        tv = sv["routes"]["ssd"]["libs"][1]
+        self.assertEqual((tv["key"], tv["first"]), ("2", [0, 1]))
+        self.assertEqual(tv["fine"][cl._bucket(cl.FINE, 3 * 86400)], [0, 1])
+        # Every library is listed, even with nothing measured yet, and says whether it's cached at all
+        sv2 = log.survival({"1": "Movies", "2": "TV Shows", "3": "Music"}, {"3": False})
+        ram2 = {lib["name"]: lib for lib in sv2["routes"]["ram"]["libs"]}
+        self.assertEqual(list(ram2), ["Movies", "TV Shows", "Music"])                 # in Plex's order
+        self.assertEqual((ram2["Music"]["cached"], ram2["Music"]["first"], ram2["TV Shows"]["cached"]), (False, [0, 0], True))
+        # Kept across restarts; a log from before libraries were noted still loads
+        log.save()
+        again = cl.CacheLog(os.path.join(d, "cachelog.json"))
+        self.assertEqual(again.survival({"1": "Movies", "2": "TV Shows"})["routes"], sv["routes"])
+        with open(os.path.join(d, "old.json"), "w", encoding="utf-8") as fh:
+            json.dump({"stats": {"ram": {"first": 3, "ages": [[1, 0]] + [[0, 0]] * (len(cl.AGES) - 1)}}}, fh)
+        old = cl.CacheLog(os.path.join(d, "old.json")).survival()["routes"]["ram"]
+        self.assertEqual((old["first"], old["libs"], old["rows"][0]["kept"]), (3, [], 1))
+        # A log from when the history was 30 days (one age bucket fewer, other finer ages) still loads
+        with open(os.path.join(d, "v30.json"), "w", encoding="utf-8") as fh:
+            json.dump({"stats": {"ram": {"first": 2, "ages": [[1, 0]] * (len(cl.AGES) - 1),
+                                         "libs": {"1": {"first": [1, 1], "ages": [[0, 1]] * (len(cl.AGES) - 1), "fine": [[5, 5]] * 64}}}}}, fh)
+        v30 = cl.CacheLog(os.path.join(d, "v30.json")).survival({"1": "Movies"})["routes"]["ram"]
+        self.assertEqual((v30["rows"][-2]["kept"], v30["rows"][-1]["kept"]), (1, 0))
+        self.assertEqual((v30["libs"][0]["first"], sum(h for h, _ in v30["libs"][0]["fine"])), ([1, 1], 0))
+        # Whether each library's pool has an SSD cache (the cache is per dataset, so they can differ)
+        l2 = log.survival({"1": "Movies", "2": "TV Shows"}, None, {"1": False, "2": True})["routes"]["ssd"]["libs"]
+        self.assertEqual([lib["l2arc"] for lib in l2], [False, True])
+        self.assertEqual(cl.HISTORY, 180 * 86400)
+        self.assertIsNone(cl.suggest([{"upto": 600, "kept": 2, "gone": 0}]))      # fewer than 3 reads: no suggestion
+        # Cooldowns from before 0.15 were in hours; now minutes
+        d2 = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d2, "settings.json"), "w") as fh:
+            json.dump({"general": {"ram_cooldown_lead_in_hours": 1, "l2arc_cooldown_whole_hours": 5}}, fh)
+        g = config.Settings(d2).section("general")
+        self.assertEqual((g["ram_cooldown_lead_in_minutes"], g["l2arc_cooldown_whole_minutes"]), (60, 360))
+        self.assertNotIn("ram_cooldown_lead_in_hours", g)
+
+    def test_automatic_cooldown_follows_the_nas(self):
+        from plexcache import cachelog as cl
+        log, t, H = cl.CacheLog(), 1_000_000.0, 3600
+        log.boot_time = 0
+        fallback = 2 * H
+
+        def reads(start, n, age, hit, lib="1"):
+            for i in range(n):
+                p = f"/{lib}/{start}/{age}/{i}"
+                log.note(p, False, at=start, route="ram", hit=False, library=lib)
+                log.note(p, False, at=start + age, route="ram", hit=hit, library=lib)
+        self.assertEqual(log.auto_cooldown("ram", "1", fallback, now=t), fallback)       # nothing yet: the default
+        reads(t, 10, 2.5 * H, True)                                                       # still cached at 2.5 h ...
+        reads(t, 10, 5 * H, False)                                                        # ... gone by 5 h
+        self.assertEqual(log.fully_cached("ram", "1"), {"age": 2.5 * H, "bound": False, "n": 20, "miss": 5 * H})
+        self.assertEqual(log.auto_cooldown("ram", "1", fallback, now=t + 6 * H), 2.5 * H)
+        self.assertEqual(log.auto_cooldown("ram", "2", fallback, now=t + 6 * H), 2.5 * H)  # a library without its own: every library's
+        # It goes up when data lasts longer (older reads have left the week's window)...
+        later = t + 30 * 86400
+        reads(later, 10, 10 * H, True)
+        self.assertEqual(log.auto_cooldown("ram", "1", fallback, now=later + 11 * H), 10 * H)
+        self.assertTrue(log.fully_cached("ram", "1", later)["bound"])                    # no misses: at least 10 h
+        # ...and back down when it doesn't: a miss at the youngest age measured gives the floor
+        reads(later + 60 * 86400, 10, 10 * H, False)
+        self.assertEqual(log.auto_cooldown("ram", "1", fallback, now=later + 60 * 86400 + 11 * H), cl.AUTO_FLOOR)
+        # Hour by hour (and day by day), for every library and each one apart: [age, no misses, re-reads, youngest miss]
+        end = later + 60 * 86400 + 11 * H
+        hours = log.fully_cached_series("ram", ["1", "2"], "hour", 24, now=end)
+        self.assertEqual(len(hours["starts"]), 24)
+        self.assertEqual([p for p in hours["libs"]["1"] if p], [[0, 0, 10, 10 * H]])     # the misses, in their hour
+        self.assertEqual(hours["libs"]["2"], [None] * 24)
+        days = log.fully_cached_series("ram", ["1"], "day", 3, now=end)
+        self.assertEqual(sum(1 for p in days["all"] if p), 1)
+        # How likely data of a given age is still cached: the library's own share, else every library's
+        self.assertAlmostEqual(log.still_cached("ram", "1", 2.5 * H), 1.0)
+        self.assertEqual(log.still_cached("ram", "1", 5 * H), 0.0)
+        self.assertIsNone(log.still_cached("ssd", "1", H))
+        # Saved and loaded with the rest
+        d = tempfile.mkdtemp(dir=TMP)
+        log.path = os.path.join(d, "c.json")
+        log.save(force=True)
+        again = cl.CacheLog(log.path)
+        self.assertEqual(again.reads, log.reads)                                           # each re-read is kept
+        self.assertEqual(again.auto_cooldown("ram", "1", fallback, now=later + 60 * 86400 + 11 * H), cl.AUTO_FLOOR)
+        self.assertEqual(again.library_of("/1/" + str(t) + "/" + str(2.5 * H) + "/0"), "1")
+        self.assertIn("reads", again.export())
+        again.reset_stats()
+        self.assertEqual(again.reads, [])
+
+    def test_library_cached_over_time(self):
+        from plexcache import coverage as cv
+        d = tempfile.mkdtemp(dir=TMP)
+        c, now, H = cv.Coverage(os.path.join(d, "coverage.json")), 1_000_000.0 * 3600, 3600
+        files = [("/a", 100, "1"), ("/b", 300, "1"), ("/c", 50, "2"), ("/d", 50, "2")]
+        self.assertTrue(c.due(now))
+        c.record(files, {"/a": now - 600, "/b": now - 3 * 86400, "/c": now - 200 * 86400}, now=now)
+        self.assertFalse(c.due(now + 60))                                               # once an hour
+        self.assertTrue(c.due(now + H))
+        s = c.series({"1": "Movies", "2": "TV"})
+        # Movies: /a within the hour (and everything after), /b within 7 days; by files and by bytes (tenths of %)
+        self.assertEqual(s["libs"]["1"][0], [[500, 500, 1000, 1000, 1000], [250, 250, 1000, 1000, 1000]])
+        self.assertEqual(s["libs"]["2"][0], [[0, 0, 0, 0, 0], [0, 0, 0, 0, 0]])           # /c was more than 6 months ago
+        self.assertEqual(s["all"][0][0], [250, 250, 500, 500, 500])
+        # Only the hourly result is kept, for 6 months, across restarts
+        again = cv.Coverage(c.path)
+        self.assertEqual(len(again.hours), 1)
+        again.record(files, {}, now=now + 181 * 86400)
+        self.assertEqual(len(again.hours), 1)
+
+    def test_every_setting_has_a_back_to_default_button(self):
+        # Every setting the pages offer has a ↺ that puts it back to its default, unless it has no
+        # meaningful default (where your servers are, secrets, which libraries, mappings, speeds,
+        # and the big feature switches). Checked in the page's code, so a new field can't miss it.
+        import re
+        js = open(os.path.join(ROOT, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        no_default = {"plex.url", "truenas.url", "mqtt.host", "mqtt.username", "mqtt.enabled"}
+
+        def body(name):  # a field builder's source
+            m = re.search(r"\n  function " + name + r"\(.*?\n  }\n", js, re.S)
+            self.assertIsNotNone(m, name)
+            return m.group(0)
+        for builder in ("range", "ramSlider", "select", "number", "checkbox", "textInput"):
+            self.assertIn("revertBtn(sec, key", body(builder), builder)
+        self.assertIn("NO_REVERT[sec + \".\" + key]", body("textInput"))
+        self.assertIn("data-pick-revert", body("pickRevert"))                        # choice lists: back to Default...
+        # ...beside their name, for every choice list on the pages
+        for m in re.finditer(r'pickHtml\(("[a-z]+:" \+ [^,]+), ', js):
+            self.assertIn("pickRevert(" + m.group(1) + ",", js, f"the choice list {m.group(1)} has no ↺")
+        builders = {n: body(n) for n in ("range", "ramSlider", "select", "number", "checkbox", "textInput")}
+        # Hand-built fields (outside the builders) carry their own ↺
+        for m in re.finditer(r'data-(?:set|check)="([a-z_]+\.[a-z_]+)"', js):
+            key = m.group(1)
+            if key in no_default or any(m.group(0) in b for b in builders.values()):
+                continue
+            line = js[js.rfind("\n", 0, m.start()) + 1: js.find("\n", m.end())]
+            nxt = "\n".join(js[m.end():].split("\n")[:5])                           # (the field, as built over a few lines)
+            sec, k = key.split(".")
+            self.assertTrue(f'revertBtn("{sec}", "{k}"' in line + nxt, f"{key} has no ↺ back-to-default button")
+        # ...and everything the builders are called with has a default the page is sent
+        defaults = config.public_defaults()
+        calls = re.findall(r'\b(?:range|ramSlider|select|number|checkbox|textInput)\("([a-z]+)", "([a-z_]+)"', js)
+        self.assertGreater(len(calls), 20)                                            # (the search finds them)
+        for sec, k in calls:
+            if f"{sec}.{k}" in no_default:
+                continue
+            self.assertIn(k, defaults.get(sec, {}), f"{sec}.{k} has no default for its ↺ button")
+        self.assertNotIn("password", str(defaults))                                    # (secrets never are)
+
+    def test_library_kinds(self):
+        from plexcache import prefetch as pf
+        self.assertEqual(pf.library_kind({"kind": "tv", "title": "TV"}), "tv")
+        self.assertEqual(pf.library_kind({"kind": "audio", "title": "Audiobooks"}), "books")
+        self.assertEqual(pf.library_kind({"kind": "audio", "title": "Music"}), "music")
+        self.assertEqual(pf.library_kind({"kind": "movie", "title": "Movies"}), "movies")
+        self.assertIsNone(pf.library_kind({"kind": None, "title": "Photos"}))
+        self.assertEqual(pf.levels_for("movies"), ("off", "next", "rest", "whole", "library"))
+        self.assertNotIn("next_group", pf.levels_for("music"))
 
     def test_old_settings_are_migrated(self):
         d = tempfile.mkdtemp(dir=TMP)
         with open(os.path.join(d, "settings.json"), "w") as fh:
-            json.dump({"nextepisode": {"start_at": "credits"}}, fh)
+            json.dump({"nextepisode": {"start_at": "after_nowplaying",
+                                       "library_modes": {"2": "next", "3": "album", "4": "off", "5": "artist", "6": "rest"}}}, fh)
         s = config.Settings(d)
-        self.assertEqual(s.section("nextepisode")["start_at"], "default")
-        for v in ("default", "after_nowplaying", "80", "90"):
-            s.update({"nextepisode": {"start_at": v}})
-        with self.assertRaises(config.SettingsError):
-            s.update({"nextepisode": {"start_at": "50"}})
+        ne = s.section("nextepisode")
+        self.assertNotIn("start_at", ne)
+        self.assertNotIn("library_modes", ne)
+        self.assertEqual(ne["libraries"], {"3": {"end": "rest"}, "4": {"start": "off", "end": "none"},
+                                           "5": {"start": "all_groups"}, "6": {"end": "rest"}})
+        s.update({"nextepisode": {"libraries": {"2": {"start": "default", "end": "rest", "end_at": "80"}}}})
+        self.assertEqual(s.section("nextepisode")["libraries"]["2"], {"end": "rest", "end_at": "80"})
+        for bad in ({"2": {"end": "library"}}, {"2": {"end_at": "50"}}, {"2": {"when": "now"}}, {"../2": {}}, ["off"]):
+            with self.assertRaises(config.SettingsError):
+                s.update({"nextepisode": {"libraries": bad}})
 
 
 class SchedulerTests(unittest.TestCase):
@@ -475,10 +847,15 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(scheduler.due(w, dt.datetime(2026, 10, 13, 3, 1), None, dt.datetime(2026, 10, 13, 3, 0, 30)))
         w = dict(w, schedule="weekly", weekday=6)
         self.assertEqual(scheduler.next_run(w, now, None), dt.datetime(2026, 10, 18, 3, 0))
-        w = dict(w, schedule="hours", every_hours=12)
-        last = dt.datetime(2026, 10, 12, 10, 0)
-        self.assertEqual(scheduler.next_run(w, now, last), dt.datetime(2026, 10, 12, 22, 0))
-        self.assertIsNone(scheduler.next_run(dict(w, schedule="manual"), now, None))
+        # Twice weekly: the weekday (Sunday) and three days later (Wednesday)
+        self.assertEqual(scheduler.next_run(w, now, None, "twice_weekly"), dt.datetime(2026, 10, 14, 3, 0))
+        self.assertEqual(scheduler.next_run(w, dt.datetime(2026, 10, 14, 4, 0), None, "twice_weekly"), dt.datetime(2026, 10, 18, 3, 0))
+        # Twice monthly: the 1st and 15th, at the time
+        self.assertEqual(scheduler.next_run(w, now, None, "twice_monthly"), dt.datetime(2026, 10, 15, 3, 0))
+        self.assertEqual(scheduler.next_run(w, dt.datetime(2026, 12, 15, 5, 0), None, "twice_monthly"), dt.datetime(2027, 1, 1, 3, 0))
+        self.assertTrue(scheduler.due(w, dt.datetime(2026, 11, 1, 3, 0, 10), None, dt.datetime(2026, 11, 1, 2, 59, 50), "twice_monthly"))
+        for untimed in ("none", "boot"):
+            self.assertIsNone(scheduler.next_run(w, now, None, untimed))
 
 
 class PreloadPlanTests(unittest.TestCase):
@@ -543,11 +920,11 @@ class PreloadPlanTests(unittest.TestCase):
         app.settings.update({"general": {"ram_reserve_gb": 61}, "nowplaying": {"enabled": True}})
         self.assertEqual(app.ram_budget()["usable"], 0)
         z = {i["title"]: i for i in checks._ram_check(app)}
-        self.assertEqual(z["Not enough RAM for preloading"]["status"], "fail")
+        self.assertEqual(z["Not enough RAM for Now Playing Cache and Prefetch"]["status"], "fail")
         recs = {r["feature"]: r["verdict"] for r in checks.recommendations(app)}
         self.assertEqual(recs["nowplaying"], "avoid")
         app.settings.update({"general": {"ram_reserve_gb": 57}})       # leaves about 3 GB: under 2 GB for Now-playing
-        self.assertEqual(checks._ram_check(app)[0]["title"], "RAM is tight for preloading")
+        self.assertEqual(checks._ram_check(app)[0]["title"], "RAM is tight for Now Playing Cache and Prefetch")
 
     def test_retired_settings_are_dropped(self):
         d = tempfile.mkdtemp(dir=TMP)
@@ -626,7 +1003,8 @@ class LayoutTests(unittest.TestCase):
 
     def test_plan_counts_indexes(self):
         from plexcache.warmup import DEFAULT_INDEX
-        stats = LibraryStats(count={"movie": 1000, "tv": 0, "audio": 0}, avg_kbps={"movie": 20000, "tv": 0, "audio": 0})
+        stats = LibraryStats(count={"movie": 1000, "tv": 0, "audio": 0}, avg_kbps={"movie": 20000, "tv": 0, "audio": 0},
+                             libraries=[{"key": "1", "name": "Movies", "kind": "movie", "count": 1000, "avg_kbps": 20000}])
         w = dict(config.DEFAULTS["warmup"])
         with_idx = plan(stats, w, None)
         self.assertEqual(with_idx["need_max"], with_idx["need_by_kind"]["movie"] + 1000 * DEFAULT_INDEX["movie"])  # always counted
@@ -636,19 +1014,7 @@ class LayoutTests(unittest.TestCase):
 
 
 class WarmupPauseTests(unittest.TestCase):
-    """When Library warm-up steps aside."""
-
-    def test_quiet_hours(self):
-        from plexcache.pauses import in_quiet_hours
-        at = lambda h, m=0: dt.datetime(2026, 10, 13, h, m)
-        # finish by 07:00, next start 03:00: paused all day, reading 03:00-07:00
-        self.assertTrue(in_quiet_hours(at(8), "07:00", "03:00"))
-        self.assertTrue(in_quiet_hours(at(2, 59), "07:00", "03:00"))
-        self.assertFalse(in_quiet_hours(at(5), "07:00", "03:00"))
-        # window that doesn't cross midnight
-        self.assertTrue(in_quiet_hours(at(12), "06:00", "23:00"))
-        self.assertFalse(in_quiet_hours(at(23, 30), "06:00", "23:00"))
-        self.assertFalse(in_quiet_hours(at(12), "03:00", "03:00"))
+    """When L2ARC-only caching steps aside."""
 
     def test_busy_percent(self):
         from plexcache.pauses import busy_percent
@@ -666,38 +1032,55 @@ class WarmupPauseTests(unittest.TestCase):
         return app
 
     def test_reasons(self):
-        from plexcache.pauses import WarmupPauses
+        from plexcache.pauses import L2arcPauses
         app = self._app()
-        p = WarmupPauses(app, manual=False)
+        p = L2arcPauses(app, manual=False)
         self.assertIsNone(p.reason())
         app.monitor.last_buffering = (time.time(), "Dune on Living room TV")
         self.assertIn("buffering (Dune on Living room TV)", p.reason())
         app.settings.update({"warmup": {"pause_buffering": False}})
         self.assertIsNone(p.reason())
-        app.monitor.preloading = lambda: "Now-playing is loading Dune"
+        app.monitor.preloading = lambda foreground_only=False: "Now-playing is loading Dune"
         self.assertEqual(p.reason(), "Now-playing is loading Dune")
         app.settings.update({"warmup": {"pause_preload": False}})
         self.assertIsNone(p.reason())
         with self.assertRaises(config.SettingsError):
             app.settings.update({"warmup": {"pause_disk_busy": 45}})
 
+    def test_prefetch_l2arc_only_reads_pause_too(self):
+        from plexcache.playback import Job
+        app = self._app()
+        mon = app.monitor
+        self.assertIsNone(mon._background_pause())
+        mon.last_buffering = (time.time(), "Dune on Living room TV")
+        self.assertIn("buffering (Dune on Living room TV)", mon._background_pause())
+        msgs = [e["message"] for e in app.activity.snapshot()["events"]]
+        self.assertTrue(any(m.startswith("L2ARC-only reads paused: a player was buffering") for m in msgs))
+        # A background read doesn't make others wait; a foreground one does
+        bg = Job("nextepisode", "Show · S01E05", "/x", [(0, 1)], 1, background=True, state="reading")
+        mon._chains["p"] = [bg]
+        self.assertIsNone(mon.preloading(foreground_only=True))
+        self.assertIn("Prefetch is loading", mon.preloading())
+        bg.background = False
+        self.assertIn("Prefetch is loading", mon.preloading(foreground_only=True))
+
     def test_scrub(self):
-        from plexcache.pauses import WarmupPauses
+        from plexcache.pauses import L2arcPauses
         app = self._app()
         TRUENAS.pool_data["scan"] = {"function": "SCRUB", "state": "SCANNING"}
         try:
-            p = WarmupPauses(app, manual=False)
+            p = L2arcPauses(app, manual=False)
             self.assertEqual(p._scrubbing(), "a scrub is running on tank", f"TrueNAS error: {p.scrub_error}")
         finally:
             TRUENAS.pool_data.pop("scan")
-        self.assertIsNone(WarmupPauses(app, manual=False).reason())
+        self.assertIsNone(L2arcPauses(app, manual=False).reason())
 
     def test_disk_busy(self):
-        from plexcache.pauses import WarmupPauses
+        from plexcache.pauses import L2arcPauses
         stats = os.path.join(os.environ["PLEXCACHE_PROC"], "diskstats")
         line = "   8      0 {name} 1 0 0 0 0 0 0 0 0 {ms} 0\n"
         app = self._app()
-        p = WarmupPauses(app, manual=False)
+        p = L2arcPauses(app, manual=False)
         try:
             with open(stats, "w") as fh:
                 fh.write(line.format(name="sdq", ms=1000))
@@ -707,7 +1090,7 @@ class WarmupPauseTests(unittest.TestCase):
                 fh.write(line.format(name="sdq", ms=1800))   # busy ~80% of the last second
             self.assertIn("% busy with other work", p.reason())
             # manual "Run now" goes at full speed and ignores it
-            m = WarmupPauses(app, manual=True)
+            m = L2arcPauses(app, manual=True)
             m.mark_idle()
             time.sleep(0.6)
             self.assertIsNone(m.reason())
@@ -725,7 +1108,6 @@ class AppTests(unittest.TestCase):
         cls.app.settings.update({
             "plex": {"url": PLEX.url, "token": "good-token"},
             "truenas": {"url": TRUENAS.url, "api_key": "good-key"},
-            "warmup": {"enabled": True},
             "nowplaying": {"enabled": True, "delay_sec": 0, "min_delay_sec": 0},
         })
         force_settings(cls.app, {"general": {"poll_seconds": 2}})
@@ -765,7 +1147,7 @@ class AppTests(unittest.TestCase):
         # Music is ticked (wanted) but its folder isn't mounted: an error, fixed in Settings
         self.assertEqual(media["Music"]["status"], "fail")
         self.assertIn("/music", media["Music"]["detail"])
-        self.assertIn("Settings → Media mappings", media["Music"]["fix"])
+        self.assertIn("System → Media mappings", media["Music"]["fix"])
         self.assertEqual(groups["media"]["items"], [])
         # one row per dataset, naming the libraries on it
         rows = {r["dataset"]: r for r in groups["datasets"]["datasets"]}
@@ -898,11 +1280,14 @@ class AppTests(unittest.TestCase):
         from plexcache import checks
         params = {"l2arc_noprefetch": "1", "l2arc_write_max": str(8 * 1048576),
                   "l2arc_rebuild_enabled": "0", "l2arc_mfuonly": "1"}
-        self.app.settings.update({"warmup": {"pacing_percent": 50}, "general": {"hdd_mb_per_sec": 150}})
+        # Automatic L2ARC pacing reads just under the fill rate, so there's nothing to warn about
+        auto = {i["title"]: i for i in checks._l2arc_tuning_checks(self.app, params)}
+        self.assertNotIn("L2ARC fills slower than warm-up reads", auto)
+        self.app.settings.update({"warmup": {"pacing_auto": False, "pacing_percent": 50}, "general": {"hdd_mb_per_sec": 150}})
         try:
             items = {i["title"]: i for i in checks._l2arc_tuning_checks(self.app, params)}
         finally:
-            self.app.settings.update({"warmup": {"pacing_percent": 10}})
+            self.app.settings.update({"warmup": {"pacing_auto": True, "pacing_percent": 10}})
         self.assertIn("L2ARC only keeps frequently used data", items)
         self.assertEqual("echo 0 | sudo tee /sys/module/zfs/parameters/l2arc_mfuonly", items["L2ARC only keeps frequently used data"]["fix_cmd"])
         self.assertIn("L2ARC is emptied on every reboot", items)
@@ -910,6 +1295,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("8 MiB/s", slow["detail"])
         self.assertIn("75 MB/s", slow["detail"])
         self.assertIn("about 5%", slow["fix"])
+        self.assertIn("automatic L2ARC pacing", slow["fix"])
         self.assertIn("Init/Shutdown Scripts", slow["fix"])
         self.assertEqual(checks._recordsize_check(self.app, "tank/m", 1048576, {"l2_total": 960 * 10 ** 9}), ("pass", []))
         # Movies and TV need 1M; audio-only datasets may use 512K or 1M
@@ -926,7 +1312,7 @@ class AppTests(unittest.TestCase):
         saved = self.app.zfs
         self.app.zfs = zfs_with(saved, {TV_DS: {"primarycache": "metadata"}})
         try:
-            for feature in ("nowplaying", "nextepisode"):
+            for feature in ("nowplaying",):
                 self.app.settings.update({feature: {"enabled": False}})
                 status, r = self.post("/api/settings", {feature: {"enabled": True}})
                 self.assertEqual(status, 400, feature)
@@ -936,7 +1322,7 @@ class AppTests(unittest.TestCase):
                 self.assertEqual(status, 200)
         finally:
             self.app.zfs = saved
-            self.app.settings.update({"nowplaying": {"enabled": True}, "nextepisode": {"enabled": True}})
+            self.app.settings.update({"nowplaying": {"enabled": True}})
 
     def test_unticked_library_is_listed_but_not_cached(self):
         from plexcache import mapping
@@ -972,30 +1358,38 @@ class AppTests(unittest.TestCase):
         saved = self.app.zfs
         self.app.zfs = zfs_with(saved, pools={"tank": {"l2_online": 0, "l2_total": 0, "cache_devices": 0}})
         try:
-            self.app.settings.update({"warmup": {"enabled": False}})
-            status, r = self.post("/api/settings", {"warmup": {"enabled": True}})
-            self.assertEqual(status, 400)
-            self.assertIn("L2ARC", en(r["error"]))
-            self.assertFalse(self.app.settings.section("warmup")["enabled"])
+            # Without an L2ARC no library warms up, and one set to warm up says it fell back
+            self.app.settings.update({"warmup": {"libraries": {"2": {"schedule": "weekly"}}}})
+            self.assertEqual(set(self.app.warmup_schedules().values()), {"none"})
+            self.assertFalse(self.app.warmup_active())
+            self.assertIn("warmup.2.schedule", [f["id"] for f in self.app.fallbacks.recent()])
             self.assertEqual(self.app.state()["l2arc"], "absent")
             from plexcache import checks
             rec = {r["feature"]: r for r in checks.recommendations(self.app)}["warmup"]
             self.assertEqual(rec["verdict"], "avoid")
             self.assertIn("Unavailable", rec["reason"])
             rows = {r["dataset"]: r for r in checks.check_datasets(self.app)["datasets"]}
-            self.assertEqual(rows[TV_DS]["l2arc"], {"status": "info", "text": "", "badge": "None"})  # warm-up is off here
-            self.app.settings.update({"warmup": {"enabled": True}})
-            z = dataset_fixes(checks.check_datasets(self.app))
-            self.assertIn("TV Shows", z["No L2ARC on pool tank"]["detail"])
+            # No L2ARC anywhere: the table just says None; the warning is under Caching mode, once
+            self.assertEqual(rows[TV_DS]["l2arc"], {"status": "info", "text": "", "badge": "None"})
+            mode = {en(i["title"]): i for i in checks.check_cache_mode(self.app)["items"]}
+            self.assertEqual(mode["No L2ARC on the media pool"]["status"], "warn")
+            self.assertIn("I won’t use an L2ARC", en(mode["No L2ARC on the media pool"]["fix"]))
+            self.assertEqual(self.app.cache_mode(), "ram")
+            # Saying you won't use one turns the warning into a note
+            self.app.settings.update({"general": {"no_l2arc": True}})
+            mode = {en(i["title"]): i for i in checks.check_cache_mode(self.app)["items"]}
+            self.assertNotIn("No L2ARC on the media pool", mode)
+            self.assertEqual(mode["RAM-only caching"]["status"], "info")
+            self.app.settings.update({"general": {"no_l2arc": False}})
             self.assertFalse(self.app.library_cacheable("2", "warmup"))
             self.assertTrue(self.app.library_cacheable("2", "nowplaying"))
         finally:
             self.app.zfs = saved
-            self.app.settings.update({"warmup": {"enabled": True}})
-        # with an L2ARC and primarycache=all it can be switched on
-        self.app.settings.update({"warmup": {"enabled": False}})
-        status, r = self.post("/api/settings", {"warmup": {"enabled": True}})
-        self.assertEqual(status, 200)
+            self.app.settings.update({"warmup": {"libraries": {}}})
+            self.app.fallbacks.items.clear()
+        # with an L2ARC, every library warms up at boot by default
+        self.assertTrue(self.app.warmup_active())
+        self.assertEqual(self.app.warmup_schedules()["2"], "boot")
 
     def test_nested_dataset_mounts(self):
         """Which dataset really holds a library when datasets are mounted inside each other."""
@@ -1093,12 +1487,25 @@ class AppTests(unittest.TestCase):
             self.app.run_checks()  # so later tests don't see health worked out with the speeds above
 
     def test_pages_and_static(self):
-        for p in ("/", "/health", "/features", "/activity", "/settings"):
+        for p in ("/", "/health", "/caching", "/ssd", "/activity", "/system", "/features", "/settings"):
             status, body, _ = self.get(p)
             self.assertEqual(status, 200)
             self.assertIn(b"/static/app.js", body)
         status, _, headers = self.get("/static/app.js")
         self.assertIn("javascript", headers["Content-Type"])
+        # After an update (or tnsync) browsers mustn't keep the old interface: the page names its
+        # files with the build, files carry an ETag (unchanged ones get a 304), and the state says
+        # which build is running so open tabs reload themselves
+        from plexcache.server import BUILD
+        _, body, _ = self.get("/activity")
+        self.assertIn(f'/static/app.js?v={BUILD}"'.encode(), body)
+        self.assertIn(f'/static/app.css?v={BUILD}"'.encode(), body)
+        req = urllib.request.Request(self.base + "/static/app.js", headers={"If-None-Match": headers["ETag"]})
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req)
+        self.assertEqual(cm.exception.code, 304)
+        cm.exception.close()
+        self.assertEqual(json.loads(self.get("/api/state")[1])["build"], BUILD)
         for bad in ("/static/../config.py", "/static/.hidden", "/nope"):
             with self.assertRaises(urllib.error.HTTPError) as cm:
                 self.get(bad)
@@ -1113,18 +1520,20 @@ class AppTests(unittest.TestCase):
         self.assertEqual(st["plan"]["status"], "fits")
 
     def test_settings_api(self):
-        status, r = self.post("/api/settings", {"warmup": {"tv_sec": 25}})
+        status, r = self.post("/api/settings", {"warmup": {"reserve_gb": 25}})
         self.assertEqual(status, 200)
-        self.assertEqual(r["settings"]["warmup"]["tv_sec"], 25)
-        status, r = self.post("/api/settings", {"warmup": {"tv_sec": -1}})
+        self.assertEqual(r["settings"]["warmup"]["reserve_gb"], 25)
+        self.addCleanup(self.app.settings.update, {"warmup": {"reserve_gb": 100}})
+        status, r = self.post("/api/settings", {"warmup": {"reserve_gb": -1}})
         self.assertEqual(status, 400)
-        status, r = self.post("/api/settings", {"warmup": {"tv_sec": 20}}, ctype="text/plain")
+        status, r = self.post("/api/settings", {"warmup": {"reserve_gb": 20}}, ctype="text/plain")
         self.assertEqual(status, 415)
 
     def test_warmup_run_via_api(self):
         # 3 s of each episode is far less than the file, so the index at the end is a separate read
-        self.app.settings.update({"warmup": {"tv_sec": 3, "tv_min_sec": 3}})
-        self.addCleanup(self.app.settings.update, {"warmup": {"tv_sec": 30}})
+        tv = next(l["key"] for l in self.app.libraries if l["kind"] == "tv")
+        self.app.settings.update({"warmup": {"libraries": {tv: {"seconds": 3}}, "tv_min_sec": 3}})
+        self.addCleanup(self.app.settings.update, {"warmup": {"libraries": {}}})
         status, r = self.post("/api/warmup/run", {})
         self.assertTrue(r["started"])
         for _ in range(100):
@@ -1155,7 +1564,9 @@ class AppTests(unittest.TestCase):
                 if len(jobs) >= 2 and all(j["state"] == "done" for j in jobs):
                     break
                 time.sleep(0.2)
-            feats = {j["feature"]: j for j in jobs}
+            feats = {}
+            for j in jobs:
+                feats.setdefault(j["feature"], j)                   # the first of each: the next episode comes first
             self.assertEqual(feats["nextepisode"]["target"], "Show's Name · S02E01")
             self.assertEqual(feats["nextepisode"]["state"], "done")
             self.assertEqual(feats["nowplaying"]["state"], "done")
@@ -1203,7 +1614,7 @@ class PlaybackMonitorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = _new_app(nowplaying={"enabled": True, "delay_sec": 0, "min_delay_sec": 0},
-                           nextepisode={"enabled": False})
+                           nextepisode={"libraries": {"*": {"start": "off", "end": "none"}}})
         cls.app.scan_library()
         cls.app.run_checks()
 
@@ -1214,10 +1625,15 @@ class PlaybackMonitorTests(unittest.TestCase):
         mon = self.app.monitor
         mon.sessions.clear()
         mon._seen.clear()
-        mon._recent.clear()
+        self.app.cachelog.__init__()
+        for j in mon._bg_queue:  # L2ARC-only reads left over from another test (they'd otherwise carry on)
+            j.cancel = True
+            if j.stop_event is not None:
+                j.stop_event.set()
+        mon._bg_queue = []
         mon.last_buffering = None
         self.app.settings.update({"general": {"ram_reserve_gb": 4}, "nowplaying": {"delay_sec": 0},
-                                  "nextepisode": {"enabled": False}})
+                                  "nextepisode": {"libraries": {"*": {"start": "off", "end": "none"}}}})
 
     def tearDown(self):
         self.pb.MIN_JOB, self.pb.RESTART_EVERY = self.saved
@@ -1236,72 +1652,198 @@ class PlaybackMonitorTests(unittest.TestCase):
     def session(self, ep, offset, state="playing", sid="m1"):
         PLEX.sessions = [{"id": sid, "item": ep, "offset": offset, "duration": 1200000, "state": state}]
 
-    def test_next_tracks_for_music_and_audiobooks(self):
+    def test_music_plays_are_read_logged_and_measured(self):
+        app, mon = self.app, self.app.monitor
+        app.library_cacheable = lambda *a, **k: True
+        try:
+            app.settings.update({"general": {"no_l2arc": True, "ram_cooldown_lead_in_minutes": 0, "ram_cooldown_whole_minutes": 0}})
+            track = CAT["tracks"][0]
+            path = app.map_path(track["path"])
+
+            def play(sid):
+                PLEX.sessions = [{"id": sid, "item": track, "offset": 10000, "duration": 120000}]
+                self.poll()
+                self.assertTrue(wait_for(lambda: self.jobs() and all(j["state"] == "done" for j in self.jobs()), 10))
+                PLEX.sessions = []
+                self.poll()
+            play("t1")
+            self.assertTrue(any("whole file" in en(e) for e in self.events()))            # the read is in Recent events
+            self.assertTrue(app.cachelog.last(path, whole=True))
+            play("t2")                                                                    # no cooldown: read again, and measured
+            ram = app.cachelog.survival()["routes"]["ram"]
+            self.assertEqual(sum(r["kept"] + r["gone"] for r in ram["rows"]), 1)
+            # A stream that can't be cached says why, once (here: its file isn't where Plex says)
+            gone = dict(track, path=track["path"] + ".missing", key="9999")
+            PLEX.sessions = [{"id": "t9", "item": gone, "offset": 10000, "duration": 120000}]
+            self.poll()
+            self.poll()
+            self.assertEqual(sum("isn't found here" in en(e) for e in self.events()), 1)
+            self.assertEqual(app.monitor.last_sessions["sessions"][0]["rating_key"], "9999")   # (for the exported log)
+            self.assertIn("plex_sessions", app.diagnostics())
+            # Within the whole-file cooldown: not read again, and Recent events says why
+            app.settings.update({"general": {"ram_cooldown_whole_minutes": 180}})
+            PLEX.sessions = [{"id": "t3", "item": track, "offset": 10000, "duration": 120000}]
+            self.poll()
+            self.assertTrue(any("within its cooldown" in en(e) for e in self.events()))
+        finally:
+            del app.library_cacheable
+            app.settings.update({"general": {"no_l2arc": False, "ram_cooldown_lead_in_minutes": 120, "ram_cooldown_whole_minutes": 180}})
+
+    def test_prefetch_waits_without_saying_nothing_plays_next(self):
+        # Seen first near the end (e.g. after the app restarted): whole files resolve to "Nothing"
+        # while lead-ins wait for Now Playing Cache. That's nothing due yet, not nothing next.
+        import plexcache.prefetch as pf
+        app = self.app
+        app.library_cacheable = lambda *a, **k: True
+        real = pf.resolve
+        pf.resolve = lambda app_, key, field, value, kind, name="": "none" if field == "end" else real(app_, key, field, value, kind, name)
+        try:
+            app.settings.update({"general": {"no_l2arc": True}, "nextepisode": {"libraries": {"3": {"start": "rest", "end": "next"}}}})
+            before = len(app.activity.events)                                             # (only this test's events)
+            PLEX.sessions = [{"id": "z1", "item": CAT["tracks"][0], "offset": 115000, "duration": 120000}]
+            self.poll()
+            mine = [e["message"] for e in list(app.activity.events)[before:]]
+            self.assertFalse(any("nothing plays after" in en(m) for m in mine))
+            self.assertTrue(wait_for(lambda: self.jobs() and all(j["state"] == "done" for j in self.jobs()), 10))
+            self.poll()                                                                   # Now Playing done: lead-ins next
+            self.assertTrue(wait_for(lambda: self.jobs("nextepisode"), 10))
+        finally:
+            pf.resolve = real
+            del app.library_cacheable
+            app.settings.update({"general": {"no_l2arc": False}, "nextepisode": {"libraries": {"*": {"start": "off", "end": "none"}}}})
+
+    def test_prefetch_for_audiobooks(self):
         app, mon = self.app, self.app.monitor
         app.library_cacheable = lambda *a, **k: True       # the audiobook dataset is left at primarycache=metadata in tests
 
-        def targets(sid):
-            return [j.target for j in mon._chains.get(sid, []) if not j.cancel]
+        def jobs(sid):  # this player's reads: its own queue, then its share of the L2ARC-only one
+            return mon._chains.get(sid, []) + [j for j in mon._bg_queue if j.player == sid]
 
-        def play(n, sid, mode):
-            app.settings.update({"nextepisode": {"library_modes": {"3": mode}}})
-            self.session(CAT["tracks"][n], 10000, sid=sid)
+        def queued(sid, whole=None):
+            return [j.target for j in jobs(sid) if not j.cancel and (whole is None or j.slice != whole)]
+
+        def done(sid):
+            return wait_for(lambda: jobs(sid) and all(j.state == "done" for j in jobs(sid)), 10)
+
+        def play(n, sid, offset=10000):
+            PLEX.sessions = [{"id": sid, "item": CAT["tracks"][n], "offset": offset, "duration": 120000}]
             self.poll()
-            self.assertTrue(wait_for(lambda: all(j.state == "done" for j in mon._chains.get(sid, [])), 10))
         try:
-            app.settings.update({"nowplaying": {"enabled": False}, "nextepisode": {"enabled": True}})
-            # Default for audiobooks: 20 minutes ahead — here, the rest of the book (two 2-minute chapters)
-            app.settings.update({"nextepisode": {"library_modes": {}}})
-            self.session(CAT["tracks"][0], 10000)
-            self.poll()
-            self.assertTrue(wait_for(lambda: len(mon._chains.get("m1", [])) == 2 and all(j.state == "done" for j in mon._chains["m1"]), 10))
-            self.assertEqual(targets("m1"), ["Author · Chapter 2", "Author · Chapter 3"])
-            self.assertTrue(all(j["whole"] for j in self.jobs("nextepisode")))
-            # Whole book, from the last chapter: the earlier chapter is read too (the others are already done)
-            mon._recent.pop(CAT["tracks"][0]["path"], None)
-            play(2, "m2", "album")
-            self.assertEqual(targets("m2"), ["Author · Chapter 1"])
-            # Everything by the author: the rest of this book, then the start of the other book, then all of it
-            mon._recent.clear()
-            play(0, "m3", "artist")
-            self.assertEqual(targets("m3"), ["Author · Chapter 2", "Author · Chapter 3", "Author · Book 2, chapter 1 (first seconds)",
-                                             "Author · Book 2, chapter 1", "Author · Book 2, chapter 2"])
-            self.assertEqual(mon._chains["m3"][2].length, 1024 * 1024)  # ~10 s, rounded up to a whole MiB
-            # Within the RAM limit, in order: here only the first chapter fits
-            mon._recent.clear()
+            app.settings.update({"nowplaying": {"enabled": False}, "nextepisode": {"libraries": {}}})
+            self.assertEqual(app.cache_mode(), "l2arc")
+            # Default with an L2ARC: the start of everything in the library, nearest first —
+            # the rest of this book, then the next book (the chapter playing is left to Now-playing)
+            play(0, "m1")
+            self.assertTrue(done("m1"))
+            self.assertEqual(queued("m1"), ["Author · Chapter 2", "Author · Chapter 3", "Author · Book 2, chapter 1", "Author · Book 2, chapter 2"])
+            self.assertTrue(all(j.slice and not j.ram for j in jobs("m1")))            # starts head for the SSD
+            self.assertEqual(jobs("m1")[0].length, 1024 * 1024)                        # 10 s, rounded up to a whole MiB
+            # Near the end (90%): the rest of the book in full — the next chapter into RAM (within the
+            # limit), the one after it to the SSD in the background (not counted against the limit)
+            play(0, "m1", offset=110000)
+            self.assertTrue(done("m1"))
+            self.assertEqual(queued("m1", whole=True), ["Author · Chapter 2", "Author · Chapter 3"])
+            full = [j for j in jobs("m1") if not j.slice]
+            self.assertEqual([(j.background, j.ram) for j in full], [(False, True), (True, False)])
+            # Starts read in the last few hours aren't read again
+            play(1, "m2")
+            self.assertEqual(queued("m2"), ["Author · Chapter 1"])  # only what hasn't been read yet
+            # RAM only: Default is the rest of the book, and a choice that needs an L2ARC falls back to it (and Health says so)
+            self.app.cachelog.__init__()
+            app.settings.update({"general": {"no_l2arc": True}, "nextepisode": {"libraries": {"3": {"start": "all_groups"}}}})
+            play(0, "m3")
+            self.assertTrue(done("m3"))
+            self.assertEqual(queued("m3"), ["Author · Chapter 2", "Author · Chapter 3"])
+            self.assertTrue(all(j.ram for j in jobs("m3")))                            # in RAM, so within the limit
+            (fb,) = app.fallbacks.recent()
+            self.assertEqual((en(fb["chosen"]), en(fb["used"])), ("All the author's books", "Rest of the book"))
+            # Within the RAM limit, in order: here only the first fits
+            self.app.cachelog.__init__()
             real = app.ram_budget
-            app.ram_budget = lambda: dict(real(), nextepisode=3 * 1024 * 1024)
+            app.ram_budget = lambda: dict(real(), nextepisode=1024 * 1024)
             try:
-                play(0, "m4", "artist")
+                play(0, "m4")
+                self.assertTrue(done("m4"))
             finally:
                 app.ram_budget = real
-            self.assertEqual(targets("m4"), ["Author · Chapter 2"])
-            # Don't preload: nothing
-            play(0, "m5", "off")
-            self.assertEqual(targets("m5"), [])
+            self.assertEqual(queued("m4"), ["Author · Chapter 2"])
+            # Don't prefetch, and nothing near the end: nothing
+            app.settings.update({"nextepisode": {"libraries": {"3": {"start": "off", "end": "none"}}}})
+            play(0, "m5", offset=115000)
+            self.assertEqual(queued("m5"), [])
             # a player that stops: what it had queued is dropped
             PLEX.sessions = []
             self.poll()
             self.assertEqual(mon._chains, {})
         finally:
             del app.library_cacheable
-            app.settings.update({"nowplaying": {"enabled": True}, "nextepisode": {"library_modes": {}}})
+            app.fallbacks.items.clear()
+            app.settings.update({"general": {"no_l2arc": False},
+                                 "nowplaying": {"enabled": True}, "nextepisode": {"libraries": {"*": {"start": "off", "end": "none"}}}})
 
-    def test_preload_choices_are_checked_and_old_checkboxes_carry_over(self):
-        import json
-        from plexcache.config import Settings, SettingsError
-        d = tempfile.mkdtemp(dir=TMP)
-        with open(os.path.join(d, "settings.json"), "w") as fh:
-            json.dump({"nextepisode": {"excluded_libraries": ["3"], "audio_ahead_min": 60}}, fh)
-        st = Settings(d)
-        self.assertEqual(st.section("nextepisode")["library_modes"], {"3": "off"})
-        self.assertNotIn("excluded_libraries", st.section("nextepisode"))
-        with self.assertRaises(SettingsError):
-            st.update({"nextepisode": {"library_modes": {"3": "forever"}}})
-        with self.assertRaises(SettingsError):
-            st.update({"nextepisode": {"library_modes": ["off"]}})
-        from plexcache.playback import slice_bytes
-        self.assertEqual((slice_bytes(0, 1000), slice_bytes(5 * 1024 * 1024, 0)), (0, 1024 * 1024))
+    def test_l2arc_only_queue_newest_first_and_outlives_its_player(self):
+        from types import SimpleNamespace
+        app, mon = self.app, self.app.monitor
+        real = mon._run_background
+        mon._run_background = lambda: None                   # keep everything waiting, to look at the order
+        app.cachelog.__init__()
+
+        def item(name):
+            return {"rating_key": "", "title": name, "files": [(f"/lib/{name}.mkv", 50 * MiB, 8000)]}
+
+        def ask(pid, names):
+            s = SimpleNamespace(session_key=pid, files=[], library_key="2", label=pid, type="episode", grandparent_title="")
+            mon._queue(f"{pid}:x", s, app.settings.get(), "tv", [], [(True, item(n)) for n in names])
+        try:
+            ask("a", ["one", "two", "three"])
+            ask("b", ["four", "two"])                         # newest first; "two" moves up with it
+            self.assertEqual([j.target for j in mon._bg_queue if j.state == "waiting"], ["four", "two", "one", "three"])
+            PLEX.sessions = []
+            self.poll()                                       # both players stop: their reads stay queued
+            self.assertEqual([j.target for j in mon._bg_queue if j.state == "waiting"], ["four", "two", "one", "three"])
+        finally:
+            mon._run_background = real
+            for j in mon._bg_queue:
+                j.state, j.cancel = "cancelled", True
+            mon._bg_queue.clear()
+
+    def test_prefetch_for_movies_in_a_collection(self):
+        app, mon = self.app, self.app.monitor
+        app.library_cacheable = lambda *a, **k: True       # the movie dataset is left at primarycache=metadata in tests
+
+        def jobs(sid):
+            return mon._chains.get(sid, []) + [j for j in mon._bg_queue if j.player == sid]
+
+        def queued(sid):
+            return [j.target for j in jobs(sid) if not j.cancel]
+        try:
+            app.settings.update({"nowplaying": {"enabled": False}, "nextepisode": {"libraries": {"1": {"end": "none"}}},
+                                 # the library step is L2ARC-only: let it read at once here
+                                 "warmup": {"pacing_percent": 100, "pause_disk_busy": 0, "pause_buffering": False}})
+            # Part 1 of a trilogy, default with an L2ARC: the rest of the collection first, then the library
+            PLEX.sessions = [{"id": "v1", "item": CAT["movies"][0], "offset": 60000, "duration": 6000000}]
+            self.poll()
+            self.assertEqual(queued("v1"), ["Trilogy · Part 2", "Trilogy · Part 3", "Movie 3.mkv"])
+            self.assertTrue(wait_for(lambda: all(j.state == "done" for j in jobs("v1")), 10),
+                            [(j.target, j.state, str(j.paused)) for j in jobs("v1")])
+            # Just the collection: the middle movie gets the next one, then the one before
+            self.app.cachelog.__init__()
+            app.settings.update({"nextepisode": {"libraries": {"1": {"start": "whole", "end": "none"}}}})
+            PLEX.sessions = [{"id": "v2", "item": CAT["movies"][1], "offset": 60000, "duration": 6000000}]
+            self.poll()
+            self.assertEqual(queued("v2"), ["Trilogy · Part 3", "Trilogy · Part 1"])
+            # A movie in no collection: nothing until the library step
+            self.app.cachelog.__init__()
+            PLEX.sessions = [{"id": "v3", "item": CAT["movies"][3], "offset": 60000, "duration": 6000000}]
+            self.poll()
+            self.assertEqual(queued("v3"), [])
+            self.assertTrue(any("nothing plays after" in m for m in self.events()))
+        finally:
+            del app.library_cacheable
+            PLEX.sessions = []
+            self.poll()
+            app.settings.update({"nowplaying": {"enabled": True}, "nextepisode": {"libraries": {"*": {"start": "off", "end": "none"}}},
+                                 "warmup": {"pacing_percent": 10, "pause_disk_busy": 50, "pause_buffering": True}})
 
     def test_buffering_is_noticed_and_preload_waits_for_playing(self):
         self.session(CAT["episodes"][0], 60000, state="buffering")
@@ -1320,7 +1862,7 @@ class PlaybackMonitorTests(unittest.TestCase):
         self.poll()
         job = self.app.monitor.sessions["m1:" + CAT["episodes"][1]["key"]]["jobs"][0]
         job.state = "reading"                                   # as if mid-read
-        self.assertIn("Now-playing is loading", self.app.monitor.preloading())
+        self.assertIn("Now Playing Cache is loading", self.app.monitor.preloading())
         job.state = "waiting"
         self.assertIsNone(self.app.monitor.preloading())
 
@@ -1355,8 +1897,8 @@ class PlaybackMonitorTests(unittest.TestCase):
                  "season": 9, "episode": 9, "key": "9999"}
         self.session(ghost, 60000)
         self.poll()
-        self.assertTrue(wait_for(lambda: self.jobs() and self.jobs()[0]["state"] == "failed"))
-        self.assertTrue(wait_for(lambda: any("couldn't read" in m for m in self.events())))
+        self.assertEqual(self.jobs(), [])                       # nothing to read: it isn't there
+        self.assertTrue(any("isn't found here" in en(m) for m in self.events()))
 
     def test_stream_ending_cancels_waiting_preload(self):
         force_settings(self.app, {"nowplaying": {"delay_sec": 1}})
@@ -1371,14 +1913,14 @@ class PlaybackMonitorTests(unittest.TestCase):
         self.assertEqual(job.state, "cancelled")
 
     def test_no_next_episode(self):
-        self.app.settings.update({"nextepisode": {"enabled": True, "start_at": "after_nowplaying"},
+        self.app.settings.update({"nextepisode": {"libraries": {"2": {"start": "next", "end": "none"}}},
                                   "nowplaying": {"enabled": False}})
         try:
             self.session(CAT["episodes"][-1], 60000)
             self.poll()
-            self.assertTrue(any("no next episode after" in m for m in self.events()))
+            self.assertTrue(any("nothing plays after" in m for m in self.events()))
         finally:
-            self.app.settings.update({"nowplaying": {"enabled": True}})
+            self.app.settings.update({"nowplaying": {"enabled": True}, "nextepisode": {"libraries": {}}})
 
     def test_monitor_survives_errors(self):
         mon = self.app.monitor
@@ -1444,8 +1986,10 @@ class PlaybackMonitorTests(unittest.TestCase):
 
     def test_next_episode_readiness_and_stream_end(self):
         import plexcache.playback as pb
-        self.app.settings.update({"nextepisode": {"enabled": True, "start_at": "after_nowplaying"},
-                                  "nowplaying": {"enabled": False}})
+        # RAM only: the lead-in is read into RAM, so it gets the still-cached check (with an L2ARC
+        # it's on its way to the SSD, and isn't checked for still being in RAM)
+        self.app.settings.update({"nextepisode": {"libraries": {"2": {"start": "next"}}},
+                                  "nowplaying": {"enabled": False}, "general": {"no_l2arc": True}})
         stats = os.path.join(os.environ["PLEXCACHE_PROC"], "diskstats")
         saved_after = pb.RETENTION_AFTER
         pb.RETENTION_AFTER = 0
@@ -1466,26 +2010,83 @@ class PlaybackMonitorTests(unittest.TestCase):
             self.session(CAT["episodes"][3], 1000, sid="n2")
             self.poll()
             nxt = self.metrics("next")[-1]
-            self.assertTrue(nxt["ready"])
+            self.assertTrue(nxt["ready"])                       # its lead-in was cached: it started instantly...
+            self.assertFalse(nxt["full"])                       # ...but only the lead-in
             self.assertEqual(nxt["label"], "Show's Name · S02E01")
             end = self.metrics("streamend")[-1]
             self.assertIsNotNone(end["busy_peak"])
         finally:
             pb.RETENTION_AFTER = saved_after
             os.remove(stats)
-            self.app.settings.update({"nowplaying": {"enabled": True}})
+            self.app.settings.update({"nowplaying": {"enabled": True}, "general": {"no_l2arc": False}})
 
-    def test_start_rules(self):
-        from plexcache.playback import Job, next_episode_due, resolve_start
-        s = type("S", (), {"progress": 0.85})()
-        self.assertTrue(next_episode_due("80", s, [], False))
-        self.assertFalse(next_episode_due("90", s, [], False))
-        self.assertTrue(next_episode_due("after_nowplaying", s, [], False))
-        busy = Job("nowplaying", "x", "/f", [(0, 10)], 10, state="reading")
-        self.assertFalse(next_episode_due("after_nowplaying", s, [busy], True))
-        self.assertEqual(resolve_start("default", "present"), "after_nowplaying")
-        self.assertEqual(resolve_start("default", "absent"), "90")
+    def test_next_episode_ready_with_no_cooldown(self):
+        # "Was it cached?" comes from the cache log, not the cooldown: with no cooldown, a next
+        # episode Prefetch got ready seconds earlier is still ready (it used to count as not)
+        self.app.settings.update({"nextepisode": {"libraries": {"2": {"start": "next"}}}, "nowplaying": {"enabled": False},
+                                  "general": {"no_l2arc": True, "ram_cooldown_lead_in_minutes": 0, "ram_cooldown_whole_minutes": 0}})
+        try:
+            self.session(CAT["episodes"][2], 60000, sid="c1")
+            self.poll()
+            self.assertTrue(wait_for(lambda: self.jobs("nextepisode") and self.jobs("nextepisode")[0]["state"] == "done"))
+            self.session(CAT["episodes"][3], 1000, sid="c2")
+            self.poll()
+            nxt = self.metrics("next")[-1]
+            self.assertTrue(nxt["ready"])
+            self.assertEqual(nxt["p"], 1.0)
+        finally:
+            self.app.settings.update({"nowplaying": {"enabled": True},
+                                      "general": {"no_l2arc": False, "ram_cooldown_lead_in_minutes": 120, "ram_cooldown_whole_minutes": 180}})
+
+    def test_cached_some_other_way_still_counts(self):
+        from types import SimpleNamespace
+        app, mon = self.app, self.app.monitor
+        path = CAT["episodes"][4]["path"]
+        size = CAT["episodes"][4]["size"]
+        s = SimpleNamespace(files=[(path, size)], library_key="2", type="episode", kbps=100, label="S02E02",  # lead-in: 1 MiB of 12
+                            progress=0.5, rating_key="r42", session_key="z", player="TV", transcoding=False, local=True)
+        try:
+            app.cachelog.__init__()
+            mon._record_skip("z:r42", s, app.settings.get(), 120)
+            self.assertFalse(self.metrics("skip")[-1]["cached"])           # nothing read: from disk
+            app.cachelog.note(path, whole=True)                               # the Whole File Cache had it
+            mon._record_skip("z:r42", s, app.settings.get(), 120)
+            self.assertTrue(self.metrics("skip")[-1]["cached"])
+            app.cachelog.__init__()
+            app.cachelog.note(path, whole=False)                              # only its lead-in:
+            mon._record_skip("z:r42", s, app.settings.get(), -120)
+            self.assertFalse(self.metrics("skip")[-1]["cached"])           # mid-file isn't covered...
+            mon._record_skip("z:r42", SimpleNamespace(**dict(vars(s), progress=0.0001)), app.settings.get(), -600)
+            self.assertTrue(self.metrics("skip")[-1]["cached"])            # ...a jump back into the lead-in is
+            # Prefetch picked it as next, but the cooldown meant nothing was read: it still counts, fully cached
+            app.cachelog.note(path, whole=True)
+            mon._expected["r42"] = time.time()
+            mon._stream_started(s)
+            nxt = self.metrics("next")[-1]
+            self.assertEqual((nxt["ready"], nxt["full"], nxt["state"]), (True, True, "logged"))
+            before = len(self.metrics("next"))
+            mon._stream_started(s)                                            # not picked as next this time: not counted
+            self.assertEqual(len(self.metrics("next")), before)
+        finally:
+            app.cachelog.__init__()
+
+    def test_near_the_end_timing(self):
+        from plexcache.playback import Job
         self.assertEqual(Job("nowplaying", "x", "/f", [], 0).offset, 0)
+        mon = self.app.monitor
+        self.app.settings.update({"nowplaying": {"enabled": False},
+                                  "nextepisode": {"libraries": {"2": {"start": "off", "end_at": "80", "end": "next"}}}})
+        try:
+            self.session(CAT["episodes"][0], int(1200000 * 0.79), sid="t1")    # S01E01 at 79%: not yet
+            self.poll()
+            self.assertEqual(mon._chains.get("t1", []), [])
+            self.session(CAT["episodes"][0], int(1200000 * 0.85), sid="t1")    # at 85%: the next episode, in full
+            self.poll()
+            self.assertEqual([(j.target, j.slice) for j in mon._chains["t1"]], [("Show's Name · S01E02", False)])
+            self.assertTrue(wait_for(lambda: mon._chains["t1"][0].state == "done", 10))
+            self.assertEqual(mon._chains["t1"][0].length, CAT["episodes"][1]["size"])
+        finally:
+            self.app.settings.update({"nowplaying": {"enabled": True}, "nextepisode": {"libraries": {"*": {"start": "off", "end": "none"}}}})
 
 
 class ServerTests(unittest.TestCase):
@@ -1609,7 +2210,7 @@ class ReportTests(unittest.TestCase):
                 ("streamend", {"label": "A", "seconds": 60, "busy_avg": 12, "busy_peak": 40})]
         r = report.build(self.app_with(rows))
         self.assertEqual(r["verdict"]["status"], "ok")
-        self.assertEqual("Last 7 days, 2 streams: 1 of 1 skip and 1 of 1 next episode came from cache.",
+        self.assertEqual("Last 7 days, 2 streams: 1 of 1 skip came from cache.",
                          r["verdict"]["text"])
         t = r["tiles"]
         self.assertEqual((t["skips"]["cached"], t["next"]["lead_min"], t["retention"]["pct"], t["preloaded"]["cached_pct"]),
@@ -1631,19 +2232,18 @@ class ReportTests(unittest.TestCase):
         r = report.build(self.app_with(rows))
         self.assertEqual(r["verdict"]["status"], "warn")
         titles = [a["title"] for a in r["attention"]]
-        for want in ("1 skip went to disk: RAM limit full", "1 skip before the preload started",
-                     "1 skip ahead of the preload", "1 skip without Now-playing", "1 next episode not ready in time",
-                     "Preloads aren't staying in RAM (40% still cached)"):
+        for want in ("1 skip went to disk: RAM limit full", "1 skip before Now Playing Cache started",
+                     "1 skip ahead of Now Playing Cache", "1 skip without Now Playing Cache",
+                     "Cached data isn't staying in RAM (40% still cached)"):
             self.assertIn(want, titles)
         self.assertIn("Disks reached 95% busy while people watched", titles)
         self.assertEqual((r["ram"]["limited"], r["ram"]["no_room"]), (1, 1))
 
     def test_warnings_busy_disks_and_quiet_weeks(self):
         from plexcache import report
-        rows = [("stream", {"label": "A"}), ("streamend", {"label": "A", "seconds": 60, "busy_avg": 50, "busy_peak": 90}),
-                ("next", {"label": "B", "ready": False, "lead": None, "pct": 40, "state": "reading"})]
+        rows = [("stream", {"label": "A"}), ("streamend", {"label": "A", "seconds": 60, "busy_avg": 50, "busy_peak": 90})]
         r = report.build(self.app_with(rows))
-        self.assertEqual(r["verdict"]["status"], "warn")
+        self.assertNotIn("next episode", str(r["attention"]))                         # (no longer reported)
         self.assertIn("Disks reached 90% busy while people watched", [a["title"] for a in r["attention"]])
         # streams with nothing to report: still a green verdict
         r = report.build(self.app_with([("stream", {"label": "A"})]))
@@ -1671,9 +2271,19 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(allr["today"]["verdict"]["text"].startswith("Today, 1 stream"))
         self.assertEqual((allr["today"]["series"][12]["streams"], allr["today"]["series"][13]["skips_cached"]), (1, 1))
         self.assertEqual(allr["today"]["series"][13]["label"], "13:00")
-        self.assertEqual(allr["month"]["tiles"]["skips"], {"cached": 1, "total": 2})
+        self.assertEqual({k: v for k, v in allr["month"]["tiles"]["skips"].items() if k != "by_lib"}, {"cached": 1, "total": 2, "expected": 1.0})
         self.assertEqual(allr["year"]["series"][0]["label"], "Apr")
         self.assertEqual(allr["year"]["series"][2]["retention"], 50)  # June's summary
+        # Skips per library (each counted by how likely it came from cache), in the total and over time
+        app.libraries = [{"key": "1", "title": "Movies"}, {"key": "2", "title": "TV Shows"}]
+        app.activity.metrics += [{"what": "skip", "t": now - 30, "cached": True, "label": "C", "p": 0.5, "lib": "2"},
+                                 {"what": "skip", "t": now - 20, "cached": True, "label": "C", "p": 1.0, "lib": "2"}]
+        today = report.build_all(app, now=now)["today"]
+        self.assertEqual(today["tiles"]["skips"]["by_lib"], [{"key": "1", "name": "Movies", "total": 0, "expected": 0},
+                                                             {"key": "2", "name": "TV Shows", "total": 2, "expected": 1.5}])
+        self.assertEqual(today["series"][13]["skips_by"], {"2": [2, 1.5]})
+        merged = report.add(report.summarize(app.activity.metrics[-2:]), report.summarize(app.activity.metrics[-1:]))
+        self.assertEqual(merged["skips_by"], {"2": [3, 2.5]})                    # day summaries add up per library
         self.assertEqual(allr["year"]["tiles"]["retention"]["pct"], 50)
         self.assertEqual(allr["week"]["series"][-1]["label"], "Sun")
 
@@ -1765,7 +2375,8 @@ class BlockSizeTests(unittest.TestCase):
         self.assertEqual(checks._blocks_note({"checked": 5, "single": 5, "sizes": {}}, 1024 * 1024), "")  # nothing to tell
         # the page gets the defaults it needs for its "back to default" buttons
         d = app.state()["defaults"]
-        self.assertEqual((d["general"]["poll_seconds"], d["general"]["ram_reserve_gb"], d["warmup"]["movie_sec"]), (5, 4, 60))
+        self.assertEqual((d["general"]["poll_seconds"], d["general"]["ram_reserve_gb"]), (5, 4))
+        self.assertEqual(app.state()["kind_seconds"], {"movie": 60, "tv": 30, "audio": 10})  # each library's default lead-in
         self.assertNotIn("cache_index", config.DEFAULTS["warmup"])  # file indexes are always cached now
 
     def test_check_every_file(self):
@@ -2013,14 +2624,62 @@ def _can_connect(port):
         return False
 
 
+class WarmupScheduleTests(unittest.TestCase):
+    """Each library's warm-up schedule: Default follows the caching mode; the old shared schedule carries over."""
+
+    def test_schedules_per_library(self):
+        app = _new_app()
+        app.scan_library()
+        app.run_checks()
+        self.assertEqual(app.cache_mode(), "l2arc")
+        kinds = {l["key"] for l in app.libraries if l.get("kind")}
+        self.assertEqual(app.warmup_schedules(), {k: "boot" for k in kinds})          # Default with an L2ARC: at boot
+        app.settings.update({"warmup": {"libraries": {"2": {"schedule": "weekly", "seconds": 45}, "3": {"schedule": "none"}}}})
+        sch = app.warmup_schedules()
+        self.assertEqual((sch["2"], sch["3"]), ("weekly", "none"))
+        self.assertEqual(app.warmup_libraries("weekly"), {"2"})
+        self.assertIsNotNone(app.next_warmup())
+        st = app.state()
+        self.assertEqual(st["warmup"]["schedules"]["2"], "weekly")
+        self.assertIn("3", [r["key"] for r in st["plan"]["libraries"]])              # sizing covers every library's lead-ins
+        self.assertEqual(next(r for r in st["plan"]["libraries"] if r["key"] == "2")["set_sec"], 45)
+        # RAM only: no warm-ups, and the weekly one is noted as a fallback
+        app.settings.update({"general": {"no_l2arc": True}})
+        self.assertEqual(set(app.warmup_schedules().values()), {"none"})
+        self.assertIn("warmup.2.schedule", [f["id"] for f in app.fallbacks.recent()])
+        self.assertIsNone(app.next_warmup())
+        app.settings.update({"general": {"no_l2arc": False}})
+        for bad in ({"2": {"schedule": "hourly"}}, {"2": {"seconds": 0}}, {"2": {"seconds": 2.5}}, {"2": {"when": 1}}):
+            with self.assertRaises(config.SettingsError):
+                app.settings.update({"warmup": {"libraries": bad}})
+
+    def test_old_shared_schedule_carries_over(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "settings.json"), "w") as fh:
+            json.dump({"warmup": {"enabled": True, "schedule": "weekly", "every_hours": 6}}, fh)
+        st = config.Settings(d)
+        w = st.section("warmup")
+        self.assertNotIn("schedule", w)
+        self.assertEqual(w["libraries"], {"*": {"schedule": "weekly"}})
+        app = _new_app()
+        st.update({"plex": app.settings.section("plex")})
+        app.settings = st
+        app.scan_library()                                                           # once the libraries are known...
+        libs = st.section("warmup")["libraries"]
+        self.assertNotIn("*", libs)
+        self.assertEqual({k: v["schedule"] for k, v in libs.items()}, {l["key"]: "weekly" for l in app.libraries if l.get("kind")})
+
+
 class AppEdgeTests(unittest.TestCase):
     """Start-up, scheduling, connection lights and fallbacks."""
 
     def test_start_and_scheduler(self):
         import plexcache.app as appmod
-        app = _new_app(warmup={"enabled": True})
+        app = _new_app(warmup={"libraries": {"2": {"schedule": "daily"}}})
+        app.scan_library()
+        app.run_checks()                      # finds the L2ARC: without one, a daily warm-up can't run
         started = []
-        app.start_warmup = lambda manual: started.append(manual)
+        app.start_warmup = lambda manual, libs=None, why=None: started.append(manual) or self.assertEqual(libs, {"2"})
         waits = iter([False, True])
         app.stopping.wait = lambda t: next(waits)
         real_due, real_time = appmod.due, appmod.time
@@ -2092,7 +2751,7 @@ class AppEdgeTests(unittest.TestCase):
         calls = iter(["a player was buffering (x)", None])
 
         class P:
-            def __init__(self, *a):
+            def __init__(self, *a, **k):
                 pass
 
             def reason(self):
@@ -2100,12 +2759,12 @@ class AppEdgeTests(unittest.TestCase):
 
             def mark_idle(self):
                 pass
-        real = appmod.WarmupPauses
-        appmod.WarmupPauses = P
+        real = appmod.L2arcPauses
+        appmod.L2arcPauses = P
         try:
             app._warmup_worker(manual=True)
         finally:
-            appmod.WarmupPauses = real
+            appmod.L2arcPauses = real
         msgs = [e["message"] for e in app.activity.snapshot()["events"]]
         self.assertTrue(any(m == "paused: a player was buffering (x)" for m in msgs))
         self.assertTrue(any(m == "carrying on" for m in msgs))
@@ -2310,12 +2969,9 @@ class SmallModuleTests(unittest.TestCase):
     def test_scheduler(self):
         from plexcache.scheduler import due, next_run
         now = dt.datetime(2026, 10, 13, 12, 0)
-        self.assertEqual(next_run({"schedule": "hours", "every_hours": 6}, now, None), now)
         weekly = {"schedule": "weekly", "weekday": now.weekday(), "time": "09:00"}
         self.assertEqual(next_run(weekly, now, None), dt.datetime(2026, 10, 20, 9, 0))   # today's 9:00 has passed
-        self.assertFalse(due({"schedule": "manual"}, now, None, now))
-        self.assertTrue(due({"schedule": "hours", "every_hours": 6}, now, None, now))
-        self.assertFalse(due({"schedule": "hours", "every_hours": 6}, now, now - dt.timedelta(hours=1), now))
+        self.assertFalse(due({"time": "09:00", "weekday": 0}, now, None, now, "none"))
 
     def test_config_validation(self):
         d = tempfile.mkdtemp(dir=TMP)
@@ -2327,7 +2983,7 @@ class SmallModuleTests(unittest.TestCase):
             with self.assertRaises(config.SettingsError, msg=patch):
                 s.update(patch)
         s.update({"general": {"disk_speeds": {"tank/a": {"mb_s": 200}, "tank/b": None}, "debug": True},
-                  "plex": {"token_set": True}, "warmup": {"finish_by": "06:30"}})
+                  "plex": {"token_set": True}, "warmup": {"time": "06:30"}})
         self.assertEqual(s.section("general")["disk_speeds"], {"tank/a": {"mb_s": 200, "measured_at": None}})
         self.assertTrue(s.section("general")["debug"])
         self.assertEqual(config.normalize_url("plex", "  "), "")
@@ -2360,6 +3016,14 @@ class SmallModuleTests(unittest.TestCase):
         held.stop.wait = lambda t: True                          # stopped while paused
         with self.assertRaises(Stopped):
             held.check()
+        # A share of disk time: 10% busy means waiting 9 s after a 1 s read
+        self.assertAlmostEqual(Pacer(10).wait_for(1.0, MiB), 9.0)
+        # A speed (L2ARC pacing): 100 MB from the disks at 10 MB/s takes 10 s in all
+        fill = Pacer(10, rate=10e6)
+        fill.disk_mb_s = 150
+        self.assertAlmostEqual(fill.wait_for(2.0, 100 * 10 ** 6), 8.0)
+        self.assertEqual(fill.wait_for(0.01, 100 * MiB), 0.0)        # 10 GiB/s: came from cache, nothing to copy
+        self.assertEqual(fill.wait_for(20.0, 100 * 10 ** 6), 0.0)    # already slower than the limit
 
     def test_zfs_unreadable(self):
         real = zfs.PROC, zfs.SYS
@@ -2439,7 +3103,7 @@ class HealthBranchTests(unittest.TestCase):
     def setUp(self):
         from plexcache import checks
         self.checks = checks
-        self.app = _new_app(warmup={"enabled": True})
+        self.app = _new_app()
         self.app.scan_library()
         self.app.run_checks()
 
@@ -2509,7 +3173,7 @@ class HealthBranchTests(unittest.TestCase):
     def test_ram_and_tuning_fallbacks(self):
         real = self.app.ram_budget
         self.app.ram_budget = lambda: {"cache_max": None}
-        self.assertEqual(self.checks._ram_check(self.app)[0]["title"], "RAM for preloading")
+        self.assertEqual(self.checks._ram_check(self.app)[0]["title"], "RAM for Now Playing Cache and Prefetch")
         self.app.ram_budget = lambda: dict(real(), source="ram")
         self.assertIn("half of RAM", self.checks._ram_check(self.app)[0]["detail"])
         self.app.ram_budget = real
@@ -2546,7 +3210,7 @@ class HealthBranchTests(unittest.TestCase):
                 setattr(c, n, lambda app: group("pass"))
             c.check_effectiveness = lambda app: group("warn")       # the "Is it working?" group is added when present
             res = c.run_all(self.app)
-            self.assertEqual(len(res["groups"]), 5)
+            self.assertEqual(len(res["groups"]), 6)
             self.assertEqual(res["summary"]["text"], "Working, with 1 warning worth a look below.")
             c.check_zfs = lambda app: group("fail", "warn")
             self.assertEqual(c.run_all(self.app)["summary"]["text"],
@@ -2802,8 +3466,6 @@ class ValidationTests(unittest.TestCase):
 
     def test_ranges_and_choices(self):
         for (sec, key), (lo, hi) in config.LIMITS.items():
-            if (sec, key) in (("warmup", "movie_min_sec"), ("warmup", "tv_min_sec"), ("warmup", "audio_min_sec")):
-                continue  # clamped to the matching *_sec, checked below
             if key == "ram_percent":  # the two RAM limits share 100%: make room for this one
                 other = "nextepisode" if sec == "nowplaying" else "nowplaying"
                 self.s.update({other: {"ram_percent": 5}})
@@ -2815,7 +3477,7 @@ class ValidationTests(unittest.TestCase):
         for (sec, key), choices in config.CHOICES.items():
             for ok in choices:
                 self.s.update({sec: {key: ok}})
-            wrong = [999, "nope", None, True, 1.5] + (["2"] if isinstance(choices[0], int) else [])
+            wrong = [999, "nope", None, True, 1.5] + (["997"] if isinstance(choices[0], int) else [])
             for w in wrong:
                 self.bad({sec: {key: w}})
         self.s.update({"general": {"poll_seconds": "10"}})  # a form field's "10" is fine for a numeric choice
@@ -2858,9 +3520,9 @@ class ValidationTests(unittest.TestCase):
         self.bad({"general": {"path_map": [{"plex": "/x", "local": "/y"}] * (config.MAX_ITEMS + 1)}})
         self.s.update({"general": {"path_map": [{"plex": "D:\\Movies", "local": "/media/movies/"}, {"plex": "/tv", "local": ""}]}})
         self.assertEqual(self.s.section("general")["path_map"], [{"plex": "D:\\Movies", "local": "/media/movies"}])
-        self.bad({"nextepisode": {"library_modes": {"1": "forever"}}})
-        self.bad({"nextepisode": {"library_modes": {"../1": "off"}}})
-        self.bad({"nextepisode": {"library_modes": ["off"]}})
+        self.bad({"nextepisode": {"libraries": {"1": {"start": "forever"}}}})
+        self.bad({"nextepisode": {"libraries": {"../1": {"start": "off"}}}})
+        self.bad({"nextepisode": {"libraries": ["off"]}})
         self.bad({"general": {"excluded_libraries": [1, 2]}})
         self.bad({"general": {"disk_speeds": {"tank/a": {"mb_s": float("nan")}}}})
         self.bad({"general": {"disk_speeds": {"tank/a": {"mb_s": 200, "measured_at": "soon"}}}})
@@ -2868,7 +3530,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_one_bad_value_changes_nothing(self):
         before = self.s.get()
-        self.bad({"warmup": {"tv_sec": 20, "movie_sec": 9999}})
+        self.bad({"warmup": {"pacing_percent": 20, "reserve_gb": 9999}})
         self.assertEqual(self.s.get(), before)
 
     def test_http_api(self):
@@ -2889,27 +3551,32 @@ class ValidationTests(unittest.TestCase):
                 with e:
                     return e.code, json.loads(e.read())
         try:
-            self.assertEqual(post("/api/settings", b'{"warmup": {"tv_sec": NaN}}')[0], 400)
-            self.assertEqual(post("/api/settings", b'{"warmup": {"tv_sec": Infinity}}')[0], 400)
-            self.assertEqual(post("/api/settings", {"warmup": {"tv_sec": "20"}})[0], 400)
-            self.assertEqual(post("/api/settings", {"warmup": {"tv_sec": 20}})[0], 200)
+            self.assertEqual(post("/api/settings", b'{"warmup": {"reserve_gb": NaN}}')[0], 400)
+            self.assertEqual(post("/api/settings", b'{"warmup": {"reserve_gb": Infinity}}')[0], 400)
+            self.assertEqual(post("/api/settings", {"warmup": {"reserve_gb": "20"}})[0], 400)
+            self.assertEqual(post("/api/settings", {"warmup": {"reserve_gb": 20}})[0], 200)
             self.assertEqual(post("/api/checks", {"rescan": "yes"})[0], 400)
             self.assertEqual(post("/api/blockscan", {"dataset": ["x"]})[0], 400)
             self.assertEqual(post("/login", {"username": ["a"], "password": "b"})[0], 200)  # login off: always fine
-            # A preload choice must suit the library's kind, from the web UI as from MQTT
+            # A prefetch choice must be for a library Prefetch covers, from the web UI as from MQTT
             tv = next(l for l in app.libraries if l["kind"] == "tv")
-            status, body = post("/api/settings", {"nextepisode": {"library_modes": {tv["key"]: "album"}}})
+            photos = next(l for l in app.libraries if l["title"] == "Photos")
+            music = next(l for l in app.libraries if l["title"] == "Music")
+            status, body = post("/api/settings", {"nextepisode": {"libraries": {photos["key"]: {"start": "next"}}}})
             self.assertEqual(status, 400)
-            self.assertIn("isn't a preload choice", en(body["error"]))
-            self.assertEqual(post("/api/settings", {"nextepisode": {"library_modes": {"9999": "off"}}})[0], 400)
-            self.assertEqual(post("/api/settings", {"nextepisode": {"library_modes": {tv["key"]: "off"}}})[0], 200)
+            self.assertIn("doesn't cover", en(body["error"]))
+            status, body = post("/api/settings", {"nextepisode": {"libraries": {music["key"]: {"start": "next_group"}}}})
+            self.assertIn("isn't a prefetch choice", en(body["error"]))
+            self.assertEqual(post("/api/settings", {"nextepisode": {"libraries": {"9999": {"start": "off"}}}})[0], 400)
+            self.assertEqual(post("/api/settings", {"nextepisode": {"libraries": {tv["key"]: {"start": "off"}}}})[0], 200)
+            self.assertEqual(post("/api/settings", {"nextepisode": {"libraries": {}}})[0], 200)
             # Requests from another site's page are refused; this app's own pages and scripts are fine
             port = httpd.server_address[1]
-            status, body = post("/api/settings", {"warmup": {"tv_sec": 25}}, {"Origin": "http://evil.example.com"})
+            status, body = post("/api/settings", {"warmup": {"reserve_gb": 25}}, {"Origin": "http://evil.example.com"})
             self.assertEqual(status, 403)
-            self.assertEqual(app.settings.section("warmup")["tv_sec"], 20)
-            self.assertEqual(post("/api/settings", {"warmup": {"tv_sec": 25}}, {"Origin": f"http://127.0.0.1:{port}"})[0], 200)
-            self.assertEqual(post("/api/settings", {"warmup": {"tv_sec": 25}}, {"Origin": "https://plex.example.com",
+            self.assertEqual(app.settings.section("warmup")["reserve_gb"], 20)
+            self.assertEqual(post("/api/settings", {"warmup": {"reserve_gb": 25}}, {"Origin": f"http://127.0.0.1:{port}"})[0], 200)
+            self.assertEqual(post("/api/settings", {"warmup": {"reserve_gb": 25}}, {"Origin": "https://plex.example.com",
                                                                                    "X-Forwarded-Host": "plex.example.com"})[0], 200)
             # Checking the Plex sign-in saves the token, so it's a POST (a link or image can't trigger it)
             with self.assertRaises(urllib.error.HTTPError) as cm:
@@ -3094,7 +3761,7 @@ class MQTTTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.broker = fakes.FakeMQTTBroker()
-        cls.app = _new_app(nowplaying={"enabled": True}, nextepisode={"enabled": True})
+        cls.app = _new_app(nowplaying={"enabled": True})
         cls.app.scan_library()
         cls.app.run_checks()
 
@@ -3238,12 +3905,12 @@ class MQTTTests(unittest.TestCase):
         devices = {}
         for t, v in disc.items():
             devices.setdefault(v["device"]["name"], set()).add(t.split("/")[3])
-        self.assertEqual(set(devices), {"Plex Cache", "Plex Cache Activity", "Plex Cache Library warm-up", "Plex Cache RAM & ZFS"})
-        self.assertIn("skips", devices["Plex Cache Activity"])
-        self.assertIn("warmup_progress", devices["Plex Cache Library warm-up"])
+        self.assertEqual(set(devices), {"Plex Cache", "Plex Cache Metrics", "Plex Cache Warm-up", "Plex Cache RAM & ZFS"})
+        self.assertIn("skips", devices["Plex Cache Metrics"])
+        self.assertIn("warmup_progress", devices["Plex Cache Warm-up"])
         self.assertIn("arc_size", devices["Plex Cache RAM & ZFS"])
         self.assertIn("run_warmup", devices["Plex Cache"])  # controls stay together
-        sub = next(v for t, v in disc.items() if v["device"]["name"] == "Plex Cache Activity")
+        sub = next(v for t, v in disc.items() if v["device"]["name"] == "Plex Cache Metrics")
         self.assertEqual(sub["device"]["via_device"], health["device"]["identifiers"][0])
         self.assertFalse(any("_device" in v for v in disc.values()))
         self.assertEqual(next(v for t, v in disc.items() if "/health_passed/" in t)["entity_category"], "diagnostic")
@@ -3259,7 +3926,9 @@ class MQTTTests(unittest.TestCase):
         self.assertLess(len(self.broker.state("plexcache/info")), 20000)
         # Number controls show their value and unit (a slider wouldn't, on the device page)
         numbers = [v for t, v in disc.items() if t.startswith("homeassistant/number/")]
-        self.assertEqual(len(numbers), 4)
+        manual = self.state()["warmup_pacing_manual"]                                   # (pacing's share only while automatic is off)
+        self.assertEqual(len(numbers), 4 if manual else 3)
+        self.assertTrue(any("/warmup_pacing_auto/" in t for t in disc))
         for n in numbers:
             self.assertEqual(n["mode"], "box")
             self.assertIn(n["unit_of_measurement"], ("%", "GB"))
@@ -3276,12 +3945,17 @@ class MQTTTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.broker.state("plexcache/update") is not None))
         versions = json.loads(self.broker.state("plexcache/update"))
         self.assertEqual((versions["installed_version"], versions["latest_version"]), (self.app.version, self.app.version))
-        # Per-library preload choice: TV gets two options, audio libraries get the long list
+        # Per library, the two Prefetch choices in the library's own words, Default first
         libs = {v["name"]: v for t, v in disc.items() if "/library_" in t}
-        tv_names = {l["title"] for l in self.app.libraries if l["kind"] == "tv"}
-        tv = next(v for n, v in libs.items() if n[:-len(" preload")] in tv_names)
-        self.assertEqual(len(tv["options"]), 2)
-        self.assertTrue(any(len(v["options"]) == 7 for v in libs.values()))
+        tv = libs["TV Shows Lead-in Cache prefetch"]
+        self.assertEqual(tv["options"], ["Default", "Don't prefetch", "Next episode", "Rest of the season", "Whole season",
+                                         "Next season", "All seasons of the show", "Every show in the library"])
+        self.assertEqual(libs["TV Shows Whole File Cache prefetch"]["options"], ["Default", "Nothing", "Next episode", "Rest of the season"])
+        self.assertEqual(len(libs["Music Lead-in Cache prefetch"]["options"]), 7)          # no "next album"
+        self.assertIn("Next book", libs["Audiobooks Lead-in Cache prefetch"]["options"])
+        self.assertEqual(libs["Movies Lead-in Cache prefetch"]["options"],
+                         ["Default", "Don't prefetch", "Next movie in the collection", "Rest of the collection", "Whole collection",
+                          "Every movie in the library"])
         # Every template reads a key that exists in the state
         import re as _re
         for t, v in disc.items():
@@ -3301,14 +3975,18 @@ class MQTTTests(unittest.TestCase):
         self.broker.inject("plexcache/set/poll_seconds", "10 seconds")
         self.assertTrue(wait_for(lambda: self.app.settings.section("general")["poll_seconds"] == 10))
         tv = next(l for l in self.app.libraries if l["kind"] == "tv")
-        self.broker.inject(f"plexcache/set/library_{tv['key']}_preload", "Don't preload")
-        self.assertTrue(wait_for(lambda: self.app.settings.section("nextepisode")["library_modes"].get(tv["key"]) == "off"))
+        libs = lambda: self.app.settings.section("nextepisode")["libraries"]
+        self.broker.inject(f"plexcache/set/library_{tv['key']}_prefetch_start", "Don't prefetch")
+        self.assertTrue(wait_for(lambda: libs().get(tv["key"], {}).get("start") == "off"))
+        self.broker.inject(f"plexcache/set/library_{tv['key']}_prefetch_end", "Rest of the season")
+        self.assertTrue(wait_for(lambda: libs().get(tv["key"], {}).get("end") == "rest"))
+        self.assertEqual(libs()[tv["key"]], {"start": "off", "end": "rest"})
         # Not a choice for a TV library: refused, nothing changes
-        self.broker.inject(f"plexcache/set/library_{tv['key']}_preload", "1 hour ahead")
+        self.broker.inject(f"plexcache/set/library_{tv['key']}_prefetch_start", "Next book")
         self.broker.inject("plexcache/set/poll_seconds", "2 seconds")
         self.broker.inject("plexcache/set/nope", "1")
         self.assertTrue(wait_for(lambda: sum("couldn't do" in e["message"] for e in self.app.activity.snapshot()["events"]) >= 3))
-        self.assertEqual(self.app.settings.section("nextepisode")["library_modes"][tv["key"]], "off")
+        self.assertEqual(libs()[tv["key"]], {"start": "off", "end": "rest"})
         # Buttons, numbers and the remaining selects
         calls = []
         saved = {n: getattr(self.app, n) for n in ("start_warmup", "stop_warmup", "run_checks_async", "run_benchmark")}
@@ -3333,20 +4011,20 @@ class MQTTTests(unittest.TestCase):
                             (name, value))
         self.broker.inject("plexcache/set/warmup_pacing_percent", "25")
         self.broker.inject("plexcache/set/ram_reserve_gb", "6")
-        self.broker.inject("plexcache/set/start_at", "At 80%")
         self.assertTrue(wait_for(lambda: self.app.settings.section("warmup")["pacing_percent"] == 25
-                                 and self.app.settings.section("general")["ram_reserve_gb"] == 6
-                                 and self.app.settings.section("nextepisode")["start_at"] == "80"))
+                                 and self.app.settings.section("general")["ram_reserve_gb"] == 6))
         # Switching on a feature that can't work here is refused, with the reason
         saved_fa = self.app.feature_available
         self.app.feature_available = lambda feat: (False, "no L2ARC on this pool")
         try:
-            self.broker.inject("plexcache/set/warmup_enabled", "ON")
+            self.app.settings.update({"nowplaying": {"enabled": False}})
+            self.broker.inject("plexcache/set/nowplaying_enabled", "ON")
             self.assertTrue(wait_for(lambda: any("no L2ARC" in e["message"] for e in self.app.activity.snapshot()["events"])))
+            self.assertFalse(self.app.settings.section("nowplaying")["enabled"])
         finally:
             self.app.feature_available = saved_fa
         self.app.settings.update({"nowplaying": {"enabled": True, "ram_percent": 20}, "general": {"poll_seconds": 5, "ram_reserve_gb": 4},
-                                  "warmup": {"pacing_percent": 10}, "nextepisode": {"start_at": "default"}})
+                                  "warmup": {"pacing_percent": 10}})
 
     def test_watch_only(self):
         self.enable(allow_control=False)
@@ -3382,6 +4060,122 @@ class MQTTTests(unittest.TestCase):
         saved = self.app._load_json("mqtt-entities.json")["topics"]
         self.assertIn(health, saved)
 
+    def test_discovery_follows_home_assistant_rules(self):
+        """Every discovery message follows Home Assistant's MQTT discovery rules
+        (https://www.home-assistant.io/integrations/mqtt/)."""
+        import re
+        self.enable()
+        self.assertTrue(wait_for(lambda: self.app.ha.status.get("entities") and self.state() is not None, 15))
+        state = self.state()
+        configs = {t: v for t, v in self.broker.retained.items() if t.endswith("/config") and v}
+        self.assertGreater(len(configs), 50)
+        components = {"sensor", "binary_sensor", "switch", "button", "number", "select", "update"}
+        data_units = {"bit", "kbit", "Mbit", "Gbit", "B", "kB", "MB", "GB", "TB", "PB", "KiB", "MiB", "GiB", "TiB", "PiB"}
+        seen_ids = set()
+        for topic, raw in configs.items():
+            with self.subTest(topic):
+                # <prefix>/<component>/<node_id>/<object_id>/config, ids from [a-zA-Z0-9_-]
+                m = re.fullmatch(r"homeassistant/([a-z_]+)/([a-zA-Z0-9_-]+)/([a-zA-Z0-9_-]+)/config", topic)
+                self.assertIsNotNone(m)
+                comp = m.group(1)
+                self.assertIn(comp, components)
+                conf = json.loads(raw)                                                    # a JSON dictionary
+                self.assertIsInstance(conf, dict)
+                # unique_id (unique), and a device with identifiers and a name
+                self.assertTrue(conf.get("unique_id"))
+                self.assertNotIn(conf["unique_id"], seen_ids)
+                seen_ids.add(conf["unique_id"])
+                self.assertTrue(conf["device"].get("identifiers") and conf["device"].get("name"))
+                # origin: which software sent it (its name is required)
+                self.assertEqual(conf["origin"]["name"], "Plex Cache")
+                # default_entity_id (object_id no longer sets the entity ID)
+                self.assertNotIn("object_id", conf)
+                self.assertRegex(conf["default_entity_id"], r"^" + comp + r"\.[a-z0-9_]+$")
+                # availability: a topic or a list, not both; the payloads as published
+                self.assertFalse("availability_topic" in conf and "availability" in conf)
+                self.assertIn(self.broker.state(conf["availability_topic"]), ("online", b"online"))
+                self.assertNotIn("payload_available", conf)                              # (the default, "online")
+                # entity categories: config or diagnostic, and sensors are never config
+                if "entity_category" in conf:
+                    self.assertIn(conf["entity_category"], ("config", "diagnostic"))
+                    if comp in ("sensor", "binary_sensor"):
+                        self.assertEqual(conf["entity_category"], "diagnostic")
+                # sensors: device class, state class and unit fit together
+                dc, sc, unit = conf.get("device_class"), conf.get("state_class"), conf.get("unit_of_measurement")
+                if comp == "sensor":
+                    self.assertIn(sc, (None, "measurement", "total", "total_increasing"))
+                    if dc == "enum":
+                        self.assertTrue(conf.get("options"))
+                        self.assertIsNone(unit)
+                        self.assertIsNone(sc)
+                    if dc == "timestamp":
+                        self.assertIsNone(unit)
+                        self.assertIsNone(sc)
+                    if dc == "duration":
+                        self.assertIn(unit, ("d", "h", "min", "s", "ms"))
+                    if dc == "data_size":
+                        self.assertIn(unit, data_units)
+                # what can be commanded has a command topic; a button has no state
+                if comp in ("switch", "button", "number", "select"):
+                    self.assertTrue(conf.get("command_topic"))
+                if comp == "button":
+                    self.assertNotIn("state_topic", conf)
+                elif comp in ("switch", "number", "select", "sensor", "binary_sensor", "update"):
+                    self.assertTrue(conf.get("state_topic"))
+                if comp == "number":
+                    self.assertLess(conf["min"], conf["max"])
+                    self.assertGreater(conf["step"], 0)
+                if comp == "select":
+                    self.assertTrue(conf["options"])
+                    self.assertEqual(len(conf["options"]), len(set(conf["options"])))
+                # the value it reads exists in the state it reads
+                vt = conf.get("value_template") or ""
+                for path in re.findall(r"value_json((?:\.[a-zA-Z0-9_]+|\['[^']+'\])+)", vt):
+                    node = state
+                    for part in re.findall(r"\.([a-zA-Z0-9_]+)|\['([^']+)'\]", path):
+                        key = part[0] or part[1]
+                        self.assertIn(key, node, f"{vt} reads a value the state doesn't have")
+                        node = node[key]
+                if conf.get("json_attributes_topic"):
+                    self.assertIsNotNone(self.broker.state(conf["json_attributes_topic"]))
+        # It listens for Home Assistant's birth message, to announce everything again
+        self.assertTrue(any("homeassistant/status" in patterns for _, patterns, _ in self.broker.clients))
+        # ...and its last will marks it offline
+        self.assertTrue(any(will and will[0] == "plexcache/availability" and will[1] in ("offline", b"offline")
+                            for _, _, will in self.broker.clients))
+
+    def test_controls_match_the_web_ui(self):
+        """Every setting Home Assistant can change is one the web UI offers, under the same conditions."""
+        import re
+        from plexcache import homeassistant as ha
+        js = open(os.path.join(ROOT, "plexcache", "web", "app.js"), encoding="utf-8").read()
+
+        def offered(sec, key):  # the page has a field (or switch) for it
+            return (re.search(r'\b(?:range|ramSlider|select|number|checkbox|textInput)\("%s", "%s"' % (sec, key), js) is not None
+                    or f'data-set="{sec}.{key}"' in js or f'data-check="{sec}.{key}"' in js
+                    or (key == "enabled" and f'toggle("{sec}"' in js))
+        state = {"libraries": {"2": {"name": "TV Shows", "kind": "tv"}}, "warmup_pacing_manual": True}
+        controls = [(c, oid) for c, oid, _ in ha.entities(state, allow_control=True) if c in ("switch", "number", "select")]
+        self.assertGreater(len(controls), 5)
+        for comp, oid in controls:
+            with self.subTest(oid):
+                if oid.startswith("library_"):
+                    self.assertIn('pickHtml("lib:" + l.key + ".%s"' % oid.rsplit("_", 1)[1], js)    # a library's Prefetch choice
+                    continue
+                self.assertIn(oid, ha.CONTROL_SETTINGS, "a control that isn't mapped to a setting")
+                sec, key = ha.CONTROL_SETTINGS[oid]
+                self.assertIn(key, config.DEFAULTS[sec])
+                self.assertTrue(offered(sec, key), f"{sec}.{key} can be changed from Home Assistant but not in the web UI")
+        # ...and nothing mapped that isn't published
+        self.assertEqual(set(ha.CONTROL_SETTINGS) - {oid for _, oid in controls}, set())
+        # Same conditions: the share-of-disk-time slider only shows while automatic pacing is off, and so does its control
+        self.assertIn("var manual = !w.pacing_auto || !rate;", js)
+        auto = [oid for _, oid, _ in ha.entities(dict(state, warmup_pacing_manual=False), allow_control=True)]
+        self.assertNotIn("warmup_pacing_percent", auto)
+        self.assertIn("warmup_pacing_auto", auto)
+        # Watch-only: no controls at all
+        self.assertFalse([c for c, _, _ in ha.entities(state, allow_control=False) if c in ("switch", "number", "select", "button")])
+
     def test_without_discovery(self):
         """For Node-RED and the like: just the state, availability and command topics."""
         self.enable()
@@ -3397,14 +4191,12 @@ class MQTTTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: any("plexcache/set/#" in c[1] for c in self.broker.clients)))
         self.broker.inject("plexcache/set/poll_seconds", "10")
         self.assertTrue(wait_for(lambda: self.app.settings.section("general")["poll_seconds"] == 10))
-        self.broker.inject("plexcache/set/nextepisode_enabled", "false")
-        self.assertTrue(wait_for(lambda: not self.app.settings.section("nextepisode")["enabled"]))
         audio = next(l for l in self.app.libraries if l["kind"] == "audio")
-        self.broker.inject(f"plexcache/set/library_{audio['key']}_preload", "album")
-        self.assertTrue(wait_for(lambda: self.app.settings.section("nextepisode")["library_modes"].get(audio["key"]) == "album"))
+        self.broker.inject(f"plexcache/set/library_{audio['key']}_prefetch_end", "rest")
+        self.assertTrue(wait_for(lambda: (self.app.settings.section("nextepisode")["libraries"].get(audio["key"]) or {}).get("end") == "rest"))
         self.broker.inject("plexcache/set/nowplaying_enabled", "maybe")
         self.assertTrue(wait_for(lambda: any("send ON or OFF" in e["message"] for e in self.app.activity.snapshot()["events"])))
-        self.app.settings.update({"general": {"poll_seconds": 5}, "nextepisode": {"enabled": True, "library_modes": {}}})
+        self.app.settings.update({"general": {"poll_seconds": 5}, "nextepisode": {"libraries": {}}})
 
     def test_wrong_password_then_retry(self):
         self.enable(password="wrong")
@@ -3601,6 +4393,227 @@ class MQTTTests(unittest.TestCase):
         self.app.settings.update({"mqtt": {"base_topic": "plexcache"}})
 
 
+class CacheModeTests(unittest.TestCase):
+    """L2ARC or RAM only: Default follows the mode; L2ARC-only choices fall back, and Health says so."""
+
+    def test_mode(self):
+        from plexcache import cachemode as cm
+        s = {"general": {"no_l2arc": False}}
+        self.assertEqual(cm.mode(s, "present"), cm.L2ARC)
+        self.assertEqual(cm.mode(s, "absent"), cm.RAM)
+        self.assertEqual(cm.mode(s, "unknown"), cm.RAM)    # unconfirmed counts as absent
+        s["general"]["no_l2arc"] = True
+        self.assertEqual(cm.mode(s, "present"), cm.RAM)    # "I won't use an L2ARC"
+
+    def test_default_follows_the_mode_and_fallbacks_are_recorded(self):
+        from plexcache import cachemode as cm
+        from plexcache.i18n import M
+        dyn = cm.Dynamic(l2arc="library", ram="season", l2arc_only=("library",), label=M("Prefetch"),
+                         names={"library": "Whole library", "season": "Whole season"})
+        fb = cm.Fallbacks()
+        self.assertEqual(cm.resolve("x", "default", cm.L2ARC, fb, dyn), "library")
+        self.assertEqual(cm.resolve("x", "default", cm.RAM, fb, dyn), "season")
+        self.assertEqual(fb.recent(), [])
+        self.assertEqual(cm.resolve("x", "next", cm.RAM, fb, dyn), "next")        # not L2ARC-only: used as is
+        self.assertEqual(cm.resolve("x", "library", cm.L2ARC, fb, dyn), "library")
+        self.assertEqual(fb.recent(), [])
+        self.assertEqual(cm.resolve("x", "library", cm.RAM, fb, dyn), "season")   # falls back...
+        (f,) = fb.recent()
+        self.assertEqual((f["chosen"], f["used"]), ("Whole library", "Whole season"))  # ...and it's noted
+        self.assertEqual(fb.recent(now=f["at"] + cm.FALLBACK_KEEP + 1), [])        # forgotten after a day
+        cm.resolve("x", "library", cm.RAM, fb, dyn)
+        cm.resolve("x", "library", cm.L2ARC, fb, dyn)                              # honoured again: cleared
+        self.assertEqual(fb.recent(), [])
+
+    def test_health_lists_fallbacks(self):
+        from plexcache import cachemode as cm, checks
+        from plexcache.i18n import M
+
+        class FakeApp:
+            def __init__(self, no_l2, status):
+                self.s = {"general": {"no_l2arc": no_l2}}
+                self.status = status
+                self.fallbacks = cm.Fallbacks()
+                self.settings = self
+
+            def get(self):
+                return self.s
+
+            def l2arc_status(self):
+                return self.status
+
+        app = FakeApp(False, "present")
+        titles = lambda: {en(i["title"]): i["status"] for i in checks.check_cache_mode(app)["items"]}
+        self.assertEqual(titles(), {"L2ARC caching": "pass", "Settings used as chosen": "pass"})
+        app.fallbacks.note("x", M("Prefetch"), "Whole library", "Whole season")
+        group = checks.check_cache_mode(app)
+        fell = [i for i in group["items"] if en(i["title"]) == "Settings not used as chosen"][0]
+        self.assertEqual(fell["status"], "warn")
+        self.assertIn("Prefetch (Whole library → Whole season)", en(fell["detail"]))
+        app.status = "unknown"
+        self.assertEqual(titles()["L2ARC not checked yet"], "info")
+
+    def test_describe(self):
+        from plexcache import cachemode as cm, prefetch  # noqa: F401  (registers the prefetch settings)
+        d = cm.describe(cm.RAM, "absent", False, cm.Fallbacks())
+        self.assertEqual(d["defaults"]["prefetch.start"], "rest")
+        self.assertEqual(d["settings"]["prefetch.end"], {"l2arc": "rest", "ram": "next", "l2arc_only": ["rest"]})
+        self.assertEqual(d["mode"], "ram")
+
+
+class MQTTStandardsTests(unittest.TestCase):
+    """The MQTT client follows the client rules of the OASIS MQTT 3.1.1 standard
+    (https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html): the [MQTT-x.x.x-x] numbers."""
+
+    def pair(self, **kw):
+        from plexcache.mqttclient import MQTTClient
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        c = MQTTClient("broker", **kw)
+        c.sock = a
+        b.settimeout(2)
+        return c, b
+
+    @staticmethod
+    def read(sock):
+        """One packet from the other end: (first byte, body)."""
+        head = sock.recv(1)
+        mult, length = 1, 0
+        while True:
+            byte = sock.recv(1)[0]
+            length += (byte & 0x7F) * mult
+            mult *= 128
+            if not byte & 0x80:
+                break
+        body = b""
+        while len(body) < length:
+            body += sock.recv(length - len(body))
+        return head[0], body
+
+    @staticmethod
+    def fields(body, i, n):
+        out = []
+        for _ in range(n):
+            size = struct.unpack("!H", body[i:i + 2])[0]
+            out.append(body[i + 2:i + 2 + size].decode())
+            i += 2 + size
+        return out
+
+    def test_connect(self):
+        # CONNECT first [MQTT-3.1.0-1]: "MQTT", level 4, the client ID first in the payload [MQTT-3.1.3-3],
+        # then will, username, password in that order [MQTT-3.1.3-1]
+        c, b = self.pair(client_id="plexcache1a2b", username="ha", password="pw", will=("pc/availability", "offline", True), keepalive=60)
+        b.sendall(bytes([0x20, 2, 0, 0]))
+        c.login()
+        kind, body = self.read(b)
+        self.assertEqual(kind, 0x10)
+        self.assertEqual(body[:7], b"\x00\x04MQTT\x04")
+        flags = body[7]
+        self.assertEqual(flags, 0x80 | 0x40 | 0x20 | 0x04 | 0x02)                      # user, password, will retain, will, clean
+        self.assertEqual(flags & 0x18, 0)                                                # will QoS 0 [MQTT-3.1.2-14]
+        self.assertEqual(struct.unpack("!H", body[8:10])[0], 60)
+        self.assertEqual(self.fields(body, 10, 5), ["plexcache1a2b", "pc/availability", "offline", "ha", "pw"])
+        # No will: its QoS and retain bits are 0 [MQTT-3.1.2-13, -15]; a password without a username isn't sent [MQTT-3.1.2-22]
+        c, b = self.pair(client_id="x", password="pw")
+        b.sendall(bytes([0x20, 2, 0, 0]))
+        c.login()
+        kind, body = self.read(b)
+        self.assertEqual(body[7], 0x02)
+        self.assertEqual(self.fields(body, 10, 1), ["x"])
+
+    def test_client_id(self):
+        # Letters and digits, 1 to 23: what every broker must accept [MQTT-3.1.3-5]
+        from plexcache.homeassistant import mqtt_client_id
+        import re
+        for node in ("plexcache_1a2b3c4d5e6f", "plexcache_x", "plexcache_" + "f" * 40, "", "plexcache_ü-ß"):
+            self.assertRegex(mqtt_client_id(node), r"^[0-9A-Za-z]{1,23}$", node)
+        self.assertEqual(mqtt_client_id("plexcache_1a2b3c4d5e6f"), "plexcache1a2b3c4d5e6f")
+
+    def test_topic_names_and_filters(self):
+        from plexcache.mqttclient import check_filter, check_topic
+        for good in ("plexcache/state", "homeassistant/sensor/plexcache_x/health/config", "a", "/"):
+            self.assertEqual(check_topic(good), good)
+        # Not empty [MQTT-4.7.3-1], no wildcards [MQTT-3.3.2-2], no U+0000 [MQTT-4.7.3-2], at most 65535 bytes [MQTT-4.7.3-3]
+        for bad in ("", "a/#", "a/+/b", "a+", "a\x00b", "é" * 40000):
+            with self.assertRaises(ValueError, msg=repr(bad[:20])):
+                check_topic(bad)
+        for good in ("#", "a/#", "+", "+/b", "a/+/c", "homeassistant/status"):
+            self.assertEqual(check_filter(good), good)
+        # "#" a whole level, at the end [MQTT-4.7.1-2]; "+" a whole level [MQTT-4.7.1-3]
+        for bad in ("", "a#", "a/#/b", "a/b#", "a+", "a/+b/c"):
+            with self.assertRaises(ValueError, msg=bad):
+                check_filter(bad)
+
+    def test_publish_and_subscribe(self):
+        c, b = self.pair()
+        # QoS 0: no packet identifier [MQTT-2.3.1-5], DUP 0 [MQTT-3.3.1-2]
+        c.publish("pc/state", b"{}", retain=True)
+        kind, body = self.read(b)
+        self.assertEqual(kind, 0x31)
+        self.assertEqual(body, b"\x00\x08pc/state{}")
+        with self.assertRaises(ValueError):
+            c.publish("pc/#", b"x")
+        # SUBSCRIBE: flags 0010 [MQTT-3.8.1-1], a non-zero identifier [MQTT-2.3.1-1], at least one filter [MQTT-3.8.3-3]
+        c._pid = 65535
+        c.subscribe(["pc/set/#", "homeassistant/status"])
+        kind, body = self.read(b)
+        self.assertEqual(kind, 0x82)
+        self.assertEqual(struct.unpack("!H", body[:2])[0], 1)                          # wraps to 1, never 0
+        self.assertEqual(body[2:], b"\x00\x08pc/set/#\x00\x00\x14homeassistant/status\x00")
+        with self.assertRaises(ValueError):
+            c.subscribe([])
+        with self.assertRaises(ValueError):
+            c.subscribe(["pc/#/x"])
+
+    def test_answers_as_the_qos_says(self):
+        from plexcache.mqttclient import MQTTError, _packet
+        c, b = self.pair()
+        # QoS 1: PUBACK; QoS 2: PUBREC, then PUBCOMP for the PUBREL — each with the same identifier [MQTT-3.3.4-1, MQTT-2.3.1-6]
+        b.sendall(_packet(0x32, b"\x00\x01t\x00\x07one") + _packet(0x34, b"\x00\x01t\x00\x08two") + _packet(0x62, b"\x00\x08"))
+        self.assertEqual(c.poll(0.5), [("t", b"one"), ("t", b"two")])
+        self.assertEqual(self.read(b), (0x40, b"\x00\x07"))
+        self.assertEqual(self.read(b), (0x50, b"\x00\x08"))
+        self.assertEqual(self.read(b), (0x70, b"\x00\x08"))
+        # Both QoS bits set [MQTT-3.3.1-4], ill-formed UTF-8 [MQTT-1.5.3-1] or U+0000 [MQTT-1.5.3-2]: the connection is closed
+        for bad in (_packet(0x36, b"\x00\x01t\x00\x01x"), _packet(0x30, b"\x00\x02\xff\xfex"), _packet(0x30, b"\x00\x02a\x00x")):
+            c, b = self.pair()
+            b.sendall(bad)
+            with self.assertRaises(MQTTError):
+                c.poll(0.5)
+            self.assertIsNone(c.sock)
+
+    def test_keep_alive_and_disconnect(self):
+        # A PINGREQ well within the keep alive when nothing else was sent [MQTT-3.1.2-23]
+        c, b = self.pair(keepalive=60)
+        c._last_send = time.monotonic() - 29
+        c.ping_if_due()
+        b.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            b.recv(2)
+        c._last_send = time.monotonic() - 31
+        c.ping_if_due()
+        b.settimeout(2)
+        self.assertEqual(self.read(b), (0xC0, b""))
+        # DISCONNECT, then nothing more [MQTT-3.14.4-1, -2]
+        c.close()
+        self.assertEqual(self.read(b), (0xE0, b""))
+        self.assertEqual(b.recv(10), b"")
+        self.assertIsNone(c.sock)
+
+    def test_strings_and_lengths(self):
+        from plexcache.mqttclient import _packet, _str
+        # UTF-8 strings: no U+0000 [MQTT-1.5.3-2], at most 65535 bytes
+        with self.assertRaises(ValueError):
+            _str("a\x00")
+        with self.assertRaises(ValueError):
+            _str("x" * 65536)
+        self.assertEqual(_str("é"), b"\x00\x02\xc3\xa9")
+        # Remaining Length: 1 to 4 bytes, 7 bits each
+        for n, size in ((0, 1), (127, 1), (128, 2), (16383, 2), (16384, 3), (2097151, 3), (2097152, 4)):
+            self.assertEqual(len(_packet(0x30, b"x" * n)) - 1 - n, size, n)
+
+
 class TranslationTests(unittest.TestCase):
     """The catalogs match the texts in the code; untranslated texts fall back to English."""
 
@@ -3620,11 +4633,20 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual([p for p in self.problems if "of a variable" not in p and "without literal" not in p], [])
         self.assertGreater(len(self.keys), 500)
 
+    # Catalogs list every text the app uses (null until translated: shown in English) and
+    # nothing it no longer uses. After changing any wording, run `python3 dev/i18n.py sync`.
+    # (PLEXCACHE_I18N_LOOSE=1 relaxes this while wording is still being worked on.)
+    STRICT = not os.environ.get("PLEXCACHE_I18N_LOOSE")
+
     def test_catalogs_consistent(self):
         for code in self.tool.TRANSLATED + list(self.tool.VARIANTS):
             with self.subTest(code):
-                self.assertEqual(self.tool.check_catalog(code, self.keys, self.tool.load(code)), [])
+                problems = self.tool.check_catalog(code, self.keys, self.tool.load(code))
+                if not self.STRICT:
+                    problems = [p for p in problems if not p.startswith("no longer used")]
+                self.assertEqual(problems, [])
 
+    @unittest.skipUnless(STRICT, "PLEXCACHE_I18N_LOOSE is set")
     def test_catalogs_list_every_text(self):
         # After `dev/i18n.py sync` every text is in each catalog, null until translated
         for code in self.tool.TRANSLATED:

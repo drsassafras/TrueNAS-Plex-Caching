@@ -11,20 +11,22 @@ import random
 import threading
 import time
 
-from . import __version__, checks, config, mapping, report, zfs
+from . import __version__, cachemode, checks, config, mapping, prefetch, report, zfs
 from .activity import Activity
+from .cachelog import CacheLog
 from .auth import Auth
 from .homeassistant import HomeAssistantBridge
-from .i18n import Fixed, M, join, msg
+from .i18n import Fixed, M, join, msg, size_text
 from .updates import UpdateChecker
 from .config import PLEX_DEFAULT_PORT, Settings
-from .pauses import WarmupPauses
+from .coverage import Coverage
+from .pauses import L2arcPauses
 from .playback import PlaybackMonitor
 from .plex import PlexClient, PlexError
 from .reader import MiB, benchmark_file
-from .scheduler import due, next_run
+from .scheduler import TIMED, due, next_run
 from .truenas import TrueNASClient, TrueNASError, describe_pool, probe as probe_truenas
-from .warmup import KINDS, LibraryStats, WarmupRun, plan
+from .warmup import KIND_SECONDS, KINDS, L2ARC_RATE_SHARE, NEXT_DAY, next_day_check, LibraryStats, WarmupRun, plan, resolve_schedule
 
 GiB = 1024 ** 3
 log = logging.getLogger("plexcache")
@@ -147,11 +149,18 @@ class App:
         self.block_scans: dict[str, dict] = self._load_json("blockscans.json") or {}
         for v in self.block_scans.values():
             v["running"] = False  # a scan cut short by a restart
+        # What's been cached, when, and whether it was still there when read again (cachelog.py)
+        self.cachelog = CacheLog(os.path.join(config_dir, "cachelog.json"))
+        # How much of each library was cached, hour by hour (coverage.py)
+        self.coverage = Coverage(os.path.join(config_dir, "coverage.json"))
+        self.cachelog.boot_time = zfs.boot_time() or 0.0
         # Playback
         self.monitor = PlaybackMonitor(self)
-        # Home Assistant over MQTT (does nothing until it's switched on in Settings)
+        # Home Assistant over MQTT (does nothing until it's switched on in System)
         self.ha = HomeAssistantBridge(self)
         self.updates = UpdateChecker(self)
+        # L2ARC-only choices that had to fall back to their RAM-only default (Health lists them)
+        self.fallbacks = cachemode.Fallbacks()
         self._slots: dict = {}
         self._slots_lock = threading.Lock()
         self.stopping = threading.Event()
@@ -198,6 +207,10 @@ class App:
     def _startup(self):
         self.scan_library()
         self.run_checks()
+        # Every schedule but "none" warms up at boot (at boot only is the default with an L2ARC)
+        boot = {k for k, v in self.warmup_schedules().items() if v != "none"}
+        if boot:
+            self.start_warmup(manual=False, libs=boot, why=M("at boot"))
 
     def _scheduler_loop(self):
         last_check = dt.datetime.now()
@@ -205,9 +218,18 @@ class App:
         while not self.stopping.wait(30):
             now = dt.datetime.now()
             w = self.settings.section("warmup")
-            if w["enabled"] and self.warmup_run is None and due(w, now, self.last_warmup, last_check):
-                self.start_warmup(manual=False)
+            if self.warmup_run is None:
+                libs = set()
+                for sched in TIMED:
+                    if due(w, now, self.last_warmup, last_check, sched):
+                        libs |= self.warmup_libraries(sched)
+                if libs:
+                    self.start_warmup(manual=False, libs=libs)
             last_check = now
+            self.check_next_day()
+            self.cachelog.prune()
+            self.cachelog.save()
+            self.record_coverage()
             if time.time() - last_health > 6 * 3600:
                 last_health = time.time()
                 self.run_checks_async()
@@ -241,6 +263,7 @@ class App:
                 self.files, self.libraries = files, lib_info
                 self.stats = LibraryStats.from_files(files, {i["key"]: i["title"] for i in lib_info})
                 self.scan_error = None
+            self._share_out_old_choices()
         except PlexError as e:
             with self.lock:
                 self.scan_error = msg(e)
@@ -296,7 +319,7 @@ class App:
         if not t["url"]:
             res["truenas_server"] = {"status": "warn", "text": M("TrueNAS not set up (optional)"),
                                      "detail": M("Without it, cache devices and dataset settings can't be checked, "
-                                                 "and Library warm-up can't be sized.")}
+                                                 "and the L2ARC can't be sized.")}
             res["truenas_key"] = {"status": "off", "text": M("TrueNAS API key"), "detail": ""}
         elif not probe_truenas(t["url"]):
             res["truenas_server"] = {"status": "fail", "text": M("TrueNAS not found"),
@@ -397,18 +420,28 @@ class App:
             self.activity.event("settings", M("found {list}", list=join(changed)))
         self.test_connections_async(then_checks=bool(changed), rescan=bool(changed))
 
-    def check_library_modes(self, modes) -> None:
-        """Each library's preload choice must suit its kind (TV: off/next; music and
-        audiobooks: the rest), for a library Plex actually has. Raises SettingsError."""
-        if not isinstance(modes, dict):
-            raise config.SettingsError(M("library_modes must be an object"))
-        kinds = {lib["key"]: lib.get("kind") for lib in self.libraries}
-        for key, mode in modes.items():
-            if kinds and key not in kinds:
+    def library_info(self, key: str) -> dict | None:
+        """A library from the last scan ({key, title, kind, ...}), or None."""
+        return next((lib for lib in self.libraries if lib["key"] == str(key)), None)
+
+    def check_prefetch_libraries(self, libs) -> None:
+        """Prefetch choices must be for a library Plex has, of a kind Prefetch covers, and offered
+        for that kind (music has no "next album"). Raises SettingsError."""
+        from . import prefetch
+        if not isinstance(libs, dict):
+            raise config.SettingsError(M("nextepisode.libraries must be an object"))
+        for key, choice in libs.items():
+            if key == "*":
+                continue  # every library (from before Prefetch's switch was retired)
+            lib = self.library_info(key)
+            if self.libraries and lib is None:
                 raise config.SettingsError(M("Plex has no library {key}", key=key))
-            allowed = config.TV_MODES if kinds.get(key) == "tv" else config.AUDIO_MODES
-            if kinds.get(key) in ("tv", "audio") and mode not in allowed:
-                raise config.SettingsError(M("“{mode}” isn't a preload choice for that library", mode=str(mode)))
+            kind = prefetch.library_kind(lib)
+            if lib is not None and kind is None:
+                raise config.SettingsError(M("Prefetch doesn't cover that library"))
+            start = choice.get("start") if isinstance(choice, dict) else None
+            if kind and start not in (None, "default") and start not in prefetch.levels_for(kind):
+                raise config.SettingsError(M("“{mode}” isn't a prefetch choice for that library", mode=str(start)))
 
     def library_datasets(self, key: str) -> list[dict]:
         """The datasets holding a library's folders (from the last check)."""
@@ -441,8 +474,16 @@ class App:
                 return False
         return True
 
+    def library_l2arc(self, key: str) -> bool | None:
+        """Whether a library's data can reach an SSD cache: an L2ARC online on the pool of any
+        dataset holding it. The cache is per pool, so libraries can differ. None: not known yet."""
+        pools = (self.zfs or {}).get("pools", {})
+        seen = [pools.get(d.get("pool")) for d in self.library_datasets(key)]
+        seen = [p for p in seen if p is not None]
+        return any(p["l2_online"] for p in seen) if seen else None
+
     def feature_available(self, feature: str) -> tuple[bool, str]:
-        """(True, "") or (False, why) — the same verdict the Features page shows."""
+        """(True, "") or (False, why) — the same verdict the Caching page shows."""
         for r in checks.recommendations(self):
             if r["feature"] == feature and r["verdict"] == "avoid":
                 return False, r["reason"]
@@ -459,9 +500,17 @@ class App:
             return "present" if arc["l2_present"] else "absent"
         return "unknown"
 
+    def cache_mode(self) -> str:
+        """'l2arc' or 'ram' (see cachemode)."""
+        return cachemode.mode(self.settings.get(), self.l2arc_status())
+
+    def resolve_setting(self, sid: str, value: str) -> str:
+        """The value a mode-dependent setting really uses right now (Default, or a fallback)."""
+        return cachemode.resolve(sid, value, self.cache_mode(), self.fallbacks)
+
     # ------------------------------------------------------------------- RAM
     def ram_budget(self) -> dict:
-        """How much RAM Now-playing and Next-episode may fill.
+        """How much RAM Now Playing Cache and Prefetch may fill.
 
         The base is the most the ZFS RAM cache (ARC) can hold: reading more
         than that just pushes out what was read first. The system reserve
@@ -657,23 +706,186 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     # --------------------------------------------------------------- warm-up
-    def start_warmup(self, manual: bool) -> bool:
+    def warmup_schedules(self) -> dict:
+        """Each library's warm-up schedule right now (Default resolved; none without an L2ARC)."""
+        w = self.settings.section("warmup")
+        out = {}
+        for lib in self.libraries:
+            if not lib.get("kind") or lib.get("excluded"):
+                continue
+            mine = (w.get("libraries") or {}).get(lib["key"]) or {}
+            out[lib["key"]] = resolve_schedule(self, lib["key"], mine.get("schedule", "default"), lib["title"])
+        return out
+
+    def warmup_active(self) -> bool:
+        """Does any library have a warm-up schedule right now?"""
+        return any(v != "none" for v in self.warmup_schedules().values())
+
+    def warmup_libraries(self, schedule: str) -> set:
+        """Libraries whose warm-up schedule is ``schedule``."""
+        return {k for k, v in self.warmup_schedules().items() if v == schedule}
+
+    def next_warmup(self, now: dt.datetime | None = None) -> dt.datetime | None:
+        """When the next timed warm-up starts, for any library."""
+        w = self.settings.section("warmup")
+        now = now or dt.datetime.now()
+        used = set(self.warmup_schedules().values())
+        times = [next_run(w, now, None, sched) for sched in TIMED if sched in used]
+        return min((t for t in times if t), default=None)
+
+    def _share_out_old_choices(self) -> None:
+        """Choices kept for every library ("*"): warm-up's one schedule before 0.15, and
+        Prefetch's switch turned off. Once Plex's libraries are known, each library without
+        its own choices gets them."""
+        for sec in ("warmup", "nextepisode"):
+            libs = dict(self.settings.section(sec).get("libraries") or {})
+            shared = libs.pop("*", None)
+            if shared is None:
+                continue
+            for lib in self.libraries:
+                if lib.get("kind") and (sec == "warmup" or prefetch.library_kind(lib)):
+                    libs[lib["key"]] = dict(shared, **(libs.get(lib["key"]) or {}))
+            self.settings.update({sec: {"libraries": libs}})
+
+    # ------------------------------------------------------------- cache log
+    def l2arc_fill_rate(self) -> int | None:
+        """How fast ZFS copies data to the L2ARC, in bytes a second (l2arc_write_max), if known."""
+        wm = ((self.zfs or {}).get("params") or {}).get("l2arc_write_max")
+        return int(wm) if wm and str(wm).isdigit() and int(wm) > 0 else None
+
+    def l2arc_rate(self) -> float | None:
+        """The speed L2ARC-only reads from the disks are held to, in bytes a second: just under
+        the fill rate with automatic pacing (None: pace by share of disk time instead)."""
+        fill = self.l2arc_fill_rate()
+        if not self.settings.section("warmup")["pacing_auto"] or not fill:
+            return None
+        return fill * L2ARC_RATE_SHARE
+
+    def cache_route(self, ram: bool) -> str:
+        """The cache log's route for a read: "ram" if it's meant to stay in RAM, else "ssd"."""
+        return "ram" if ram else "ssd"
+
+    def cooldown_seconds(self, whole: bool, library: str = "") -> float:
+        """Seconds before a lead-in (or a whole file) is cached again: the L2ARC setting when
+        there's an L2ARC (what's read is taken to be on the SSD), else the RAM one. "Automatic"
+        works it out per library from what's been measured (cachelog), with the setting's
+        default until there's enough."""
+        g = self.settings.section("general")
+        l2 = self.cache_mode() == cachemode.L2ARC
+        key = ("l2arc_" if l2 else "ram_") + ("cooldown_whole_minutes" if whole else "cooldown_lead_in_minutes")
+        if g[key] == config.AUTO:
+            return self.cachelog.auto_cooldown("ssd" if l2 else "ram", library, config.DEFAULTS["general"][key] * 60)
+        return g[key] * 60
+
+    def cooldowns(self) -> tuple[float, float]:
+        """Hours before a lead-in, and a whole file, are cached again (for every library)."""
+        return self.cooldown_seconds(False) / 3600, self.cooldown_seconds(True) / 3600
+
+    def recently_cached(self, path: str, whole: bool) -> bool:
+        return self.cachelog.recent(path, whole, self.cooldown_seconds(whole, self.cachelog.library_of(path)) / 3600)
+
+    def record_coverage(self, force: bool = False) -> None:
+        """Once an hour (after the first library scan): how much of each library was cached."""
+        if not self.files or not (force or self.coverage.due()):
+            return
+        files = [(self.map_path(f.path), f.size, f.library_key) for f in self.files]
+        self.coverage.record(files, self.cachelog.latest_writes())
+
+    def diagnostics(self) -> dict:
+        """For "Export log": the cache log, plus what's needed to see why something isn't cached —
+        the streams Plex reported last, recent events, cooldowns and each library's state.
+        No secrets (tokens, keys, passwords) are included."""
+        g = self.settings.section("general")
+        mon = getattr(self, "monitor", None)
+        return dict(self.cachelog.export(),
+                    version=self.version, cache_mode=self.cache_mode(),
+                    cooldowns={k: v for k, v in g.items() if "cooldown" in k},
+                    libraries=[{"key": lib["key"], "title": lib.get("title"), "kind": lib.get("kind"), "excluded": lib.get("excluded"),
+                                "cacheable": self.library_cacheable(lib["key"]), "l2arc": self.library_l2arc(lib["key"])}
+                               for lib in self.libraries],
+                    path_map=g.get("path_map"),
+                    plex_sessions=getattr(mon, "last_sessions", None),
+                    playing=mon.snapshot() if mon else None,
+                    events=self.activity.snapshot()["events"])
+
+    def _refresh_auto(self) -> None:
+        """Let Automatic decide again if it's due, so the page shows what it would use now."""
+        for route, key in (("ram", "ram_cooldown_lead_in_minutes"), ("ssd", "l2arc_cooldown_lead_in_minutes")):
+            self.cachelog.auto_cooldown(route, "", config.DEFAULTS["general"][key] * 60)
+
+    def cached_chance(self, path: str, whole: bool) -> float:
+        """How likely ``path``'s lead-in (or whole file) was still cached just now: from how long
+        ago it was cached and how long cached data lasts in its library (cachelog). Without
+        enough measured yet at that age: 1 within the last hour (or its cooldown, if longer), else 0.
+        (Not "within the cooldown" alone: with no cooldown, nothing would ever count as cached.)"""
+        t, route, lib = self.cachelog.written(path, whole)
+        if not t:
+            return 0.0
+        age = time.time() - t
+        p = self.cachelog.still_cached(route, lib, age)
+        if p is None:
+            return 1.0 if age < max(3600, self.cooldown_seconds(whole, lib)) else 0.0
+        return p
+
+    def prefetch_active(self) -> bool:
+        """Does any library prefetch anything? (Prefetch has no switch: each library's choices say.)"""
+        cfg = self.settings.section("nextepisode")
+        libs = [lib for lib in self.libraries if prefetch.library_kind(lib) and not lib.get("excluded")]
+        if not libs:
+            return True  # not scanned yet: the defaults prefetch
+        for lib in libs:
+            mine = prefetch.library_settings(cfg, lib["key"])
+            if mine["start"] != "off" or mine["end"] != "none":
+                return True
+        return False
+
+    def check_next_day(self) -> None:
+        """A day after each warm-up, check whether a sample of its lead-ins is still on the SSD,
+        which says how long the L2ARC really keeps them here (the cooldown and the warm-up
+        schedule can be set by it). Waits while a warm-up is running, so it measures the SSD."""
+        if self.warmup_run is not None or getattr(self, "_next_day_busy", False):
+            return
+        due = self.activity.runs_due(time.time(), NEXT_DAY)
+        if not due:
+            return
+        self._next_day_busy = True
+        run = due[0]
+
+        def work():
+            try:
+                r = next_day_check(run["sample"])
+                self.activity.update_run(run["started"], sample=None, next_day=r["pct"], next_day_checked=r["checked"])
+                if r["pct"] is not None:
+                    when = dt.datetime.fromtimestamp(run["started"]).strftime("%Y-%m-%d %H:%M")
+                    self.activity.event("warm-up", M("a day after the warm-up of {when}: {pct}% of a sample of its lead-ins still on the SSD",
+                                                     when=when, pct=r["pct"]))
+            except Exception:  # never let it stop the scheduler
+                log.exception("next-day check failed")
+                self.activity.update_run(run["started"], sample=None)
+            finally:
+                self._next_day_busy = False
+        threading.Thread(target=work, name="next-day", daemon=True).start()
+
+    def start_warmup(self, manual: bool, libs: set | None = None, why=None) -> bool:
+        """Warm up ``libs`` (library keys). Run now (``libs`` None) warms every library that
+        has a warm-up schedule, or all of them if none has."""
         with self.lock:
             if self.warmup_run is not None:
                 return False
             self.warmup_stop = threading.Event()
             self.warmup_run = WarmupRun([], {k: 0 for k in KINDS}, 100, 150, self.warmup_stop)  # placeholder while scanning
             self.warmup_run.result = "scanning"
-        threading.Thread(target=self._warmup_worker, args=(manual,), name="warmup", daemon=True).start()
+        threading.Thread(target=self._warmup_worker, args=(manual, libs, why), name="warmup", daemon=True).start()
         return True
 
     def stop_warmup(self):
         self.warmup_stop.set()
 
-    def _warmup_worker(self, manual: bool):
+    def _warmup_worker(self, manual: bool, libs: set | None = None, why=None):
         started = dt.datetime.now()
         try:
-            self.activity.event("warm-up", M("started (run now, full speed)") if manual else M("started"))
+            self.activity.event("warm-up", M("started (run now, full speed)") if manual
+                                else M("started ({why})", why=why) if why else M("started"))
             self.scan_library()
             if self.scan_error:
                 self.activity.event("warm-up", M("stopped: couldn't read libraries: {why}", why=self.scan_error), "warn")
@@ -681,16 +893,19 @@ class App:
             self.probe_zfs()
             s = self.settings.get()
             w, g = s["warmup"], s["general"]
-            p = plan(self.stats, w, self.l2_total(), self.index_avg())
+            if libs is None:
+                libs = {k for k, v in self.warmup_schedules().items() if v != "none"} or None
+            p = plan(self.stats, w, self.l2_total(), self.index_avg(), libs)
             if p["status"] == "none":
                 self.activity.event("warm-up", M("skipped: no L2ARC on the media pool"), "warn")
                 return
             if p["status"] in ("reduced", "insufficient"):
-                secs = [M("{kind} {n} s", kind=KIND_LABEL.get(k, k), n=v) for k, v in p["seconds"].items()]
+                secs = [M("{kind} {n} s", kind=r["name"], n=r["sec"]) for r in p["libraries"]]
                 self.activity.event("warm-up", M("L2ARC too small for your settings, using {list}", list=secs), "warn")
             files = [f.__class__(self.map_path(f.path), f.kbps, f.size, f.kind, f.library, f.library_key)
-                     for f in self.files if self.library_cacheable(f.library_key, "warmup")]
-            pauses = WarmupPauses(self, manual)
+                     for f in self.files if self.library_cacheable(f.library_key, "warmup")
+                     and (libs is None or f.library_key in libs)]
+            pauses = L2arcPauses(self, manual)
             holder: dict = {}
 
             def pause():
@@ -702,25 +917,35 @@ class App:
                 return why is not None
 
             speeds = {f.library_key: self.disk_speed_for_library(f.library_key) for f in files}
+            # Lead-ins cached within their cooldown are skipped — but only those cached since the last
+            # warm-up started, so a timed warm-up re-checks its own (rewriting what the L2ARC has overwritten since) ("Run now" reads everything)
+            since = self.last_warmup.timestamp() if self.last_warmup else 0
+            skip = None if manual else (lambda f: self.cachelog.last(f.path, False) > since
+                                        and self.recently_cached(f.path, whole=False))
             run = WarmupRun(files, p["seconds"], 100 if manual else w["pacing_percent"],
                             lambda f: speeds.get(f.library_key, g["hdd_mb_per_sec"]),
-                            self.warmup_stop, pause, zfs.arcstats)
+                            self.warmup_stop, pause, zfs.arcstats, skip=skip,
+                            note=lambda f, hit: self.cachelog.note(f.path, whole=False, route="ssd", hit=hit,
+                                                                   library=f.library_key),
+                            rate=None if manual else self.l2arc_rate())
             run.pacer.before_wait = pauses.mark_idle
             holder["run"] = run
             with self.lock:
                 self.warmup_run = run
-            self.activity.event("warm-up", M("reading the start of {n} files at {pct}% pacing", n=len(files), pct=run.pacer.percent))
+            self.activity.event("warm-up", M("reading the lead-ins of {n} files at {pct}% pacing", n=len(files), pct=run.pacer.percent))
             result = run.run()
             result["manual"] = manual
             self.activity.add_run(result)
             hr = result["hit_rate"]
             growth = result["l2_growth"]
             outcome = {"ok": M("ok"), "stopped": M("stopped"), "errors": M("errors")}.get(result["result"], result["result"])
-            bits = [M("{outcome}: {n} files, {size} GB read", outcome=outcome, n=result["files"], size=Fixed(result["bytes"] / 1e9, 1))]
+            bits = [M("{outcome}: {n} files, {size} read", outcome=outcome, n=result["files"], size=size_text(result["bytes"]))]
+            if result.get("skipped"):
+                bits.append(M("{n} skipped (cached since the last warm-up, within the cooldown)", n=result["skipped"]))
             if hr is not None:
                 bits.append(M("{pct}% already cached", pct=round(hr * 100)))
             if growth is not None:
-                bits.append(M("L2ARC {sign}{size} GB", sign="+" if growth >= 0 else "", size=Fixed(growth / 1e9, 1)))
+                bits.append(M("L2ARC {sign}{size}", sign="+" if growth >= 0 else "−", size=size_text(abs(growth))))
             if result["errors"]:
                 bits.append(M("{n} unreadable", n=result["errors"]))
             self.activity.event("warm-up", M("{list}", list=bits), "warn" if result["errors"] else "info")
@@ -858,7 +1083,7 @@ class App:
     def state(self) -> dict:
         s = self.settings.get()
         now = dt.datetime.now()
-        nxt = next_run(s["warmup"], now, self.last_warmup) if s["warmup"]["enabled"] else None
+        nxt = self.next_warmup(now)
         run = self.warmup_run
         with self.lock:
             zinfo = dict(self.zfs)
@@ -867,10 +1092,9 @@ class App:
         return {
             "version": self.version,
             "settings": self.settings.public(),
-            # Defaults of the tunable settings, for the page's "back to default" buttons.
             "auth": {"enabled": self.auth.enabled, "user": self.auth.username if self.auth.enabled else ""},
-            "defaults": {sec: {k: v for k, v in config.DEFAULTS[sec].items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
-                         for sec in ("general", "warmup", "nowplaying", "nextepisode")},
+            # Defaults of every setting (but secrets), for the page's ↺ "back to default" buttons
+            "defaults": config.public_defaults(),
             "health": self.health,
             "checking": self.checking,
             "connections": self.connections,
@@ -880,14 +1104,30 @@ class App:
             "locations": self.locations,
             "mapping_choices": self.mapping_choices,
             "l2arc": self.l2arc_status(),
+            "cache": cachemode.describe(self.cache_mode(), self.l2arc_status(), bool(s["general"]["no_l2arc"]), self.fallbacks),
             "ram": self.ram_budget(),
-            "library": {"stats": stats, "libraries": libraries, "error": self.scan_error, "scanning": self.scanning},
+            "cachelog": self.cachelog.counts(*self.cooldowns()),
+            # how long cached data lasts here (RAM, SSD), and per library
+            "survival": self._refresh_auto() or self.cachelog.survival({lib["key"]: lib.get("title") or "" for lib in self.libraries},
+                                               {lib["key"]: self.library_cacheable(lib["key"]) for lib in self.libraries},
+                                               {lib["key"]: self.library_l2arc(lib["key"]) for lib in self.libraries}),
+            "kind_seconds": KIND_SECONDS,  # each library's default lead-in length, by kind
+            "l2arc_fill": self.l2arc_fill_rate(),  # bytes a second ZFS copies to the L2ARC (l2arc_write_max)
+            "l2arc_rate": self.l2arc_rate(),  # what automatic L2ARC pacing holds reads to
+            "prefetch_active": self.prefetch_active(),
+            "prefetch_kind_defaults": prefetch.KIND_DEFAULTS,  # kinds whose Default differs (music: no whole files)
+            # Prefetch's L2ARC-only queue: waiting, reading now, and why it's paused (if it is)
+            "l2arc_queue": self.monitor.background_queue(),
+            "library": {"stats": stats, "error": self.scan_error, "scanning": self.scanning,
+                        # tv / music / books for the libraries Prefetch covers
+                        "libraries": [dict(lib, prefetch_kind=prefetch.library_kind(lib)) for lib in libraries]},
             "zfs": {
                 "arc": zinfo.get("arc"),
                 "pools": zinfo.get("pools", {}),
                 "datasets": [{k: v for k, v in d.items() if k != "props_debug"} for d in zinfo.get("datasets", [])],
                 "l2_total": self.l2_total(),
             },
+            # Sizing assumes every library's lead-ins are cached (libraries without a warm-up need less)
             "plan": plan(self.stats, s["warmup"], self.l2_total(), self.index_avg()),
             "index_avg": self.index_avg(),
             "warmup": {
@@ -896,6 +1136,7 @@ class App:
                 "phase": run.result if run else None,
                 "next_run": nxt.isoformat(timespec="minutes") if nxt else None,
                 "last_run": self.last_warmup.isoformat(timespec="minutes") if self.last_warmup else None,
+                "schedules": self.warmup_schedules(),  # library key -> its schedule now (Default resolved)
             },
             "benchmark": {"running": self.benchmarking, "last": self.benchmark, "progress": self.benchmark_progress},
             "block_scans": {k: {x: v.get(x) for x in ("running", "checked", "at", "complete", "error")}

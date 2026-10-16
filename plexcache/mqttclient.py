@@ -2,7 +2,10 @@
 
 Just what the MQTT bridge (homeassistant.py) needs: connect with a username and password
 (optionally over TLS), a "last will" so Home Assistant marks everything unavailable
-if the app disappears, QoS 0 publish (retained or not), subscribe (QoS 1 messages are acknowledged), and keep-alive.
+if the app disappears, QoS 0 publish (retained or not), subscribe, and keep-alive.
+
+It follows the client rules of the OASIS MQTT 3.1.1 standard (the [MQTT-x.x.x-x] numbers below);
+tests/test_plexcache.py (MQTTStandardsTests) checks them.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from .i18n import M
 
 
 MAX_PACKET = 1024 * 1024
+MAX_LENGTH = 268_435_455  # the most a Remaining Length can say (four bytes)
 
 
 class MQTTError(Exception):
@@ -36,11 +40,44 @@ CONNACK_ERRORS = {
 
 
 def _str(s: str) -> bytes:
-    b = s.encode()
+    """A UTF-8 string field: no U+0000 [MQTT-1.5.3-2], at most 65535 bytes [MQTT-1.5.3]."""
+    if "\x00" in s:
+        raise ValueError("MQTT strings can't contain U+0000")
+    b = s.encode("utf-8")
+    if len(b) > 65535:
+        raise ValueError("MQTT strings are at most 65535 bytes")
     return struct.pack("!H", len(b)) + b
 
 
+def check_topic(topic: str) -> str:
+    """A topic name to publish to: at least one character [MQTT-4.7.3-1], no wildcards
+    [MQTT-3.3.2-2, MQTT-4.7.1-1] (and _str's rules: no U+0000, at most 65535 bytes)."""
+    if not topic:
+        raise ValueError("an MQTT topic name can't be empty")
+    if "#" in topic or "+" in topic:
+        raise ValueError(f"an MQTT topic name can't contain wildcards: {topic!r}")
+    _str(topic)
+    return topic
+
+
+def check_filter(pattern: str) -> str:
+    """A topic filter to subscribe to: at least one character, "#" only as the whole last level
+    [MQTT-4.7.1-2], "+" only as a whole level [MQTT-4.7.1-3]."""
+    if not pattern:
+        raise ValueError("an MQTT topic filter can't be empty")
+    levels = pattern.split("/")
+    for i, level in enumerate(levels):
+        if "#" in level and (level != "#" or i != len(levels) - 1):
+            raise ValueError(f"'#' must be a whole level, at the end: {pattern!r}")
+        if "+" in level and level != "+":
+            raise ValueError(f"'+' must be a whole level: {pattern!r}")
+    _str(pattern)
+    return pattern
+
+
 def _packet(kind: int, body: bytes) -> bytes:
+    if len(body) > MAX_LENGTH:
+        raise ValueError("an MQTT packet is at most 268435455 bytes")
     n, length = len(body), b""
     while True:
         byte, n = n % 128, n // 128
@@ -141,16 +178,16 @@ class MQTTClient:
 
     def login(self) -> None:
         """Step 3: the MQTT handshake, with the username and password."""
-        flags = 0x02  # clean session
-        payload = _str(self.client_id)
-        if self.will:
+        flags = 0x02  # clean session (so even an empty client ID would be allowed [MQTT-3.1.3-7])
+        payload = _str(self.client_id)  # first in the payload [MQTT-3.1.3-3]; then will, username, password [MQTT-3.1.3-1]
+        if self.will:  # (will QoS 0; without a will, its QoS and retain bits stay 0 [MQTT-3.1.2-13, -15])
             topic, message, retain = self.will
             flags |= 0x04 | (0x20 if retain else 0)
-            payload += _str(topic) + _str(message)
+            payload += _str(check_topic(topic)) + _str(message)
         if self.username:
             flags |= 0x80
             payload += _str(self.username)
-            if self.password:
+            if self.password:  # (a password only with a username [MQTT-3.1.2-22])
                 flags |= 0x40
                 payload += _str(self.password)
         body = _str("MQTT") + bytes([4, flags]) + struct.pack("!H", self.keepalive) + payload
@@ -191,6 +228,20 @@ class MQTTClient:
                 self._send(_packet(0xE0, b""))
             except (OSError, MQTTError):
                 pass
+            # Close gently: say we're done sending, then read whatever the broker still sends until it
+            # hangs up. Closing a socket with unread data makes the system reset the connection, and a
+            # broker may then drop what we sent last — like the "offline" message.
+            try:
+                self.sock.shutdown(socket.SHUT_WR)
+            except (OSError, ValueError):
+                pass
+            try:
+                self.sock.settimeout(1.0)
+                end = time.monotonic() + 2
+                while time.monotonic() < end and self.sock.recv(4096):
+                    pass
+            except (OSError, ValueError):
+                pass
             try:
                 self.sock.close()
             except OSError:
@@ -200,13 +251,18 @@ class MQTTClient:
 
     # ------------------------------------------------------------ messages
     def publish(self, topic: str, payload, retain: bool = False) -> None:
+        """QoS 0: no packet identifier [MQTT-2.3.1-5], DUP 0 [MQTT-3.3.1-2]."""
         if isinstance(payload, str):
             payload = payload.encode()
-        self._send(_packet(0x30 | (1 if retain else 0), _str(topic) + payload))
+        self._send(_packet(0x30 | (1 if retain else 0), _str(check_topic(topic)) + payload))
 
     def subscribe(self, topics: list[str]) -> None:
+        """At least one filter [MQTT-3.8.3-3], a non-zero packet identifier [MQTT-2.3.1-1],
+        flags 0010 [MQTT-3.8.1-1], requested QoS 0."""
+        if not topics:
+            raise ValueError("SUBSCRIBE needs at least one topic filter")
         self._pid = self._pid % 65535 + 1
-        body = struct.pack("!H", self._pid) + b"".join(_str(t) + b"\x00" for t in topics)
+        body = struct.pack("!H", self._pid) + b"".join(_str(check_filter(t)) + b"\x00" for t in topics)
         self._send(_packet(0x82, body))
 
     def ping_if_due(self) -> None:
@@ -227,12 +283,25 @@ class MQTTClient:
                 return out
             if kind & 0xF0 == 0x30:  # PUBLISH
                 qos = (kind >> 1) & 3
+                if qos == 3:  # both QoS bits set: a protocol violation [MQTT-3.3.1-4]
+                    self.close()
+                    raise MQTTError(M("bad packet from the broker"))
                 n = struct.unpack("!H", data[:2])[0]
-                topic, rest = data[2:2 + n].decode("utf-8", "replace"), data[2 + n:]
+                try:
+                    topic = data[2:2 + n].decode("utf-8")  # ill-formed UTF-8: close the connection [MQTT-1.5.3-1]
+                except UnicodeDecodeError:
+                    topic = None
+                if topic is None or "\x00" in topic:  # [MQTT-1.5.3-2]
+                    self.close()
+                    raise MQTTError(M("bad packet from the broker"))
+                rest = data[2 + n:]
                 if qos:
                     pid, rest = rest[:2], rest[2:]
-                    self._send(_packet(0x40, pid))  # PUBACK
+                    # Answer as the QoS says [MQTT-3.3.4-1]: PUBACK for 1, PUBREC for 2 (then PUBCOMP)
+                    self._send(_packet(0x40 if qos == 1 else 0x50, pid))
                 out.append((topic, rest))
+            elif kind & 0xF0 == 0x60:  # PUBREL (QoS 2): complete it, with the same identifier [MQTT-2.3.1-6]
+                self._send(_packet(0x70, data[:2]))
             # SUBACK, PINGRESP and anything else need no reply
 
     # ------------------------------------------------------------- wire

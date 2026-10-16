@@ -59,9 +59,9 @@ const card = (title) => async (page) => {
   await shot(b, { url: MAIN + "/activity", name: "activity", height: 1060 });
   await shot(b, { url: MAIN + "/activity", name: "activity-dark", scheme: "dark", height: 1060 });
   await shot(b, { url: MAIN + "/health", name: "health", height: 1400 });
-  await shot(b, { url: MAIN + "/features", name: "features", full: true });
-  await shot(b, { url: MAIN + "/settings", name: "media-mappings", element: card("Media mappings") });
-  await shot(b, { url: NO_L2 + "/features", name: "l2arc-sizing", element: async (p) => (await p.$$("section.card"))[0] });
+  await shot(b, { url: MAIN + "/caching", name: "features", full: true });
+  await shot(b, { url: MAIN + "/system", name: "media-mappings", element: card("Media mappings") });
+  await shot(b, { url: NO_L2 + "/ssd", name: "l2arc-sizing", element: async (p) => (await p.$$("section.card"))[1] });
   await shot(b, {
     url: MAIN + "/activity", name: "activity-chart", element: card("Over time"),
     before: async (p) => { await p.click('[data-period="month"]'); await p.waitForTimeout(400); },

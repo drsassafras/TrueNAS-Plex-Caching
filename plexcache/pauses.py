@@ -1,19 +1,20 @@
-"""When Library warm-up should step aside.
+"""When L2ARC-only caching should step aside (SSD Cache → L2ARC Cache Settings).
 
-Warm-up is never urgent, so it pauses — and later carries on from the same
-file — whenever something more important needs the disks or the cache:
+That's warm-up, and the steps of Prefetch that need an L2ARC (the whole library's lead-ins,
+the rest of a season in full...). They're never urgent, so they pause — and later carry on
+from the same file — whenever something more important needs the disks or the cache:
 
 * a player reports buffering (and for a few minutes after),
-* Now-playing or Next-episode is reading for someone watching,
+* Now Playing Cache, or a step of Prefetch that doesn't need an L2ARC, is reading,
 * a scrub or resilver is running on a media pool,
-* the pool's disks are busy with other work (measured in warm-up's own idle
-  gaps, so its reads don't count),
-* it's past the "finish by" time: it waits for the next scheduled start.
+* the pool's disks are busy with other work (measured in their own idle gaps, so their
+  reads don't count).
+
+Caching that works without an L2ARC (Now Playing Cache, the next episode...) never waits.
 """
 
 from __future__ import annotations
 
-import datetime as dt
 import re
 import time
 
@@ -24,19 +25,6 @@ from .truenas import TrueNASError
 BUFFER_HOLD = 180  # seconds to stay paused after a player last reported buffering
 SCRUB_EVERY = 60  # seconds between scrub/resilver checks
 WHOLE_DISK = re.compile(r"^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme\d+n\d+)$")
-
-
-def _minutes(hhmm: str) -> int:
-    h, m = hhmm.split(":")
-    return int(h) * 60 + int(m)
-
-
-def in_quiet_hours(now: dt.datetime, finish_by: str, start: str) -> bool:
-    """Between the finish-by time and the next start time (either side of midnight)."""
-    t, fb, st = now.hour * 60 + now.minute, _minutes(finish_by), _minutes(start)
-    if fb == st:
-        return False
-    return fb <= t < st if fb < st else (t >= fb or t < st)
 
 
 def busy_percent(before: dict, after: dict, elapsed_ms: float, disks) -> float | None:
@@ -51,10 +39,10 @@ def busy_percent(before: dict, after: dict, elapsed_ms: float, disks) -> float |
     return max(min(100.0, (after[d] - before[d]) / elapsed_ms * 100) for d in names)
 
 
-class WarmupPauses:
+class L2arcPauses:
     def __init__(self, app, manual: bool):
         self.app = app
-        self.manual = manual
+        self.manual = manual  # "Run now": ignores busy disks
         self._mark: tuple[float, dict] | None = None
         self._scrub: str | None = None
         self._scrub_at: float | None = None  # when TrueNAS was last asked
@@ -102,17 +90,14 @@ class WarmupPauses:
         return self._scrub
 
     def reason(self) -> str | None:
-        """Why warm-up should wait right now, or None to carry on."""
+        """Why L2ARC-only caching should wait right now, or None to carry on."""
         w = self.app.settings.section("warmup")
-        if (w["finish_by_enabled"] and not self.manual and w["schedule"] in ("daily", "weekly")
-                and in_quiet_hours(dt.datetime.now(), w["finish_by"], w["time"])):
-            return M("past the finish-by time ({finish}); carries on at {start}", finish=w["finish_by"], start=w["time"])
         if w["pause_buffering"]:
             last = self.app.monitor.last_buffering
             if last and time.time() - last[0] < BUFFER_HOLD:
                 return M("a player was buffering ({player})", player=last[1])
         if w["pause_preload"]:
-            what = self.app.monitor.preloading()
+            what = self.app.monitor.preloading(foreground_only=True)
             if what:
                 return what
         if w["pause_scrub"]:
@@ -123,3 +108,6 @@ class WarmupPauses:
         if w["pause_disk_busy"] and not self.manual and busy is not None and busy >= w["pause_disk_busy"]:
             return M("the pool's disks are {pct}% busy with other work", pct=round(busy))
         return None
+
+
+WarmupPauses = L2arcPauses  # its name before Prefetch's L2ARC-only steps used it too

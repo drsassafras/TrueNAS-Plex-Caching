@@ -34,9 +34,18 @@ DEFAULTS: dict = {
         # {"tank/media": {"mb_s": 210, "measured_at": "2026-10-13T12:47:29"}}.
         # hdd_mb_per_sec is used for anything not measured yet.
         "disk_speeds": {},
-        # RAM kept out of reach of Now-playing and Next-episode, for TrueNAS,
+        # RAM kept out of reach of Now Playing Cache and Prefetch, for TrueNAS,
         # other apps and ZFS itself. Their limits are shares of what's left.
         "ram_reserve_gb": 4,
+        # Cache log (cachelog.py): hours before a lead-in or a whole file is cached again. RAM-only
+        # mode uses the RAM pair (Caching page); with an L2ARC, everything read is taken to be on
+        # the SSD and the L2ARC pair applies (SSD Cache page).
+        "ram_cooldown_lead_in_minutes": 120,
+        "ram_cooldown_whole_minutes": 180,
+        "l2arc_cooldown_lead_in_minutes": 1440,
+        "l2arc_cooldown_whole_minutes": 360,
+        # "I won't use an L2ARC" (SSD Cache page): RAM-only mode, and no Health warning about a missing L2ARC.
+        "no_l2arc": False,
         "debug": False,  # unused: logging detail comes from PLEXCACHE_DEBUG (kept so older exports still import)
         "excluded_libraries": [],
         # Optional rewrites when Plex sees media at a different path than
@@ -45,28 +54,32 @@ DEFAULTS: dict = {
         "client_id": "",
     },
     "warmup": {
-        "enabled": False,
-        "schedule": "daily",  # daily | weekly | hours | manual
-        "time": "03:00",
-        "weekday": 6,  # 0 = Monday
-        "every_hours": 12,
+        "time": "03:00",   # when timed warm-ups start
+        "weekday": 6,      # weekly: 0 = Monday (twice weekly adds 3 days later); twice monthly is the 1st and 15th
+        # L2ARC pacing: automatic reads from the disks just under how fast ZFS copies to the SSD
+        # (l2arc_write_max), so nothing is read only to leave RAM before reaching it; otherwise
+        # pacing_percent, a share of disk time.
+        "pacing_auto": True,
         "pacing_percent": 10,
-        "movie_sec": 60,
-        "tv_sec": 30,
-        "audio_sec": 10,
+        # Per library (Plex library key -> choices; anything not set is its default):
+        # {"schedule": "default" | "none" | "boot" | "twice_monthly" | "weekly" | "twice_weekly" | "daily",
+        #  "seconds": n} — every schedule but "none" also runs at boot
+        # "seconds" is each lead-in's length (warm-up, and Prefetch's lead-ins); without it the
+        # library's kind decides (warmup.KIND_SECONDS: 60 s for movies, 30 for TV, 10 for audio).
+        "libraries": {},
         "movie_min_sec": 3,
         "tv_min_sec": 3,
         "audio_min_sec": 1,
         "reserve_gb": 100,
         "padding_video": 5,
         "padding_audio": 15,
+        # "pacing_percent" above and these are the L2ARC Cache Settings (SSD Cache page): they
+        # apply to all caching that needs an L2ARC — warm-up, and Prefetch's L2ARC-only steps.
         # When to pause (it carries on from where it was afterwards).
         "pause_buffering": True,   # a player reports buffering (and for a few minutes after)
-        "pause_preload": True,     # Now-playing or Next-episode is reading
+        "pause_preload": True,     # Now Playing Cache or Prefetch's other steps are reading
         "pause_scrub": True,       # a scrub or resilver is running on a media pool
         "pause_disk_busy": 50,     # pool disks this % busy with other work (0 = off)
-        "finish_by_enabled": False,
-        "finish_by": "07:00",      # pause at this time until the next scheduled start
     },
     "nowplaying": {
         "enabled": False,
@@ -80,17 +93,13 @@ DEFAULTS: dict = {
         "max_streams": 2,
         "pacing_percent": 50,
     },
-    "nextepisode": {
-        "enabled": True,
-        # default | after_nowplaying | "80" | "90" (percent through the episode)
-        "start_at": "default",
+    "nextepisode": {  # Prefetch (see prefetch.py); no switch: each library's choices say what it does
         "ram_percent": 20,  # share of the usable RAM cache
         "pacing_percent": 50,
-        # Per library (Plex library key -> mode); libraries not listed use their type's default.
-        # TV: "off" | "next". Music and audiobooks: "off" | "10" | "20" | "60" (minutes ahead),
-        # "rest" (rest of the album/book), "album" (the whole album/book), "artist" (everything
-        # by the artist/author). All within the RAM limit above.
-        "library_modes": {},
+        # Per library (Plex library key -> choices); anything not set is "default" (see prefetch.py):
+        # {"start": after Now Playing Cache, the start of files; "end": near the end, whole files;
+        #  "end_at": "80" | "90"}
+        "libraries": {},
     },
     # MQTT (off until switched on): status on <base_topic>/state, commands on <base_topic>/set/<name>.
     # With "discovery", Home Assistant (and openHAB, Domoticz...) create the entities themselves.
@@ -112,9 +121,17 @@ DEFAULTS: dict = {
     },
 }
 
-TV_MODES = ("off", "next")
-AUDIO_MODES = ("off", "10", "20", "60", "rest", "album", "artist")
-DEFAULT_MODE = {"tv": "next", "audio": "20"}
+WARMUP_SCHEDULES = ("default", "none", "boot", "twice_monthly", "weekly", "twice_weekly", "daily")
+SECONDS_LIMITS = {"movie": (3, 180), "tv": (3, 180), "audio": (1, 60)}  # per library, by its kind
+# Before 0.15 warm-up had one schedule for every library; what it becomes.
+OLD_SCHEDULE = {"daily": "daily", "weekly": "weekly", "hours": "daily", "manual": "none"}
+OLD_LIBRARY_SCHEDULE = {"monthly": "twice_monthly"}  # 0.15 betas
+PREFETCH_FIELDS = {"start": ("default", "off", "next", "rest", "whole", "next_group", "all_groups", "library"),
+                   "end": ("default", "none", "next", "rest"),
+                   "end_at": ("80", "90")}
+# Before 0.15 each library had one choice ("library_modes"); what each becomes.
+OLD_MODES = {"off": {"start": "off", "end": "none"}, "rest": {"end": "rest"}, "album": {"end": "rest"},
+             "artist": {"start": "all_groups"}}
 
 # What each setting accepts. Every change — from the web UI, the API or MQTT — goes
 # through _coerce(), so these are the only rules. Numbers are whole numbers in the same
@@ -123,11 +140,7 @@ LIMITS = {
     ("general", "hdd_mb_per_sec"): (10, 5000),
     ("general", "ram_reserve_gb"): (0, 4096),
     ("warmup", "weekday"): (0, 6),
-    ("warmup", "every_hours"): (1, 168),
     ("warmup", "pacing_percent"): (5, 100),
-    ("warmup", "movie_sec"): (3, 180),
-    ("warmup", "tv_sec"): (3, 180),
-    ("warmup", "audio_sec"): (1, 60),
     ("warmup", "movie_min_sec"): (1, 600),
     ("warmup", "tv_min_sec"): (1, 600),
     ("warmup", "audio_min_sec"): (1, 600),
@@ -145,15 +158,32 @@ LIMITS = {
     ("mqtt", "port"): (1, 65535),
     ("mqtt", "interval"): (5, 600),
 }
+AUTO = -1  # a cooldown worked out from what's been measured (cachelog.CacheLog.auto_cooldown)
+COOLDOWN_RAM = (AUTO, 0, 10, 30, 60, 120, 180, 240, 360, 720)                    # minutes
+COOLDOWN_L2ARC = (AUTO, 0, 10, 60, 180, 360, 720, 1440, 2880, 4320, 10080)
 CHOICES = {
     ("general", "poll_seconds"): (3, 5, 10, 30),
-    ("warmup", "schedule"): ("daily", "weekly", "hours", "manual"),
+    # 0 and 10 minutes: next to no cooldown, to collect re-reads for "How long cached data lasts"
+    ("general", "ram_cooldown_lead_in_minutes"): COOLDOWN_RAM,
+    ("general", "ram_cooldown_whole_minutes"): COOLDOWN_RAM,
+    ("general", "l2arc_cooldown_lead_in_minutes"): COOLDOWN_L2ARC,
+    ("general", "l2arc_cooldown_whole_minutes"): COOLDOWN_L2ARC,
     ("warmup", "pause_disk_busy"): (0, 40, 50, 60),
     ("nowplaying", "delay_sec"): (0, 15, 30, 60),
-    ("nextepisode", "start_at"): ("default", "after_nowplaying", "80", "90"),
     ("mqtt", "report_period"): ("today", "week", "month"),
     ("mqtt", "language"): tuple(CODES),
 }
+def public_defaults() -> dict:
+    """Every setting's default that's a plain value (no lists or maps), but secrets: for the
+    page's ↺ "back to default" buttons."""
+    return {sec: {k: v for k, v in vals.items() if isinstance(v, (str, int, float)) and not SECRET_KEY(k)}
+            for sec, vals in DEFAULTS.items() if isinstance(vals, dict)}
+
+
+def SECRET_KEY(key: str) -> bool:  # noqa: N802 (a predicate used like a constant)
+    return any(w in key for w in ("token", "password", "api_key", "secret"))
+
+
 MAX_ITEMS = 500  # entries in a list/map setting (libraries, mappings, datasets)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _ISO_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?")
@@ -237,7 +267,7 @@ def _coerce(section: str, key: str, value, current):
         choices = CHOICES[(section, key)]
         if isinstance(choices[0], int):
             # Numbers may arrive as 10 or "10" (a form field); nothing else
-            if isinstance(value, bool) or not isinstance(value, (int, str)) or not str(value).isdigit():
+            if isinstance(value, bool) or not isinstance(value, (int, str)) or not str(value).removeprefix("-").isdigit():
                 raise SettingsError(M("{setting} must be one of {choices}", setting=where, choices=", ".join(map(str, choices))))
             value = int(value)
         if value not in choices:
@@ -255,7 +285,7 @@ def _coerce(section: str, key: str, value, current):
         if not lo <= value <= hi:
             raise SettingsError(M("{setting} must be between {min} and {max}", setting=where, min=str(lo), max=str(hi)))
         return int(value)
-    if key in ("time", "finish_by"):
+    if key == "time":
         if not isinstance(value, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
             raise SettingsError(M("time must look like 03:00"))
         return value
@@ -285,16 +315,44 @@ def _coerce(section: str, key: str, value, current):
         if not re.fullmatch(r"[A-Za-z0-9_\-]+(/[A-Za-z0-9_\-]+)*", value):
             raise SettingsError(M("{setting} may only use letters, numbers, - _ and /", setting=key))
         return value
-    if key == "library_modes":
+    if (section, key) == ("warmup", "libraries"):
         if not isinstance(value, dict) or len(value) > MAX_ITEMS:
-            raise SettingsError(M("library_modes must be an object"))
+            raise SettingsError(M("warmup.libraries must be an object"))
         out = {}
-        for lib, mode in value.items():
-            if not _LIB_KEY.fullmatch(str(lib)):
+        for lib, choice in value.items():
+            if not (_LIB_KEY.fullmatch(str(lib)) or lib == "*"):
                 raise SettingsError(M("unknown library: {key}", key=str(lib)))
-            if mode not in AUDIO_MODES and mode not in TV_MODES:
-                raise SettingsError(M("unknown preload choice: {mode}", mode=str(mode)))
-            out[str(lib)] = mode
+            if choice is None:
+                continue
+            if not isinstance(choice, dict) or any(k not in ("schedule", "seconds") for k in choice):
+                raise SettingsError(M("each library's warm-up choices must be an object"))
+            if "schedule" in choice and choice["schedule"] not in WARMUP_SCHEDULES:
+                raise SettingsError(M("unknown warm-up schedule: {mode}", mode=str(choice["schedule"])))
+            secs = choice.get("seconds")
+            if secs is not None and (isinstance(secs, bool) or not isinstance(secs, (int, float)) or not math.isfinite(secs)
+                                     or secs != int(secs) or not 1 <= secs <= 180):
+                raise SettingsError(M("{setting} must be between {min} and {max}", setting="seconds", min="1", max="180"))
+            row = {k: v for k, v in choice.items() if not (k == "schedule" and v == "default") and v is not None}
+            if "seconds" in row:
+                row["seconds"] = int(row["seconds"])
+            if row:
+                out[str(lib)] = row
+        return out
+    if key == "libraries":
+        if not isinstance(value, dict) or len(value) > MAX_ITEMS:
+            raise SettingsError(M("nextepisode.libraries must be an object"))
+        out = {}
+        for lib, choice in value.items():
+            if not (_LIB_KEY.fullmatch(str(lib)) or lib == "*"):
+                raise SettingsError(M("unknown library: {key}", key=str(lib)))
+            if choice is None:
+                continue  # null puts a library back to its defaults
+            if not isinstance(choice, dict) or any(k not in PREFETCH_FIELDS for k in choice):
+                raise SettingsError(M("each library's prefetch choices must be an object"))
+            for k, v in choice.items():
+                if v not in PREFETCH_FIELDS[k]:
+                    raise SettingsError(M("unknown prefetch choice: {mode}", mode=str(v)))
+            out[str(lib)] = {k: v for k, v in choice.items() if not (k != "end_at" and v == "default")}
         return out
     if key == "disk_speeds":
         if not isinstance(value, dict) or len(value) > MAX_ITEMS:
@@ -338,12 +396,59 @@ class Settings:
         os.makedirs(config_dir, exist_ok=True)
         self._data = self._load()
         changed = False
-        # 0.9.0 had per-library checkboxes for Next-episode; an unticked one becomes "Don't preload".
+        # 0.9.0 had per-library checkboxes for Prefetch; an unticked one becomes "Don't preload".
         ne = self._data.get("nextepisode", {})
         if ne.get("excluded_libraries"):
             modes = ne.setdefault("library_modes", {})
             for k in ne["excluded_libraries"]:
                 modes.setdefault(str(k), "off")
+        # Before 0.15: one warm-up schedule for every library ("*" is shared out once Plex's libraries are known).
+        w = self._data.get("warmup", {})
+        if "schedule" in w and w.get("schedule") in OLD_SCHEDULE and not (w.get("libraries") or {}).get("*"):
+            if w.get("enabled") or w["schedule"] == "manual":
+                w.setdefault("libraries", {})["*"] = {"schedule": OLD_SCHEDULE[w["schedule"]]}
+            changed = True
+        # 0.15 betas: near-the-end "off" became the choice "Nothing"; warm-up had an on/off switch
+        # besides each library's schedule (off: every library without its own schedule gets none).
+        for row in (ne.get("libraries") or {}).values():
+            if isinstance(row, dict) and row.get("end_at") == "off":
+                del row["end_at"]
+                row["end"] = "none"
+                changed = True
+            # ... and the whole season in full (including what was already watched) became the rest of it
+            if isinstance(row, dict) and row.get("end") == "whole":
+                row["end"] = "rest"
+                changed = True
+        if w.get("enabled") is False and not (w.get("libraries") or {}):
+            w.setdefault("libraries", {})["*"] = {"schedule": "none"}
+            changed = True
+        # 0.15 betas: cooldowns were in hours; now minutes (a value no longer offered becomes the nearest one)
+        gen = self._data.get("general", {})
+        for key in [k for k in gen if k.endswith("_cooldown_lead_in_hours") or k.endswith("_cooldown_whole_hours")]:
+            mins = gen.pop(key) * 60
+            new = key[:-len("hours")] + "minutes"
+            offered = COOLDOWN_L2ARC if new.startswith("l2arc") else COOLDOWN_RAM
+            gen[new] = min(offered, key=lambda m: abs(m - mins)) if isinstance(mins, (int, float)) else DEFAULTS["general"][new]
+            changed = True
+        # 0.15 betas: a monthly warm-up became twice monthly
+        for row in (w.get("libraries") or {}).values():
+            if isinstance(row, dict) and row.get("schedule") in OLD_LIBRARY_SCHEDULE:
+                row["schedule"] = OLD_LIBRARY_SCHEDULE[row["schedule"]]
+                changed = True
+        # Prefetch had an on/off switch until 0.15: off becomes "Don't prefetch" and "Nothing" for
+        # every library without its own choices ("*" is shared out once Plex's libraries are known).
+        if ne.get("enabled") is False:
+            libs = ne.setdefault("libraries", {})
+            if "*" not in libs:
+                libs["*"] = {"start": "off", "end": "none"}
+            changed = True
+        # Before 0.15: one preload choice per library, and one start time for all of them.
+        if ne.get("library_modes"):
+            libs = ne.setdefault("libraries", {})
+            for k, mode in ne["library_modes"].items():
+                if mode in OLD_MODES and str(k) not in libs:
+                    libs[str(k)] = dict(OLD_MODES[mode])
+            changed = True
         for sec, values in DEFAULTS.items():
             for key in [k for k in self._data.get(sec, {}) if k not in values]:
                 del self._data[sec][key]  # settings retired in a later version
@@ -407,7 +512,7 @@ class Settings:
         return data
 
     def update(self, patch: dict) -> dict:
-        """Apply a partial update like ``{"warmup": {"tv_sec": 20}}``."""
+        """Apply a partial update like ``{"warmup": {"pacing_percent": 20}}``."""
         if not isinstance(patch, dict):
             raise SettingsError(M("settings update must be an object"))
         with self._lock:
@@ -423,12 +528,8 @@ class Settings:
                     if (sec, key) in SECRET_PATHS and value == SECRET_MASK:
                         continue
                     new[sec][key] = _coerce(sec, key, value, DEFAULTS[sec][key])
-            w = new["warmup"]
-            for kind in ("movie", "tv", "audio"):
-                if w[f"{kind}_min_sec"] > w[f"{kind}_sec"]:
-                    w[f"{kind}_min_sec"] = w[f"{kind}_sec"]
             if new["nowplaying"]["ram_percent"] + new["nextepisode"]["ram_percent"] > 100:
-                raise SettingsError(M("Now-playing and Next-episode limits together can't be more than 100%"))
+                raise SettingsError(M("Now Playing Cache and Prefetch limits together can't be more than 100%"))
             self._data = new
             self._save()
             return copy.deepcopy(self._data)

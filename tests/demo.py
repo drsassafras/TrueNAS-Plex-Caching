@@ -75,7 +75,6 @@ app = App(os.path.join(tmp, "config"))
 app.settings.update({
     "plex": {"url": plex.url, "token": "good-token"},
     "truenas": {"url": tn.url, "api_key": "good-key"},
-    "warmup": {"enabled": not no_l2},
     "general": {"hdd_mb_per_sec": 182, "hdd_measured_at": "2026-10-07T21:14:00",
                 # TV and Audiobooks already mapped; Movies left for the demo to pick.
                 "path_map": [{"plex": "/data/TV", "local": os.path.join(media, "TV")},
@@ -91,6 +90,42 @@ for i, (hit, growth, files) in enumerate([(0.02, 11e9, 25598), (0.64, 171e9, 256
     app.activity.add_run({"started": start, "finished": start + 9700 - i * 400, "files": files, "total": files,
                           "bytes": 505e9, "hit_rate": hit, "errors": 0, "l2_growth": growth, "result": "ok",
                           "manual": i == 0, "by_kind": {}, "seconds": {}})
+# How long cached data lasts: re-reads by age, RAM falling off after a few hours, the SSD lasting days.
+_ram = [[40, 0], [55, 1], [48, 2], [30, 4], [18, 6], [12, 14], [4, 15], [1, 9], [0, 3], [0, 0], [0, 0], [0, 0], [0, 0]]
+_ssd = [[0, 0], [12, 0], [20, 0], [34, 0], [41, 1], [60, 1], [88, 2], [120, 3], [96, 5], [70, 9], [31, 12], [6, 9], [0, 2]]
+app.cachelog.stats = {"ram": {"first": 412, "ages": _ram, "libs": {}}, "ssd": {"first": 25611, "ages": _ssd, "libs": {}}}
+# The same per library, from simulated reads: each library's data lasts a little differently.
+import math as _m
+import random as _rl
+_rl.seed(7)
+_t0, _boot = time.time() - 9 * 86400, app.cachelog.boot_time
+app.cachelog.boot_time = 0
+for _key, _n, _new, _ram_h, _ssd_d in (("1", 160, 0.4, 1.5, 3), ("2", 320, 0.15, 4, 6), ("3", 90, 0.1, 8, 10)):
+    for _i in range(_n):
+        for _route, _life, _spread in (("ram", _ram_h * 3600, 600), ("ssd", _ssd_d * 86400, 1800)):
+            _p, _at = f"/demo/{_route}/{_key}/{_i}", _t0 + _rl.uniform(0, 3600)
+            app.cachelog.note(_p, False, at=_at, route=_route, hit=_rl.random() < 0.05, library=_key)
+            if _rl.random() < _new:
+                continue  # cached once, never read again
+            _age = _m.exp(_rl.uniform(_m.log(_spread), _m.log(20 * 86400)))
+            app.cachelog.note(_p, False, at=_at + _age, route=_route, hit=_rl.random() < _m.exp(-_age / _life), library=_key)
+app.cachelog.boot_time = _boot
+# Library cached over time: two weeks of hours, with a warm-up every Sunday at 03:00
+_files = [(f"/demo/{_k}/{_i}", 10_000_000, _k) for _k, _n in (("1", 300), ("2", 900), ("3", 200)) for _i in range(_n)]
+_last = {}
+_h0 = time.time() - time.time() % 3600 - 14 * 86400
+for _h in range(14 * 24):
+    _t = _h0 + _h * 3600
+    _tm = time.localtime(_t)
+    if 18 <= _tm.tm_hour <= 23:
+        for _ in range(8):
+            _last[_files[int(_rl.random() ** 2.5 * len(_files))][0]] = _t
+    if _tm.tm_wday == 6 and _tm.tm_hour == 3:
+        for _p, _s, _k in _files:
+            if _k == "2" or _rl.random() < 0.3:
+                _last[_p] = _t
+    app.coverage.record(_files, _last, now=_t + 60)
+app.cachelog.since = time.time() - 9 * 86400
 # A week of what the playback monitor measures, for the Activity report.
 import random as _r
 _r.seed(4)

@@ -31,7 +31,7 @@ def _count_total(totals: dict, what: str, f: dict) -> None:
     elif what == "next":
         totals["next"] += 1
         totals["next_ready"] += 1 if f.get("ready") else 0
-    elif what == "read":
+    elif what == "read" and f.get("route") != "ssd":  # read for viewers (not on its way to the SSD)
         totals["preloaded_bytes"] += int(f.get("cached", 0) or 0) + int(f.get("disk", 0) or 0)
 
 
@@ -128,12 +128,29 @@ class Activity:
             self.runs = self.runs[-self.max_runs:]
             self._save()
 
+    def runs_due(self, now: float, after: float) -> list[dict]:
+        """Runs that kept a sample to check, finished at least ``after`` seconds ago."""
+        with self._lock:
+            return [dict(r) for r in self.runs if r.get("sample") and r.get("finished") and now - r["finished"] >= after]
+
+    def update_run(self, started: float, **fields) -> None:
+        """Add to a run (found by when it started); a field set to None is dropped."""
+        with self._lock:
+            for r in self.runs:
+                if r.get("started") == started:
+                    for k, v in fields.items():
+                        if v is None:
+                            r.pop(k, None)
+                        else:
+                            r[k] = v
+            self._save()
+
     def snapshot(self) -> dict:
         with self._lock:
             week_ago = time.time() - 7 * 86400
             counts = collections.Counter(c["kind"] for c in self.counters if c["t"] >= week_ago)
             return {
                 "events": list(reversed(self.events))[:100],
-                "runs": list(reversed(self.runs)),
+                "runs": [{k: v for k, v in r.items() if k != "sample"} for r in reversed(self.runs)],
                 "week": dict(counts),
             }

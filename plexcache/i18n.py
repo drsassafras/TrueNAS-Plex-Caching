@@ -83,6 +83,27 @@ class Fixed(float):
         return (Fixed, (float(self), self.places))
 
 
+def size_text(n: float) -> M:
+    """An amount of data in the unit that suits it: "3.2 MB", "41 MB", "1.6 GB"."""
+    for tmpl, unit in (("{n} TB", 1e12), ("{n} GB", 1e9), ("{n} MB", 1e6), ("{n} KB", 1e3)):
+        if n >= unit:
+            return M(tmpl, n=Fixed(n / unit, 1 if n < 10 * unit else 0))
+    return M("{n} B", n=round(n))
+
+
+def duration_text(sec: float) -> M:
+    """A length of time in the unit that suits it: "180 ms", "2.4 s", "38 s", "4 min 10 s", "1 h 5 min"."""
+    if sec < 1:
+        return M("{n} ms", n=round(sec * 1000))
+    if sec < 60:
+        return M("{n} s", n=Fixed(sec, 1 if sec < 10 else 0))
+    if sec < 3600:
+        m, s = divmod(round(sec), 60)
+        return M("{m} min {s} s", m=m, s=s) if s else M("{m} min", m=m)
+    h, m = divmod(round(sec / 60), 60)
+    return M("{h} h {m} min", h=h, m=m) if m else M("{h} h", h=h)
+
+
 def msg(error: BaseException) -> str:
     """An exception's message, keeping it translatable when it was raised with an ``M``."""
     first = error.args[0] if len(error.args) == 1 else None

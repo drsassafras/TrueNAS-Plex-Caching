@@ -290,6 +290,38 @@ class PlexClient:
         return None
 
 
+    def show_episodes(self, show_rating_key: str) -> list[dict]:
+        """Every episode of a show in Plex's order (season, then episode), specials included."""
+        root = self.get(f"/library/metadata/{show_rating_key}/allLeaves")
+        out = []
+        for ep in root.findall("Video"):
+            files = [(part.get("file"), _int(part.get("size")), media_kbps(media, part))
+                     for media in ep.findall("Media") for part in media.findall("Part") if part.get("file")]
+            out.append({"rating_key": ep.get("ratingKey", ""), "season": _int(ep.get("parentIndex"), 0),
+                        "episode": _int(ep.get("index"), 0), "title": ep.get("title", ""), "files": files})
+        return out
+
+    def movie_collections(self, rating_key: str, section_key: str) -> list[list[dict]]:
+        """The Plex collections a movie is in, each as its movies in the collection's order."""
+        root = self.get(f"/library/metadata/{rating_key}")
+        video = root.find("Video")
+        tags = [c.get("tag", "") for c in (video.findall("Collection") if video is not None else []) if c.get("tag")]
+        if not tags or not section_key:
+            return []
+        cols = {d.get("title", ""): d.get("ratingKey", "") for d in self.get(f"/library/sections/{section_key}/collections").findall("Directory")}
+        out = []
+        for tag in tags:
+            rk = cols.get(tag)
+            if not rk:
+                continue
+            movies = []
+            for v in self.get(f"/library/collections/{rk}/children").findall("Video"):
+                files = [(part.get("file"), _int(part.get("size")), media_kbps(media, part))
+                         for media in v.findall("Media") for part in media.findall("Part") if part.get("file")]
+                movies.append({"rating_key": v.get("ratingKey", ""), "title": v.get("title", ""), "collection": tag, "files": files})
+            out.append(movies)
+        return out
+
     def album_tracks(self, album_rating_key: str) -> list[dict]:
         """An album's (or audiobook's) tracks in Plex's order."""
         root = self.get(f"/library/metadata/{album_rating_key}/children")

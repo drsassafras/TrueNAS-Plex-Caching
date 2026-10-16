@@ -1,6 +1,6 @@
 """MQTT: status for Home Assistant, Node-RED, openHAB and anything else that speaks MQTT.
 
-Off until switched on in Settings. Everything is in one retained JSON message
+Off until switched on in System. Everything is in one retained JSON message
 (<base>/state); commands arrive on <base>/set/<name>; <base>/availability says
 online/offline. With discovery on, Home Assistant's MQTT discovery messages make the
 "Plex Cache" device and its entities appear on their own.
@@ -17,7 +17,8 @@ import threading
 import time
 
 from . import REPO_URL
-from .config import AUDIO_MODES, DEFAULT_MODE, SettingsError, TV_MODES
+from . import prefetch
+from .config import SettingsError
 from .i18n import M, msg, render
 from .mqttclient import MQTTClient, MQTTError, topic_matches
 
@@ -29,11 +30,13 @@ RETRY_FIRST, RETRY_MAX = 5, 60  # seconds between attempts: 5, 10, 20, 40, then 
 PERIOD_NAME = {"today": M("today"), "week": M("7 days"), "month": M("30 days")}
 WARMUP_STATES = ["off", "idle", "preparing", "running", "paused"]
 HEALTH_STATES = ["ok", "warning", "problem", "checking"]
-START_AT = {"default": M("Default"), "after_nowplaying": M("After Now-playing"), "80": M("At 80%"), "90": M("At 90%")}
 POLL = {str(n): M("{n} seconds", one="{n} second", n=n) for n in (3, 5, 10, 30)}
-MODE_NAME = {"off": M("Don't preload"), "next": M("Next episode"), "10": M("10 minutes ahead"), "20": M("20 minutes ahead"),
-             "60": M("1 hour ahead"), "rest": M("Rest of the album / book"), "album": M("Whole album / book"),
-             "artist": M("Everything by the artist / author")}
+
+
+def prefetch_choices(kind: str, field: str) -> dict:
+    """value -> name of a library's Prefetch choices (Default first), as Home Assistant lists them."""
+    levels = prefetch.levels_for(kind) if field == "start" else prefetch.END_LEVELS
+    return {"default": M("Default"), **{v: prefetch.NAMES[kind][v] for v in levels}}
 WARMUP_RESULT = {"ok": M("ok"), "stopped": M("stopped"), "errors": M("errors")}
 
 
@@ -137,9 +140,15 @@ def build_state(app, period: str = "week", lang: str = "en") -> dict:
     last = runs[0] if runs else {}
     rep = (st.get("reports") or {}).get(period) or {}
     tiles = rep.get("tiles") or {}
+    fully = tiles.get("fully") or {}
+    route = ((st.get("survival") or {}).get("routes") or {}).get("ssd" if app.cache_mode() == "l2arc" else "ram") or {}
+    # How much of every library was cached within 1 h, 24 h, 7 d, 30 d, 6 months, at the last hour recorded (%)
+    hours = app.coverage.series({}).get("all") or []
+    latest = next((h for h in reversed(hours) if h), None)
+    cover = [x / 10 for x in latest[0]] if latest else [None] * 5
     totals = dict(app.activity.totals)
-    if not s["warmup"]["enabled"]:
-        wstate = "off"
+    if not any(v != "none" for v in app.warmup_schedules().values()):
+        wstate = "off"  # no library has a warm-up
     elif not wu.get("running"):
         wstate = "idle"
     elif prog.get("paused"):
@@ -188,7 +197,7 @@ def build_state(app, period: str = "week", lang: str = "en") -> dict:
         # L2ARC
         "l2arc_size": _gb(l2),
         "l2arc_cached": _gb(arc.get("l2_size")),
-        # Library warm-up
+        # Warm-up
         "warmup_state": wstate,
         "warmup_running": "ON" if wu.get("running") else "OFF",
         "warmup_progress": _pct(prog.get("done", 0), prog.get("total")) if wu.get("running") else None,
@@ -202,17 +211,19 @@ def build_state(app, period: str = "week", lang: str = "en") -> dict:
         "warmup_last_cached": round(last["hit_rate"] * 100, 1) if last.get("hit_rate") is not None else None,
         "warmup_last_l2arc_growth": _gb(last.get("l2_growth")),
         "warmup_last_files": last.get("files"),
-        # The Activity report, for the chosen period
+        # The Metrics page's report, for the chosen period
         "report_period": PERIOD_NAME.get(period, period),
         "report_verdict": _verdict(rep),
         "report_streams": rep.get("streams"),
         "skips": (tiles.get("skips") or {}).get("total"),
         "skips_cached": (tiles.get("skips") or {}).get("cached"),
-        "skips_cached_pct": _pct((tiles.get("skips") or {}).get("cached", 0), (tiles.get("skips") or {}).get("total")),
-        "next_total": (tiles.get("next") or {}).get("total"),
-        "next_ready": (tiles.get("next") or {}).get("ready"),
-        "next_ready_pct": _pct((tiles.get("next") or {}).get("ready", 0), (tiles.get("next") or {}).get("total")),
-        "next_lead_min": (tiles.get("next") or {}).get("lead_min"),
+        # (expected: each skip counted by how likely it came from cache, as the Metrics page shows it)
+        "skips_cached_pct": _pct((tiles.get("skips") or {}).get("expected", 0), (tiles.get("skips") or {}).get("total")),
+        "lead_in_served_pct": (tiles.get("lead") or {}).get("pct"),
+        "fully_cached_age": round(fully["age"] / 60) if fully.get("n") else None,
+        "suggested_cooldown": round(route["suggest"] / 60) if route.get("suggest") else None,
+        "cooldown_in_use": round(app.cooldown_seconds(False) / 60),
+        "library_cached_24h": cover[1], "library_cached_7d": cover[2], "library_cached_30d": cover[3],
         "still_cached_pct": (tiles.get("retention") or {}).get("pct"),
         "preloaded": _gb((tiles.get("preloaded") or {}).get("bytes")),
         "preloaded_already_cached_pct": (tiles.get("preloaded") or {}).get("cached_pct"),
@@ -223,33 +234,32 @@ def build_state(app, period: str = "week", lang: str = "en") -> dict:
         "total_streams": totals["streams"],
         "total_skips": totals["skips"],
         "total_skips_cached": totals["skips_cached"],
-        "total_next": totals["next"],
-        "total_next_ready": totals["next_ready"],
         "total_preloaded": _gb(totals["preloaded_bytes"]),
         # Background jobs
         "checking": "ON" if st.get("checking") else "OFF",
         "benchmarking": "ON" if (st.get("benchmark") or {}).get("running") else "OFF",
         # Settings (for the controls)
-        "warmup_enabled": "ON" if s["warmup"]["enabled"] else "OFF",
         "nowplaying_enabled": "ON" if s["nowplaying"]["enabled"] else "OFF",
-        "nextepisode_enabled": "ON" if s["nextepisode"]["enabled"] else "OFF",
         "nowplaying_ram_percent": s["nowplaying"]["ram_percent"],
         "nextepisode_ram_percent": s["nextepisode"]["ram_percent"],
         "warmup_pacing_percent": s["warmup"]["pacing_percent"],
+        "warmup_pacing_auto": "ON" if s["warmup"]["pacing_auto"] else "OFF",
+        # The page shows the share-of-disk-time slider only when automatic pacing is off (or can't work)
+        "warmup_pacing_manual": not s["warmup"]["pacing_auto"] or not app.l2arc_rate(),
         "ram_reserve_gb": s["general"]["ram_reserve_gb"],
         "poll_seconds": POLL.get(str(s["general"]["poll_seconds"]),
                                  M("{n} seconds", one="{n} second", n=s["general"]["poll_seconds"])),
-        "start_at": START_AT.get(s["nextepisode"]["start_at"], s["nextepisode"]["start_at"]),
         "datasets": datasets,
         "libraries": {},
         "update": update_info(app, lang),
     }
-    modes = s["nextepisode"].get("library_modes") or {}
     for lib in st["library"]["libraries"]:
-        if lib.get("kind") in ("tv", "audio") and not lib.get("excluded"):
-            mode = modes.get(lib["key"]) or DEFAULT_MODE[lib["kind"]]
-            out["libraries"][lib["key"]] = {"name": lib["title"], "kind": lib["kind"], "mode": MODE_NAME.get(mode, mode),
-                                            "items": lib.get("count")}
+        kind = prefetch.library_kind(lib)
+        if kind and not lib.get("excluded"):
+            mine = prefetch.library_settings(s["nextepisode"], lib["key"])
+            out["libraries"][lib["key"]] = {"name": lib["title"], "kind": kind, "items": lib.get("count"),
+                                            "prefetch_start": prefetch_choices(kind, "start")[mine["start"]],
+                                            "prefetch_end": prefetch_choices(kind, "end")[mine["end"]]}
     out = localize(out, lang)
     for k in ("health_text", "report_verdict", "preloading", "warmup_pause_reason", "warmup_last_result"):
         if isinstance(out[k], str) and len(out[k]) > 250:  # Home Assistant keeps at most 255 characters of a state
@@ -267,8 +277,8 @@ DESCRIPTIONS = {
     "problem": M("On when a health check failed: something needs fixing before every feature can work."),
     "streams": M("How many Plex streams are playing right now."),
     "streaming": M("On while anything is playing on Plex."),
-    "preloading": M("What Now-playing preload or Next-episode prefetch is reading right now, or Idle."),
-    "preloading_active": M("On while Now-playing or Next-episode is reading from the disks."),
+    "preloading": M("What Now Playing Cache or Prefetch is reading right now, or Idle."),
+    "preloading_active": M("On while Now Playing Cache or Prefetch is reading from the disks."),
     "health_passed": M("How many health checks passed."),
     "health_warnings": M("How many health checks gave a warning. Features still run; the Health page says what could be better."),
     "health_failures": M("How many health checks failed. The Health page says how to fix each one."),
@@ -278,34 +288,44 @@ DESCRIPTIONS = {
     "checking": M("On while the health checks are running."),
     "benchmarking": M("On while the disk benchmark is measuring each dataset's uncached read speed."),
     "version": M("The version of Plex Cache that's running."),
-    "update": M("Whether a newer Plex Cache is on GitHub (checked every 6 hours, if switched on in Settings). Update the app in TrueNAS."),
+    "update": M("Whether a newer Plex Cache is on GitHub (checked every 6 hours, if switched on in System). Update the app in TrueNAS."),
     # Activity
-    "report_verdict": M("The Activity report's verdict for the chosen period (Settings → MQTT): what could be better, or that all went well."),
+    "report_verdict": M("The Metrics page's verdict for the chosen period (System → MQTT): what could be better, or that all went well."),
     "report_streams": M("Streams played in the report period."),
     "skips": M("Times someone jumped more than 30 seconds within a title, in the report period."),
-    "skips_cached": M("Skips that landed on a part Now-playing had already loaded, so they played from cache."),
-    "skips_cached_pct": M("Share of skips that played from cache. Higher is better."),
-    "next_total": M("Next episodes (and next tracks or chapters) started in the report period."),
-    "next_ready": M("Next episodes that Next-episode prefetch had finished loading before they started."),
-    "next_ready_pct": M("Share of next episodes that were ready in time. Higher is better."),
-    "next_lead_min": M("On average, how long before it started a next episode was ready."),
-    "still_cached_pct": M("About 30 minutes after a preload, how much of it was still in RAM. Low means other work pushes it out too soon."),
-    "preloaded": M("How much data Now-playing and Next-episode read in the report period."),
+    "skips_cached": M("Skips that landed on a part Now Playing Cache had already loaded, so they played from cache."),
+    "warmup_pacing_auto": M("L2ARC pacing: on, warm-up and Prefetch's L2ARC-only reads go just under how fast ZFS copies to the SSD "
+                            "(l2arc_write_max). Off, they use the share of disk time in L2ARC pacing."),
+    "skips_cached_pct": M("Share of skips expected to have played from cache: each counted by how likely that part was still "
+                          "cached, from how long ago it was cached and how long data lasts in its library. Higher is better."),
+    "lead_in_served_pct": M("Share of plays that started from a lead-in (or whole file) already cached — by warm-up, Prefetch "
+                            "or an earlier play — each counted by how likely it was still there. Higher is better."),
+    "fully_cached_age": M("Everything read again up to this age was still cached, in the report period: the oldest re-read "
+                          "before the first one that had to come from the disks."),
+    "suggested_cooldown": M("The fully cached age over the last 7 days, every library: reading cached data again sooner "
+                            "would be for nothing. Automatic cooldowns use it, per library."),
+    "cooldown_in_use": M("The lead-in cooldown in use now: Automatic's, or the one set in the web UI."),
+    "library_cached_24h": M("Share of the library's files this app cached within the last 24 hours (in RAM or on the SSD), "
+                            "every library together."),
+    "library_cached_7d": M("Share of the library's files this app cached within the last 7 days (in RAM or on the SSD), "
+                           "every library together."),
+    "library_cached_30d": M("Share of the library's files this app cached within the last 30 days (in RAM or on the SSD), "
+                            "every library together."),
+    "still_cached_pct": M("About 30 minutes after a read, how much of it was still in RAM. Low means other work pushes it out too soon."),
+    "preloaded": M("How much data Now Playing Cache and Prefetch read into RAM for viewers in the report period (not counting reads on their way to the SSD)."),
     "preloaded_already_cached_pct": M("Share of what they read that was already cached (it read much faster than the disks can)."),
     "disk_busy_avg": M("How busy the media pool's disks were, on average, while people watched."),
     "disk_busy_peak": M("The busiest the media pool's disks got while people watched. Near 100% leaves little room for skips that miss the cache."),
-    "attention": M("How many items the Activity page's Needs attention list has for the report period."),
+    "attention": M("How many items the Metrics page's Needs attention list has for the report period."),
     "total_streams": M("Streams played since Plex Cache started counting. Only goes up, for long-term statistics."),
     "total_skips": M("Skips since Plex Cache started counting. Only goes up."),
     "total_skips_cached": M("Skips that played from cache, since Plex Cache started counting. Only goes up."),
-    "total_next": M("Next episodes started, since Plex Cache started counting. Only goes up."),
-    "total_next_ready": M("Next episodes that were ready in time, since Plex Cache started counting. Only goes up."),
-    "total_preloaded": M("Data read by Now-playing and Next-episode, since Plex Cache started counting. Only goes up."),
-    # Library warm-up
-    "warmup_state": M("Library warm-up: off, idle (waiting for its next run), preparing, running or paused."),
+    "total_preloaded": M("Data read by Now Playing Cache and Prefetch, since Plex Cache started counting. Only goes up."),
+    # Warm-up
+    "warmup_state": M("Warm-up (fills the Lead-in Cache on a schedule): off, idle (waiting for its next run), preparing, running or paused."),
     "warmup_running": M("On while a warm-up run is going (including while it's paused)."),
     "warmup_progress": M("How far through its files the current warm-up run is."),
-    "warmup_pause_reason": M("Why warm-up is paused (a player buffering, a preload reading, a scrub, busy disks or the finish-by time). It carries on afterwards."),
+    "warmup_pause_reason": M("Why warm-up is paused (a player buffering, Now Playing Cache or Prefetch reading, a scrub or busy disks — SSD Cache → L2ARC Cache Settings). It carries on afterwards."),
     "warmup_next_run": M("When the next scheduled warm-up starts."),
     "warmup_last_run": M("When the last warm-up started."),
     "warmup_last_result": M("How the last warm-up ended."),
@@ -316,29 +336,26 @@ DESCRIPTIONS = {
     "warmup_read": M("Data the current warm-up run has read so far."),
     "warmup_last_files": M("Files the last warm-up run read."),
     # RAM & ZFS
-    "nowplaying_ram_used": M("RAM Now-playing preload is using for the streams playing now."),
-    "nextepisode_ram_used": M("RAM Next-episode prefetch is using for the streams playing now."),
+    "nowplaying_ram_used": M("RAM Now Playing Cache is using for the streams playing now."),
+    "nextepisode_ram_used": M("RAM Prefetch is using for the streams playing now."),
     "arc_size": M("How much RAM the ZFS cache (ARC) holds right now, for everything on the NAS."),
     "l2arc_cached": M("How much data the SSD cache (L2ARC) holds right now."),
-    "nowplaying_ram_limit": M("The most RAM Now-playing may use, shared by all streams: its share of the ZFS cache that's available, after the reserve."),
-    "nextepisode_ram_limit": M("The most RAM Next-episode may use, shared by all streams."),
+    "nowplaying_ram_limit": M("The most RAM Now Playing Cache may use, shared by all streams: its share of the ZFS cache that's available, after the reserve."),
+    "nextepisode_ram_limit": M("The most RAM Prefetch may use, shared by all streams."),
     "zfs_cache_available": M("How much RAM the ZFS cache can use right now (up to its maximum). The two RAM limits are shares of this, after the reserve."),
     "l2arc_size": M("Total size of the SSD cache (L2ARC) devices on the media pools."),
     "arc_hit_ratio": M("Share of all reads on the NAS answered from RAM since it started (ZFS's own count, not just Plex)."),
     # Controls
-    "warmup_enabled": M("Library warm-up: on a schedule, read the start of every movie, episode and track so it sits on the SSD cache. Needs an L2ARC."),
-    "nowplaying_enabled": M("Now-playing preload: once a stream is playing, read the file into RAM ahead of the viewer, so skips play from cache."),
-    "nextepisode_enabled": M("Next-episode prefetch: while an episode plays, read the start of the next one (or read ahead in an album or audiobook)."),
-    "run_warmup": M("Start a warm-up now, at full speed (it ignores the busy-disks and finish-by pauses)."),
+    "nowplaying_enabled": M("Now Playing Cache: once a stream is playing, read the file into RAM ahead of the viewer, so skips play from cache."),
+    "run_warmup": M("Start a warm-up now, at full speed (it ignores the busy-disks pause and the cooldown)."),
     "stop_warmup": M("Stop the current warm-up. The next scheduled run starts as usual."),
     "recheck": M("Run all the health checks again."),
-    "benchmark": M("Measure each dataset's uncached read speed. Used to tell cache hits from disk reads, and to time preloads."),
-    "nowplaying_ram_percent": M("Now-playing's RAM limit, as a share of the ZFS cache available after the reserve. Shared by all streams."),
-    "nextepisode_ram_percent": M("Next-episode's RAM limit, as a share of the ZFS cache available after the reserve. The two limits together can't pass 100%."),
-    "warmup_pacing_percent": M("Share of disk time background warm-up may use. Lower is gentler on other work; Run now ignores it."),
+    "benchmark": M("Measure each dataset's uncached read speed. Used to tell cache hits from disk reads, and to time Now Playing Cache."),
+    "nowplaying_ram_percent": M("Now Playing Cache's RAM limit, as a share of the ZFS cache available after the reserve. Shared by all streams."),
+    "nextepisode_ram_percent": M("Prefetch's RAM limit, as a share of the ZFS cache available after the reserve. The two limits together can't pass 100%."),
+    "warmup_pacing_percent": M("Share of disk time L2ARC-only caching (warm-up, and Prefetch's L2ARC-only steps) may use, when automatic L2ARC pacing is off in the web UI. Lower is gentler on other work; Run now ignores it."),
     "ram_reserve_gb": M("ZFS cache kept for the rest of the NAS (TrueNAS, other apps, ZFS itself). The RAM limits are shares of what's left."),
     "poll_seconds": M("How often Plex Cache asks Plex what's playing. 5 seconds suits most people; 3 reacts sooner to skips and short tracks."),
-    "start_at": M("When Next-episode prefetch starts: Default picks for you; After Now-playing waits for that preload to finish; 80% or 90% waits until then."),
 }
 
 
@@ -350,22 +367,42 @@ def describe(oid: str):
         return M("This dataset's ZFS record size, and whether its files match it. 1M suits movies and TV; 512K or 1M suits audio.")
     if oid.startswith("dataset_") and oid.endswith("_cache"):
         return M("This dataset's cache settings. primarycache=all is needed for any caching; secondarycache=all lets data go on to "
-                 "the SSD cache, which Library warm-up needs.")
-    if oid.startswith("library_") and oid.endswith("_preload"):
-        return M("What Next-episode prefetch reads for this library: for TV, the next episode; for music and audiobooks, "
-                 "minutes ahead, the rest of the album or book, the whole album, or everything by the artist. Or nothing.")
+                 "the SSD cache, which warm-up needs.")
+    if oid.startswith("library_") and oid.endswith("_prefetch_start"):
+        return M("What Prefetch puts in the Lead-in Cache once Now Playing Cache finishes: from the next episode, track or chapter "
+                 "up to the whole library, each step including the ones before it. Default follows the caching mode.")
+    if oid.startswith("library_") and oid.endswith("_prefetch_end"):
+        return M("What Prefetch puts in the Whole File Cache near the end (80% or 90%, set in the web UI): nothing, the next "
+                 "episode, track or chapter, the rest of the season, album or book, or all of it. Default follows the caching mode.")
     return ""
 
 
+# Each control, and the setting it changes — the same settings the web UI offers, shown under
+# the same conditions (tests/test_plexcache.py checks they stay in sync). Per-library Prefetch
+# selects are added for each library ("library_<key>_prefetch_start" / "_end").
+CONTROL_SETTINGS = {
+    "nowplaying_enabled": ("nowplaying", "enabled"),
+    "nowplaying_ram_percent": ("nowplaying", "ram_percent"),
+    "nextepisode_ram_percent": ("nextepisode", "ram_percent"),
+    "ram_reserve_gb": ("general", "ram_reserve_gb"),
+    "poll_seconds": ("general", "poll_seconds"),
+    "warmup_pacing_auto": ("warmup", "pacing_auto"),
+    "warmup_pacing_percent": ("warmup", "pacing_percent"),  # only while automatic pacing is off, as on the page
+}
+
 # Entities dropped in an update, removed from Home Assistant if they're still there.
-RETIRED = [("sensor", "arc_max"), ("sensor", "l2arc_needed")]
+RETIRED = [("sensor", "arc_max"), ("sensor", "l2arc_needed"), ("select", "start_at"), ("switch", "warmup_enabled"),
+           ("switch", "nextepisode_enabled"),
+           # "Next episodes ready" was taken off the Metrics page
+           ("sensor", "next_total"), ("sensor", "next_ready"), ("sensor", "next_ready_pct"), ("sensor", "next_lead_min"),
+           ("sensor", "total_next"), ("sensor", "total_next_ready")]
 
 # Entities are spread over a main device and three linked ones, so Home Assistant shows them
 # under clear headings (each with its own page and dashboard card).
 DEVICES = {
     "main": "Plex Cache",
-    "activity": M("Plex Cache Activity"),
-    "warmup": M("Plex Cache Library warm-up"),
+    "activity": M("Plex Cache Metrics"),
+    "warmup": M("Plex Cache Warm-up"),
     "memory": M("Plex Cache RAM & ZFS"),
 }
 
@@ -410,8 +447,8 @@ def entities(state: dict, allow_control: bool, lang: str = "en") -> list[tuple[s
     binary("main", "problem", M("Problem"), "problem", dc="problem")
     sensor("main", "streams", M("Streams playing"), "streams", icon="mdi:play-network-outline", sc="measurement")
     binary("main", "streaming", M("Streaming"), "streaming", dc="running")
-    sensor("main", "preloading", M("Preloading"), "preloading", icon="mdi:tray-arrow-down")
-    binary("main", "preloading_active", M("Preload reading"), "preloading_active", dc="running")
+    sensor("main", "preloading", M("Caching ahead"), "preloading", icon="mdi:tray-arrow-down")
+    binary("main", "preloading_active", M("Reading ahead"), "preloading_active", dc="running")
     # diagnostics
     sensor("main", "health_passed", M("Checks passed"), "health_passed", icon="mdi:check-circle-outline", sc="measurement", cat=D)
     sensor("main", "health_warnings", M("Health warnings"), "health_warnings", icon="mdi:alert-outline", sc="measurement", cat=D)
@@ -432,29 +469,31 @@ def entities(state: dict, allow_control: bool, lang: str = "en") -> list[tuple[s
     E.append(("update", "update", {"_device": "main", "name": M("Update"), "device_class": "firmware",
                                    "title": "Plex Cache", "release_url": REPO_URL, "entity_category": "diagnostic"}))
 
-    # ---- Activity: the Activity page's report, plus totals that only go up
+    # ---- Metrics: the Metrics page's report, plus totals that only go up
     sensor("activity", "report_verdict", M("Report ({period})", period=period), "report_verdict", icon="mdi:chart-box-outline")
     sensor("activity", "report_streams", M("Streams ({period})", period=period), "report_streams", sc="measurement", icon="mdi:play-box-multiple-outline")
     sensor("activity", "skips", M("Skips ({period})", period=period), "skips", sc="measurement", icon="mdi:skip-forward-outline")
     sensor("activity", "skips_cached", M("Skips from cache ({period})", period=period), "skips_cached", sc="measurement", icon="mdi:skip-forward")
-    sensor("activity", "skips_cached_pct", M("Skips from cache % ({period})", period=period), "skips_cached_pct", unit="%", sc="measurement", icon="mdi:percent")
-    sensor("activity", "next_total", M("Next episodes ({period})", period=period), "next_total", sc="measurement", icon="mdi:skip-next-outline")
-    sensor("activity", "next_ready", M("Next episodes ready ({period})", period=period), "next_ready", sc="measurement", icon="mdi:skip-next")
-    sensor("activity", "next_ready_pct", M("Next episodes ready % ({period})", period=period), "next_ready_pct", unit="%", sc="measurement", icon="mdi:percent")
-    sensor("activity", "next_lead_min", M("Next episode ready early ({period})", period=period), "next_lead_min", unit="min", dc="duration", sc="measurement")
+    sensor("activity", "skips_cached_pct", M("Skips served from cache ({period})", period=period), "skips_cached_pct", unit="%", sc="measurement", icon="mdi:percent")
+    sensor("activity", "lead_in_served_pct", M("Media served lead-in cached ({period})", period=period), "lead_in_served_pct", unit="%", sc="measurement", icon="mdi:play-circle-outline")
+    sensor("activity", "fully_cached_age", M("Fully cached age ({period})", period=period), "fully_cached_age", unit="min", dc="duration", sc="measurement", icon="mdi:timer-check-outline")
+    sensor("activity", "suggested_cooldown", M("Suggested cooldown"), "suggested_cooldown", unit="min", dc="duration", sc="measurement", icon="mdi:timer-cog-outline")
+    sensor("activity", "cooldown_in_use", M("Cooldown in use"), "cooldown_in_use", unit="min", dc="duration", sc="measurement", icon="mdi:timer-outline", cat=D)
+    for oid, name in (("library_cached_24h", M("Library cached within 24 hours")), ("library_cached_7d", M("Library cached within 7 days")),
+                      ("library_cached_30d", M("Library cached within 30 days"))):
+        sensor("activity", oid, name, oid, unit="%", sc="measurement", icon="mdi:bookshelf")
     sensor("activity", "still_cached_pct", M("Still cached 30 min later ({period})", period=period), "still_cached_pct", unit="%", sc="measurement", icon="mdi:timer-sand")
-    sensor("activity", "preloaded", M("Data preloaded ({period})", period=period), "preloaded", unit="GB", dc="data_size", sc="measurement")
-    sensor("activity", "preloaded_already_cached_pct", M("Preloaded already in cache ({period})", period=period), "preloaded_already_cached_pct", unit="%", sc="measurement")
+    sensor("activity", "preloaded", M("Data cached ahead ({period})", period=period), "preloaded", unit="GB", dc="data_size", sc="measurement")
+    sensor("activity", "preloaded_already_cached_pct", M("Already in cache ({period})", period=period), "preloaded_already_cached_pct", unit="%", sc="measurement")
     sensor("activity", "disk_busy_avg", M("Disks busy during streams ({period})", period=period), "disk_busy_avg", unit="%", sc="measurement", icon="mdi:harddisk")
     sensor("activity", "disk_busy_peak", M("Disks busy peak ({period})", period=period), "disk_busy_peak", unit="%", sc="measurement", icon="mdi:harddisk-plus")
     sensor("activity", "attention", M("Needs attention ({period})", period=period), "attention", sc="measurement", icon="mdi:alert-decagram-outline")
     for oid, name in (("total_streams", M("Total streams")), ("total_skips", M("Total skips")),
-                      ("total_skips_cached", M("Total skips from cache")), ("total_next", M("Total next episodes")),
-                      ("total_next_ready", M("Total next episodes ready"))):
+                      ("total_skips_cached", M("Total skips from cache"))):
         sensor("activity", oid, name, oid, sc="total_increasing", icon="mdi:counter")
-    sensor("activity", "total_preloaded", M("Total data preloaded"), "total_preloaded", unit="GB", dc="data_size", sc="total_increasing")
+    sensor("activity", "total_preloaded", M("Total data cached ahead"), "total_preloaded", unit="GB", dc="data_size", sc="total_increasing")
 
-    # ---- Library warm-up
+    # ---- Warm-up
     sensor("warmup", "warmup_state", M("Warm-up"), "warmup_state", dc="enum", options=WARMUP_STATES, icon="mdi:fire")
     binary("warmup", "warmup_running", M("Warm-up running"), "warmup_running", dc="running")
     sensor("warmup", "warmup_progress", M("Warm-up progress"), "warmup_progress", unit="%", sc="measurement", icon="mdi:progress-clock")
@@ -470,12 +509,12 @@ def entities(state: dict, allow_control: bool, lang: str = "en") -> list[tuple[s
     sensor("warmup", "warmup_last_files", M("Warm-up last run files"), "warmup_last_files", icon="mdi:file-multiple-outline", cat=D)
 
     # ---- RAM & ZFS: how much each feature uses, and the caches themselves
-    for oid, name, cat in (("nowplaying_ram_used", M("Now-playing RAM in use"), None),
-                           ("nextepisode_ram_used", M("Next-episode RAM in use"), None),
+    for oid, name, cat in (("nowplaying_ram_used", M("Now Playing Cache RAM in use"), None),
+                           ("nextepisode_ram_used", M("Prefetch RAM in use"), None),
                            ("arc_size", M("ARC size"), None),
                            ("l2arc_cached", M("L2ARC filled"), None),
-                           ("nowplaying_ram_limit", M("Now-playing RAM limit"), D),
-                           ("nextepisode_ram_limit", M("Next-episode RAM limit"), D),
+                           ("nowplaying_ram_limit", M("Now Playing Cache RAM limit"), D),
+                           ("nextepisode_ram_limit", M("Prefetch RAM limit"), D),
                            ("zfs_cache_available", M("ZFS cache available"), D),
                            ("l2arc_size", M("L2ARC size"), D)):
         sensor("memory", oid, name, oid, unit="GB", dc="data_size", sc="measurement", icon="mdi:memory", cat=cat)
@@ -483,34 +522,45 @@ def entities(state: dict, allow_control: bool, lang: str = "en") -> list[tuple[s
 
     # ---- Controls (on the main device, so they're all in one place)
     if allow_control:
-        for feat, name in (("warmup", M("Library warm-up")), ("nowplaying", M("Now-playing preload")), ("nextepisode", M("Next-episode prefetch"))):
+        for feat, name in (("nowplaying", M("Now Playing Cache")),):
             E.append(("switch", f"{feat}_enabled", {"_device": "main", "name": name,
                                                      "value_template": "{{ value_json.%s_enabled }}" % feat,
                                                      "state_on": "ON", "state_off": "OFF", "payload_on": "ON", "payload_off": "OFF",
                                                      "icon": "mdi:cached"}))
+        E.append(("switch", "warmup_pacing_auto", {"_device": "main", "name": M("L2ARC pacing: automatic"),
+                                                   "value_template": "{{ value_json.warmup_pacing_auto }}",
+                                                   "state_on": "ON", "state_off": "OFF", "payload_on": "ON", "payload_off": "OFF",
+                                                   "entity_category": "config", "icon": "mdi:speedometer-medium"}))
         for oid, name, icon in (("run_warmup", M("Run warm-up now"), "mdi:play"), ("stop_warmup", M("Stop warm-up"), "mdi:stop"),
                                 ("recheck", M("Re-run health checks"), "mdi:refresh"), ("benchmark", M("Benchmark disks"), "mdi:speedometer")):
             E.append(("button", oid, {"_device": "main", "name": name, "payload_press": "PRESS", "icon": icon}))
         # Boxes, not sliders: Home Assistant's device page shows a slider without its value or unit.
-        for oid, name, lo, hi, step, unit in (("nowplaying_ram_percent", M("Now-playing RAM"), 5, 90, 5, "%"),
-                                              ("nextepisode_ram_percent", M("Next-episode RAM"), 5, 90, 5, "%"),
-                                              ("warmup_pacing_percent", M("Warm-up pacing"), 5, 100, 5, "%"),
-                                              ("ram_reserve_gb", M("ZFS cache reserve"), 0, 4096, 1, "GB")):
+        numbers = [("nowplaying_ram_percent", M("Now Playing Cache RAM"), 5, 90, 5, "%"),
+                   ("nextepisode_ram_percent", M("Prefetch RAM"), 5, 90, 5, "%"),
+                   ("ram_reserve_gb", M("Reserve ZFS Cache"), 0, 4096, 1, "GB")]
+        if state.get("warmup_pacing_manual", True):  # (as on the page: only while automatic pacing is off)
+            numbers.insert(2, ("warmup_pacing_percent", M("L2ARC pacing"), 5, 100, 5, "%"))
+        for oid, name, lo, hi, step, unit in numbers:
             E.append(("number", oid, {"_device": "main", "name": name, "value_template": "{{ value_json.%s }}" % oid,
                                       "min": lo, "max": hi, "step": step, "unit_of_measurement": unit,
                                       "mode": "box", "entity_category": "config", "icon": "mdi:tune-variant"}))
         E.append(("select", "poll_seconds", {"_device": "main", "name": M("Check what's playing every"),
                                              "value_template": "{{ value_json.poll_seconds }}",
                                              "options": list(POLL.values()), "entity_category": "config"}))
-        E.append(("select", "start_at", {"_device": "main", "name": M("Start next-episode prefetch"),
-                                         "value_template": "{{ value_json.start_at }}",
-                                         "options": list(START_AT.values()), "entity_category": "config"}))
         for key, lib in (state.get("libraries") or {}).items():
-            options = [MODE_NAME[m] for m in (TV_MODES if lib.get("kind") == "tv" else AUDIO_MODES)]
-            E.append(("select", f"library_{key}_preload", {"_device": "main", "name": M("{name} preload", name=lib["name"]), "options": options,
-                                                           "value_template": "{{ value_json.libraries['%s'].mode }}" % key,
-                                                           "entity_category": "config", "icon": "mdi:playlist-play"}))
+            for field, name, icon in (("start", M("{name} Lead-in Cache prefetch", name=lib["name"]), "mdi:playlist-play"),
+                                      ("end", M("{name} Whole File Cache prefetch", name=lib["name"]), "mdi:playlist-check")):
+                E.append(("select", f"library_{key}_prefetch_{field}", {
+                    "_device": "main", "name": name, "options": list(prefetch_choices(lib["kind"], field).values()),
+                    "value_template": "{{ value_json.libraries['%s'].prefetch_%s }}" % (key, field),
+                    "entity_category": "config", "icon": icon}))
     return [(component, oid, localize(conf, lang)) for component, oid, conf in E]
+
+
+def mqtt_client_id(node: str) -> str:
+    """The MQTT client ID: letters and digits only, 1 to 23 of them — what every broker must accept
+    [MQTT-3.1.3-5]. (``node``, with its underscore, stays the name Home Assistant knows the entities by.)"""
+    return ("".join(ch for ch in node if ch.isascii() and ch.isalnum()) or "plexcache")[:23]
 
 
 # ------------------------------------------------------------------- bridge
@@ -521,7 +571,7 @@ class HomeAssistantBridge:
         self.app = app
         self.stop = threading.Event()
         self.wake = threading.Event()  # set to publish straight away (e.g. after a command)
-        self.retry_now = threading.Event()  # "Reconnect now" in Settings
+        self.retry_now = threading.Event()  # "Reconnect now" in System
         self.status = {"state": "off", "error": None, "since": None, "entities": 0, "last_publish": None,
                        "next_retry": None, "ha_seen": None, "steps": self._steps("off")}
         self._client: MQTTClient | None = None
@@ -615,7 +665,7 @@ class HomeAssistantBridge:
     def _run(self, cfg):
         base, avail, state_topic, set_topic = self._topics(cfg)
         node = "plexcache_" + (self.app.settings.section("general")["client_id"] or "x").replace("-", "")[:12]
-        c = MQTTClient(cfg["host"], cfg["port"], client_id=node, username=cfg["username"], password=cfg["password"],
+        c = MQTTClient(cfg["host"], cfg["port"], client_id=mqtt_client_id(node), username=cfg["username"], password=cfg["password"],
                        tls=cfg["tls"], verify_tls=cfg["verify_tls"], will=(avail, "offline", True))
         self.status.update(state="connecting", error=None, steps=self._steps("testing"))
         if not cfg["tls"]:
@@ -651,7 +701,7 @@ class HomeAssistantBridge:
                 self.wake.clear()
                 state = build_state(self.app, cfg["report_period"], cfg.get("language", "en"))
                 sig = json.dumps([sorted(state["datasets"]), sorted(state["libraries"]), state["report_period"],
-                                  self._web_url()])
+                                  self._web_url(), state["warmup_pacing_manual"]])
                 if cfg["discovery"] and sig != discovery_sig:
                     self._publish_discovery(c, cfg, node, state)
                     discovery_sig = sig
@@ -706,14 +756,18 @@ class HomeAssistantBridge:
         devices = self._devices(node, lang)
         topics = set()
         ents = entities(state, cfg["allow_control"], lang)
+        # Which software sent these: Home Assistant shows it, and asks every discovery message for it
+        origin = {"name": "Plex Cache", "sw_version": self.app.version, "support_url": REPO_URL}
         # Every entity's description, in one retained message (sent with discovery, not with each update)
         c.publish(f"{base}/info", json.dumps({oid: render(describe(oid), lang) for _, oid, _ in ents}), retain=True)
         for component, oid, conf in ents:
             if self.stop.is_set() or self.retry_now.is_set():
                 return  # shutting down or reconnecting: the rest is sent next time
             conf = dict(conf)
-            conf = dict(conf, unique_id=f"{node}_{oid}", availability_topic=avail, device=devices[conf.pop("_device")])
-            conf["object_id"] = f"plex_cache_{oid}"
+            conf = dict(conf, unique_id=f"{node}_{oid}", availability_topic=avail, device=devices[conf.pop("_device")],
+                        origin=origin)
+            # The entity ID Home Assistant suggests (object_id no longer sets it: default_entity_id does)
+            conf["default_entity_id"] = f"{component}.plex_cache_{oid}"
             if component == "update":
                 conf["state_topic"] = f"{base}/update"
             elif component != "button":
@@ -760,7 +814,11 @@ class HomeAssistantBridge:
         app = self.app
         lang = app.settings.section("mqtt").get("language", "en")
         try:
-            if name in ("warmup_enabled", "nowplaying_enabled", "nextepisode_enabled"):
+            if name == "warmup_pacing_auto":
+                if value.upper() not in ("ON", "OFF", "TRUE", "FALSE", "1", "0"):
+                    raise SettingsError(M("send ON or OFF"))
+                app.settings.update({"warmup": {"pacing_auto": value.upper() in ("ON", "TRUE", "1")}})
+            elif name == "nowplaying_enabled":
                 if value.upper() not in ("ON", "OFF", "TRUE", "FALSE", "1", "0"):
                     raise SettingsError(M("send ON or OFF"))
                 feat, on = name[:-8], value.upper() in ("ON", "TRUE", "1")
@@ -784,17 +842,16 @@ class HomeAssistantBridge:
                 app.settings.update({sec: {key: float(value)}})
             elif name == "poll_seconds":
                 app.settings.update({"general": {"poll_seconds": int(_choice(POLL, value, lang))}})
-            elif name == "start_at":
-                app.settings.update({"nextepisode": {"start_at": _choice(START_AT, value, lang)}})
-            elif name.startswith("library_") and name.endswith("_preload"):
-                key = name[len("library_"):-len("_preload")]
-                mode = _choice(MODE_NAME, value, lang)
-                if not any(x["key"] == key for x in app.libraries):
+            elif name.startswith("library_") and (name.endswith("_prefetch_start") or name.endswith("_prefetch_end")):
+                field = "start" if name.endswith("_start") else "end"
+                key = name[len("library_"):-len("_prefetch_" + field)]
+                kind = prefetch.library_kind(app.library_info(key))
+                if kind is None:
                     raise SettingsError(M("Plex has no such library"))
-                modes = dict(app.settings.section("nextepisode").get("library_modes") or {})
-                modes[key] = mode
-                app.check_library_modes(modes)  # the same check as the web UI's
-                app.settings.update({"nextepisode": {"library_modes": modes}})
+                libs = dict(app.settings.section("nextepisode").get("libraries") or {})
+                libs[key] = dict(libs.get(key) or {}, **{field: _choice(prefetch_choices(kind, field), value, lang)})
+                app.check_prefetch_libraries(libs)  # the same check as the web UI's
+                app.settings.update({"nextepisode": {"libraries": libs}})
             else:
                 raise SettingsError(M("unknown command {name}", name=name))
             app.activity.event("mqtt", M("MQTT command: {name} → {value}", name=name, value=value))

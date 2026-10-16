@@ -29,14 +29,21 @@ class ReadResult:
 
 
 class Pacer:
-    """Keeps background reads to a share of disk time.
+    """Keeps background reads gentle, in one of two ways.
 
-    After a read that took ``t`` seconds we wait ``t * (100 - p) / p``, so the
-    reader is busy roughly ``p`` percent of the time.
+    * A share of disk time: after a read that took ``t`` seconds we wait
+      ``t * (100 - p) / p``, so the reader is busy roughly ``p`` percent of the time.
+    * A speed (``rate``, bytes per second): reads from the disks are spread out so they
+      average no more than that. Used for the L2ARC, which ZFS fills at a limited speed
+      (l2arc_write_max): reading from the disks faster only wastes the reads, since data
+      leaves RAM before it reaches the SSD. Reads that came from cache (faster than
+      ``disk_mb_s`` could deliver) aren't held back: there's nothing to copy.
     """
 
-    def __init__(self, percent: float, stop: threading.Event | None = None, pause=None):
+    def __init__(self, percent: float, stop: threading.Event | None = None, pause=None, rate: float | None = None):
         self.percent = max(1.0, min(100.0, float(percent)))
+        self.rate = rate if rate and rate > 0 else None
+        self.disk_mb_s: float | None = None  # uncached disk speed, to tell cache hits apart
         self.stop = stop or threading.Event()
         self.pause = pause  # callable -> bool: True while we should hold off
         self.before_wait = None  # optional callable: an idle gap is about to start
@@ -48,11 +55,24 @@ class Pacer:
             if self.stop.wait(5):
                 raise Stopped()
 
-    def after(self, seconds: float) -> None:
+    def wait_for(self, seconds: float, nbytes: int = 0) -> float:
+        """How long to wait after reading ``nbytes`` in ``seconds``."""
+        if self.rate:
+            if not nbytes:
+                return 0.0
+            if self.disk_mb_s and seconds > 0 and nbytes / MiB / seconds >= 4 * self.disk_mb_s:
+                return 0.0  # came from cache
+            return max(0.0, nbytes / self.rate - seconds)
         if self.percent < 100 and seconds > 0:
+            return seconds * (100 - self.percent) / self.percent
+        return 0.0
+
+    def after(self, seconds: float, nbytes: int = 0) -> None:
+        wait = self.wait_for(seconds, nbytes)
+        if wait > 0:
             if self.before_wait:
                 self.before_wait()
-            if self.stop.wait(seconds * (100 - self.percent) / self.percent):
+            if self.stop.wait(wait):
                 raise Stopped()
         self.check()
 
@@ -98,7 +118,7 @@ def read_range(path: str, offset: int, length: int, pacer: Pacer | None = None, 
                 if on_group:
                     on_group(group_bytes, took)
                 if pacer:
-                    pacer.after(took)
+                    pacer.after(took, group_bytes)
                 group_start, group_bytes = time.monotonic(), 0
         took = time.monotonic() - group_start
         spent += took
@@ -111,6 +131,16 @@ def read_range(path: str, offset: int, length: int, pacer: Pacer | None = None, 
 
 def read_head(path: str, nbytes: int) -> ReadResult:
     return read_range(path, 0, nbytes)
+
+
+# A 1 MiB read this quick came from an SSD or RAM: a hard drive needs longer just to move its
+# head (a few ms) and spin to the data (about 4 ms on average at 7200 rpm).
+PROBE_HIT_SECONDS = 0.004
+
+
+def is_probe_hit(result: ReadResult) -> bool:
+    """For a single small read at a spot the disks haven't just read: did it come from cache?"""
+    return not result.error and result.bytes > 0 and result.seconds <= PROBE_HIT_SECONDS
 
 
 def is_cache_hit(result: ReadResult, hdd_mb_per_sec: float) -> bool:

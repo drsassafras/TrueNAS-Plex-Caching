@@ -225,6 +225,17 @@ class FakePlex:
                 f'duration="{t["duration"]}">{self._part(t)}</Track>' for i, t in enumerate(book)) + "</MediaContainer>"
         if u.path == "/library/metadata/700/children":  # the author's books
             return '<MediaContainer><Directory type="album" ratingKey="600"/><Directory type="album" ratingKey="601"/></MediaContainer>'
+        # Movies 0-2 are a collection ("Trilogy"); the last movie is in none.
+        if u.path == "/library/sections/1/collections":
+            return '<MediaContainer><Directory ratingKey="900" title="Trilogy" type="collection"/></MediaContainer>'
+        if u.path == "/library/collections/900/children":
+            return "<MediaContainer>" + "".join(
+                f'<Video type="movie" ratingKey="{m["key"]}" title="Part {i + 1}">{self._part(m)}</Video>'
+                for i, m in enumerate(self.cat["movies"][:3])) + "</MediaContainer>"
+        movie = next((m for m in self.cat["movies"] if u.path == f'/library/metadata/{m["key"]}'), None)
+        if movie is not None:
+            tag = '<Collection id="77" tag="Trilogy"/>' if self.cat["movies"].index(movie) < 3 else ""
+            return f'<MediaContainer><Video type="movie" ratingKey="{movie["key"]}" title="Movie">{self._part(movie)}{tag}</Video></MediaContainer>'
         if u.path == "/library/metadata/500/allLeaves":
             return f'<MediaContainer>{"".join(self._episode_xml(e) for e in self.cat["episodes"])}</MediaContainer>'
         if u.path == "/status/sessions":

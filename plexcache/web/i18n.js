@@ -165,8 +165,10 @@
     return wrap;
   }
 
+  // The page loads this file as i18n.js?v=<build>: ask for the translations of the same version
+  var BUILD_QS = (((document.currentScript || {}).src || "").match(/\?v=[0-9a-f]+/) || [""])[0];
   var ready = (lang === "en" ? Promise.resolve() :
-    fetch("/static/i18n/" + lang + ".json", { credentials: "same-origin" })
+    fetch("/static/i18n/" + lang + ".json" + BUILD_QS, { credentials: "same-origin" })
       .then(function (r) { return r.ok ? r.json() : {}; })
       .then(function (c) { cat = c || {}; })
       .catch(function () { cat = {}; }))
