@@ -3756,17 +3756,20 @@ class OptimizerSetupTests(unittest.TestCase):
         self.assertEqual(svc.token, "a-token-made-by-the-app-1234")             # picked up without a restart
         self.assertEqual(osrv.Service([d], "set-in-the-yaml-123456", token_file).token, "set-in-the-yaml-123456")
         # By default it may write what the YAML mounts writable: not its own filesystems, not /config
+        # (media paths as a container has them: under /tmp would be the container's own scratch space)
         ml = [{"root": "/", "mountpoint": "/", "fstype": "overlay", "source": "overlay", "options": ["rw"]},
-              {"root": "/", "mountpoint": d, "fstype": "zfs", "source": "tank/plexfiles", "options": ["rw", "noatime"]},
+              {"root": "/", "mountpoint": "/data", "fstype": "zfs", "source": "tank/plexfiles", "options": ["rw", "noatime"]},
               {"root": "/", "mountpoint": "/config", "fstype": "zfs", "source": "tank/apps", "options": ["ro"]},
               {"root": "/", "mountpoint": "/tmp", "fstype": "tmpfs", "source": "tmpfs", "options": ["rw"]},
               {"root": "/h", "mountpoint": "/etc/hosts", "fstype": "zfs", "source": "boot", "options": ["rw"]},
               {"root": "/", "mountpoint": "/proc", "fstype": "proc", "source": "proc", "options": ["rw"]}]
-        self.assertEqual(zfs.writable_mounts(ml), [d])
-        ml[1]["options"] = ["ro"]
-        self.assertEqual(zfs.writable_mounts(ml), [])                           # read-only media: nothing to write
-        # where a container folder is on the host, for the YAML Health shows
-        self.assertEqual(zfs.host_path(d + "/Movies", [dict(ml[1], root="/media")]), "/mnt/tank/plexfiles/media/Movies")
+        isdir = lambda p: p != "/etc/hosts"                                    # /etc/hosts is a file
+        with mock.patch("os.path.isdir", isdir):
+            self.assertEqual(zfs.writable_mounts(ml), ["/data"])
+            ml[1]["options"] = ["ro"]
+            self.assertEqual(zfs.writable_mounts(ml), [])                       # read-only media: nothing to write
+        # where a container folder is on the host, for the YAML the Optimizer page shows
+        self.assertEqual(zfs.host_path("/data/Movies", [dict(ml[1], root="/media")]), "/mnt/tank/plexfiles/media/Movies")
         self.assertIsNone(zfs.host_path("/tmp", ml))
 
 
