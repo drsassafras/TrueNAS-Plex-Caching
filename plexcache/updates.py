@@ -28,9 +28,14 @@ def parse_version(text: str) -> str | None:
 
 
 def newer(a: str, b: str) -> bool:
-    """Is version a newer than b? (0.14.0 > 0.13.2; anything unparseable isn't newer)."""
+    """Is version a newer than b? (0.14.0 > 0.13.2; a pre-release comes before its release:
+    0.16.0-beta.1 < 0.16.0-beta.2 < 0.16.0; anything unparseable isn't newer)."""
     def key(v):
-        return tuple(int(x) for x in re.findall(r"\d+", v.split("+")[0])[:4])
+        core, _, pre = v.split("+")[0].partition("-")
+        nums = [int(x) for x in re.findall(r"\d+", core)[:4]]
+        nums += [0] * (4 - len(nums))
+        # a release sorts after every pre-release of it
+        return (tuple(nums), (1,) if not pre else (0, *[int(x) for x in re.findall(r"\d+", pre)]))
     try:
         return key(a) > key(b)
     except ValueError:

@@ -56,12 +56,42 @@ On the SSD Cache page. Everything that needs an L2ARC — warm-up, and the Prefe
 ### Health checks that explain themselves
 
 - **Plex and TrueNAS** — server reachable, signed in, API key accepted. The TrueNAS connection is read-only.
-- **Media access** — opens a real file in every library folder, and suggests the right folder when the app has it mounted somewhere else.
-- **Media datasets** — for every dataset a library is on: cache settings (`primarycache`, `secondarycache`), record size (1M for video; 512K or 1M for audio) and the SSD cache on its pool. Also flags datasets mounted in the app that no library uses, and works out which dataset really holds a library when datasets are mounted inside one another.
-- **Record size, file by file** — a new record size only applies to files written afterwards, so Health samples the files themselves and says how many still use smaller blocks; "Check every file" counts them all. A built-in script rewrites them safely (see below).
+- **Libraries** — opens a real file in every library folder, and suggests the right folder when the app has it mounted somewhere else. Each library also shows the record size of its dataset (always read from the dataset: from TrueNAS, or from ZFS itself) and the one recommended for it from its average bitrate: 512K under 1 Mbps (music, audiobooks), 1M up to 15 Mbps (FLAC, SD to 1080p encodes), 2M up to 40 Mbps (4K encodes, 1080p remuxes), 4M above (4K remuxes), and 128K for files under 1 MB. A second best is named too, the neighbouring size on the side the bitrate leans to. **Ideal** when the dataset uses the recommended size, **Pass** when it uses the second best (fine too, so a library near the line between two sizes doesn't flip between them), **Warning** otherwise; the column's ⓘ says where to change it in TrueNAS.
+- **Media datasets** — for every dataset a library is on, one column per check, each with an ⓘ saying what it checks, why it matters and what to do about a warning:
+  - **Cache settings** — `primarycache` and `secondarycache`;
+  - **Dataset record size** — that the setting suits every library on it (each library's recommended size or second best). When no one size can, it names the library to move to a dataset of its own, since a record size is set per dataset;
+  - **File record size** — that every file is written in that size (**All files match**). A new record size only applies to files written afterwards; every health check looks at every file (one `stat()` each, a fraction of a second for 20,000 files), and the [optimizer](#the-optimizer-files-written-for-caching) writes the others again;
+  - **Compression** — ZSTD-3 is what's recommended;
+  - **L2ARC** — the SSD cache on its pool.
+
+  Also flags datasets mounted in the app that no library uses, and works out which dataset really holds a library when datasets are mounted inside one another.
 - **ZFS and RAM** — how much RAM is free for preloading, and whether ZFS settings would stop warm-up from landing on the SSD (for example, warm-up reading faster than ZFS copies to the SSD).
 - **Is it working?** — compares warm-up runs to show how much was already cached, and a day after each run checks a sample of its lead-ins: how many are still on the SSD. The L2ARC reuses its space oldest first, so that's how long lead-ins really last on your NAS.
 - Every problem comes with the fix — a setting to change or a command to copy — and features that can't work on your system are switched off with the reason, coming back on by themselves once it's fixed.
+
+### The optimizer: files written for caching
+
+A second container, `plex-cache-optimizer`, rewrites media files so they suit caching. It's optional, and the only part of the app that writes media. It does nothing on its own: on the **Optimizer** page, choose for each library what it should do, then press **Optimize Now**. Until it works, the top of the Optimizer page checks, in order, everything it needs — in the app's YAML, running, answering, holding the app's token, with its tools, with media it may write — and shows only what's left to do, with the lines to paste filled in for your NAS. With a TrueNAS API key that can see apps, it can tell "not in the YAML" from "stopped right after starting". Health → Plex Cache says in one line whether it's ready.
+
+Per library:
+
+- **TrueNAS Compression & Recordsize** (on by default) — writes each file again, byte for byte, so it takes its dataset's current record size and compression: ZFS applies both only to files as they're written. Any kind of file. The copy is read back and must have the same SHA-256 as the original before it replaces it. A file's compression can't be read back from it, so every file counts as to do until the optimizer has written it once (it records the compression the dataset had then); after that, only files not in the dataset's record size, or written before its compression changed, are done again.
+- **Optimize MKV Files** (off by default) — for each MKV file it:
+  - remuxes it with MKVToolNix (`mkvmerge --no-attachments`), keeping every track as it is — image subtitles (PGS, VobSub) get zlib, mkvmerge's default; video, audio and text subtitles aren't compressed;
+  - handles cover art (image attachments, which some DLNA players and TVs show) as the library chooses with **Cover art**:
+    - **Only Embed Plex Cover Art for Unmatched Items** (the default) — when Plex can't match something to an online entry (home videos, concerts, rare releases), it has nowhere to fetch artwork from again, and the most reliable place to keep it is in the file. Those get Plex's poster (whatever you set in Plex), losslessly compressed as below; matched items have their cover art taken out, since Plex fetches it anyway. Plex marks unmatched items with a `local://` guid;
+    - **Strip Cover Art** — takes it out of every file;
+    - **Compress Existing Cover Art** — keeps it, losslessly compressed: PNG with [oxipng](https://github.com/shssoichiro/oxipng) (`-o 4 --strip safe`, which keeps colour profiles and transparency), JPEG with jpegtran from libjpeg-turbo (`-copy all -optimize`: new Huffman tables, the picture and every marker untouched, still baseline JPEG so every TV shows it). Each result is decoded and compared with the original pixel for pixel, and kept only if it's smaller;
+    - **Compress and Embed Plex Cover Art** — puts Plex's poster in every file (a movie's own; an episode's season poster, or the show's), as `cover.jpg` or `cover.png`, losslessly compressed the same way. The app downloads the poster as Plex has it (not resized), and rewrites the file again when the poster in Plex changes;
+  - puts the attachments back **after the video** (`mkvpropedit`), least compressible first — images, then fonts, then text — and moves the index and tags after them. The lead-in is then all video, and everything that compresses sits together at the end of the file, next to the padding of its last record;
+  - writes it in the dataset's current record size and compression;
+  - checks, with ffmpeg, that every video, audio and subtitle stream is exactly the same as before, and every attachment is byte for byte what was meant to go in.
+
+Either way it works one file at a time, skips anything playing and anything written in the last 10 minutes (still being imported), keeps each file's owner, permissions, timestamps and extended attributes (and skips files whose owner it can't keep), and swaps the new file in with an atomic rename. An MKV already laid out right isn't remuxed unless its cover art needs it, but it's still checked and recorded.
+
+**The record.** The app keeps a record of every file the optimizer finished: when, what it did, the SHA-256 of the file it left, the optimizer's version, and the file's size, modification time and inode then. A record counts only while the file is still that exact file — so telling which files are done is one quick `stat()` each, without reading any of them — and, for MKV files, only for the optimizer version, cover art choice (and Plex poster) it was done for. The Optimizer page shows, per library, how many files still need something under its choices — not in the dataset's record size or not known to have its compression, MKV files not yet optimized, or optimized for another cover art choice — or **Complete**. `python -m plexcache.optimize --check FILE…` checks single MKV files, and `python -m plexcache.optimize FILE…` optimizes them.
+
+Things to know: snapshots keep the old copy of every rewritten file until they expire; replication sends each one again; Plex re-analyses each changed file.
 
 ### Activity: is it actually helping?
 
@@ -77,13 +107,13 @@ On the SSD Cache page. Everything that needs an L2ARC — warm-up, and the Prefe
 ### Easy to set up and live with
 
 - **Sign in with Plex** — no token hunting. Plex and TrueNAS addresses are filled in when they run on the same NAS.
-- **L2ARC Sizing Estimator** — tells you how big an SSD you'd need to hold the lead-in of everything in your libraries (titles × bitrate × seconds), with sliders that work out an Estimate column for other lead-in lengths without saving them, so you can try settings before you buy one.
+- **L2ARC Sizing Estimator** — how much cache the lead-in of everything in your libraries takes, in RAM without an L2ARC and on the SSD with one, counted in whole records as ZFS caches them. Four columns per library: *Target minimum* (the first record of each file at the recommended record size, indexes at the front), *Your minimum* (the first record at your record size, plus the index for files keeping it at the end), *Target* (the recommended record size, indexes at the front, at the lengths on the sliders) and *Your library* (the block sizes your files are written with now, at your settings). Below them: the system buffer (room for everything else ZFS caches; the larger it is, the longer cached files stay on the SSD) and the RAM the L2ARC uses to keep track of what it holds. Warm-up, Prefetch and Now Playing Cache read in whole records of each library's dataset, as ZFS does. Warm-up never caches less than a library's minimum: when the L2ARC is too small it shortens every lead-in by the same share, as little as fits, down to one record. A lead-in slider all the way down is one record too, on the Caching page and in the estimator; the estimator's sliders start from the default lengths. Leave room on top for how much your libraries will grow.
 - **Disk speed benchmark** per dataset, so cache hits and preload timing are judged against your actual disks.
 - Help behind small ⓘ buttons instead of walls of text, a ↺ to put any setting back to its default, changes saved as you go, dark mode, and a layout that works on a phone.
 - **MQTT, for Home Assistant and more** (optional) — publishes health, streams, RAM in use, ARC and L2ARC, warm-up progress, the Activity report and lifetime totals, and takes commands. In Home Assistant a "Plex Cache" device appears on its own with 60–80 entities, including switches, buttons and sliders; Node-RED, openHAB and other MQTT tools can use the same topics. Status lights show each step of the connection. Follows the MQTT 3.1.1 and Home Assistant discovery standards, checked by its tests ([Standards](#standards)). See [MQTT](#mqtt-home-assistant-node-red-and-more).
 - **Login** for the web UI — a username and password set in the app's YAML (on by default; the example password is refused).
 - **Update notices** — checks GitHub every 6 hours (can be switched off in System) and says when there's a newer version, in the web UI and in Home Assistant.
-- **Safe by design** — runs as TrueNAS's unprivileged `apps` user in a read-only container, with media mounted read-only and all extra permissions dropped; it writes only to its settings folder. Pure Python with no third-party dependencies. If its settings folder isn't writable it says how to fix it, rather than restarting endlessly.
+- **Safe by design** — runs as TrueNAS's unprivileged `apps` user in a read-only container, with media mounted read-only and all extra permissions dropped; it writes only to its settings folder. Pure Python with no third-party dependencies. The only part that writes media is the optional [optimizer](#the-optimizer-files-written-for-caching), a second container that acts only when you ask it to. If its settings folder isn't writable it says how to fix it, rather than restarting endlessly.
 
 ## Install on TrueNAS
 
@@ -94,6 +124,7 @@ TrueNAS doesn't support third-party app catalogs since 24.10, so this installs a
 3. **Apps → Discover Apps → ⋮ → Install via YAML**, name it `plex-cache`, and paste [`compose.yaml`](compose.yaml). Change the lines marked `CHANGE ME`:
    - the settings dataset → `/config`
    - each media host path → **the same mount path Plex uses**, read-only. Add a line per mount if Plex has several.
+   - for the optimizer (the second service, optional): the same settings folder, read-only, and the media it may rewrite, writable. That's all: it finds the app's token in the settings folder, and it can only change files under the media folders you mount into it — leave out any you don't want changed (or the whole service). It runs as user 568; files it can't write, or whose owner it can't keep, are skipped (see the comments in the YAML for media owned by another user). If you add it later, the Optimizer page shows the lines to paste, filled in for your NAS.
    - `PLEXCACHE_PASSWORD` (and the username, if you like) → your own; the example password is refused. See [the web UI login](#the-web-ui-login).
 4. Open `http://<your-nas-ip>:8642` and sign in.
 5. Open **System**. If Plex and TrueNAS run on the same NAS, their addresses are filled in for you; otherwise enter your NAS's IP (Plex's port 32400 is added automatically). Choose **Sign in with Plex** — Plex only shares library and playback details with apps that hold a token. Optionally add a TrueNAS API key (user menu → API Keys) so Health can see your cache devices and dataset settings. The app only reads from the API. Status lights on the page show what's working.
@@ -195,7 +226,7 @@ The translations were made with AI and haven't been reviewed by native speakers 
 - Plex Media Server reachable from the NAS
 - `primarycache=all` on each media dataset for any feature to work there: ZFS only fills L2ARC from data that passed through RAM, so `primarycache=metadata` means nothing gets cached (the old scripts recommended that — it doesn't work)
 - For warm-up (and Prefetch's L2ARC-only choices): at least one cache (L2ARC) device on the media pool, and `secondarycache=all` on the media dataset
-- `recordsize=1M` on datasets holding movies or TV; audio-only datasets can use `512K` or `1M`. A new record size only applies to files written afterwards, so Health also samples the files themselves and says when many were written with smaller blocks.
+- A `recordsize` that suits each library's media, by its average bitrate: `512K` under 1 Mbps, `1M` up to 15 Mbps, `2M` up to 40 Mbps, `4M` above (Health → Libraries shows the recommended size and the second best for each). A new record size only applies to files written afterwards, so Health also checks every file and warns when any don't match it.
 
 ### Rewriting files after a record size change
 
@@ -242,9 +273,14 @@ Keep every `{placeholder}` and HTML tag from the English. A plural is an object 
 | `PLEXCACHE_CONFIG` | settings folder (default `/config`) |
 | `PLEXCACHE_PORT`, `PLEXCACHE_HOST` | where the web UI listens (default `8642` on all addresses) |
 | `PLEXCACHE_DEBUG` | any value: more detail in the app's log |
+| `PLEXCACHE_OPTIMIZER_URL` | where the optimizer service is (default `http://plex-cache-optimizer:8643`, the second service in the YAML) |
+| `PLEXCACHE_OPTIMIZER_TOKEN` | the secret the app and the optimizer share. Not needed: the app makes one and keeps it in its settings folder (`optimizer-token`), and the optimizer reads it there (`/config/optimizer-token`, mounted read-only). Set the same value in both services to use your own |
+| `PLEXCACHE_MEDIA_ROOTS` | optimizer only: the folders it may write. Not needed: by default, the folders mounted into it writable |
+| `PLEXCACHE_OPTIMIZER_PORT` | optimizer only: the port it listens on inside the app (default `8643`) |
+| `PLEXCACHE_TOOLS_PATH` | extra folders to find MKVToolNix, ffmpeg, oxipng and jpegtran in (e.g. the macOS app bundle when testing) |
 | `PLEX_URL`, `PLEX_TOKEN`, `TRUENAS_URL`, `TRUENAS_API_KEY` | fill in those settings when they're empty (handy for scripted installs); the web UI can change them afterwards |
 | `TZ` | time zone for schedules |
 
 ### The config folder
 
-`settings.json` (all settings, including the Plex token, TrueNAS API key and MQTT password — readable only by the app), `history.json` (Activity history), `session.key` and `signed-out.json` (web UI sessions), and small files remembering the web UI's address, "Check every file" results and the Home Assistant entities published. `GET /api/export` downloads the settings without any secrets.
+`settings.json` (all settings, including the Plex token, TrueNAS API key and MQTT password — readable only by the app), `history.json` (Activity history), `session.key` and `signed-out.json` (web UI sessions), and small files remembering the web UI's address, the Home Assistant entities published, the token the optimizer accepts (`optimizer-token`), and the optimizer's record of the files it has done (`optimized.json`: for each, when, the result, the SHA-256 of the file it left, the optimizer's version, and the file's size, modification time and inode then). `GET /api/export` downloads the settings without any secrets.

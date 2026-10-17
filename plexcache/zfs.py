@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 
 PROC = os.environ.get("PLEXCACHE_PROC", "/proc")
@@ -120,8 +121,52 @@ def mounts() -> list[dict]:
         lf, rf = left.split(), right.split()
         if len(lf) < 5 or len(rf) < 2:
             continue
-        out.append({"root": _unescape(lf[3]), "mountpoint": _unescape(lf[4]), "fstype": rf[0], "source": _unescape(rf[1])})
+        out.append({"root": _unescape(lf[3]), "mountpoint": _unescape(lf[4]), "fstype": rf[0], "source": _unescape(rf[1]),
+                    "options": lf[5].split(",") if len(lf) > 5 else []})
     return out
+
+
+def own_container_id() -> str | None:
+    """This container's Docker ID, from the files Docker mounts into it (/etc/hostname and
+    friends live under /var/lib/docker/containers/<id>/). None outside Docker."""
+    try:
+        with open(os.path.join(PROC, "self/mountinfo"), encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    m = re.search(r"/containers/([0-9a-f]{64})/", text)
+    return m.group(1) if m else None
+
+
+PSEUDO_FS = {"proc", "sysfs", "tmpfs", "devtmpfs", "devpts", "mqueue", "cgroup", "cgroup2", "overlay", "securityfs",
+             "debugfs", "tracefs", "pstore", "bpf", "hugetlbfs", "configfs", "fusectl", "autofs", "binfmt_misc", "nsfs"}
+SYSTEM_DIRS = ("/proc", "/sys", "/dev", "/run", "/tmp", "/etc", "/usr", "/app")
+
+
+def writable_mounts(mount_list: list[dict] | None = None, exclude: tuple = ("/config",)) -> list[str]:
+    """The folders mounted into this container read-write from the host — the media volumes a
+    YAML gives a service — leaving out the container's own filesystems, single files (like
+    /etc/hosts) and ``exclude``."""
+    out = []
+    for m in mount_list if mount_list is not None else mounts():
+        mp = m["mountpoint"]
+        if (m["fstype"] in PSEUDO_FS or "rw" not in (m.get("options") or []) or mp == "/" or mp in exclude
+                or any(mp == d or mp.startswith(d + "/") for d in SYSTEM_DIRS) or not os.path.isdir(mp)):
+            continue
+        out.append(mp)
+    return sorted(set(out))
+
+
+def host_path(path: str, mount_list: list[dict] | None = None) -> str | None:
+    """Where a folder in this container is on the TrueNAS host, for a ZFS mount: the dataset's
+    mountpoint there (/mnt/<dataset>, TrueNAS's default) plus the folder inside it. None when
+    it isn't on ZFS."""
+    m = mount_for(path, mount_list)
+    if not m or m["fstype"] != "zfs" or m["mountpoint"] == "/":
+        return None
+    root = "" if m["root"] in ("", "/") else m["root"]
+    rest = os.path.abspath(path)[len(m["mountpoint"].rstrip("/")):]
+    return "/mnt/" + m["source"] + root + rest
 
 
 def mount_for(path: str, mount_list: list[dict] | None = None) -> dict | None:
@@ -136,6 +181,18 @@ def mount_for(path: str, mount_list: list[dict] | None = None) -> dict | None:
     if best and best["fstype"] == "zfs":
         best = dict(best, dataset=best["source"], pool=best["source"].split("/")[0])
     return best
+
+
+def recordsize(mountpoint: str | None) -> int | None:
+    """A ZFS dataset's record size, read from the dataset itself: ZFS reports it as the
+    filesystem's block size (statfs f_bsize). None if it can't be read."""
+    if not mountpoint:
+        return None
+    try:
+        bs = os.statvfs(mountpoint).f_bsize
+    except OSError:
+        return None
+    return bs if bs and bs & (bs - 1) == 0 and bs >= 4096 else None
 
 
 def block_sizes(paths) -> dict:

@@ -67,9 +67,6 @@ DEFAULTS: dict = {
         # "seconds" is each lead-in's length (warm-up, and Prefetch's lead-ins); without it the
         # library's kind decides (warmup.KIND_SECONDS: 60 s for movies, 30 for TV, 10 for audio).
         "libraries": {},
-        "movie_min_sec": 3,
-        "tv_min_sec": 3,
-        "audio_min_sec": 1,
         "reserve_gb": 100,
         "padding_video": 5,
         "padding_audio": 15,
@@ -101,6 +98,15 @@ DEFAULTS: dict = {
         #  "end_at": "80" | "90"}
         "libraries": {},
     },
+    # The optimizer (the second container): rewrites files so they're laid out for caching
+    # (attachments, index and tags after the video), with the dataset's record size and compression.
+    # Per library (Plex library key -> choices; see optimizing.py): {"sync": true — write files again
+    # so they take the dataset's record size and compression, "mkv": false — lay MKV files out for
+    # caching, "images": "unmatched" | "remove" | "compress" | "plex" — what an optimized MKV's cover
+    # art becomes; "unmatched": Plex's poster only for items Plex hasn't matched}.
+    "optimizer": {
+        "libraries": {},
+    },
     # MQTT (off until switched on): status on <base_topic>/state, commands on <base_topic>/set/<name>.
     # With "discovery", Home Assistant (and openHAB, Domoticz...) create the entities themselves.
     "mqtt": {
@@ -122,7 +128,7 @@ DEFAULTS: dict = {
 }
 
 WARMUP_SCHEDULES = ("default", "none", "boot", "twice_monthly", "weekly", "twice_weekly", "daily")
-SECONDS_LIMITS = {"movie": (3, 180), "tv": (3, 180), "audio": (1, 60)}  # per library, by its kind
+SECONDS_LIMITS = {"movie": (0, 180), "tv": (0, 180), "audio": (0, 60)}  # per library, by its kind; 0: one record
 # Before 0.15 warm-up had one schedule for every library; what it becomes.
 OLD_SCHEDULE = {"daily": "daily", "weekly": "weekly", "hours": "daily", "manual": "none"}
 OLD_LIBRARY_SCHEDULE = {"monthly": "twice_monthly"}  # 0.15 betas
@@ -141,9 +147,6 @@ LIMITS = {
     ("general", "ram_reserve_gb"): (0, 4096),
     ("warmup", "weekday"): (0, 6),
     ("warmup", "pacing_percent"): (5, 100),
-    ("warmup", "movie_min_sec"): (1, 600),
-    ("warmup", "tv_min_sec"): (1, 600),
-    ("warmup", "audio_min_sec"): (1, 600),
     ("warmup", "reserve_gb"): (0, 500),
     ("warmup", "padding_video"): (0, 100),
     ("warmup", "padding_audio"): (0, 100),
@@ -330,13 +333,32 @@ def _coerce(section: str, key: str, value, current):
                 raise SettingsError(M("unknown warm-up schedule: {mode}", mode=str(choice["schedule"])))
             secs = choice.get("seconds")
             if secs is not None and (isinstance(secs, bool) or not isinstance(secs, (int, float)) or not math.isfinite(secs)
-                                     or secs != int(secs) or not 1 <= secs <= 180):
-                raise SettingsError(M("{setting} must be between {min} and {max}", setting="seconds", min="1", max="180"))
+                                     or secs != int(secs) or not 0 <= secs <= 180):
+                raise SettingsError(M("{setting} must be between {min} and {max}", setting="seconds", min="0", max="180"))
             row = {k: v for k, v in choice.items() if not (k == "schedule" and v == "default") and v is not None}
             if "seconds" in row:
                 row["seconds"] = int(row["seconds"])
             if row:
                 out[str(lib)] = row
+        return out
+    if (section, key) == ("optimizer", "libraries"):
+        if not isinstance(value, dict) or len(value) > MAX_ITEMS:
+            raise SettingsError(M("optimizer.libraries must be an object"))
+        out = {}
+        for lib, choice in value.items():
+            if not _LIB_KEY.fullmatch(str(lib)):
+                raise SettingsError(M("unknown library: {key}", key=str(lib)))
+            if choice is None:
+                continue
+            if isinstance(choice, dict) and choice.get("images") == "keep":
+                choice = dict(choice, images="compress")  # the name before the three choices
+            if (not isinstance(choice, dict) or any(k not in ("sync", "mkv", "images") for k in choice)
+                    or choice.get("images", "unmatched") not in ("unmatched", "compress", "remove", "plex")
+                    or any(not isinstance(choice[k], bool) for k in ("sync", "mkv") if k in choice)):
+                raise SettingsError(M("each library's optimizer choices must be {\"sync\": true/false, \"mkv\": true/false, "
+                                      "\"images\": \"unmatched\", \"remove\", \"compress\" or \"plex\"}"))
+            if choice:
+                out[str(lib)] = dict(choice)
         return out
     if key == "libraries":
         if not isinstance(value, dict) or len(value) > MAX_ITEMS:

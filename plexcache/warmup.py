@@ -44,11 +44,31 @@ def resolve_schedule(app_or_mode, key: str, value: str, lib_name: str = "") -> s
     return cachemode.resolve(f"warmup.{key}.schedule", value, app_or_mode.cache_mode(), app_or_mode.fallbacks, one)
 
 
-def preload_bytes(kbps: int, seconds: float, size: int = 0) -> int:
-    """Bytes to read for ``seconds`` of playback, rounded up to whole MiB."""
-    raw = max(1, int(kbps)) * 125 * seconds
-    n = max(1, math.ceil(raw / MiB)) * MiB
+def preload_bytes(kbps: int, seconds: float, size: int = 0, record: int | None = None) -> int:
+    """Bytes to read for ``seconds`` of playback, in whole records of the file's dataset (ZFS
+    reads and caches whole records anyway), at least one. 0 seconds: just the first record.
+    Without a known record size, whole MiB."""
+    unit = record or MiB
+    raw = max(1, int(kbps)) * 125 * max(0.0, seconds)
+    n = max(1, math.ceil(raw / unit)) * unit
     return min(n, size) if size > 0 else n
+
+
+def align_ranges(ranges: list, record: int | None, size: int) -> list:
+    """(offset, length) ranges widened to whole records of the dataset, the way ZFS reads them,
+    and merged where they meet. Unchanged without a known record size."""
+    if not record:
+        return list(ranges)
+    out = []
+    for off, length in sorted(ranges):
+        start = off // record * record
+        end = min(size, -(-(off + length) // record) * record) if size else -(-(off + length) // record) * record
+        if out and start <= out[-1][0] + out[-1][1]:
+            prev = out[-1]
+            out[-1] = (prev[0], max(prev[0] + prev[1], end) - prev[0])
+        else:
+            out.append((start, end - start))
+    return out
 
 
 @dataclass
@@ -59,7 +79,7 @@ class LibraryStats:
     avg_kbps: dict = field(default_factory=lambda: {k: 0 for k in KINDS})
     scanned_at: float | None = None
     # The same per library, so the sizing table can show e.g. audiobooks and music apart
-    # (their bitrates differ a lot): [{"key", "name", "kind", "count", "avg_kbps"}]
+    # (their bitrates differ a lot): [{"key", "name", "kind", "count", "avg_kbps", "avg_size"}]
     libraries: list = field(default_factory=list)
 
     @classmethod
@@ -72,13 +92,14 @@ class LibraryStats:
             totals[f.kind] += f.kbps
             key = getattr(f, "library_key", "") or ""
             lib = per.setdefault(key, {"key": key, "name": (names or {}).get(key) or KIND_LABEL.get(f.kind, f.kind),
-                                       "kind": f.kind, "count": 0, "total": 0})
+                                       "kind": f.kind, "count": 0, "total": 0, "size": 0})
             lib["count"] += 1
             lib["total"] += f.kbps
+            lib["size"] += getattr(f, "size", 0) or 0
         for k in KINDS:
             st.avg_kbps[k] = int(totals[k] / st.count[k]) if st.count[k] else 0
         st.libraries = [{"key": v["key"], "name": v["name"], "kind": v["kind"], "count": v["count"],
-                         "avg_kbps": int(v["total"] / v["count"])}
+                         "avg_kbps": int(v["total"] / v["count"]), "avg_size": int(v["size"] / v["count"])}
                         for v in sorted(per.values(), key=lambda v: (KINDS.index(v["kind"]), v["name"].lower()))]
         st.scanned_at = time.time()
         return st
@@ -89,6 +110,58 @@ class LibraryStats:
 
 # Index (and other end-of-file parts) per file, until a run has measured your library.
 DEFAULT_INDEX = {"movie": 512 * 1024, "tv": 256 * 1024, "audio": 0}
+
+# ---- Record size: ZFS reads, caches and copies to the SSD in whole records, so a lead-in costs
+# its bytes rounded up to records, and an index at the end of a file costs the records it touches
+# there besides. Recommendations follow the usual guidance for media by bitrate — about half a
+# second to a second of playback per record — with ZFS's own 128K for files under 1 MB, which
+# fit in a block or two whatever the setting.
+KiB, MB = 1024, 1000 * 1000
+# (up to this many kbps, record size, the bitrate around the middle of the band)
+RECORD_BANDS = [(1_000, 512 * KiB, 250), (15_000, 1024 * KiB, 3_873), (40_000, 2048 * KiB, 24_495),
+                (None, 4096 * KiB, 80_000)]
+RECORD_BELOW, RECORD_ABOVE = 128 * KiB, 8192 * KiB  # the neighbours past the first and last band
+SMALL_FILE = MB
+L2ARC_HEADER_BYTES = 96  # RAM the L2ARC uses per record it holds (roughly; 70–100 B by OpenZFS version)
+
+
+def recommend_recordsize(kbps: float, avg_size: float = 0) -> dict:
+    """The record size that suits a library, and the next best.
+
+    The next best is the neighbouring band's size on the side the bitrate leans to, so a
+    library near the line between two bands names the same two sizes on either side of it:
+    a dataset set to either is fine, and it doesn't flip as titles come and go."""
+    if avg_size and avg_size < SMALL_FILE:
+        return {"best": RECORD_BELOW, "alt": RECORD_BANDS[0][1]}
+    for i, (top, size, mid) in enumerate(RECORD_BANDS):
+        if top is None or kbps < top:
+            if kbps >= mid:
+                alt = RECORD_BANDS[i + 1][1] if i + 1 < len(RECORD_BANDS) else RECORD_ABOVE
+            else:
+                alt = RECORD_BANDS[i - 1][1] if i else RECORD_BELOW
+            return {"best": size, "alt": alt}
+    raise AssertionError("unreachable")
+
+
+def whole_records(n: float, record: int) -> float:
+    """``n`` bytes rounded up to whole records (0 stays 0)."""
+    return math.ceil(n / record) * record if n > 0 else 0
+
+
+def cached_bytes(lead: float, index: float, index_share: float, record: int, avg_size: float,
+                 index_first: bool) -> float:
+    """What one file's lead-in (and index) takes in the cache at a record size, on average.
+
+    A file no bigger than a record is one block of its own size. Otherwise the lead-in rounds
+    up to whole records (half a record more on average, at least one record), and an index at
+    the end adds the whole records it takes, for the share of files keeping it there — ZFS reads
+    and caches nothing smaller; at the front it's part of the lead-in."""
+    head = lead + (index * index_share if index_first else 0)
+    if avg_size and (avg_size <= record or head >= avg_size):
+        return avg_size  # the whole file, index and all
+    tail = 0.0 if index_first or not index else index_share * whole_records(index, record)
+    total = (record if head <= record else head + record / 2) + tail
+    return min(total, avg_size) if avg_size else total
 
 
 # Automatic L2ARC pacing reads from the disks at this share of l2arc_write_max: a little under,
@@ -102,33 +175,88 @@ KIND_SECONDS = {"movie": 60, "tv": 30, "audio": 10}
 def library_seconds(w: dict, key: str, kind: str) -> int:
     """Seconds of each file's start a library caches: its own choice, or its kind's default."""
     mine = (w.get("libraries") or {}).get(str(key)) or {}
-    return int(mine.get("seconds") or KIND_SECONDS[kind])
+    secs = mine.get("seconds")
+    return int(secs) if secs is not None else KIND_SECONDS[kind]  # 0: one record
+
+
+def _record_info(rec) -> dict:
+    """``records`` entries: a record size, or {"rs", "blocks" (zfs.block_sizes()), "dataset"}."""
+    return rec if isinstance(rec, dict) else {"rs": rec}
+
+
+def block_mix(rs: int | None, blocks: dict | None) -> list:
+    """[(block size, share of files)] the library's files were actually written with: a new
+    record size only applies to files written after it was set. Without a sample, the setting."""
+    sizes = {int(k): n for k, n in ((blocks or {}).get("sizes") or {}).items() if n}
+    total = sum(sizes.values())
+    if total:
+        return sorted((bs, n / total) for bs, n in sizes.items())
+    return [(rs, 1.0)] if rs else []
 
 
 def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | None = None,
-         keys: set | None = None) -> dict:
+         keys: set | None = None, records: dict | None = None, index_layout: dict | None = None) -> dict:
     """How much L2ARC the libraries' warm-ups need, and what seconds to actually use.
 
-    ``keys``: the libraries warmed (None: all). Each library uses its own seconds. If the
-    L2ARC (minus the reserve) can't hold them all, every library's seconds are reduced in
-    proportion toward its kind's minimum, like the original script meant to.
+    ``keys``: the libraries warmed (None: all). Each library uses its own seconds. Sizes are
+    what the cache really holds: lead-ins in whole records of the library's dataset, as its
+    files are written, plus the index for files keeping it at the end. If the L2ARC (minus the
+    system buffer) can't hold them all, every library's seconds are cut by the same share,
+    as little as fits, down to 0 — one record: the first record of each file, and its index
+    if that's at the end.
+
+    ``records``: library key -> its dataset's record size, as checked (never guessed: a
+    library whose dataset couldn't be checked has none, and is sized from its bitrate alone),
+    or a dict with the files' block sizes and the dataset too. ``index_layout``: kind ->
+    {"share" of files with their index at the end, "avg" bytes there}. Each library also gets
+    four sizes for the sizing table: ``target_min`` (one record per file at the recommended
+    record size, the index assumed at the front), ``your_min`` (one record of yours, and the
+    index for files with it at the end), ``target`` (the recommended record size and the index
+    at the front, at the library's seconds) and ``your`` (as the files are written now).
     """
     pad = {"movie": w["padding_video"], "tv": w["padding_video"], "audio": w["padding_audio"]}
     idx_avg = dict(DEFAULT_INDEX, **(index_avg or {}))
+    layout = {k: {"share": 1.0 if idx_avg[k] else 0.0, "avg": idx_avg[k]} for k in KINDS}
+    layout.update(index_layout or {})
     libs = [lib for lib in stats.libraries if keys is None or lib["key"] in keys]
     rows = []
     for lib in libs:
-        k = lib["kind"]
-        per_sec = lib["avg_kbps"] * 125 * lib["count"] * (100 + pad[k]) / 100
-        hi, lo = library_seconds(w, lib["key"], k), min(w[f"{k}_min_sec"], library_seconds(w, lib["key"], k))
-        rows.append({"key": lib["key"], "name": lib["name"], "kind": k, "count": lib["count"], "kbps": lib["avg_kbps"],
-                     "per_sec": per_sec, "set_sec": hi, "min_sec": lo, "max": per_sec * hi, "min": per_sec * lo,
-                     "index": lib["count"] * idx_avg[k]})  # the index etc. at the end of each file: always cached
+        k, n = lib["kind"], lib["count"]
+        size = lib.get("avg_size") or 0
+        per_sec = lib["avg_kbps"] * 125 * n * (100 + pad[k]) / 100
+        bps = per_sec / n if n else 0  # bytes a second of one file, margin included
+        info = _record_info((records or {}).get(lib["key"]))
+        rs, ix = info.get("rs"), layout[k]
+        hi = library_seconds(w, lib["key"], k)
+        idx = ix["share"] * ix["avg"]  # index bytes at the end, per file on average
+        idx_rec = ix["share"] * whole_records(ix["avg"], rs) if rs else idx  # ... in the whole records it takes
+        mix = block_mix(rs, info.get("blocks"))
+        rec = recommend_recordsize(lib["avg_kbps"], size)
+        one = lambda bytes_, size=size: min(bytes_, size) if size else bytes_  # never more than the file
+
+        def cost(sec, n=n, bps=bps, ix=ix, mix=mix, size=size, per_sec=per_sec, idx=idx):
+            """What the library's lead-ins take at ``sec`` seconds each."""
+            if mix:
+                return n * sum(share * cached_bytes(bps * sec, ix["avg"], ix["share"], bs, size, False) for bs, share in mix)
+            return max(per_sec * sec, n * MiB) + n * idx  # record size unknown: whole MiB, as warm-up reads then
+
+        row = {"key": lib["key"], "name": lib["name"], "kind": k, "count": n, "kbps": lib["avg_kbps"],
+               "per_sec": per_sec, "set_sec": hi, "min_sec": 0.0, "max": cost(hi), "min": cost(0),
+               "index": n * idx, "cost": cost,
+               "avg_size": size, "bps": bps, "index_share": ix["share"], "index_avg": ix["avg"],
+               "rs": rs, "dataset": info.get("dataset"), "blocks": mix,
+               "rs_best": rec["best"], "rs_alt": rec["alt"],
+               # either of the two is fine, so a library on the line between them doesn't flip
+               "rs_ok": bool(rs) and rs in (rec["best"], rec["alt"]),
+               "target_min": n * one(rec["best"]),
+               "your_min": n * (one(rs) + idx_rec) if rs else None,
+               "target": n * cached_bytes(bps * hi, ix["avg"], ix["share"], rec["best"], size, True),
+               "your": cost(hi) if mix else None}
+        rows.append(row)
     reserve = w["reserve_gb"] * GB
-    index_total = sum(r["index"] for r in rows)
-    need_max = sum(r["max"] for r in rows) + index_total
-    need_min = sum(r["min"] for r in rows) + index_total
-    factor = 0.0
+    need_max = sum(r["max"] for r in rows)
+    need_min = sum(r["min"] for r in rows)
+    cut = 0.0  # the share every library's seconds are cut by
     status, note = "unknown", M("L2ARC size unknown — add a TrueNAS API key in System to size this.")
     if l2_total is not None:
         available = l2_total - reserve
@@ -139,22 +267,28 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | N
         elif need_max <= available:
             status, note = "tight", M("Fits, but with little room to spare.")
         elif need_min <= available:
-            wiggle = need_max - need_min
-            factor = min(1.0, (need_max - available) / wiggle) if wiggle > 0 else 1.0
+            lo, hi_cut = 0.0, 1.0  # the smallest cut that fits (sizes only grow with seconds)
+            for _ in range(40):
+                mid = (lo + hi_cut) / 2
+                if sum(r["cost"](_cut_sec(r["set_sec"], mid)) for r in rows) <= available:
+                    hi_cut = mid
+                else:
+                    lo = mid
+            cut = hi_cut
             status, note = "reduced", M("Too big for your L2ARC — seconds are reduced automatically to fit.")
         else:
-            factor = 1.0
-            status, note = "insufficient", M("Even the minimum seconds don't fit. Lower the reserve or add L2ARC.")
+            cut = 1.0
+            status, note = "insufficient", M("Even the first record of each file doesn't fit. Lower the system buffer or add L2ARC.")
     seconds, by_kind = {}, {k: {"need": 0.0, "used": 0.0, "index": 0.0} for k in KINDS}
     for r in rows:
-        hi, lo = r["set_sec"], r["min_sec"]
-        sec = float(hi) if not factor else (float(lo) if factor >= 1 else max(lo, math.floor((hi - (hi - lo) * factor) * 10) / 10))
+        sec = _cut_sec(r["set_sec"], cut)
         r["sec"] = sec
-        r["used"] = r["per_sec"] * sec + r["index"]
+        r["used"] = r["cost"](sec)
         seconds[r["key"]] = sec
         by_kind[r["kind"]]["need"] += r["max"]
         by_kind[r["kind"]]["used"] += r["used"]
         by_kind[r["kind"]]["index"] += r["index"]
+        del r["cost"]
     return {
         "need_max": need_max,
         "need_min": need_min,
@@ -164,25 +298,34 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | N
         "index_measured": bool(index_avg),
         "reserve": reserve,
         "l2_total": l2_total,
-        "seconds": seconds,  # library key -> seconds to use
+        "seconds": seconds,  # library key -> seconds to use (0: one record)
         "libraries": rows,  # per library, with per_sec (bytes per second of lead-in) for what-if sizing
         "status": status,
         "note": note,
     }
 
 
+def _cut_sec(sec: float, cut: float) -> float:
+    """``sec`` cut by the share ``cut``, rounded down to a tenth of a second (0: one record)."""
+    if cut <= 0:
+        return float(sec)
+    return max(0.0, math.floor(sec * (1 - cut) * 10) / 10)
+
+
 class WarmupRun:
     """One warm-up pass over the library."""
 
     def __init__(self, files, seconds: dict, pacing_percent: float, hdd_mb_per_sec,
-                 stop, pause=None, arcstats=None, cache_index: bool = True, skip=None, note=None, rate=None):
+                 stop, pause=None, arcstats=None, cache_index: bool = True, skip=None, note=None, rate=None,
+                 record=None):
         """``seconds``: per library key (or, failing that, per kind). ``hdd_mb_per_sec`` is the
         uncached disk speed: a number, or a function giving it for a file (datasets on
         different disks read at different speeds). ``skip(f)``: True for a file whose lead-in
         was cached within the cooldown (the cache log); ``note(f, hit)``: its lead-in was cached,
         and whether it was cached already (the read came back at cache speed).
         ``rate``: read from the disks at no more than this many bytes a second (instead of
-        a share of disk time), to match how fast ZFS fills the L2ARC."""
+        a share of disk time), to match how fast ZFS fills the L2ARC. ``record(f)``: the record
+        size of the file's dataset (None if unknown), so reads come in whole records of it."""
         self.files = list(files)
         random.shuffle(self.files)  # spread reads across the disks
         self.seconds = seconds
@@ -203,6 +346,7 @@ class WarmupRun:
         self.result = "running"
         self.paused: str | None = None  # why it's waiting, while it is
         self.cache_index = cache_index
+        self.record = record or (lambda f: None)
         # What was found at the ends of files, per kind
         self.index = {k: {"files": 0, "bytes": 0, "largest": 0, "mp4_at_end": 0} for k in KINDS}
 
@@ -219,21 +363,30 @@ class WarmupRun:
         ranges, info = tail_ranges(f.path, f.size, head)
         if not ranges:
             return 0.0
+        # The index's own size is what's measured, so the sizing table can work out the whole
+        # records it takes at any record size...
+        size = sum(n for _, n in ranges)
+        # ... but it's read in whole records, the way ZFS reads them — minus what the lead-in already read
+        ranges = [(o, n) for o, n in align_ranges(ranges, self.record(f), f.size) if o + n > head]
+        ranges = [(max(o, head), o + n - max(o, head)) for o, n in ranges]
         st = self.index[f.kind]
         took = 0.0
         got = 0
+        ok = True
         for off, length in ranges:
             res = read_range(f.path, off, length)
             if res.error:
+                ok = False
                 break
             got += res.bytes
             took += res.seconds
         if got:
-            st["files"] += 1
-            st["bytes"] += got
-            st["largest"] = max(st["largest"], got)
-            if info.get("index_at") == "end":
-                st["mp4_at_end"] += 1
+            if ok:
+                st["files"] += 1
+                st["bytes"] += size
+                st["largest"] = max(st["largest"], size)
+                if info.get("index_at") == "end":
+                    st["mp4_at_end"] += 1
             self.bytes += got
         return took
 
@@ -248,7 +401,7 @@ class WarmupRun:
                     self.skipped += 1
                     continue
                 secs = self.seconds.get(getattr(f, "library_key", ""), self.seconds.get(f.kind, 0))
-                n = preload_bytes(f.kbps, secs, f.size)
+                n = preload_bytes(f.kbps, secs, f.size, self.record(f))
                 self.pacer.disk_mb_s = self.hdd(f)
                 file_start = self.bytes
                 res = read_range(f.path, 0, n)

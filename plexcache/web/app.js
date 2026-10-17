@@ -260,14 +260,14 @@ PCI18N.ready.then(function () {
       out += '<section class="card">' + heading(esc(g.title), esc(g.hint));
       if (g.table && g.table.length) {
         out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library") + '</th><th scope="col">' + H("Folders (Plex → here)") +
-          '</th><th scope="col">' + H("Items") + '</th><th scope="col">' + H("Readable here") + "</th></tr></thead><tbody>";
+          '</th><th scope="col">' + H("Items") + '</th><th scope="col">' + H("Readable here") + '</th><th scope="col">' + H("Record size") + info(RS_HELP, T("Record size")) + "</th></tr></thead><tbody>";
         g.table.forEach(function (r) {
           var folders = r.folders.length ? r.folders.map(function (f) {
             return '<div class="mono">' + esc(f.plex_path) + (f.local_path !== f.plex_path ? ' <span class="muted">→ ' + esc(f.local_path) + "</span>" : "") + "</div>";
           }).join("") : '<span class="muted">' + esc(r.detail || "") + "</span>";
           out += "<tr><td>" + esc(r.library) + "</td><td>" + folders + '</td><td class="nw">' + (r.status === "info" ? "—" : fmtNum(r.count)) +
             "</td><td>" + badge(r.status, r.badge || STATUS_TEXT[r.status] || r.status) +
-            (r.status !== "pass" && r.status !== "info" ? '<div class="det">' + esc(r.detail) + "</div>" : "") + "</td></tr>";
+            (r.status !== "pass" && r.status !== "info" ? '<div class="det">' + esc(r.detail) + "</div>" : "") + "</td><td>" + recordCell(r.record) + "</td></tr>";
         });
         out += "</tbody></table></div>";
         g.table.forEach(function (r) {
@@ -279,7 +279,7 @@ PCI18N.ready.then(function () {
           DS_COLUMNS.map(function (col) { return '<th scope="col">' + col[0] + info(col[1], col[0]) + "</th>"; }).join("") + "</tr></thead><tbody>";
         g.datasets.forEach(function (r) {
           var c = function (x) { return x ? badge(x.status, x.badge || STATUS_TEXT[x.status] || x.status) + (x.text ? '<div class="det">' + esc(x.text) + "</div>" : "") : '<span class="muted">—</span>'; };
-          out += '<tr><td class="mono nw">' + esc(r.dataset) + (r.mountpoint !== r.dataset ? '<div class="det">' + H("at {path}", { path: r.mountpoint }) + "</div>" : "") + "</td><td>" + c(r.in_use) + "</td><td>" + c(r.cache) + "</td><td>" + c(r.recordsize) + (r.recordsize ? scanCtl(r.dataset) : "") + "</td><td>" + c(r.l2arc) + "</td></tr>";
+          out += '<tr><td class="mono nw">' + esc(r.dataset) + (r.mountpoint !== r.dataset ? '<div class="det">' + H("at {path}", { path: r.mountpoint }) + "</div>" : "") + "</td><td>" + c(r.in_use) + "</td><td>" + c(r.cache) + "</td><td>" + dsRecordCell(r) + "</td><td>" + c(r.file_rs) + "</td><td>" + c(r.compression) + "</td><td>" + c(r.l2arc) + "</td></tr>";
         });
         out += "</tbody></table></div>";
         g.datasets.forEach(function (r) { r.fixes.forEach(function (it) { out += itemRow(it); }); });
@@ -291,6 +291,45 @@ PCI18N.ready.then(function () {
     return out;
   }
 
+  // Health → Libraries: each library's record size, with the one recommended for its media.
+  var RS_HELP = H("The block size ZFS uses for new files, read from the library’s dataset, and the one recommended for the library from its average bitrate: " +
+    "<strong>512K</strong> under 1 Mbps (music, audiobooks), <strong>1M</strong> up to 15 Mbps (FLAC, SD to 1080p encodes), <strong>2M</strong> up to 40 Mbps (4K encodes, 1080p remuxes) " +
+    "and <strong>4M</strong> above (4K remuxes); <strong>128K</strong> for files under 1 MB, which fit in a block or two anyway. The second best is " +
+    "the neighbour on the side the bitrate leans to. <strong>Ideal</strong>: the dataset uses the recommended size. <strong>Pass</strong>: it uses the second best — " +
+    "fine too, so a library near the line between two doesn’t flip back and forth. <strong>Warning</strong>: neither.<br><br>" +
+    "<strong>To fix a warning</strong>: in TrueNAS, Datasets → the library’s dataset → Edit → Advanced Options → <strong>Record Size</strong>: the recommended size. " +
+    "It only applies to files written afterwards; on the Optimizer page, <strong>TrueNAS Compression &amp; Recordsize</strong> writes the existing ones again. " +
+    "If other libraries on the same dataset need a different size, see Media datasets below.");
+  var DS_RS_HELP = H("<strong>What it checks</strong>: that the dataset’s record size — the largest block ZFS writes a file in — suits every library on it. " +
+    "Each library’s recommended size and second best come from its average bitrate (see Libraries above); one of them is <strong>Pass</strong>.<br><br>" +
+    "<strong>Why it matters</strong>: ZFS reads, caches and compresses whole records. Too small, and big video files take many more reads and use more RAM to track in the cache; " +
+    "too large, and small files (music, audiobooks) waste cache space on data nobody asked for.<br><br>" +
+    "<strong>To fix a warning</strong>: in TrueNAS, Datasets → the dataset → Edit → Advanced Options → <strong>Record Size</strong>. " +
+    "If no one size suits every library, give the library named a dataset of its own (TrueNAS → Datasets → Add Dataset), move its files there, " +
+    "then point its folder in Plex and in System → Media mappings at the new place.");
+  var FILE_RS_HELP = H("<strong>What it checks</strong>: that every file on the dataset is written in blocks of the dataset’s record size. Each health check looks at every file " +
+    "(their details, not their contents — a fraction of a second). Files smaller than one record don’t count: they’re a single block of their own size.<br><br>" +
+    "<strong>Why it matters</strong>: ZFS uses a record size only for files written after it’s set. Files written before keep their old block size — and with it the slower reads " +
+    "and cache use the dataset’s setting was chosen to avoid — until they’re written again.<br><br>" +
+    "<strong>To fix a warning</strong>: on the Optimizer page, <strong>TrueNAS Compression &amp; Recordsize</strong> writes those files again, one at a time.");
+  var COMP_HELP = H("The dataset’s compression. <strong>ZSTD-3</strong> compresses what can be compressed in media files — fonts, the index, tags and the padding at the end of each file — better than LZ4, at little cost.<br><br>" +
+    "<strong>To fix a warning</strong>: in TrueNAS, Datasets → the dataset → Edit → Advanced Options → <strong>Compression Level</strong>: ZSTD (that’s level 3). " +
+    "Files keep the compression they were written with; on the Optimizer page, <strong>TrueNAS Compression &amp; Recordsize</strong> writes the existing ones again.");
+  function recordCell(rec) {
+    if (!rec || !rec.best) return '<span class="muted">—</span>';
+    var badges = { ideal: badge("pass", T("Ideal")), pass: badge("pass", T("Pass")), warn: badge("warn", T("Warning")), info: badge("info", T("Not checked")) };
+    var line = function (label, v) { return '<div class="det">' + esc(label) + ' <span class="mono">' + (v ? esc(fmtRs(v)) : "—") + "</span></div>"; };
+    return badges[rec.status] + line(T("Dataset"), rec.rs) + line(T("Recommended"), rec.best) + line(T("Second best"), rec.alt);
+  }
+  // Media datasets → Record size: the size, how the files compare, and whether it suits every library on it
+  function dsRecordCell(r) {
+    var x = r.recordsize;
+    if (!x) return '<span class="muted">—</span>';
+    return badge(x.status, x.badge || STATUS_TEXT[x.status] || x.status) + (x.text ? '<div class="det mono">' + esc(x.text) + "</div>" : "") +
+      (x.lines || []).map(function (l) { return '<div class="det">' + esc(l) + "</div>"; }).join("");
+  }
+
+
   // Media datasets table: each column's explanation sits behind an ⓘ in its header.
   var DS_COLUMNS = [
     [H("In use"), H("Which libraries are on the dataset. A dataset mounted in this app with no Plex library on it is flagged, " +
@@ -299,26 +338,16 @@ PCI18N.ready.then(function () {
     [H("Cache settings"), H("<strong>primarycache=all</strong> is needed for any caching: ZFS only keeps in RAM, and only copies to the SSD, " +
       "data that passed through RAM. With <strong>metadata</strong>, nothing is cached and no feature can help.<br><br>" +
       "<strong>secondarycache=all</strong> lets that data go on to the SSD cache (L2ARC). Only caching that needs an L2ARC (warm-up, and Prefetch’s L2ARC-only choices) needs it.")],
-    [H("Record size"), H("The block size ZFS uses for new files. Large media files read best in big blocks: <strong>1M</strong> for movies and TV, " +
-      "<strong>512K or 1M</strong> for audio. It's checked for every library, cached or not, because it affects how Plex reads the files either way.<br><br>" +
-      "A new record size only applies to files written after the change, so Health also looks at a random sample of about 300 files on each check. " +
-      "<strong>Check every file</strong> reads the details (not the contents) of every file on the dataset — a minute or two for a large library — and changes nothing.")],
+    [H("Dataset record size"), DS_RS_HELP],
+    [H("File record size"), FILE_RS_HELP],
+    [H("Compression"), COMP_HELP],
     ["L2ARC", H("The SSD cache devices on the dataset's pool, and how much they hold. Only warm-up and Prefetch’s L2ARC-only choices need an L2ARC; " +
       "Now Playing Cache and Prefetch work from RAM.")]
   ];
 
-  // "Check every file" for a dataset: Health otherwise looks at a random sample on each check.
-  function scanCtl(ds) {
-    var sc = (ST.block_scans || {})[ds];
-    if (sc && sc.running) return '<div class="det">' + H("Checking every file… {n} so far", { n: sc.checked || 0 }) + "</div>";
-    var when = sc && sc.at && sc.complete ? '<span class="muted">' + H("checked {when}", { when: ago(sc.at) }) + "</span>" : "";
-    return '<div class="det scanctl"><button class="link" type="button" data-act="blockscan" data-ds="' + esc(ds) + '">' +
-      (when ? H("Check again") : H("Check every file")) + "</button>" + when + "</div>";
-  }
-
   function itemRow(it, extra) {
     var out = '<div class="row">' + badge(it.status, STATUS_TEXT[it.status] || it.status) + '<div class="grow"><div class="what">' + esc(it.title) +
-      '</div><div class="det">' + esc(it.detail) + "</div>";
+      (it.help ? info(it.help, it.title) : "") + '</div><div class="det">' + esc(it.detail) + "</div>";
     if (it.fix || it.fix_cmd) {
       // {APP} in a command is this app's own address (e.g. to download a script it serves).
       var cmd = it.fix_cmd ? it.fix_cmd.split("{APP}").join(location.origin) : "";
@@ -326,6 +355,7 @@ PCI18N.ready.then(function () {
       if (cmd) out += '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) + '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button></div>";
       out += "</div>";
     }
+    if (it.link) out += '<div class="det"><a href="' + esc(it.link.href) + '" data-nav>' + esc(it.link.text) + "</a></div>";
     return out + (extra || "") + "</div></div>";
   }
 
@@ -431,7 +461,7 @@ PCI18N.ready.then(function () {
     var total = Math.max(l2 || 0, need, 1);
     function pct(x) { return Math.max(0, Math.min(100, x / total * 100)).toFixed(2); }
     var head, cls;
-    if (l2 == null) { head = T("Needs about {size} of L2ARC (incl. {free} GB kept free)", { size: fmtBytes(need), free: S.warmup.reserve_gb }); cls = ["info", T("L2ARC size unknown")]; }
+    if (l2 == null) { head = T("Needs about {size} of L2ARC (incl. a {free} GB system buffer)", { size: fmtBytes(need), free: S.warmup.reserve_gb }); cls = ["info", T("L2ARC size unknown")]; }
     else {
       head = T("Needs {size} of your {l2} L2ARC", { size: fmtBytes(need), l2: fmtBytes(l2) });
       cls = { fits: ["pass", T("Fits")], tight: ["warn", T("Tight fit")], reduced: ["warn", T("Too big — seconds reduced automatically")],
@@ -444,7 +474,7 @@ PCI18N.ready.then(function () {
       '<div style="width:' + pct(p.reserve) + '%;background:var(--c-res)"></div></div>';
     out += '<div class="legend"><span><i style="background:var(--c-movie)"></i>' + H("Movies {size}", { size: fmtBytes(used.movie) }) + "</span><span><i style=\"background:var(--c-tv)\"></i>" + H("TV {size}", { size: fmtBytes(used.tv) }) +
       '</span><span><i style="background:var(--c-audio)"></i>' + H("Audio {size}", { size: fmtBytes(used.audio) }) + "</span>" +
-      '<span><i style="background:var(--c-res)"></i>' + H("Kept free {n} GB", { n: S.warmup.reserve_gb }) + "</span>" +
+      '<span><i style="background:var(--c-res)"></i>' + H("System buffer {n} GB", { n: S.warmup.reserve_gb }) + "</span>" +
       (l2 != null ? "<span>" + H("Unused {size}", { size: fmtBytes(Math.max(0, l2 - need)) }) + "</span>" : "") + "</div>";
     if (p.status === "reduced" || p.status === "insufficient") {
       out += '<div class="help muted" style="font-size:13px;margin-top:6px">' + H("Will use: {list}", { list: p.libraries.map(function (r) { return T("{kind} {n} s", { kind: r.name, n: r.sec }); }) }) + "</div>";
@@ -453,70 +483,121 @@ PCI18N.ready.then(function () {
     return out;
   }
 
-  // How big an L2ARC the Lead-in Cache needs, worked out from your library like the original script:
-  // titles × average bitrate × seconds of the start, plus a safety margin, file indexes and the
-  // space kept free. Shown even without an L2ARC, since that's when it's most useful.
+  // How much cache the Lead-in Cache takes, worked out from your library: titles × average bitrate
+  // × seconds of the start, plus a safety margin, counted in whole records as ZFS caches them.
+  // Shown even without an L2ARC: the same lead-ins then take RAM instead.
   var SSD_SIZES = [128, 256, 500, 1000, 2000, 4000, 8000];  // GB, as drives are sold
-  var GROWTH = 0.25;  // room for the library to grow
+  var L2_HEADER = 96;  // RAM the L2ARC uses per record it holds (plexcache/warmup.py L2ARC_HEADER_BYTES)
+
+  // What one file takes in the cache at a record size (plexcache/warmup.py cached_bytes()).
+  function wholeRecords(n, record) { return n > 0 ? Math.ceil(n / record) * record : 0; }
+  function cachedBytes(lead, index, share, record, size, first) {
+    var head = lead + (first ? index * share : 0);
+    if (size && (size <= record || head >= size)) return size;
+    var total = (head <= record ? record : head + record / 2) + (first || !index ? 0 : share * wholeRecords(index, record));
+    return size ? Math.min(total, size) : total;
+  }
+  function fmtRs(n) { return n >= 1048576 ? T("{n}M", { n: n / 1048576 }) : T("{n}K", { n: n / 1024 }); }
+  // The four sizes of one library, in bytes and in L2ARC records (each record costs RAM to track).
+  // Target follows the sliders; the others use the library's own seconds.
+  function libSizes(r) {
+    var one = function (b) { return r.avg_size ? Math.min(b, r.avg_size) : b; };
+    var out = {
+      tmin: { bytes: r.count * one(r.rs_best), recs: r.count },
+      target: { bytes: r.count * cachedBytes(r.bps * estSec(r), r.index_avg, r.index_share, r.rs_best, r.avg_size, true) }
+    };
+    out.target.recs = out.target.bytes / r.rs_best;
+    if (r.rs) {
+      var idx = r.index_share * wholeRecords(r.index_avg, r.rs);  // the index at the end, in whole records
+      out.ymin = { bytes: r.count * (one(r.rs) + idx), recs: r.count * (1 + idx / r.rs) };
+      var lead = r.bps * r.set_sec, b = 0, n = 0;
+      (r.blocks || []).forEach(function (m) {
+        var c = cachedBytes(lead, r.index_avg, r.index_share, m[0], r.avg_size, false);
+        b += m[1] * c; n += m[1] * c / m[0];
+      });
+      out.your = { bytes: r.count * b, recs: r.count * n };
+    }
+    return out;
+  }
+  var SIZE_COLS = ["tmin", "ymin", "target", "your"];
+  function sizeTotals() {
+    var t = {}, missing = false;
+    SIZE_COLS.forEach(function (c) { t[c] = { bytes: 0, recs: 0 }; });
+    (ST.plan ? ST.plan.libraries : []).forEach(function (r) {
+      var z = libSizes(r);
+      SIZE_COLS.forEach(function (c) { if (z[c]) { t[c].bytes += z[c].bytes; t[c].recs += z[c].recs; } else missing = true; });
+    });
+    t.missing = missing;
+    return t;
+  }
+
   function sizingHtml(standalone) {
     var st = ST.library.stats, p = ST.plan, w = S.warmup;
     if (!st || !st.scanned_at || !p) return standalone ? '<div class="sizing"><p class="muted" style="margin:14px 0 0">' +
       (ST.library.scanning ? H("Reading your libraries to work out how big an L2ARC you’d need…") : H("Connect Plex to see how big an L2ARC you’d need.")) + "</p></div>" : "";
-    var rows = p.libraries, reserve = p.reserve;
-    var need = { min: p.need_min + reserve, set: p.need_max + reserve };
-    var advise = need.set * (1 + GROWTH);
-    var ssd = SSD_SIZES.filter(function (g) { return g * GB >= advise; })[0];
-    // L2ARC keeps a small record in RAM for every block it holds (about 100 bytes each).
-    var rs = ((ST.zfs.datasets || []).map(function (d) { return d.props && d.props.recordsize; }).filter(Boolean)[0]) || 131072;
-    var headerRam = advise / rs * 100;
+    var rows = p.libraries, buffer = p.reserve, tot = sizeTotals();
     var kbps = function (v) { return v >= 1000 ? T("{n} Mbps", { n: dec(v / 1000, 1) }) : T("{n} kbps", { n: Math.round(v) }); };
+    var notChecked = '<span class="muted">' + H("Not checked") + "</span>";
+    var cell = function (z, sub, est) { return '<td class="nw' + (est ? " estc" : "") + '">' + (z ? esc(fmtBytes(z.bytes)) + (sub ? ' <span class="muted">· ' + esc(sub) + "</span>" : "") : notChecked) + "</td>"; };
+    var head4 = [[H("Target minimum"), H("The first record of each file at the record size recommended for the library, with its index assumed to be at the front. The least warm-up could cache, if the files were laid out that way.")],
+      [H("Your minimum"), H("The first record of each file at your dataset’s record size, plus the whole records the index takes for files that keep it at the end. The least warm-up caches: when the L2ARC is too small, it shortens lead-ins toward this.")],
+      [H("Target"), H("The recommended record size, indexes at the front, at the lead-in lengths on the sliders above. All the way down is one record.")],
+      [H("Your library"), H("As your files are written now — the block sizes found on the dataset, indexes where they are — at your lead-in lengths.")]];
     var table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">' + H("Titles") + '</th><th scope="col">' + H("Avg bitrate") + "</th>" +
-      '<th scope="col">' + H("Minimum") + '</th><th scope="col">' + H("Your settings") + '</th><th scope="col">' + H("Estimate") + "</th></tr></thead><tbody>";
+      '<th scope="col">' + H("Avg file") + "</th>" + head4.map(function (h, i) { return '<th scope="col"' + (i === 2 ? ' class="estc"' : "") + ">" + h[0] + info(h[1], h[0]) + "</th>"; }).join("") + "</tr></thead><tbody>";
     rows.forEach(function (r) {
-      var kind = KIND_NAME[r.kind];
+      var kind = KIND_NAME[r.kind], z = libSizes(r);
+      var mine = r.rs ? fmtRs(r.rs) : "";
       table += "<tr><td>" + esc(r.name) + (r.name.toLowerCase().indexOf(kind.toLowerCase()) < 0 ? ' <span class="muted">· ' + esc(kind) + "</span>" : "") + '</td><td class="nw">' + fmtNum(r.count) + '</td><td class="nw">' + (r.count ? kbps(r.kbps) : "—") +
-        '</td><td class="nw">' + esc(fmtBytes(r.min + r.index)) + ' <span class="muted">· ' + r.min_sec + ' s</span></td><td class="nw">' + esc(fmtBytes(r.max + r.index)) +
-        ' <span class="muted">· ' + r.set_sec + ' s</span></td><td class="nw estc" data-estcell="' + esc(r.key) + '">' + estCell(r) + "</td></tr>";
+        '</td><td class="nw">' + (r.avg_size ? esc(fmtBytes(r.avg_size)) : "—") + "</td>" +
+        cell(z.tmin, fmtRs(r.rs_best)) + cell(z.ymin, mine) +
+        '<td class="nw estc" data-estcell="' + esc(r.key) + '">' + estCell(r) + "</td>" +
+        cell(z.your, secText(r.set_sec)) + "</tr>";
     });
-    var three = function (v) { var c = '<td class="nw">' + esc(fmtBytes(v)) + "</td>"; return c + c + '<td class="nw estc">' + esc(fmtBytes(v)) + "</td>"; };
-    table += "<tr><td>" + H("Kept free") + "</td><td></td><td></td>" + three(reserve) + "</tr>" +
-      '<tr class="sum"><th scope="row">' + H("Total") + '</th><td></td><td></td><td class="nw">' + esc(fmtBytes(need.min)) + '</td><td class="nw">' + esc(fmtBytes(need.set)) +
-      '</td><td class="nw estc" data-esttotal>' + esc(fmtBytes(estTotal())) + "</td></tr></tbody></table></div>";
-    var l2 = ST.zfs.l2_total, head;
+    var four = function (f, cls) {
+      return SIZE_COLS.map(function (c) { return '<td class="nw' + (c === "target" ? " estc" : "") + '"' + (cls ? " data-est" + cls + '="' + c + '"' : "") + ">" + esc(fmtBytes(f(tot[c]))) + "</td>"; }).join("");
+    };
+    var blank = "<td></td><td></td><td></td>";
+    table += '<tr class="sum"><th scope="row">' + H("Lead-ins") + info(H("What the lead-ins take: in RAM without an L2ARC, or on the SSD with one."), T("Lead-ins")) + "</th>" + blank + four(function (x) { return x.bytes; }, "lead") + "</tr>" +
+      "<tr><td>" + H("System buffer") + info(H("Room on the SSD for everything else ZFS caches. This size decides how quickly the L2ARC is emptied: it reuses its space oldest first, so the larger the buffer, the longer cached files stay cached. Set it with the slider above."), T("System buffer")) + "</td>" + blank +
+      four(function () { return buffer; }) + "</tr>" +
+      '<tr class="sum"><th scope="row">' + H("L2ARC size") + "</th>" + blank + four(function (x) { return x.bytes + buffer; }, "l2") + "</tr>" +
+      '<tr><td>' + H("RAM used by the L2ARC") + info(H("The L2ARC keeps about {n} bytes of RAM for every record it holds, so larger records need less. Counted for the lead-ins; what the system buffer holds depends on what else is cached.", { n: L2_HEADER }), T("RAM used by the L2ARC")) + "</td>" + blank +
+      four(function (x) { return x.recs * L2_HEADER; }, "ram") + "</tr></tbody></table></div>";
+    var l2 = ST.zfs.l2_total, need = tot.your.bytes + buffer, least = tot.ymin.bytes + buffer, head;
     if (ST.l2arc === "absent" || !l2) {
+      var ssd = SSD_SIZES.filter(function (g) { return g * GB >= need; })[0];
       var drive = ssd >= 1000 ? T("{n} TB", { n: ssd / 1000 }) : T("{n} GB", { n: ssd });
-      head = ssd ? T("For the Lead-in Cache, add an L2ARC of at least {size} — a {drive} SSD leaves room to grow.", { size: fmtBytes(need.set), drive: drive })
-        : T("For the Lead-in Cache, add an L2ARC of at least {size}.", { size: fmtBytes(need.set) });
+      head = ssd ? T("For the Lead-in Cache as it is, add an L2ARC of at least {size}: a {drive} SSD.", { size: fmtBytes(need), drive: drive })
+        : T("For the Lead-in Cache, add an L2ARC of at least {size}.", { size: fmtBytes(need) });
     } else {
-      var lv = { size: fmtBytes(l2), min: fmtBytes(need.min) };
-      head = l2 >= advise ? T("Your {size} L2ARC holds your settings with room for the library to grow.", lv) :
-        l2 >= need.set ? T("Your {size} L2ARC holds your settings, with a little room to grow.", lv) :
-        l2 >= need.min ? T("Your {size} L2ARC holds the minimum; seconds are reduced to fit.", lv) :
+      var lv = { size: fmtBytes(l2), min: fmtBytes(least) };
+      head = l2 >= need ? T("Your {size} L2ARC holds your settings.", lv) :
+        l2 >= least ? T("Your {size} L2ARC holds the minimum; seconds are reduced to fit.", lv) :
         T("Your {size} L2ARC is smaller than the minimum ({min}).", lv);
     }
     var why = H("Each title’s lead-in (its length is set per library on the Caching page) × its library’s average bitrate ({video}% extra for video, {audio}% for audio, for bitrate spikes), " +
-      "plus each file’s seek index ({how}), plus the space kept free for everything else ZFS caches. " +
-      "<strong>Minimum</strong> is the least warm-up will cache; <strong>Your settings</strong> is what it aims for. " +
-      "The suggested SSD adds {growth}% for the library to grow. " +
-      "An L2ARC also uses a little RAM to keep track of what it holds — about {ram} for {size} at this dataset’s {rs} KiB record size.",
-      { video: w.padding_video, audio: w.padding_audio, how: ST.index_avg ? T("measured by warm-up") : T("estimated until warm-up has measured yours"),
-        growth: Math.round(GROWTH * 100), ram: fmtBytes(headerRam), size: fmtBytes(advise), rs: Math.round(rs / 1024) });
+      "and its seek index ({how}). ZFS caches whole records, so a lead-in rounds up to the record size, and an index at the end of a file costs the records it touches there as well. " +
+      "Moving indexes to the front (remuxing with mkclean, or ffmpeg’s faststart for MP4) and using the recommended record size give the Target columns; Health → Libraries shows each library’s record size and the one recommended for it. " +
+      "Sizes are for your libraries as they are today: leave room on top for how much they’ll grow.",
+      { video: w.padding_video, audio: w.padding_audio, how: ST.index_avg ? T("measured by warm-up") : T("estimated until warm-up has measured yours") });
     var body = '<p style="font-weight:600;margin:12px 0 8px">' + esc(head) + info(why, T("L2ARC sizing")) + "</p>" + table +
-      '<p class="muted" style="font-size:13px;margin:8px 0 0">' + H("From {n} titles: every library’s lead-ins. Libraries without a warm-up need less.", { n: rows.reduce(function (a, r) { return a + r.count; }, 0) }) + "</p>" +
+      '<p class="muted" style="font-size:13px;margin:8px 0 0">' + H("From {n} titles: every library’s lead-ins. Libraries without a warm-up need less.", { n: rows.reduce(function (a, r) { return a + r.count; }, 0) }) +
+      (tot.missing ? " " + H("Libraries whose dataset’s record size couldn’t be checked aren’t counted in Your minimum or Your library.") : "") + "</p>" +
       '<p style="margin:8px 0 0;font-weight:600" data-esthead>' + estHead() + "</p>";
     if (standalone) return '<div class="sizing">' + body + "</div>";
     return '<div class="sizing">' + details("l2-sizing", H("L2ARC sizing"), body) + "</div>";
   }
 
-  // The settings that decide the size, for when warm-up's own controls aren't shown (no L2ARC yet).
-  // They're the real settings: what you pick here is what warm-up uses once it can run.
-  // ---- L2ARC Sizing Estimator: what a different lead-in length per library would need.
-  // Only a what-if — kept in the page, never saved; each starts at the library's real length.
+  // ---- L2ARC Sizing Estimator: what a different lead-in length per library would need (the
+  // Target column). Only a what-if — kept in the page, never saved; each starts at the library's
+  // default length whenever the page is opened.
   var EST = {};
-  function estSec(r) { return EST[r.key] != null ? EST[r.key] : r.set_sec; }
-  function estBytes(r) { return (r.per_sec || 0) * estSec(r) + r.index; }
-  function estCell(r) { return esc(fmtBytes(estBytes(r))) + ' <span class="muted">· ' + estSec(r) + " s</span>"; }
-  function estTotal() { var p = ST.plan; return p ? p.libraries.reduce(function (a, r) { return a + estBytes(r); }, 0) + p.reserve : 0; }
+  function estSec(r) { return EST[r.key] != null ? EST[r.key] : ((ST.kind_seconds || {})[r.kind] != null ? ST.kind_seconds[r.kind] : r.set_sec); }
+  function estCell(r) {
+    return esc(fmtBytes(libSizes(r).target.bytes)) + ' <span class="muted">· ' + esc(secText(estSec(r))) + " · " + esc(fmtRs(r.rs_best)) + "</span>";
+  }
+  function estTotal() { return ST.plan ? sizeTotals().target.bytes + ST.plan.reserve : 0; }
   function estHead() {
     var t = estTotal(), l2 = ST.zfs.l2_total;
     if (!l2) return esc(T("Estimate: {size}", { size: fmtBytes(t) }));
@@ -528,7 +609,7 @@ PCI18N.ready.then(function () {
     if (!p || !p.libraries.length) return "";
     return '<div class="estgrid">' + p.libraries.map(function (r) {
       var lim = SEC_LIMITS[r.kind], id = "est-" + r.key;
-      return '<div class="fld" style="margin:0"><label for="' + id + '">' + esc(r.name) + ' <span class="val" data-val="' + id + '">' + estSec(r) + " s</span></label>" +
+      return '<div class="fld" style="margin:0"><label for="' + id + '">' + esc(r.name) + ' <span class="val" data-val="' + id + '">' + esc(secText(estSec(r))) + "</span></label>" +
         '<input id="' + id + '" type="range" min="' + lim[0] + '" max="' + lim[1] + '" step="1" value="' + estSec(r) + '" data-est="' + esc(r.key) + '"></div>';
     }).join("") + "</div>";
   }
@@ -538,30 +619,31 @@ PCI18N.ready.then(function () {
     EST[el.dataset.est] = Number(el.value);
     var r = ((ST.plan || {}).libraries || []).filter(function (x) { return x.key === el.dataset.est; })[0];
     var v = document.querySelector('[data-val="' + el.id + '"]');
-    if (v) v.textContent = el.value + " s";
-    var cell = document.querySelector('[data-estcell="' + el.dataset.est + '"]');
-    if (cell && r) cell.innerHTML = estCell(r);
-    var tot = document.querySelector("[data-esttotal]");
-    if (tot) tot.textContent = fmtBytes(estTotal());
+    if (v) v.textContent = secText(el.value);
+    var c = document.querySelector('[data-estcell="' + el.dataset.est + '"]');
+    if (c && r) c.innerHTML = estCell(r);
+    var t = sizeTotals().target, buf = ST.plan.reserve;
+    [["lead", t.bytes], ["l2", t.bytes + buf], ["ram", t.recs * L2_HEADER]].forEach(function (x) {
+      var td = document.querySelector('[data-est' + x[0] + '="target"]');
+      if (td) td.textContent = fmtBytes(x[1]);
+    });
     var head = document.querySelector("[data-esthead]");
     if (head) head.innerHTML = estHead();
   });
 
   function sizingControls() {
     return '<div class="grid" style="max-width:520px">' +
-      range("warmup", "reserve_gb", T("Keep free in L2ARC"), 0, 500, 10, "GB", H("Room left for everything else ZFS wants to cache.")) + "</div>" +
-      "";
+      range("warmup", "reserve_gb", T("System buffer"), 0, 500, 10, "GB",
+        H("Room on the SSD for everything else ZFS caches. The larger the buffer, the longer cached files stay cached.")) + "</div>";
   }
   function sizingAdvanced() {
-    return details("l2-advanced", H("Minimums and safety margins"),
-      '<p class="help" style="margin:8px 0 0">' + H("When the L2ARC is too small for your seconds, warm-up cuts them back, but never below these.") + "</p>" +
+    return details("l2-advanced", H("Safety margins"),
+      '<p class="help" style="margin:8px 0 0">' + H("When the L2ARC is too small for your seconds, warm-up shortens them, but never below the first record of each file (and the last one, for files with their index at the end).") + "</p>" +
       '<div class="grid" style="margin-top:8px">' +
-      number("warmup", "movie_min_sec", T("Movies — minimum seconds"), 1, 600, "") +
-      number("warmup", "tv_min_sec", T("TV episodes — minimum seconds"), 1, 600, "") +
-      number("warmup", "audio_min_sec", T("Audio — minimum seconds"), 1, 600, "") +
       number("warmup", "padding_video", T("Video safety margin (%)"), 0, 100, H("Extra on top of the average bitrate, for scenes that run higher.")) +
       number("warmup", "padding_audio", T("Audio safety margin (%)"), 0, 100, "") + "</div>");
   }
+
 
   function checkbox(sec, key, label, help) {
     var h = splitHelp(help);
@@ -799,6 +881,101 @@ PCI18N.ready.then(function () {
   }
 
   // ---- SSD Cache: the L2ARC, whether to use one, and how big it needs to be.
+  // ------------------------------------------------------------ optimizer
+  // Each library's choices, as optimizing.py reads them (DEFAULTS there: sync on, MKV off, Plex's
+  // cover art only for unmatched items).
+  function optChoices(key) {
+    var lib = ((S.optimizer || {}).libraries || {})[key] || {};
+    return { sync: lib.sync !== false, mkv: lib.mkv === true, images: { remove: 1, compress: 1, plex: 1 }[lib.images] ? lib.images : "unmatched" };
+  }
+  var COVER_HELP = H("What happens to the cover art in MKV files — the images some DLNA players and TVs show. Fonts and other attachments are always kept.<br><br>" +
+    "<strong>Only Embed Plex Cover Art for Unmatched Items</strong> (the default): when Plex can’t match something to an online entry — home videos, concerts, rare releases — " +
+    "it has nowhere to fetch artwork from again, and the most reliable place to keep it is in the file itself. So those get Plex’s poster (whatever you set in Plex), losslessly compressed; " +
+    "matched items have their cover art taken out, since Plex fetches it anyway.<br><br>" +
+    "<strong>Strip Cover Art</strong> takes it out of every file. <strong>Compress Existing Cover Art</strong> keeps what’s there, losslessly compressed " +
+    "(PNG with oxipng, JPEG with jpegtran: every pixel stays the same). <strong>Compress and Embed Plex Cover Art</strong> puts Plex’s poster in every file — the movie’s, " +
+    "or for an episode its season’s — and writes the file again whenever the poster in Plex changes.");
+  var SORT_HELP = H("The last record of a file is usually only partly filled: with a 1M record size, the end of a file might hold only 500K. " +
+    "ZFS keeps a record compressed only when compression saves at least 12.5%, so a record that mixes a little compressible data with a lot that isn’t (video, images) is often stored as it is.<br><br>" +
+    "So the optimizer puts the cover art straight after the video — it barely compresses, but it’s large enough to fill out a record — and the fonts, index and tags after it. " +
+    "Those compress very well, and sitting together at the very end of the file, the record that holds them is very likely to be compressed: ZSTD-3 often halves them.<br><br>" +
+    "The index is needed before a file can start playing, so it’s cached along with the start of every file. ZFS caches it as it’s stored on disk, compressed — " +
+    "so the smaller it is, the more files fit in the same cache and the longer they stay there.");
+  // Setting the optimizer up: each thing that has to be true, checked in order (optimizing.py
+  // diagnose()); what passes in one line, then the first that doesn't, with what to do about it.
+  function optimizerSetup(op) {
+    var su = op.setup || {}, steps = su.steps || [];
+    if (su.ready) return "";
+    var out = '<section class="card">' + heading(esc(T("Set up the optimizer")),
+      H("Optional: a second service in this app, and the only part of Plex Cache that can change your media. Until it’s running, the choices below wait."));
+    if (!su.at) return out + '<p class="muted">' + H("Checking…") + "</p></section>";
+    var done = steps.filter(function (x) { return x.ok; }), next = steps.filter(function (x) { return !x.ok; })[0];
+    if (done.length) out += '<div class="det">' + done.map(function (x) { return "✓ " + esc(x.title); }).join(" · ") + "</div>";
+    if (next) {
+      var cmd = next.cmd || "";
+      out += '<div class="row">' + badge("warn", T("To do")) + '<div class="grow"><div class="what">' + esc(next.title) + "</div>" +
+        (next.detail ? '<div class="det">' + esc(next.detail) + "</div>" : "") +
+        (next.fix || cmd ? '<div class="fix">' + esc(next.fix || "") + (cmd ? '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) +
+          '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button></div>" : "") + "</div>" : "") + "</div></div>";
+    }
+    out += '<div style="margin-top:10px"><button class="btn" type="button" data-act="optimizer-check">' + H("Check again") + "</button> " +
+      '<span class="muted">' + H("checked {when}", { when: ago(su.at) }) + "</span></div>";
+    return out + "</section>";
+  }
+  function pageOptimizer() {
+    var op = ST.optimizer || {}, job = op.job, sums = op.libraries || {};
+    var out = top(T("Optimizer"), H("Rewrites your media files so they suit caching — one library at a time, only when you press Optimize Now."), "");
+    out += '<div class="stack">' + optimizerSetup(op);
+    out += '<section class="card">' + heading(esc(T("What it does")), "") + '<ul class="help">' +
+      "<li>" + H("<strong>TrueNAS Compression &amp; Recordsize</strong>: writes each file again, byte for byte, so it takes its dataset’s current record size and compression — ZFS applies them only to files as they’re written. Any kind of file. A file’s compression can’t be read back, so every file counts until the optimizer has written it once.") + "</li>" +
+      "<li>" + H("<strong>Optimize MKV Files</strong>:") + "<ul>" +
+        "<li>" + H("moves the fonts, cover art, index and tags to the end of the file, sorted so the parts not needed to play the file can be skipped") + "</li>" +
+        "<li>" + H("sorts that metadata so the most compressible parts sit nearest the end. This maximizes how much TrueNAS can cache, sometimes significantly.") + info(SORT_HELP, T("Sorting the metadata")) + "</li>" +
+        "<li>" + H("compresses image subtitles (PGS, VobSub) with zlib, as MKVToolNix does by default; video, audio and text subtitles are copied as they are") + "</li>" +
+        "<li>" + H("handles cover art as you choose: by default, embeds Plex’s poster only in items Plex hasn’t matched, where the file is the most reliable place to keep it — compressed losslessly") + "</li></ul></li>" +
+      "</ul></section>";
+    var libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind && !l.excluded; });
+    out += '<section class="card">' + heading(esc(T("Optimize Files")), H("Choose what to do for each library, then press Optimize Now."));
+    if (!libs.length) {
+      // Right after a start the libraries haven't been read from Plex yet: say so, rather than "no libraries"
+      var lib0 = ST.library || {}, plexSet = S.plex && S.plex.url && S.plex.token_set;
+      var why = lib0.error ? esc(lib0.error) :
+        (lib0.scanning || plexSet) ? H("Reading your libraries from Plex…") : H("No libraries yet. Connect Plex in <a href=\"/system\" data-nav>System</a>.");
+      return out + '<p class="muted">' + why + "</p></section></div>";
+    }
+    out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library") + '</th><th scope="col">' + H("Options") +
+      '</th><th scope="col">' + H("Status") + '</th><th scope="col"></th></tr></thead><tbody>';
+    libs.forEach(function (l) {
+      var key = String(l.key), c = optChoices(key), sm = sums[key], running = job && job.running && job.library === key;
+      // the choices on one line: two checkboxes, and with MKV the cover art choice
+      var opts = '<div class="optline"><label class="nw"><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="sync"' + (c.sync ? " checked" : "") + "> " + H("TrueNAS Compression &amp; Recordsize") + "</label>" +
+        '<label class="nw"><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="mkv"' + (c.mkv ? " checked" : "") + "> " + H("Optimize MKV Files") + "</label>";
+      if (c.mkv) opts += '<label class="nw"><select data-optlib="' + esc(key) + '" data-optkey="images" aria-label="' + esc(T("Cover art")) + '">' +
+        [["unmatched", H("Only Embed Plex Cover Art for Unmatched Items")], ["remove", H("Strip Cover Art")], ["compress", H("Compress Existing Cover Art")],
+         ["plex", H("Compress and Embed Plex Cover Art")]].map(function (o) {
+          return '<option value="' + o[0] + '"' + (c.images === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
+        }).join("") + "</select>" + info(COVER_HELP, T("Cover art")) + "</label>";
+      opts += "</div>";
+      // one status for everything chosen: the files still to do, or Complete
+      var st;
+      if (!sm) st = '<span class="muted">—</span>';
+      else if (!c.sync && !c.mkv) st = '<span class="muted">' + H("Nothing chosen") + "</span>";
+      else st = sm.todo ? badge("warn", P(sm.todo, "{n} file", "{n} files", { n: fmtNum(sm.todo) })) : badge("pass", T("Complete"));
+      var act;
+      if (running) {
+        act = '<div class="det">' + H("{done} of {total}: {file}", { done: fmtNum(job.done + 1), total: fmtNum(job.total), file: job.current || "…" }) +
+          (job.step ? ' <span class="muted">(' + esc(job.step) + ")</span>" : "") + '</div><div class="det"><button class="link" type="button" data-act="optimize-stop">' + H("Stop") + "</button></div>";
+      } else {
+        act = '<button class="btn pri" type="button" data-act="optimize-lib" data-key="' + esc(key) + '"' +
+          (!op.configured || (job && job.running) || !sm || !sm.todo ? " disabled" : "") + ">" + H("Optimize Now") + "</button>";
+        if (job && !job.running && job.library === key && job.finished)
+          act += '<div class="det muted">' + H("Last run: {optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed", job) + "</div>";
+      }
+      out += "<tr><td>" + esc(l.title) + "</td><td>" + opts + "</td><td>" + st + '</td><td class="nw">' + act + "</td></tr>";
+    });
+    return out + "</tbody></table></div></section></div>";
+  }
+
   function pageSsd() {
     var c = ST.cache || {}, pools = ST.zfs.pools || {}, names = Object.keys(pools).filter(function (k) { return pools[k]; });
     var out = top(T("SSD Cache"), H("Caching is planned around an SSD cache (L2ARC) on the media pool. Here’s what you have, and how big it needs to be."), "");
@@ -823,8 +1000,8 @@ PCI18N.ready.then(function () {
     out += l2arcSettingsCard();
     // ---- how big
     out += '<section class="card"><h2>' + H("L2ARC Sizing Estimator") + "</h2>" +
-      '<p class="help" style="margin:4px 0 0">' + H("How much L2ARC it takes to keep every library’s lead-ins in the Lead-in Cache. Libraries without a warm-up need less. " +
-        "Try a different lead-in length per library below to see what it would need — the <strong>Estimate</strong> column follows. These sliders are only a what-if: they don’t change your settings (lead-in length is set per library in <a href=\"/caching#leadin\" data-nav>Caching → Lead-in Cache</a>).") + "</p>" +
+      '<p class="help" style="margin:4px 0 0">' + H("How much cache it takes to keep every library’s lead-ins in the Lead-in Cache — on the SSD with an L2ARC, in RAM without one. Libraries without a warm-up need less. " +
+        "Try a different lead-in length per library below to see what it would need — the <strong>Target</strong> column follows. These sliders are only a what-if: they don’t change your settings (lead-in length is set per library in <a href=\"/caching#leadin\" data-nav>Caching → Lead-in Cache</a>), and they start from the default lengths each time this page opens. All the way down is one record.") + "</p>" +
       estimatorSliders() +
       sizingControls() + estimateHtml() + sizingHtml(true) + sizingAdvanced() + "</section>";
     out += "</div>";
@@ -857,7 +1034,9 @@ PCI18N.ready.then(function () {
     var libs = S.nextepisode.libraries || {}, c = (libs[key] || libs["*"] || {})[field];
     return c || (field === "end_at" ? "90" : "default");
   }
-  var SEC_LIMITS = { movie: [3, 180], tv: [3, 180], audio: [1, 60] };
+  // All the way down (0) is one record: the first record of each file, plus its index if that's at the end.
+  var SEC_LIMITS = { movie: [0, 180], tv: [0, 180], audio: [0, 60] };
+  function secText(n, unit) { return Number(n) === 0 ? T("1 record") : n + " " + (unit || "s"); }
   var WARM_NAMES = { none: T("No warm-up"), boot: T("At boot only"), twice_monthly: T("At boot + twice monthly"), weekly: T("At boot + weekly"),
     twice_weekly: T("At boot + twice weekly"), daily: T("At boot + daily") };
   var WARM_ORDER = ["none", "boot", "twice_monthly", "weekly", "twice_weekly", "daily"];
@@ -920,14 +1099,14 @@ PCI18N.ready.then(function () {
     out += '<div class="pflibs">' + libs.map(function (l) {
       var kind = libKind(l), names = PF_NAMES[kind];
       var wk = WARM_KIND[kind], lim = SEC_LIMITS[wk], def = (ST.kind_seconds || {})[wk];
-      var secs = warmChoice(l.key, "seconds") || def, sched = warmChoice(l.key, "schedule") || "default";
+      var secs = warmChoice(l.key, "seconds") != null ? warmChoice(l.key, "seconds") : def, sched = warmChoice(l.key, "schedule") || "default";
       var order = PF_START.filter(function (v) { return names[v]; });
       var start = libChoice(l.key, "start");
       // Video and audiobooks (M4B) have an index players read before starting; music files don't
       var id = "f-lib-" + l.key, unit = kind === "music" ? T("s of playback") : T("s of playback + index");
       return '<div class="pflib">' + libHead(l, kind) +
         '<div class="pflib-grid">' +
-        '<div><label class="sublbl" for="' + id + '" aria-label="' + H("Lead-in length") + '"><span class="val" data-val="' + id + '">' + esc(secs) + " " + esc(unit) + "</span>" +
+        '<div><label class="sublbl" for="' + id + '" aria-label="' + H("Lead-in length") + '"><span class="val" data-val="' + id + '">' + esc(secText(secs, unit)) + "</span>" +
           (secs !== def ? ' <button type="button" class="revert" data-libsec-revert="' + esc(l.key) + '" title="' + H("Back to the default ({value})", { value: def + " s" }) + '">↺</button>' : "") + "</label>" +
           '<input id="' + id + '" type="range" min="' + lim[0] + '" max="' + lim[1] + '" step="1" value="' + esc(secs) + '" data-libsec="' + esc(l.key) + '" data-unit="' + esc(unit) + '"></div>' +
         '<div><span class="sublbl">' + H("Warm-up") + pickRevert("warm:" + l.key, sched, dynOptions("warmup.schedule", WARM_ORDER, WARM_NAMES)) + "</span>" +
@@ -1909,7 +2088,7 @@ PCI18N.ready.then(function () {
   }
 
   // --------------------------------------------------------------- render
-  var PAGES = { health: pageHealth, caching: pageCaching, ssd: pageSsd, activity: pageActivity, system: pageSystem };
+  var PAGES = { health: pageHealth, caching: pageCaching, ssd: pageSsd, optimizer: pageOptimizer, activity: pageActivity, system: pageSystem };
   var ALIAS = { features: "caching", settings: "system" };  // pages before 0.15
 
   // The side menu folds down to its icons (remembered in this browser); folded, each item's
@@ -1997,9 +2176,10 @@ PCI18N.ready.then(function () {
   function go(p, push) {
     p = ALIAS[p] || p;
     page = PAGES[p] ? p : "health";
+    if (page === "ssd") EST = {};  // the what-if sliders start from your settings every time
     if (push) history.pushState({}, "", "/" + page);
     else if (location.pathname !== "/" + page && location.pathname !== "/") history.replaceState({}, "", "/" + page + location.hash);
-    document.title = "Plex Cache – " + { health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), activity: T("Metrics"), system: T("System") }[page];
+    document.title = "Plex Cache – " + { health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), optimizer: T("Optimizer"), activity: T("Metrics"), system: T("System") }[page];
     render();
     window.scrollTo(0, 0);
     main.focus({ preventScroll: true });
@@ -2185,14 +2365,17 @@ PCI18N.ready.then(function () {
 
   function action(act, el) {
     if (act === "recheck") { api("/api/checks", { rescan: true }).then(function () { toast(T("Checking…")); ST.checking = true; render(); }); }
-    else if (act === "blockscan") {
-      api("/api/blockscan", { dataset: el.dataset.ds }).then(function (r) {
-        toast(r.started ? T("Checking every file…") : T("Already checking"));
-        ST.block_scans = ST.block_scans || {};
-        ST.block_scans[el.dataset.ds] = { running: true, checked: 0 };
-        render();
+    else if (act === "optimize-lib") {
+      api("/api/optimize/library", { library: el.dataset.key }).then(function (r) {
+        toast(r.started ? T("Optimizing…") : T("The optimizer is busy or not set up"));
+        load();
       });
     }
+    else if (act === "optimizer-check") {
+      el.disabled = true;
+      api("/api/optimizer/check", {}).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+    }
+    else if (act === "optimize-stop") { api("/api/optimize/stop", {}).then(function () { toast(T("Stopping after this file")); load(); }); }
     else if (act === "benchmark") { api("/api/benchmark", {}).then(function () { toast(T("Measuring disk speed…")); ST.benchmark.running = true; render(); }); }
     else if (act === "warmup-run") { api("/api/warmup/run", {}).then(function (r) { toast(r.started ? T("Warm-up started") : T("Already running")); load(); }); }
     else if (act === "lasts-reset") { api("/api/cachelog/reset", {}).then(function () { toast(T("Started again")); load(); }); }
@@ -2381,7 +2564,16 @@ PCI18N.ready.then(function () {
     var el = e.target;
     if (!el.dataset || el.dataset.libsec === undefined) return;
     var v = document.querySelector('[data-val="' + el.id + '"]');
-    if (v) v.textContent = el.value + " " + el.dataset.unit;
+    if (v) v.textContent = secText(el.value, el.dataset.unit);
+  });
+  // The Optimizer page: each library's choices (sync, mkv: checkboxes; images: the cover art select)
+  document.addEventListener("change", function (e) {
+    var el = e.target;
+    if (!el.dataset || el.dataset.optlib === undefined) return;
+    var libs = JSON.parse(JSON.stringify((S.optimizer || {}).libraries || {}));
+    var lib = libs[el.dataset.optlib] = optChoices(el.dataset.optlib);
+    lib[el.dataset.optkey] = el.type === "checkbox" ? el.checked : el.value;
+    queueSave("optimizer", "libraries", libs, true);
   });
   document.addEventListener("change", function (e) {
     var el = e.target;

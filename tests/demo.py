@@ -30,6 +30,7 @@ for m, title in zip(cat["movies"], MOVIES):
 for ep in cat["episodes"]:
     ep["title"] = EPISODES[(ep["episode"] - 1) % len(EPISODES)]
 # TV is on its own child dataset (set up well); the rest share the parent (left at metadata/128K).
+os.environ.setdefault("PLEXCACHE_OPTIMIZER_URL", "http://127.0.0.1:9")  # no optimizer service in the demo
 os.environ["PLEXCACHE_PROC"] = fakes.make_proc(tmp, media, extra=((os.path.join(media, "TV"), "tank/plexfiles/tv"),))
 os.environ["PLEXCACHE_SYS"] = fakes.make_sys(tmp, {"l2arc_noprefetch": 1, "l2arc_write_max": 8388608,
                                                    "l2arc_rebuild_enabled": 1, "l2arc_mfuonly": 0})

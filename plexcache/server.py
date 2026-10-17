@@ -19,7 +19,7 @@ from .plex import PlexError, check_pin, create_pin
 
 log = logging.getLogger("plexcache")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
-PAGES = {"/", "/health", "/caching", "/ssd", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
+PAGES = {"/", "/health", "/caching", "/ssd", "/optimizer", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
 MAX_BODY = 1024 * 1024
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
@@ -250,11 +250,6 @@ def make_handler(app):
                         raise SettingsError(M("rescan must be true or false"))
                     app.run_checks_async(rescan=rescan)
                     return self._json({"started": True})
-                if path == "/api/blockscan":
-                    dataset = body.get("dataset")
-                    if not isinstance(dataset, str) or len(dataset) > 255:
-                        raise SettingsError(M("dataset must be a dataset name"))
-                    return self._json({"started": app.run_block_scan(dataset)})
                 if path == "/api/mqtt/reconnect":
                     app.ha.retry()
                     return self._json({"started": True})
@@ -268,6 +263,17 @@ def make_handler(app):
                     app.cachelog.save(force=True)
                     app.activity.event("settings", M("“How long cached data lasts” started again"))
                     return self._json({"reset": True})
+                if path == "/api/optimize/library":
+                    key = body.get("library")
+                    if not isinstance(key, str) or not app.library_info(key):
+                        raise SettingsError(M("unknown library: {key}", key=str(key)))
+                    return self._json({"started": app.optimizing.start_library(key)})
+                if path == "/api/optimizer/check":
+                    # The optimizer's setup steps, checked again now (the Optimizer page's "Check again")
+                    return self._json(jsonable(app.optimizing.diagnose()))
+                if path == "/api/optimize/stop":
+                    app.optimizing.stop()
+                    return self._json({"stopping": True})
                 if path == "/api/warmup/stop":
                     app.stop_warmup()
                     return self._json({"stopping": True})

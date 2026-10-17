@@ -21,6 +21,7 @@ from .updates import UpdateChecker
 from .config import PLEX_DEFAULT_PORT, Settings
 from .coverage import Coverage
 from .pauses import L2arcPauses
+from .optimizing import Optimizing
 from .playback import PlaybackMonitor
 from .plex import PlexClient, PlexError
 from .reader import MiB, benchmark_file
@@ -145,10 +146,6 @@ class App:
         self.benchmarking = False
         self.benchmark: dict | None = None
         self.benchmark_progress: dict | None = None  # {"dataset", "done", "total", "finished": [...]} while it runs
-        # "Check every file": dataset -> {"running", "checked", "single", "sizes", "examples", "at", ...}
-        self.block_scans: dict[str, dict] = self._load_json("blockscans.json") or {}
-        for v in self.block_scans.values():
-            v["running"] = False  # a scan cut short by a restart
         # What's been cached, when, and whether it was still there when read again (cachelog.py)
         self.cachelog = CacheLog(os.path.join(config_dir, "cachelog.json"))
         # How much of each library was cached, hour by hour (coverage.py)
@@ -156,6 +153,7 @@ class App:
         self.cachelog.boot_time = zfs.boot_time() or 0.0
         # Playback
         self.monitor = PlaybackMonitor(self)
+        self.optimizing = Optimizing(self)  # the optimizer service (second container): which files need it
         # Home Assistant over MQTT (does nothing until it's switched on in System)
         self.ha = HomeAssistantBridge(self)
         self.updates = UpdateChecker(self)
@@ -653,28 +651,15 @@ class App:
             self.zfs = info
         return info
 
-    BLOCK_SAMPLE = 300  # files per dataset; a sample is enough to see how much was written before a change
-
     def _survey_blocks(self, datasets: list[dict]) -> None:
-        """Sample each cached dataset's files for the block size they were written with,
-        so Health can tell when files predate a recordsize change."""
-        mlist = zfs.mounts()
+        """The block size every file on each dataset was written with (one stat() per file, nothing
+        read — a few tenths of a second for 20,000 files), so Health can tell when files predate a
+        record size change."""
         kind_of = {lib["key"]: lib["kind"] for lib in self.libraries}
         for d in datasets:
             if not (d["keys"] or d["off"]) or d.get("fstype") != "zfs":
                 continue
-            mine = [f for f in self.files if f.library_key in d["keys"]]
-            candidates = [self.map_path(f.path) for f in random.sample(mine, min(len(mine), self.BLOCK_SAMPLE * 3))]
-            # Unticked libraries aren't listed from Plex, so sample their folders directly.
-            candidates += _sample_files(d.get("off_folders") or [], self.BLOCK_SAMPLE * 3)
-            paths = []
-            for path in candidates:
-                m = zfs.mount_for(path, mlist)
-                if m and m["mountpoint"] == d["mountpoint"]:  # not a file on a child dataset
-                    paths.append(path)
-                if len(paths) >= self.BLOCK_SAMPLE:
-                    break
-            d["blocks"] = zfs.block_sizes(paths)
+            d["blocks"] = dict(zfs.scan_block_sizes(d["mountpoint"], stop=lambda: self.stopping.is_set()), full=True)
             d["kinds"] = sorted({kind_of[k] for k in d["keys"] + d["off_keys"] if kind_of.get(k)})
 
     # ---------------------------------------------------------------- checks
@@ -690,6 +675,7 @@ class App:
                 self.locations = locations
                 self.mapping_choices = mapping.choices(locations)
             self.probe_zfs()  # needs the locations: it checks the dataset under each library
+            self.optimizing.survey()  # which files are optimized: Health's Libraries section reports it
             result = checks.run_all(self)
             with self.lock:
                 self.health = result
@@ -895,7 +881,8 @@ class App:
             w, g = s["warmup"], s["general"]
             if libs is None:
                 libs = {k for k, v in self.warmup_schedules().items() if v != "none"} or None
-            p = plan(self.stats, w, self.l2_total(), self.index_avg(), libs)
+            records = self.library_records()
+            p = self.lead_in_plan(w, libs, records)
             if p["status"] == "none":
                 self.activity.event("warm-up", M("skipped: no L2ARC on the media pool"), "warn")
                 return
@@ -927,7 +914,8 @@ class App:
                             self.warmup_stop, pause, zfs.arcstats, skip=skip,
                             note=lambda f, hit: self.cachelog.note(f.path, whole=False, route="ssd", hit=hit,
                                                                    library=f.library_key),
-                            rate=None if manual else self.l2arc_rate())
+                            rate=None if manual else self.l2arc_rate(),
+                            record=lambda f: (records.get(f.library_key) or {}).get("rs"))
             run.pacer.before_wait = pauses.mark_idle
             holder["run"] = run
             with self.lock:
@@ -980,6 +968,43 @@ class App:
                         if kinds.get(k, {}).get("files")}
         return None
 
+    def index_layout(self) -> dict | None:
+        """Per kind, from the last run that measured it: the share of files keeping their index
+        (and the like) at the end, and the average bytes there for those files."""
+        for run in reversed(self.activity.runs):
+            idx = run.get("index")
+            if idx:
+                kinds = run.get("by_kind") or {}
+                return {k: {"share": v["files"] / kinds[k]["files"], "avg": v["bytes"] / v["files"] if v["files"] else 0}
+                        for k, v in idx.items() if kinds.get(k, {}).get("files")}
+        return None
+
+    def lead_in_plan(self, w: dict | None = None, libs: set | None = None, records: dict | None = None) -> dict:
+        """The Lead-in Cache's plan (warmup.plan), sized at each library's dataset record size."""
+        return plan(self.stats, w or self.settings.get()["warmup"], self.l2_total(), self.index_avg(), libs,
+                    records=self.library_records() if records is None else records, index_layout=self.index_layout())
+
+    def record_for(self, library_key: str) -> int | None:
+        """The record size of a library's dataset, as checked (None if it couldn't be)."""
+        return (self.library_records().get(str(library_key)) or {}).get("rs")
+
+    def library_records(self) -> dict:
+        """Library key -> {"rs": its dataset's record size, "blocks": the block sizes a sample of
+        the dataset's files were written with, "dataset"}. The record size comes from TrueNAS,
+        or failing that from the dataset itself: ZFS reports it as the filesystem's block size.
+        A dataset that can't be checked either way has none — it's never guessed."""
+        out = {}
+        with self.lock:
+            datasets = list((self.zfs or {}).get("datasets") or [])
+        for d in datasets:
+            rs = (d.get("props") or {}).get("recordsize")
+            if not rs and d.get("fstype") == "zfs":
+                rs = zfs.recordsize(d.get("mountpoint"))
+            for key in (d.get("keys") or []) + (d.get("off_keys") or []):
+                out[str(key)] = {"rs": rs or None, "blocks": d.get("blocks"), "dataset": d.get("dataset") or d.get("mountpoint"),
+                                 "compression": (d.get("props") or {}).get("compression")}
+        return out
+
     # ------------------------------------------------------------- benchmark
     def _load_json(self, name: str):
         try:
@@ -996,30 +1021,6 @@ class App:
             os.replace(path + ".tmp", path)
         except OSError as e:
             log.warning("couldn't save %s: %s", name, e)
-
-    def run_block_scan(self, dataset: str) -> bool:
-        """Check the block size of every file on a dataset (Health shows a sample otherwise)."""
-        d = next((d for d in (self.zfs or {}).get("datasets", []) if d.get("dataset") == dataset), None)
-        if d is None:
-            return False
-        with self.lock:
-            if (self.block_scans.get(dataset) or {}).get("running"):
-                return False
-            self.block_scans[dataset] = {"running": True, "checked": 0, "started": time.time()}
-
-        def work():
-            def progress(n):
-                self.block_scans[dataset]["checked"] = n
-            res = zfs.scan_block_sizes(d["mountpoint"], progress, lambda: self.stopping.is_set())
-            res.update(running=False, at=time.time(), started=self.block_scans[dataset]["started"])
-            with self.lock:
-                self.block_scans[dataset] = res
-                self._save_json("blockscans.json", self.block_scans)
-            self.activity.event("record size", M("{dataset}: checked {n} files", dataset=dataset, n=res["checked"]))
-            self.run_checks()
-
-        threading.Thread(target=work, name="block-scan", daemon=True).start()
-        return True
 
     def run_benchmark(self):
         """Time reads of a few media files on each dataset to learn its uncached speed.
@@ -1080,6 +1081,12 @@ class App:
         self.benchmark_thread.start()
 
     # ---------------------------------------------------------------- state
+    def _optimizer_state(self) -> dict:
+        snap = self.optimizing.snapshot()
+        if not snap["configured"]:
+            self.optimizing.diagnose_soon()  # what's left to set up, checked again now and then
+        return snap
+
     def state(self) -> dict:
         s = self.settings.get()
         now = dt.datetime.now()
@@ -1128,7 +1135,7 @@ class App:
                 "l2_total": self.l2_total(),
             },
             # Sizing assumes every library's lead-ins are cached (libraries without a warm-up need less)
-            "plan": plan(self.stats, s["warmup"], self.l2_total(), self.index_avg()),
+            "plan": self.lead_in_plan(s["warmup"]),
             "index_avg": self.index_avg(),
             "warmup": {
                 "running": run is not None,
@@ -1139,8 +1146,8 @@ class App:
                 "schedules": self.warmup_schedules(),  # library key -> its schedule now (Default resolved)
             },
             "benchmark": {"running": self.benchmarking, "last": self.benchmark, "progress": self.benchmark_progress},
-            "block_scans": {k: {x: v.get(x) for x in ("running", "checked", "at", "complete", "error")}
-                            for k, v in self.block_scans.items()},
+            # The optimizer: per library how many files are optimized, the job, and the service itself
+            "optimizer": dict(self._optimizer_state(), service=self.optimizing.client.status()),
             "playback": {"sessions": self.monitor.snapshot(), "error": self.monitor.last_error, "last_poll": self.monitor.last_poll},
             "activity": self.activity.snapshot(),
             "reports": self.reports(),
@@ -1149,15 +1156,3 @@ class App:
         }
 
 
-def _sample_files(folders: list[str], limit: int, max_seen: int = 5000) -> list[str]:
-    """Up to ``limit`` random files from these folders (looking at no more than ``max_seen``)."""
-    seen: list[str] = []
-    for root in folders:
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [n for n in dirnames if not n.startswith((".", "@"))]
-            seen.extend(os.path.join(dirpath, n) for n in filenames if not n.startswith("."))
-            if len(seen) >= max_seen:
-                break
-        if len(seen) >= max_seen:
-            break
-    return random.sample(seen, min(limit, len(seen)))

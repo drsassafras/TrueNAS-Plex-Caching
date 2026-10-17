@@ -1,6 +1,8 @@
 import datetime as dt
+import hashlib
 import json
 import logging
+from unittest import mock
 import os
 import shutil
 import struct
@@ -10,6 +12,7 @@ import socket
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,6 +22,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 TMP = tempfile.mkdtemp(prefix="plexcache-test-")
 # Never ask GitHub for the latest version while testing (an app started by a test would, after 30 s).
 os.environ["PLEXCACHE_UPDATE_SOURCE"] = "http://127.0.0.1:9/never"
+# No optimizer service: nothing listens there, so the app sees it as not set up.
+os.environ["PLEXCACHE_OPTIMIZER_URL"] = "http://127.0.0.1:9"
 MEDIA = os.path.join(TMP, "media")
 import fakes  # noqa: E402
 
@@ -133,9 +138,9 @@ class ConfigTests(unittest.TestCase):
             s.update({"warmup": {"nope": 1}})
         with self.assertRaises(config.SettingsError):
             s.update({"nextepisode": {"libraries": {"2": {"start": "forever"}}}})
-        # A minimum above a library's lead-in length uses the lead-in length (warmup.plan)
-        s.update({"warmup": {"movie_min_sec": 100}})
-        self.assertEqual(s.section("warmup")["movie_min_sec"], 100)
+        # The per-kind minimum seconds are retired: the floor is now the first record of each file
+        with self.assertRaises(config.SettingsError):
+            s.update({"warmup": {"movie_min_sec": 100}})
 
     def test_broken_file_is_set_aside(self):
         with open(os.path.join(self.dir, "settings.json"), "w") as fh:
@@ -237,7 +242,7 @@ class TrueNASTests(unittest.TestCase):
         self.assertEqual(info["l2_total"], 960 * 10 ** 9)
         self.assertEqual(info["l2_online"], 2)
         self.assertEqual(info["data_disks"], 4)
-        self.assertEqual(props, {"primarycache": "metadata", "secondarycache": "all", "recordsize": 131072})
+        self.assertEqual(props, {"primarycache": "metadata", "secondarycache": "all", "recordsize": 131072, "compression": "lz4"})
 
     def test_probe(self):
         from plexcache.truenas import probe
@@ -289,6 +294,14 @@ class ReaderAndPlanTests(unittest.TestCase):
         self.assertEqual(preload_bytes(8000, 10), 10 * MiB)
         self.assertEqual(preload_bytes(8000, 10, size=3 * MiB), 3 * MiB)
         self.assertEqual(preload_bytes(0, 10), MiB)
+        # in whole records of the dataset when it's known; 0 seconds is one record
+        self.assertEqual(preload_bytes(8000, 10, record=4 * MiB), 12 * MiB)
+        self.assertEqual(preload_bytes(8000, 0, record=4 * MiB), 4 * MiB)
+        self.assertEqual(preload_bytes(8000, 0), MiB)
+        from plexcache.warmup import align_ranges
+        self.assertEqual(align_ranges([(5 * MiB + 10, 100), (6 * MiB - 1, 2)], MiB, 100 * MiB), [(5 * MiB, 2 * MiB)])
+        self.assertEqual(align_ranges([(99 * MiB + 5, 10)], 4 * MiB, 99 * MiB + 15), [(96 * MiB, 3 * MiB + 15)])
+        self.assertEqual(align_ranges([(5, 10)], None, 100), [(5, 10)])
 
     def test_failed_reads_are_not_hits(self):
         res = read_range("/nonexistent/file.mkv", 0, MiB)
@@ -325,13 +338,15 @@ class ReaderAndPlanTests(unittest.TestCase):
 
     def test_plan_fits_and_reduces(self):
         w = config.DEFAULTS["warmup"]
+        from plexcache.warmup import DEFAULT_INDEX
         p = plan(self._stats(), w, 960 * 10 ** 9)
         self.assertEqual(p["status"], "fits")
-        self.assertAlmostEqual(p["need_by_kind"]["movie"] / 1e9, 18000 * 125 * 60 * 1240 * 1.05 / 1e9)
+        # record sizes not checked: sized from the bitrate alone, plus each file's index
+        self.assertAlmostEqual(p["need_by_kind"]["movie"] / 1e9, (18000 * 125 * 60 * 1240 * 1.05 + 1240 * DEFAULT_INDEX["movie"]) / 1e9)
         p = plan(self._stats(), w, 400 * 10 ** 9)
         self.assertEqual(p["status"], "reduced")
         self.assertLess(p["seconds"]["1"], 60)                     # seconds are per library now
-        self.assertGreaterEqual(p["seconds"]["1"], 3)
+        self.assertGreaterEqual(p["seconds"]["1"], 0)
         planned = sum(p["planned_by_kind"].values())
         self.assertLessEqual(planned, 400 * 10 ** 9 - 100 * 10 ** 9 + 1)
         self.assertEqual(plan(self._stats(), w, 0)["status"], "none")
@@ -340,7 +355,7 @@ class ReaderAndPlanTests(unittest.TestCase):
         # Each library's own seconds, and only the libraries warm-up covers
         w2 = dict(w, libraries={"1": {"seconds": 30}})
         p = plan(self._stats(), w2, 960 * 10 ** 9)
-        self.assertAlmostEqual(p["need_by_kind"]["movie"] / 1e9, 18000 * 125 * 30 * 1240 * 1.05 / 1e9)
+        self.assertAlmostEqual(p["need_by_kind"]["movie"] / 1e9, (18000 * 125 * 30 * 1240 * 1.05 + 1240 * DEFAULT_INDEX["movie"]) / 1e9)
         self.assertEqual([r["set_sec"] for r in p["libraries"]], [30, 30, 10])
         self.assertEqual([r["key"] for r in plan(self._stats(), w2, None, keys={"2"})["libraries"]], ["2"])
 
@@ -1001,13 +1016,117 @@ class LayoutTests(unittest.TestCase):
         r = with_index(p, size, [(30 * MiB, 10 * MiB), (0, 30 * MiB)], size)
         self.assertEqual(r, [(m["cues_at"], m["cues_len"]), (30 * MiB, m["cues_at"] - 30 * MiB), (0, 30 * MiB)])
 
+    def test_recommend_recordsize(self):
+        from plexcache.warmup import recommend_recordsize as rec
+        K, M = 1024, 1024 * 1024
+        pick = lambda kbps, size=10 ** 9: (lambda r: (r["best"], r["alt"]))(rec(kbps, size))
+        self.assertEqual(pick(70000), (4 * M, 2 * M))     # 4K remux
+        self.assertEqual(pick(120000), (4 * M, 8 * M))    # past the middle of the top band
+        self.assertEqual(pick(30000), (2 * M, 4 * M))     # 1080p remux / 4K encode
+        self.assertEqual(pick(10000), (1 * M, 2 * M))     # 1080p encode
+        self.assertEqual(pick(3000), (1 * M, 512 * K))    # SD / 720p, FLAC
+        self.assertEqual(pick(256), (512 * K, 1 * M))     # lossy music
+        self.assertEqual(pick(64), (512 * K, 128 * K))    # audiobooks
+        self.assertEqual(pick(256, 80_000), (128 * K, 512 * K))  # short clips: ZFS's own 128K
+        # On either side of the line between two bands, the same two sizes: no flapping
+        for edge in (1000, 15000, 40000):
+            self.assertEqual(set(pick(edge - 1)), set(pick(edge + 1)))
+
+    def test_dataset_must_suit_all_its_libraries(self):
+        from types import SimpleNamespace
+        from plexcache import checks
+        libs = [("1", "Movies", 70000, 8e10), ("2", "Concerts", 30000, 3e10), ("3", "Music", 256, 8e6)]
+        app = SimpleNamespace(
+            libraries=[{"key": k, "title": t} for k, t, _, _ in libs],
+            stats=LibraryStats(libraries=[{"key": k, "name": t, "kind": "movie", "count": 5, "avg_kbps": b, "avg_size": z}
+                                          for k, t, b, z in libs]),
+            library_records=lambda: {})
+        # Movies (4M or 2M) and Concerts (2M or 4M) can share; whatever the dataset is set to now
+        self.assertIsNone(checks._shared_record_check(app, "tank/films", ["1", "2"]))
+        # Music (512K or 1M) can't share with them: move it out, the others keep 2M or 4M
+        r = checks._shared_record_check(app, "tank/media", ["1", "2", "3"])
+        self.assertEqual((r["move"], r["keep"]), (["Music"], 4 * 1024 * 1024))
+        self.assertIn("Music: 512K or 1M", [str(x) for x in r["needs"]])
+        self.assertIsNone(checks._shared_record_check(app, "tank/m", ["3"]))  # one library: nothing to share
+
+    def test_cached_bytes(self):
+        from plexcache.warmup import cached_bytes
+        M = 1024 * 1024
+        # A file no bigger than a record is one block of its own size
+        self.assertEqual(cached_bytes(10 * M, 0, 0, 4 * M, 3 * M, False), 3 * M)
+        # A lead-in shorter than a record still costs one record
+        self.assertEqual(cached_bytes(300_000, 0, 0, M, 50 * M, False), M)
+        # Longer ones round up by half a record on average; an index at the end adds the whole records it takes
+        self.assertEqual(cached_bytes(100 * M, 0, 0, 4 * M, 10 ** 10, False), 102 * M)
+        self.assertEqual(cached_bytes(100 * M, M, 1.0, 4 * M, 10 ** 10, False), 106 * M)
+        self.assertEqual(cached_bytes(100 * M, 5 * M, 1.0, 4 * M, 10 ** 10, False), 110 * M)
+        # 0 seconds: one record, plus the index's records if it's at the end
+        self.assertEqual(cached_bytes(0, M, 1.0, 4 * M, 10 ** 10, False), 8 * M)
+        self.assertEqual(cached_bytes(0, M, 1.0, 4 * M, 10 ** 10, True), 4 * M)
+        # At the front, the index is simply part of the lead-in
+        self.assertEqual(cached_bytes(100 * M, M, 1.0, 4 * M, 10 ** 10, True), 103 * M)
+        # Only the share of files with an index at the end pays for it
+        self.assertEqual(cached_bytes(100 * M, M, 0.5, 4 * M, 10 ** 10, False), 104 * M)
+        # Never more than the file
+        self.assertEqual(cached_bytes(100 * M, M, 1.0, 4 * M, 101 * M, False), 101 * M)
+        # your minimum: one record plus the index's whole records
+        stats = LibraryStats(libraries=[{"key": "1", "name": "M", "kind": "movie", "count": 10, "avg_kbps": 30000, "avg_size": 10 ** 10}])
+        p = plan(stats, dict(config.DEFAULTS["warmup"]), None, records={"1": 4 * M}, index_layout={"movie": {"share": 1.0, "avg": 300_000}})
+        self.assertEqual(p["libraries"][0]["your_min"], 10 * (4 * M + 4 * M))
+
+    def test_plan_record_sizes(self):
+        K, M = 1024, 1024 * 1024
+        stats = LibraryStats(libraries=[
+            {"key": "1", "name": "Movies", "kind": "movie", "count": 100, "avg_kbps": 70000, "avg_size": 80 * 10 ** 9},
+            {"key": "3", "name": "Music", "kind": "audio", "count": 1000, "avg_kbps": 256, "avg_size": 8 * 10 ** 6},
+            {"key": "4", "name": "Clips", "kind": "audio", "count": 10, "avg_kbps": 256, "avg_size": 80_000}])
+        w = dict(config.DEFAULTS["warmup"])
+        # Movies: dataset set to 1M, but a quarter of the files were written with 128K blocks
+        records = {"1": {"rs": M, "blocks": {"sizes": {str(M): 75, str(128 * K): 25}}, "dataset": "tank/movies"},
+                   "3": 512 * K}
+        p = plan(stats, w, 10 ** 12, records=records, index_layout={"movie": {"share": 1.0, "avg": 2 * M}})
+        movies, music, clips = p["libraries"]
+        self.assertEqual((movies["rs"], movies["rs_best"], movies["rs_alt"], movies["rs_ok"]), (M, 4 * M, 2 * M, False))
+        self.assertEqual(movies["dataset"], "tank/movies")
+        self.assertTrue(music["rs_ok"])
+        # Target minimum: one recommended record per file; your minimum: one of yours plus the index at the end
+        self.assertEqual(movies["target_min"], 100 * 4 * M)
+        self.assertEqual(movies["your_min"], 100 * (M + 2 * M))
+        self.assertEqual(music["your_min"], 1000 * 512 * K)  # audio: no index at the end
+        self.assertEqual(clips["target_min"], 10 * 80_000)   # never more than the file
+        # Target: recommended records, index at the front; yours: the block sizes the files really have
+        lead = 70000 * 125 * (100 + w["padding_video"]) / 100 * movies["set_sec"]
+        self.assertAlmostEqual(movies["target"], 100 * (lead + 2 * M + 2 * M))
+        self.assertAlmostEqual(movies["your"], 100 * (0.25 * (lead + 64 * K + 2 * M) + 0.75 * (lead + M / 2 + 2 * M)))
+        # A dataset that couldn't be checked isn't guessed at
+        self.assertIsNone(clips["rs"])
+        self.assertIsNone(clips["your_min"])
+        self.assertIsNone(clips["your"])
+        self.assertFalse(clips["rs_ok"])
+        # Warm-up's sizes are these real ones, and its floor is one record (plus the index at the end)
+        self.assertAlmostEqual(movies["max"], movies["your"])
+        self.assertAlmostEqual(movies["min"], 100 * (0.25 * (128 * K + 2 * M) + 0.75 * (M + 2 * M)))
+        # Too small: every library's seconds are cut by the same share, as little as fits
+        avail = p["need_max"] * 0.6
+        q = plan(stats, w, avail + w["reserve_gb"] * 10 ** 9, records=records, index_layout={"movie": {"share": 1.0, "avg": 2 * M}})
+        self.assertEqual(q["status"], "reduced")
+        self.assertLessEqual(sum(q["planned_by_kind"].values()), avail)
+        self.assertGreater(sum(q["planned_by_kind"].values()), avail * 0.9)
+        self.assertLess(q["seconds"]["1"], movies["set_sec"])
+        # 0 seconds is one record
+        z = plan(stats, dict(w, libraries={"1": {"seconds": 0}}), None, records=records,
+                 index_layout={"movie": {"share": 1.0, "avg": 2 * M}})["libraries"][0]
+        self.assertEqual(z["set_sec"], 0)
+        self.assertAlmostEqual(z["max"], z["min"])
+
     def test_plan_counts_indexes(self):
         from plexcache.warmup import DEFAULT_INDEX
         stats = LibraryStats(count={"movie": 1000, "tv": 0, "audio": 0}, avg_kbps={"movie": 20000, "tv": 0, "audio": 0},
                              libraries=[{"key": "1", "name": "Movies", "kind": "movie", "count": 1000, "avg_kbps": 20000}])
         w = dict(config.DEFAULTS["warmup"])
         with_idx = plan(stats, w, None)
-        self.assertEqual(with_idx["need_max"], with_idx["need_by_kind"]["movie"] + 1000 * DEFAULT_INDEX["movie"])  # always counted
+        self.assertEqual(with_idx["need_max"], with_idx["need_by_kind"]["movie"])
+        self.assertEqual(with_idx["index_by_kind"]["movie"], 1000 * DEFAULT_INDEX["movie"])  # always counted
         measured = plan(stats, w, None, {"movie": 100_000})
         self.assertEqual(measured["index_by_kind"]["movie"], 100_000_000)
         self.assertTrue(measured["index_measured"])
@@ -1148,7 +1267,20 @@ class AppTests(unittest.TestCase):
         self.assertEqual(media["Music"]["status"], "fail")
         self.assertIn("/music", media["Music"]["detail"])
         self.assertIn("System → Media mappings", media["Music"]["fix"])
-        self.assertEqual(groups["media"]["items"], [])
+        # Record size, compression and optimized are columns with their own info boxes: no items repeat them
+        self.assertEqual([i["title"] for i in groups["media"]["items"]], [])
+        self.assertEqual(media["Movies"]["record"]["status"], "warn")       # tank/plexfiles is 128K
+        self.assertNotIn("compression", media["Movies"])                     # per dataset: Media datasets
+        dsrow = {r["dataset"]: r for r in groups["datasets"]["datasets"]}["tank/plexfiles"]
+        # the badge is what the dataset uses; under it, what to use instead
+        self.assertEqual((dsrow["compression"]["status"], dsrow["compression"]["badge"], en(dsrow["compression"]["text"])),
+                         ("warn", "lz4", "Use ZSTD-3"))
+        # Movies, TV Shows and Audiobooks share it but need different record sizes: split it, saying how
+        rs = dsrow["recordsize"]
+        if rs["status"] == "warn" and en(rs.get("badge", "")) == "Split Dataset":
+            self.assertEqual(len(rs["lines"]), 1)
+            self.assertIn("to a dataset of its own;", en(rs["lines"][0]))
+        self.assertNotIn("optimized", media["Movies"])                        # the Optimizer page has its own
         # one row per dataset, naming the libraries on it
         rows = {r["dataset"]: r for r in groups["datasets"]["datasets"]}
         self.assertEqual(set(rows), {"tank/plexfiles", TV_DS})
@@ -1158,7 +1290,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(rows["tank/plexfiles"]["cache"]["status"], "fail")
         self.assertEqual(rows["tank/plexfiles"]["recordsize"]["status"], "warn")
         self.assertEqual(rows[TV_DS]["cache"]["status"], "pass")
-        self.assertEqual(rows[TV_DS]["recordsize"], {"status": "pass", "text": "1M"})
+        self.assertEqual(rows[TV_DS]["recordsize"], {"status": "pass", "text": "1M", "lines": []})
         self.assertEqual(rows[TV_DS]["l2arc"]["status"], "pass")
         self.assertIn("960 GB", rows[TV_DS]["l2arc"]["text"])
         self.assertNotIn("L2ARC cache devices", [i["title"] for i in groups["zfs"]["items"]])
@@ -1265,13 +1397,10 @@ class AppTests(unittest.TestCase):
     def test_recordsize_and_l2arc_settings(self):
         from plexcache import checks
         groups = {g["id"]: g for g in checks.run_all(self.app)["groups"]}  # fresh, not left over from another test
-        z = dict(dataset_fixes(groups["datasets"]), **{i["title"]: i for i in groups["zfs"]["items"]})
-        rs = z["Record size for tank/plexfiles"]
-        self.assertEqual(rs["status"], "warn")                       # parent dataset is 128K, TV is 1M
-        self.assertIn("recordsize=128K (Movies and Audiobooks)", rs["detail"])
-        self.assertEqual("sudo zfs set recordsize=1M tank/plexfiles", rs["fix_cmd"])
-        self.assertIn("RAM", rs["detail"])
-        self.assertNotIn(f"Record size for {TV_DS}", z)
+        z = dict(dataset_fixes(groups["datasets"]), **{i["title"]: i for i in groups["zfs"]["items"] + groups["media"]["items"]})
+        media = {r["library"]: r for r in groups["media"]["table"]}
+        rec = media["Movies"]["record"]                           # parent dataset is 128K: Movies wants 2M
+        self.assertEqual((rec["status"], rec["rs"], rec["best"]), ("warn", 128 * 1024, 2 * 1024 * 1024))
         # 182 MB/s default guess? pacing 10% of hdd speed vs 32 MiB/s fill: fine
         self.assertEqual(z["L2ARC settings"]["status"], "pass")
         self.assertIn("32 MiB/s", z["L2ARC settings"]["detail"])
@@ -1297,15 +1426,18 @@ class AppTests(unittest.TestCase):
         self.assertIn("about 5%", slow["fix"])
         self.assertIn("automatic L2ARC pacing", slow["fix"])
         self.assertIn("Init/Shutdown Scripts", slow["fix"])
-        self.assertEqual(checks._recordsize_check(self.app, "tank/m", 1048576, {"l2_total": 960 * 10 ** 9}), ("pass", []))
-        # Movies and TV need 1M; audio-only datasets may use 512K or 1M
-        self.assertEqual(checks._recordsize_check(self.app, "tank/m", 512 * 1024, None, kinds=["audio"]), ("pass", []))
-        self.assertEqual(checks._recordsize_check(self.app, "tank/m", 1024 * 1024, None, kinds=["audio"]), ("pass", []))
-        st, its = checks._recordsize_check(self.app, "tank/m", 512 * 1024, None, kinds=["movie", "audio"])
-        self.assertEqual((st, its[0]["fix_cmd"]), ("warn", "sudo zfs set recordsize=1M tank/m"))
-        self.assertIn("rewrite_blocks.py tank/m", its[1]["fix_cmd"])  # then the files already there
-        st, its = checks._recordsize_check(self.app, "tank/m", 256 * 1024, None, kinds=["audio"])
-        self.assertEqual((st, its[0]["fix_cmd"]), ("warn", "sudo zfs set recordsize=512K tank/m"))
+        # Each library's record size against the one recommended for its media, and the next best
+        K, M = 1024, 1024 * 1024
+        real_stats, real_records = self.app.stats, self.app.library_records
+        self.app.stats = LibraryStats(libraries=[{"key": "1", "name": "Movies", "kind": "movie", "count": 10,
+                                                  "avg_kbps": 30000, "avg_size": 30 * 10 ** 9}])
+        try:
+            for rs, status in ((2 * M, "ideal"), (4 * M, "pass"), (M, "warn"), (None, "info")):
+                self.app.library_records = lambda rs=rs: {"1": {"rs": rs, "dataset": "tank/m"}}
+                rec = checks.library_record(self.app, "1")
+                self.assertEqual((rec["best"], rec["alt"], rec["status"]), (2 * M, 4 * M, status))
+        finally:
+            self.app.stats, self.app.library_records = real_stats, real_records
 
     def test_unavailable_features_cannot_be_enabled(self):
         # With every media dataset at primarycache=metadata nothing can be cached.
@@ -1532,7 +1664,7 @@ class AppTests(unittest.TestCase):
     def test_warmup_run_via_api(self):
         # 3 s of each episode is far less than the file, so the index at the end is a separate read
         tv = next(l["key"] for l in self.app.libraries if l["kind"] == "tv")
-        self.app.settings.update({"warmup": {"libraries": {tv: {"seconds": 3}}, "tv_min_sec": 3}})
+        self.app.settings.update({"warmup": {"libraries": {tv: {"seconds": 3}}}})
         self.addCleanup(self.app.settings.update, {"warmup": {"libraries": {}}})
         status, r = self.post("/api/warmup/run", {})
         self.assertTrue(r["started"])
@@ -1550,6 +1682,7 @@ class AppTests(unittest.TestCase):
         msgs = [e["message"] for e in self.app.activity.snapshot()["events"]]
         self.assertTrue(any("TV episodes: 6 of 6 had one at the end" in m for m in msgs), msgs[:5])
         self.assertAlmostEqual(self.app.index_avg()["tv"], 20_012)
+        self.assertEqual(self.app.index_layout()["tv"], {"share": 1.0, "avg": 20_012})
         self.assertEqual(run["errors"], 0)
         self.assertTrue(run["manual"])
 
@@ -1737,7 +1870,8 @@ class PlaybackMonitorTests(unittest.TestCase):
             self.assertTrue(done("m1"))
             self.assertEqual(queued("m1"), ["Author · Chapter 2", "Author · Chapter 3", "Author · Book 2, chapter 1", "Author · Book 2, chapter 2"])
             self.assertTrue(all(j.slice and not j.ram for j in jobs("m1")))            # starts head for the SSD
-            self.assertEqual(jobs("m1")[0].length, 1024 * 1024)                        # 10 s, rounded up to a whole MiB
+            self.assertEqual(jobs("m1")[0].length % (128 * 1024), 0)                   # 10 s, in whole 128K records of the dataset
+            self.assertLessEqual(jobs("m1")[0].length, 1024 * 1024)
             # Near the end (90%): the rest of the book in full — the next chapter into RAM (within the
             # limit), the one after it to the SSD in the background (not counted against the limit)
             play(0, "m1", offset=110000)
@@ -1760,7 +1894,7 @@ class PlaybackMonitorTests(unittest.TestCase):
             # Within the RAM limit, in order: here only the first fits
             self.app.cachelog.__init__()
             real = app.ram_budget
-            app.ram_budget = lambda: dict(real(), nextepisode=1024 * 1024)
+            app.ram_budget = lambda: dict(real(), nextepisode=400 * 1024)  # one 256K lead-in (two 128K records), not two
             try:
                 play(0, "m4")
                 self.assertTrue(done("m4"))
@@ -2343,36 +2477,21 @@ class BlockSizeTests(unittest.TestCase):
         bs = os.stat(big).st_blksize
         self.assertEqual((r["checked"], r["single"], r["sizes"]), (2, 1, {str(bs): 1}))
 
-    def test_sample_files_from_folders(self):
-        from plexcache.app import _sample_files
-        d = tempfile.mkdtemp(dir=TMP)
-        for sub in ("A", "B", ".hidden"):
-            os.makedirs(os.path.join(d, sub))
-            for i in range(4):
-                open(os.path.join(d, sub, f"f{i}.flac"), "w").close()
-        got = _sample_files([d], 5)
-        self.assertEqual(len(got), 5)
-        self.assertFalse(any("/.hidden/" in p for p in got))
-        self.assertEqual(len(_sample_files([d], 100, max_seen=3)), 4)  # stops looking after a folder passes the cap
-
     def test_health_compares_files_with_the_setting(self):
         from plexcache import checks
         app = App(tempfile.mkdtemp(dir=TMP))
         old = {"checked": 300, "single": 20, "sizes": {str(128 * 1024): 180, str(1024 * 1024): 100}}
-        st, its = checks._recordsize_check(app, "tank/tv", 1024 * 1024, None, "TV", ["tv"], old)
-        self.assertEqual((st, its[0]["title"]), ("warn", "Older files on tank/tv use smaller blocks"))
-        self.assertIn("In a random sample of 300 files, about 64% were written with 128K blocks", its[0]["detail"])
-        self.assertEqual(its[0]["fix_cmd"], "curl -fsSO {APP}/tools/rewrite_blocks.py && sudo python3 rewrite_blocks.py tank/tv")
-        self.assertEqual(checks._blocks_note(old, 1024 * 1024), " · ~64% of a sample at 128K")
-        # a few stragglers: a note, not a warning
+        self.assertEqual(checks._blocks_check("tank/tv", 1024 * 1024, old, "TV"), "warn")  # the cell says how many
+        self.assertEqual(checks._files_note(old, 1024 * 1024), "180 of 280 files in 128K")
+        # every file is checked against the setting: a few stragglers warn too, and so do larger blocks
         few = {"checked": 300, "single": 0, "sizes": {str(128 * 1024): 3, str(1024 * 1024): 297}}
-        self.assertEqual(checks._recordsize_check(app, "tank/tv", 1024 * 1024, None, "", ["tv"], few)[0], "info")
-        # audio written at 512K is fine on an audio-only dataset, even if it's now 1M
-        music = {"checked": 300, "single": 50, "sizes": {str(512 * 1024): 250}}
-        self.assertEqual(checks._recordsize_check(app, "tank/music", 1024 * 1024, None, "", ["audio"], music), ("pass", []))
-        self.assertEqual(checks._blocks_note(music, 512 * 1024), " · 300 sampled files match")
-        self.assertEqual(checks._blocks_note(None, 1024 * 1024), "")
-        self.assertEqual(checks._blocks_note({"checked": 5, "single": 5, "sizes": {}}, 1024 * 1024), "")  # nothing to tell
+        self.assertEqual(checks._blocks_check("tank/tv", 1024 * 1024, few), "warn")
+        music = {"checked": 300, "single": 50, "sizes": {str(1024 * 1024): 250}}
+        self.assertEqual(checks._blocks_check("tank/music", 512 * 1024, music), "warn")
+        self.assertEqual(checks._blocks_check("tank/music", 1024 * 1024, music), "pass")
+        self.assertEqual(checks._files_note(music, 1024 * 1024), "250 files in 1M")
+        self.assertEqual(checks._files_note(None, 1024 * 1024), "")
+        self.assertEqual(checks._files_note({"checked": 5, "single": 5, "sizes": {}}, 1024 * 1024), "5 files, each smaller than a record")
         # the page gets the defaults it needs for its "back to default" buttons
         d = app.state()["defaults"]
         self.assertEqual((d["general"]["poll_seconds"], d["general"]["ram_reserve_gb"]), (5, 4))
@@ -2393,27 +2512,20 @@ class BlockSizeTests(unittest.TestCase):
         self.assertEqual(sorted(r["examples"][bs]), ["Show/a.mkv", "Show/b.mkv"])
         self.assertFalse(zfs.scan_block_sizes(d, stop=lambda: True)["complete"])
         self.assertIn("error", zfs.scan_block_sizes(os.path.join(d, "gone")))
-        # Health words a full count differently from a sample, and names a few of the files
-        full = {"checked": 1000, "single": 0, "sizes": {"131072": 600, "1048576": 400}, "full": True,
-                "examples": {"131072": ["TV/a.mkv", "TV/b.mkv"]}}
-        self.assertEqual(checks._blocks_note(full, 1024 * 1024), " · 600 of 1,000 files at 128K")
-        self.assertEqual(checks._blocks_note(dict(full, sizes={"1048576": 1000}), 1024 * 1024), " · all 1,000 files match")
-        st, its = checks._recordsize_check(App(tempfile.mkdtemp(dir=TMP)), "tank/tv", 1024 * 1024, None, "", ["tv"], full)
-        self.assertIn("Of all 1,000 files, 600 (60%) were written with 128K blocks", its[0]["detail"])
-        self.assertIn("For example: TV/a.mkv, TV/b.mkv.", its[0]["detail"])
-        # through the app: started from the API, kept across a restart, and used by Health
+        full = {"checked": 1000, "single": 0, "sizes": {"131072": 600, "1048576": 400}, "full": True}
+        self.assertEqual(checks._files_note(full, 1024 * 1024), "600 of 1,000 files in 128K")
+        self.assertEqual(checks._files_note(dict(full, sizes={"1048576": 1000}), 1024 * 1024), "1,000 files in 1M")
+        self.assertEqual(checks._blocks_check("tank/tv", 1024 * 1024, full), "warn")
+        # through the app: every health check looks at every file, in its own column
         app = _new_app()
         app.scan_library()
         app.run_checks()
-        self.assertFalse(app.run_block_scan("no/such"))
-        self.assertTrue(app.run_block_scan(TV_DS))
-        self.assertTrue(wait_for(lambda: app.block_scans[TV_DS].get("complete"), 20))
-        self.assertTrue(wait_for(lambda: not app.checking, 20))
-        self.assertGreater(app.state()["block_scans"][TV_DS]["checked"], 0)
-        again = App(app.config_dir)
-        self.assertTrue(again.block_scans[TV_DS]["complete"])
         rows = {r["dataset"]: r for g in app.health["groups"] if g["id"] == "datasets" for r in g["datasets"]}
-        self.assertIn("files", rows[TV_DS]["recordsize"]["text"])
+        tv = next(d for d in app.zfs["datasets"] if d["dataset"] == TV_DS)
+        self.assertTrue(tv["blocks"]["full"] and tv["blocks"]["complete"])
+        self.assertEqual(tv["blocks"]["checked"], len([n for _, _, fs in os.walk(tv["mountpoint"]) for n in fs if not n.startswith(".")]))
+        self.assertIn("files", rows[TV_DS]["file_rs"]["text"])
+        self.assertNotIn("block_scans", app.state())
 
     def test_rewrite_script_is_served_and_rewrites_safely(self):
         import subprocess
@@ -2649,7 +2761,7 @@ class WarmupScheduleTests(unittest.TestCase):
         self.assertIn("warmup.2.schedule", [f["id"] for f in app.fallbacks.recent()])
         self.assertIsNone(app.next_warmup())
         app.settings.update({"general": {"no_l2arc": False}})
-        for bad in ({"2": {"schedule": "hourly"}}, {"2": {"seconds": 0}}, {"2": {"seconds": 2.5}}, {"2": {"when": 1}}):
+        for bad in ({"2": {"schedule": "hourly"}}, {"2": {"seconds": -1}}, {"2": {"seconds": 181}}, {"2": {"seconds": 2.5}}, {"2": {"when": 1}}):
             with self.assertRaises(config.SettingsError):
                 app.settings.update({"warmup": {"libraries": bad}})
 
@@ -2734,7 +2846,7 @@ class AppEdgeTests(unittest.TestCase):
         import plexcache.app as appmod
         app.zfs["pools"]["tank"] = dict(app.zfs["pools"]["tank"], l2_online=1, l2_total=10 ** 9)
         real_plan = appmod.plan
-        appmod.plan = lambda *a: dict(real_plan(*a), status="reduced")
+        appmod.plan = lambda *a, **kw: dict(real_plan(*a, **kw), status="reduced")
         try:
             app._warmup_worker(manual=True)
         finally:
@@ -3097,6 +3209,734 @@ class PlexEdgeTests(unittest.TestCase):
 
 
 
+def _el(id_hex: str, payload: bytes) -> bytes:
+    return fakes.ebml(id_hex, payload)
+
+
+def _read_bytes(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def build_mkv(path, tail=("Cues", "Tags"), front_atts=(), tail_atts=(), pgs_algo="none", void=0, cluster=b""):
+    """A small, real-structured MKV for the optimizer: header, SeekHead (+ Void), Info, Tracks
+    (video + PGS), optional Attachments before the cluster, one Cluster, then ``tail`` in order
+    (names from Cues, Tags, Attachments). ``pgs_algo``: "none" (no ContentEncodings) or a number."""
+    cluster = cluster or os.urandom(20000)
+    att = lambda files: _el("1941A469", b"".join(
+        _el("61A7", _el("466E", n.encode()) + _el("4660", m.encode()) + _el("46AE", (1000 + i).to_bytes(8, "big")) + _el("465C", d))
+        for i, (n, m, d) in enumerate(files)))
+    enc = b"" if pgs_algo == "none" else _el("6D80", _el("6240", _el("5034", _el("4254", bytes([pgs_algo])))))
+    tracks = _el("1654AE6B", _el("AE", _el("D7", b"\x01") + _el("86", b"V_MPEG4/ISO/AVC")) +
+                 _el("AE", _el("D7", b"\x02") + _el("86", b"S_HDMV/PGS") + enc))
+    info = _el("1549A966", _el("2AD7B1", (1000000).to_bytes(3, "big")))
+    parts = {"Cues": _el("1C53BB6B", b"\x00" * 300), "Tags": _el("1254C367", b"\x01" * 200),
+             "Attachments": att(tail_atts) if tail_atts else b""}
+    ids = {"Info": "1549A966", "Tracks": "1654AE6B", "Attachments": "1941A469", "Cues": "1C53BB6B", "Tags": "1254C367"}
+    header = _el("1A45DFA3", _el("4282", b"matroska"))
+
+    def seekhead(pos):
+        return _el("114D9B74", b"".join(_el("4DBB", _el("53AB", bytes.fromhex(ids[n])) + _el("53AC", pos.get(n, 0).to_bytes(8, "big")))
+                                         for n in ("Info", "Tracks", "Attachments", "Cues", "Tags") if n in pos))
+    names = ["Info", "Tracks", "Cues", "Tags"] + (["Attachments"] if front_atts or tail_atts else [])
+    sh_len = len(seekhead({n: 0 for n in names}))
+    gap = _el("EC", b"\x00" * (200 + void))
+    front = [("Info", info), ("Tracks", tracks)] + ([("Attachments", att(front_atts))] if front_atts else [])
+    pos, p = {}, sh_len + len(gap)
+    for n, raw in front:
+        pos[n] = p
+        p += len(raw)
+    clus = _el("1F43B675", cluster)
+    p += len(clus)
+    tail_parts = [(n, parts[n]) for n in tail if parts[n]]
+    for n, raw in tail_parts:
+        pos[n] = p
+        p += len(raw)
+    body = seekhead(pos) + gap + b"".join(r for _, r in front) + clus + b"".join(r for _, r in tail_parts)
+    with open(path, "wb") as fh:
+        fh.write(header + bytes.fromhex("18538067") + (len(body) | (1 << 56)).to_bytes(8, "big") + body)
+    return {"cluster": clus}
+
+
+FONT = ("font.ttf", "font/ttf", b"glyph data " * 400)
+COVER = ("cover.jpg", "image/jpeg", os.urandom(3000))
+
+
+class FakeOptimizer:
+    """Stands in for the optimizer service: "optimizes" a file by writing it again, and reports
+    what the real one does (the new file's identity, its sha256, the optimizer version)."""
+    configured = True
+
+    def __init__(self, result="optimized"):
+        self.sent, self.done, self.result = [], None, result
+
+    def rewrite(self, path):
+        return self._done(path, "rewritten", {"path": path, "action": "rewrite"})
+
+    def optimize(self, path, images, force, cover=None):
+        return self._done(path, self.result, {"path": path, "action": "optimize", "images": images, "force": force, "cover": cover})
+
+    def _done(self, path, result, sent):
+        from plexcache.optimize import VERSION
+        self.sent.append(sent)
+        cover = sent.get("cover")
+        if result in ("optimized", "rewritten"):
+            build_mkv(path + ".new", pgs_algo=0, tail_atts=[FONT], tail=("Attachments", "Cues", "Tags"))
+            os.replace(path + ".new", path)                    # a new file, as the optimizer writes
+            os.utime(path, (time.time() - 3600, time.time() - 3600))  # with the original's timestamps
+        st = os.stat(path)
+        with open(path, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        self.done = {"path": path, "result": result, "finished": time.time() + 1, "images_left": 0,
+                     "cover": bool(cover), "sha256": digest, "version": VERSION,
+                     "file": {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "ino": st.st_ino}}
+        return {"started": True}
+
+    def ready(self):
+        return True
+
+    def status(self, fresh=False):
+        return {"current": None, "results": [self.done] if self.done else []}
+
+
+def run_job(op, key="1"):
+    assert op.start_library(key)
+    for _ in range(200):
+        if not op.snapshot()["job"]["running"]:
+            return op.snapshot()
+        time.sleep(0.05)
+    raise AssertionError("the job didn't finish")
+
+
+class OptimizerTests(unittest.TestCase):
+    """plexcache/optimize: the layout check, the tail reorder, and the service."""
+
+    def path(self, name):
+        d = tempfile.mkdtemp(dir=TMP)
+        return os.path.join(d, name)
+
+    def test_check(self):
+        from plexcache.optimize import mkv
+        cases = [
+            ({"pgs_algo": 0}, True, []),
+            ({"pgs_algo": "none"}, True, ["subs_uncompressed"]),
+            ({"pgs_algo": 0, "front_atts": [FONT]}, True, ["attachments_front"]),
+            ({"pgs_algo": 0, "tail": ("Cues", "Tags", "Attachments"), "tail_atts": [COVER, FONT]}, True, ["tail_order"]),
+            ({"pgs_algo": 0, "tail": ("Attachments", "Cues", "Tags"), "tail_atts": [COVER, FONT]}, True, []),
+            ({"pgs_algo": 0, "tail": ("Attachments", "Cues", "Tags"), "tail_atts": [FONT, COVER]}, True, ["images_order"]),
+            ({"pgs_algo": 0, "tail": ("Attachments", "Cues", "Tags"), "tail_atts": [COVER, FONT]}, False, ["images"]),
+            ({"pgs_algo": 0, "void": 2 * 1024 * 1024}, True, ["void"]),
+        ]
+        for kw, keep, problems in cases:
+            p = self.path("a.mkv")
+            build_mkv(p, **kw)
+            c = mkv.check(p, keep)
+            self.assertEqual((c["applies"], c["problems"], c["optimized"]), (True, problems, not problems), kw)
+        self.assertEqual(mkv.check(self.path("a.mp4")), {"applies": False})
+        bad = self.path("bad.mkv")
+        with open(bad, "wb") as fh:
+            fh.write(b"not a matroska file at all")
+        self.assertEqual(mkv.check(bad)["problems"], ["unreadable"])
+
+    def test_reorder_tail(self):
+        from plexcache.optimize import mkv
+        p = self.path("t.mkv")
+        built = build_mkv(p, pgs_algo=0, tail=("Cues", "Tags", "Attachments"), tail_atts=[COVER, FONT])
+        read = lambda: _read_bytes(p)
+        before = read()
+        self.assertEqual(mkv.reorder_tail(p), ["Attachments", "Cues", "Tags"])
+        after = read()
+        self.assertEqual(len(after), len(before))
+        self.assertIn(built["cluster"], after)                      # the video isn't touched
+        self.assertEqual(after.index(built["cluster"]), before.index(built["cluster"]))
+        self.assertTrue(mkv.check(p)["optimized"])
+        lay = mkv.read_layout(p)                                    # the SeekHead points at each one
+        for name, eid in (("Attachments", "1941A469"), ("Cues", "1C53BB6B"), ("Tags", "1254C367")):
+            self.assertEqual(after[lay["seek"][name]:lay["seek"][name] + 4], bytes.fromhex(eid), name)
+        self.assertEqual([a["name"] for a in lay["attachments"]], ["cover.jpg", "font.ttf"])
+        self.assertEqual(mkv.reorder_tail(p), ["Attachments", "Cues", "Tags"])  # running it again changes nothing
+        self.assertEqual(read(), after)
+
+    def test_attachment_order(self):
+        from plexcache.optimize.optimizer import plan_attachments
+        d = tempfile.mkdtemp(dir=TMP)
+        files = {}
+        for i, data in enumerate((b"text " * 2000, os.urandom(10000), os.urandom(5000))):
+            files[i] = os.path.join(d, str(i))
+            with open(files[i], "wb") as fh:
+                fh.write(data)
+        atts = [{"id": 0, "image": False, "name": "notes.txt"}, {"id": 1, "image": False, "name": "font.otf"},
+                {"id": 2, "image": True, "name": "cover.jpg"}]
+        # images first (next to the video), then least to most compressible
+        self.assertEqual([a["id"] for a in plan_attachments(atts, files, True)], [2, 1, 0])
+        self.assertEqual([a["id"] for a in plan_attachments(atts, files, False)], [1, 0])
+
+    def test_optimize_with_the_real_tools(self):
+        from plexcache.optimize import VERSION, mkv, tools
+        from plexcache.optimize.optimizer import Skipped, optimize_file, stream_hashes
+        bundle = "/Applications/MKVToolNix.app/Contents/MacOS"
+        if os.path.isdir(bundle) and not os.environ.get("PLEXCACHE_TOOLS_PATH"):
+            os.environ["PLEXCACHE_TOOLS_PATH"] = bundle
+        if tools.missing():
+            self.skipTest("MKVToolNix and ffmpeg aren't installed")
+        d = tempfile.mkdtemp(dir=TMP)
+        src = os.path.join(d, "src.mkv")
+        tools.run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=24", "-t", "3",
+                  "-c:v", "mpeg4", os.path.join(d, "v.mkv"))
+        for name, data in (("font.ttf", FONT[2]), ("cover.jpg", COVER[2])):
+            with open(os.path.join(d, name), "wb") as fh:
+                fh.write(data)
+        tools.run("mkvmerge", "-q", "-o", src, "--attachment-mime-type", "image/jpeg", "--attach-file", os.path.join(d, "cover.jpg"),
+                  "--attachment-mime-type", "font/ttf", "--attach-file", os.path.join(d, "font.ttf"), os.path.join(d, "v.mkv"))
+        self.assertEqual(mkv.check(src)["problems"], ["attachments_front"])
+        hashes = stream_hashes(src)
+        os.utime(src, (1_600_000_000, 1_600_000_000))
+        keep = os.path.join(d, "keep.mkv")
+        shutil.copy2(src, keep)
+        r = optimize_file(keep)
+        self.assertEqual(r["result"], "optimized")
+        self.assertTrue(mkv.check(keep)["optimized"])
+        self.assertEqual(stream_hashes(keep), hashes)
+        self.assertEqual(int(os.stat(keep).st_mtime), 1_600_000_000)          # timestamps kept
+        self.assertEqual([a["name"] for a in mkv.read_layout(keep)["attachments"]], ["cover.jpg", "font.ttf"])
+        # laid out right, cover art left as it is: not rewritten, but hashed for the record
+        r = optimize_file(keep, "keep")
+        self.assertEqual((r["result"], r["version"], r["file"]["ino"]), ("already", VERSION, os.stat(keep).st_ino))
+        with open(keep, "rb") as fh:
+            self.assertEqual(r["sha256"], hashlib.sha256(fh.read()).hexdigest())
+        # Compress: its cover art was never compressed by the optimizer, so it's written again
+        r = optimize_file(keep)
+        self.assertEqual(r["result"], "optimized")
+        with open(keep, "rb") as fh:
+            self.assertEqual(r["sha256"], hashlib.sha256(fh.read()).hexdigest())  # the file it left
+        self.assertEqual(optimize_file(keep, force=True)["result"], "optimized")  # rewritten anyway when asked
+        drop = os.path.join(d, "drop.mkv")
+        shutil.copy2(src, drop)
+        r = optimize_file(drop, "remove")
+        self.assertEqual((r["images_before"], r["images_after"]), (1, 0))
+        self.assertEqual([a["name"] for a in mkv.read_layout(drop)["attachments"]], ["font.ttf"])
+        # Sync from Plex: the poster takes the cover art's place, as cover.png, losslessly compressed
+        poster = os.path.join(d, "poster.png")
+        tools.run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=200x300", "-frames:v", "1",
+                  "-compression_level", "0", poster)
+        plex = os.path.join(d, "plex.mkv")
+        shutil.copy2(src, plex)
+        with open(poster, "rb") as fh:
+            r = optimize_file(plex, "plex", cover=fh.read())
+        self.assertTrue(r["cover"])
+        atts = mkv.read_layout(plex)["attachments"]
+        self.assertEqual([(a["name"], a["mime"]) for a in atts], [("cover.png", "image/png"), ("font.ttf", "font/ttf")])
+        self.assertEqual(stream_hashes(plex), hashes)
+        if tools.find("oxipng"):
+            self.assertGreater(r["images_saved"], 0)
+            self.assertEqual(r["images_left"], 0)
+        else:
+            self.assertEqual(r["images_left"], 1)  # kept as it was, and said so
+        with self.assertRaises(ValueError):
+            optimize_file(plex, "sometimes")
+        self.assertFalse([n for n in os.listdir(d) if n.startswith(".plexcache-optimize")])  # cleaned up
+        with self.assertRaises(Skipped):
+            optimize_file(os.path.join(d, "v.mp4"))
+
+    def test_rewrite_file(self):
+        from plexcache.optimize import VERSION
+        from plexcache.optimize.optimizer import Skipped, rewrite_file
+        d = tempfile.mkdtemp(dir=TMP)
+        p = os.path.join(d, "song.flac")
+        data = os.urandom(3 * 1024 * 1024 + 17)
+        with open(p, "wb") as fh:
+            fh.write(data)
+        os.chmod(p, 0o640)
+        os.utime(p, (1_600_000_000, 1_600_000_000))
+        ino = os.stat(p).st_ino
+        steps = []
+        r = rewrite_file(p, log=steps.append)
+        self.assertEqual((r["result"], r["version"], r["sha256"]), ("rewritten", VERSION, hashlib.sha256(data).hexdigest()))
+        with open(p, "rb") as fh:
+            self.assertEqual(fh.read(), data)                                    # byte for byte
+        st = os.stat(p)
+        self.assertNotEqual(st.st_ino, ino)                                     # a new file, written now
+        self.assertEqual((r["file"]["ino"], int(st.st_mtime), st.st_mode & 0o777), (st.st_ino, 1_600_000_000, 0o640))
+        self.assertEqual(steps, ["copying", "checking the copy"])
+        self.assertFalse([n for n in os.listdir(d) if n.startswith(".plexcache-optimize")])  # cleaned up
+        os.link(p, p + ".link")
+        with self.assertRaises(Skipped):
+            rewrite_file(p)                                                     # a rename would split the link
+
+    def test_service(self):
+        from http.server import ThreadingHTTPServer
+        from plexcache.optimize import server as osrv
+        d = tempfile.mkdtemp(dir=TMP)
+        good = os.path.join(d, "a.mkv")
+        build_mkv(good, pgs_algo=0)
+        svc = osrv.Service([d], "a-long-test-token-123456")
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), osrv.make_handler(svc))
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.shutdown)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        def call(path, body=None, token="a-long-test-token-123456"):
+            req = urllib.request.Request(base + path, data=json.dumps(body).encode() if body is not None else None,
+                                         headers={"X-Plexcache-Token": token})
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read())
+        code, hz = call("/healthz", token="")                                   # no token needed, and none shown
+        self.assertEqual((code, hz["ok"], hz["service"], hz["token"], hz["roots"]), (200, True, "optimizer", True, 1))
+        self.assertNotIn("a-long-test-token-123456", json.dumps(hz))
+        self.assertEqual(call("/api/status", token="wrong")[0], 401)
+        self.assertEqual(call("/api/check", {"path": "/etc/passwd"})[0], 403)
+        self.assertEqual(call("/api/check", {"path": d + "/../a.mkv"})[0], 403)           # no escaping the media folders
+        self.assertEqual(call("/api/check", {"path": good})[1]["optimized"], True)
+        code, r = call("/api/optimize", {"path": good})
+        self.assertEqual((code, r["started"]), (200, True))
+        for _ in range(50):
+            st = call("/api/status")[1]
+            if st["results"]:
+                break
+            time.sleep(0.1)
+        self.assertEqual(st["results"][-1]["result"], "already")
+        self.assertIsNone(st["current"])
+        # any file can be written again (record size, compression), still only under the media folders
+        other = os.path.join(d, "notes.txt")
+        with open(other, "w") as fh:
+            fh.write("hello")
+        self.assertEqual(call("/api/rewrite", {"path": "/etc/hosts"})[0], 403)
+        self.assertEqual(call("/api/rewrite", {"path": other})[1], {"started": True})
+        for _ in range(50):
+            st = call("/api/status")[1]
+            if st["results"][-1]["path"] == other:
+                break
+            time.sleep(0.1)
+        self.assertEqual((st["results"][-1]["result"], st["results"][-1]["action"]), ("rewritten", "rewrite"))
+
+    def test_app_survey_checks_and_job(self):
+        from types import SimpleNamespace
+        from plexcache import checks
+        from plexcache.optimize import VERSION
+        from plexcache.optimizing import Optimizing
+        app = _new_app()
+        app.scan_library()
+        d = tempfile.mkdtemp(dir=TMP)
+        ok_path, todo_path, mp4 = os.path.join(d, "ok.mkv"), os.path.join(d, "todo.mkv"), os.path.join(d, "a.mp4")
+        build_mkv(ok_path, pgs_algo=0)
+        build_mkv(todo_path, pgs_algo="none")
+        with open(mp4, "wb") as fh:
+            fh.write(b"x" * 100)
+        for p in (ok_path, todo_path, mp4):
+            os.utime(p, (time.time() - 3600, time.time() - 3600))
+        app.files = [SimpleNamespace(path=p, library_key="1", kind="movie", size=1, kbps=1, library="Movies")
+                     for p in (ok_path, todo_path, mp4)]
+        comp = {"value": "zstd"}
+        app.library_records = lambda: {"1": {"rs": None, "dataset": "tank/movies", "compression": comp["value"]}}
+        app.map_path = lambda p: p
+        client = FakeOptimizer()
+        op = app.optimizing = Optimizing(app, client)
+        # The defaults: TrueNAS compression & record size on, MKV off, Plex's cover art for unmatched items only
+        self.assertEqual(op.options("1"), {"sync": True, "mkv": False, "images": "unmatched"})
+        with mock.patch("plexcache.optimize.mkv.check", side_effect=AssertionError("files aren't read")):
+            op.survey()                                         # stat() only
+        lib = op.snapshot()["libraries"]["1"]
+        # ZSTD-3 on the dataset, and no file is known to be written with it: all three to sync, any kind
+        self.assertEqual((lib["files"], lib["mkv"], lib["sync_todo"], lib["todo"]), (3, 2, 3, 3))
+        self.assertEqual(checks.check_media(app)["items"], [])   # Health doesn't repeat any of it
+        job = run_job(op)["job"]
+        self.assertEqual((job["total"], job["rewritten"], job["optimized"], job["failed"]), (3, 3, 0, 0))
+        self.assertEqual({x["action"] for x in client.sent}, {"rewrite"})  # MKV off: written again, not remuxed
+        self.assertEqual(op.snapshot()["libraries"]["1"]["todo"], 0)
+        # the record: when, the hash of the file left, the optimizer's version, the file's identity
+        saved = json.load(open(os.path.join(app.config_dir, "optimized.json")))["files"]
+        entry = saved[mp4]
+        with open(mp4, "rb") as fh:
+            self.assertEqual(entry["sha256"], hashlib.sha256(fh.read()).hexdigest())
+        self.assertEqual((entry["version"], entry["result"], entry["compression"], entry["layout"]), (VERSION, "rewritten", "zstd", None))
+        self.assertEqual(entry["ino"], os.stat(mp4).st_ino)
+        self.assertLess(abs(entry["at"] - time.time()), 30)
+        self.assertEqual(set(Optimizing(app, client).record), {ok_path, todo_path, mp4})  # kept across restarts
+        # Optimize MKV files: the two MKVs are laid out; the sync done before isn't redone
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True}}}})
+        op.survey()
+        lib = op.snapshot()["libraries"]["1"]
+        self.assertEqual((lib["mkv_done"], lib["why"]), (0, {"new": 2}))
+        client.sent.clear()
+        run_job(op)
+        # Plex didn't say whether they're matched: their cover art is kept, compressed
+        self.assertEqual([(x["action"], x["images"], x["force"]) for x in client.sent], [("optimize", "compress", False)] * 2)
+        lib = op.snapshot()["libraries"]["1"]
+        self.assertEqual((lib["mkv_done"], lib["todo"]), (2, 0))
+        self.assertEqual(op.record[ok_path]["layout"]["images"], "compress")
+        # a file replaced since (an upgrade from Radarr, say) needs doing again, laid out and synced
+        build_mkv(todo_path, pgs_algo=0, cluster=b"other")
+        op.survey()
+        self.assertEqual(op.snapshot()["libraries"]["1"]["why"], {"changed": 1, "compression": 1})
+        # a newer optimizer version: every MKV needs laying out again
+        with mock.patch("plexcache.optimizing.VERSION", VERSION + 1):
+            op.survey()
+            self.assertEqual(op.snapshot()["libraries"]["1"]["why"].get("version"), 1)
+        # Sync off, LZ4: a replaced MKV laid out right is only checked, and recorded as "already"
+        app.settings.update({"optimizer": {"libraries": {"1": {"sync": False, "mkv": True}}}})
+        comp["value"] = "lz4"
+        os.utime(todo_path, (time.time() - 3600, time.time() - 3600))
+        client.sent.clear()
+        client.result = "already"
+        run_job(op)
+        self.assertEqual([(x["path"], x["force"]) for x in client.sent], [(todo_path, False)])
+        self.assertEqual(op.record[todo_path]["result"], "already")
+        self.assertIsNone(op.record[todo_path]["compression"])   # not written by the optimizer
+        # nothing chosen: nothing applies
+        app.settings.update({"optimizer": {"libraries": {"1": {"sync": False, "mkv": False}}}})
+        op.survey()
+        self.assertEqual(op.snapshot()["libraries"]["1"]["todo"], 0)
+
+
+class OptimizerSetupTests(unittest.TestCase):
+    """Setting the optimizer up: as little to edit as possible, and Health → Plex Cache says how."""
+
+    def test_optimizer_check(self):
+        from plexcache import checks
+        from plexcache.optimizing import DEFAULT_URL, OptimizerClient
+        app = _new_app()
+        app.scan_library()
+        app.run_checks()
+        # The app makes the token itself and keeps it in its config folder, for the optimizer to read
+        token = app.optimizing.token()
+        self.assertEqual(len(token), 48)
+        self.assertEqual(app.optimizing.token(), token)                      # the same each time
+        path = os.path.join(app.config_dir, "optimizer-token")
+        self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o640")         # the apps group can read it
+        self.assertEqual(app.optimizing.client.token, token)
+        with mock.patch.dict(os.environ, {"PLEXCACHE_OPTIMIZER_URL": ""}):
+            self.assertEqual(OptimizerClient(token="x" * 20).url, DEFAULT_URL)  # the second service in the YAML
+        # Nothing answers, and TrueNAS can't be asked: add it to the YAML — no token, no environment
+        setup = app.optimizing.diagnose()
+        self.assertFalse(setup["ready"])
+        (first,) = setup["steps"]
+        self.assertEqual((first["id"], first["ok"]), ("yaml", False))
+        yaml = first["cmd"]
+        self.assertIn("  plex-cache-optimizer:", yaml)
+        self.assertNotIn("TOKEN", yaml)
+        self.assertNotIn("environment", yaml)
+        self.assertNotIn("container_name", yaml)                              # a test copy next to the real app can't clash
+        self.assertIn('test: ["CMD", "python", "-m", "plexcache.healthcheck"]', yaml)  # its own port, whatever the image says
+        self.assertIn(":/config:ro", yaml)                                      # the settings folder, read-only
+        # the host path from the app's own mount: the dataset's folder under /mnt, plus where in it the mount starts
+        self.assertIn(f"/mnt/tank/plexfiles/plexfiles:{MEDIA}", yaml)
+        self.assertNotIn(f"{MEDIA}/TV\n", yaml)                                 # TV comes with the folder it's in
+        # Health only says so, and links to the Optimizer page (where the steps are)
+        it = checks._optimizer_check(app)
+        self.assertEqual((it["status"], en(it["title"]), it["link"]["href"]), ("info", "Optimizer: not set up", "/optimizer"))
+        self.assertNotIn("fix_cmd", {k: v for k, v in it.items() if v})
+        self.assertFalse(app.optimizing.snapshot()["configured"])
+
+    def test_setup_steps(self):
+        """Each step is checked in order; the first that fails says what to do."""
+        from plexcache import checks
+        from plexcache.optimizing import Optimizing
+        app = _new_app()
+        op = Optimizing(app)
+        ids = lambda: [(x["id"], x["ok"]) for x in op.diagnose()["steps"]]
+        me = {"id": "abc123" + "0" * 58, "service_name": "plex-cache-dev", "state": "running"}
+        containers = {"app": "plex-cache-dev", "me": "plex-cache-dev", "optimizer": None}
+        hz = {"error": "[Errno 8] nodename nor servname provided"}
+        st = {"error": "not set up"}
+        with mock.patch.dict(os.environ, {"PLEXCACHE_OPTIMIZER_URL": ""}), \
+                mock.patch.object(op, "_containers", lambda: containers), \
+                mock.patch.object(op.client, "healthz", lambda: hz), \
+                mock.patch.object(op.client, "status", lambda fresh=False: st), \
+                mock.patch.object(checks, "optimizer_code_mount", lambda: "/mnt/ssd/AppConfigs/plex-cache-dev/src/plexcache"):
+            # 1. TrueNAS sees the app, without an optimizer service: paste it (with the test copy's code mount)
+            self.assertEqual(ids(), [("yaml", False)])
+            step = op.setup["steps"][0]
+            self.assertIn("plex-cache-dev has no optimizer service", en(step["detail"]))
+            self.assertIn("- /mnt/ssd/AppConfigs/plex-cache-dev/src/plexcache:/app/plexcache:ro", step["cmd"])
+            # 2. there, but stopped right after starting: the test copy's code isn't mounted into it
+            containers["optimizer"] = {"service_name": "plex-cache-optimizer", "state": "exited", "targets": ["/config", "/data"],
+                                       "has_config": True}
+            self.assertEqual(ids(), [("yaml", True), ("running", False)])
+            step = op.setup["steps"][1]
+            self.assertIn("exited", en(step["detail"]))
+            self.assertEqual(step["cmd"], "      - /mnt/ssd/AppConfigs/plex-cache-dev/src/plexcache:/app/plexcache:ro")
+            with mock.patch.object(checks, "optimizer_code_mount", lambda: None):
+                self.assertIn("older than the optimizer", en(op.diagnose()["steps"][1]["fix"]))
+            # …the code is mounted already: not suggested again — its logs say why
+            containers["optimizer"]["targets"].append("/app/plexcache")
+            step = op.diagnose()["steps"][1]
+            self.assertEqual(step["cmd"], "")
+            self.assertIn("View Logs", en(step["fix"]))
+            # running, answering, but the image's built-in health check looks at the wrong port: TrueNAS
+            # shows "starting" (then "unhealthy") and keeps the app deploying — not a mount problem
+            containers["optimizer"] = {"service_name": "plex-cache-optimizer", "state": "starting", "healthcheck": False}
+            hz = {"service": "optimizer", "version": 1, "token": True}
+            self.assertEqual(ids(), [("yaml", True), ("running", True), ("answers", True), ("health", False)])
+            self.assertIn("plexcache.healthcheck", op.setup["steps"][-1]["cmd"])
+            containers["optimizer"]["healthcheck"] = True                         # its own check, not run yet
+            self.assertEqual(en(op.diagnose()["steps"][-1]["title"]), "Still starting")
+            hz = {"error": "timed out"}
+            # 3. running, but not answering
+            containers["optimizer"] = {"service_name": "optimizer", "state": "running"}
+            hz = {"error": "timed out"}
+            self.assertEqual(ids(), [("yaml", True), ("running", True), ("answers", False)])
+            self.assertEqual(op.client.url, "http://optimizer:8643")         # a renamed service is followed
+            # 4. answering, without the token: the settings folder isn't mounted
+            hz = {"service": "optimizer", "version": 1, "token": False, "token_problem": "missing", "token_file": "/config/optimizer-token"}
+            self.assertEqual(ids()[-1], ("token", False))
+            self.assertIn(":/config:ro", op.setup["steps"][-1]["cmd"])
+            hz = dict(hz, token_problem="unreadable", uid=1000)
+            self.assertIn("group_add", en(op.diagnose()["steps"][-1]["fix"]))
+            # 5. a token, but not this app's
+            hz = dict(hz, token=True, token_problem=None)
+            st = {"error": "HTTP Error 401: Unauthorized"}
+            self.assertEqual(en(op.diagnose()["steps"][-1]["title"]), "The optimizer has a different token")
+            # 6. tools, 7. media
+            st = {"missing": ["mkvmerge"], "roots": []}
+            self.assertEqual(ids()[-1], ("tools", False))
+            st = {"missing": [], "roots": []}
+            self.assertEqual(ids()[-1], ("media", False))
+            st = {"missing": [], "roots": ["/data"]}
+            self.assertEqual(ids(), [(x, True) for x in ("yaml", "running", "answers", "token", "tools", "media")])
+            self.assertTrue(op.setup["ready"])
+            # without TrueNAS it can't tell "not in the YAML" from "stopped": it says both
+            containers = None
+            hz = {"error": "Name does not resolve"}
+            self.assertEqual(ids(), [("yaml", False)])
+            self.assertIn("If it's already there", en(op.setup["steps"][0]["fix"]))
+        # Health: ready, or what's left, in one line
+        app.optimizing = op
+        with mock.patch.object(op, "diagnose", lambda: {"ready": False, "steps": [
+                {"id": "yaml", "ok": True, "title": "In the app's YAML"}, {"id": "running", "ok": False, "title": "The optimizer isn't running"}]}):
+            it = checks._optimizer_check(app)
+        self.assertEqual((it["status"], en(it["title"]), en(it["detail"])), ("warn", "Optimizer: not working yet", "The optimizer isn't running"))
+
+    def test_own_container_and_its_app(self):
+        from plexcache.optimizing import Optimizing
+        cid = "c3ce07a94a53" + "b" * 52
+        d = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(d, "self"))
+        with open(os.path.join(d, "self/mountinfo"), "w") as fh:
+            fh.write(f"500 22 0:60 /var/lib/docker/containers/{cid}/hostname /etc/hostname rw - zfs boot-pool/x rw\n")
+        with mock.patch.object(zfs, "PROC", d):
+            self.assertEqual(zfs.own_container_id(), cid)
+            app = _new_app()
+            op = Optimizing(app)
+
+            class TN:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    pass
+
+                def apps(self, config=False):
+                    yaml = {"services": {"plex-cache-optimizer": {
+                        "volumes": ["/mnt/ssd/x/config:/config", "/mnt/ssd/x/src/plexcache:/app/plexcache",
+                                    {"type": "bind", "source": "/mnt/tank2/plexfiles", "target": "/data"}],
+                        "environment": {"PLEXCACHE_PASSWORD": "secret"}}}}
+                    return [{"name": "plex", "active_workloads": {"container_details": [{"id": "f" * 64, "service_name": "plex"}]}},
+                            dict({"name": "plex-cache-dev", "active_workloads": {"container_details": [
+                                {"id": cid, "service_name": "plex-cache-dev", "state": "running"},
+                                {"id": "e" * 64, "service_name": "plex-cache-optimizer", "state": "exited"}]}},
+                                **({"config": yaml} if config else {}))]
+            app.truenas = lambda: TN()
+            got = op._containers()
+        self.assertEqual((got["app"], got["me"], got["optimizer"]["state"]), ("plex-cache-dev", "plex-cache-dev", "exited"))
+        # the optimizer's volumes and health check from the YAML — nothing else is kept from it
+        self.assertEqual((got["optimizer"]["targets"], got["optimizer"]["healthcheck"]), (["/config", "/app/plexcache", "/data"], False))
+        self.assertNotIn("secret", json.dumps(got))
+
+    def test_service_reads_the_apps_token_and_its_own_mounts(self):
+        from plexcache.optimize import server as osrv
+        d = tempfile.mkdtemp(dir=TMP)
+        token_file = os.path.join(d, "optimizer-token")
+        svc = osrv.Service([d], token_file=token_file)
+        self.assertEqual(svc.token, "")                                         # not made yet: refuses everything
+        with open(token_file, "w") as fh:
+            fh.write("a-token-made-by-the-app-1234\n")
+        self.assertEqual(svc.token, "a-token-made-by-the-app-1234")             # picked up without a restart
+        self.assertEqual(osrv.Service([d], "set-in-the-yaml-123456", token_file).token, "set-in-the-yaml-123456")
+        # By default it may write what the YAML mounts writable: not its own filesystems, not /config
+        ml = [{"root": "/", "mountpoint": "/", "fstype": "overlay", "source": "overlay", "options": ["rw"]},
+              {"root": "/", "mountpoint": d, "fstype": "zfs", "source": "tank/plexfiles", "options": ["rw", "noatime"]},
+              {"root": "/", "mountpoint": "/config", "fstype": "zfs", "source": "tank/apps", "options": ["ro"]},
+              {"root": "/", "mountpoint": "/tmp", "fstype": "tmpfs", "source": "tmpfs", "options": ["rw"]},
+              {"root": "/h", "mountpoint": "/etc/hosts", "fstype": "zfs", "source": "boot", "options": ["rw"]},
+              {"root": "/", "mountpoint": "/proc", "fstype": "proc", "source": "proc", "options": ["rw"]}]
+        self.assertEqual(zfs.writable_mounts(ml), [d])
+        ml[1]["options"] = ["ro"]
+        self.assertEqual(zfs.writable_mounts(ml), [])                           # read-only media: nothing to write
+        # where a container folder is on the host, for the YAML Health shows
+        self.assertEqual(zfs.host_path(d + "/Movies", [dict(ml[1], root="/media")]), "/mnt/tank/plexfiles/media/Movies")
+        self.assertIsNone(zfs.host_path("/tmp", ml))
+
+
+class CoverArtTests(unittest.TestCase):
+    """Lossless cover art compression, and the three cover art choices."""
+
+    def tools(self):
+        from plexcache.optimize import tools
+        bundle = "/Applications/MKVToolNix.app/Contents/MacOS"
+        if os.path.isdir(bundle) and not os.environ.get("PLEXCACHE_TOOLS_PATH"):
+            os.environ["PLEXCACHE_TOOLS_PATH"] = bundle
+        if not tools.find("ffmpeg"):
+            self.skipTest("ffmpeg isn't installed")
+        return tools
+
+    def test_compress_images(self):
+        from plexcache.optimize import images
+        tools = self.tools()
+        d = tempfile.mkdtemp(dir=TMP)
+        for name, args in (("a.png", ["-compression_level", "0"]), ("a.jpg", ["-huffman", "default", "-q:v", "3"])):
+            tools.run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=300x450", "-frames:v", "1", *args,
+                      os.path.join(d, name))
+        with open(os.path.join(d, "a.webp"), "wb") as fh:
+            fh.write(b"RIFF\0\0\0\0WEBPVP8 ")
+        self.assertEqual([images.kind(os.path.join(d, n)) for n in ("a.png", "a.jpg", "a.webp")], ["png", "jpeg", None])
+        self.assertEqual(images.compress(os.path.join(d, "a.webp"), os.path.join(d, "o"))["why"], "not PNG or JPEG")
+        for name, tool in (("a.png", "oxipng"), ("a.jpg", "jpegtran")):
+            src, out = os.path.join(d, name), os.path.join(d, "min-" + name)
+            r = images.compress(src, out)
+            if not tools.find(tool):
+                self.assertEqual((r["path"], r["why"]), (src, f"{tool} isn't installed"))
+                continue
+            self.assertEqual(r["path"], out, r)
+            self.assertLess(r["after"], r["before"])
+            self.assertEqual(images.pixels(out), images.pixels(src))      # lossless
+            again = images.compress(out, out + ".2")                     # nothing more to gain
+            self.assertEqual(again["path"], out)
+        # an animated PNG is left alone (oxipng would keep only its first frame)
+        apng = os.path.join(d, "anim.png")
+        with open(apng, "wb") as fh:
+            fh.write(images.PNG_MAGIC + b"\0\0\0\x08acTL" + b"\0" * 12 + b"IDAT")
+        self.assertEqual(images.compress(apng, apng + ".o")["why"], "animated PNG")
+
+    def test_settings(self):
+        from plexcache.config import Settings, SettingsError
+        st = Settings(tempfile.mkdtemp(dir=TMP))
+        st.update({"optimizer": {"libraries": {"1": {"images": "keep"}, "2": {"images": "plex", "mkv": True}, "3": {"sync": False},
+                                               "4": {"images": "unmatched"}}}})
+        self.assertEqual(st.section("optimizer")["libraries"],
+                         {"1": {"images": "compress"}, "2": {"images": "plex", "mkv": True}, "3": {"sync": False},
+                          "4": {"images": "unmatched"}})
+        for bad in ({"images": "sometimes"}, {"mkv": "yes"}, {"other": 1}):
+            with self.assertRaises(SettingsError):
+                st.update({"optimizer": {"libraries": {"1": bad}}})
+
+    def test_posters_from_plex(self):
+        import xml.etree.ElementTree as ET
+        from plexcache.plex import poster_of
+        self.assertEqual(poster_of(ET.fromstring('<Video type="movie" thumb="/library/metadata/5/thumb/17"/>')),
+                         "/library/metadata/5/thumb/17")
+        self.assertEqual(poster_of(ET.fromstring('<Video type="episode" thumb="/e" parentThumb="/s" grandparentThumb="/g"/>')), "/s")
+        self.assertEqual(poster_of(ET.fromstring('<Video type="episode" thumb="/e" grandparentThumb="/g"/>')), "/g")
+        # matched to an online entry, or Plex's own "local" item
+        from plexcache.plex import matched_of
+        self.assertTrue(matched_of(ET.fromstring('<Video guid="plex://movie/5d776b59ad5437001f79c6f8"/>')))
+        self.assertTrue(matched_of(ET.fromstring('<Video guid="com.plexapp.agents.imdb://tt0048280?lang=en"/>')))
+        self.assertFalse(matched_of(ET.fromstring('<Video guid="local://12345"/>')))
+        self.assertFalse(matched_of(ET.fromstring('<Video guid="com.plexapp.agents.none://abc?lang=xn"/>')))
+        self.assertIsNone(matched_of(ET.fromstring('<Video/>')))
+        # what cover art becomes under "unmatched"
+        from plexcache.optimizing import Optimizing
+        self.assertEqual([Optimizing.cover_for("unmatched", p, m) for p, m in (("/p", False), ("", False), ("/p", True), ("/p", None))],
+                         ["plex", "compress", "remove", "compress"])
+        self.assertEqual(Optimizing.cover_for("remove", "/p", False), "remove")
+
+    def test_compression_is_known_only_for_files_the_optimizer_wrote(self):
+        from types import SimpleNamespace
+        from plexcache.optimizing import Optimizing
+        app = _new_app()
+        d = tempfile.mkdtemp(dir=TMP)
+        path = os.path.join(d, "song.flac")
+        with open(path, "wb") as fh:
+            fh.write(b"x" * 100)
+        os.utime(path, (time.time() - 3600, time.time() - 3600))
+        app.files = [SimpleNamespace(path=path, library_key="1", kind="audio", size=1, kbps=1, library="Music")]
+        comp = {"value": "lz4"}
+        app.library_records = lambda: {"1": {"rs": None, "dataset": "tank/music", "compression": comp["value"]}}
+        app.map_path = lambda p: p
+        client = FakeOptimizer()
+        op = app.optimizing = Optimizing(app, client)
+        lib = lambda: op.snapshot()["libraries"]["1"]
+        # LZ4, in the right record size, never touched by the optimizer: not Complete — its compression isn't known
+        op.survey()
+        self.assertEqual((lib()["todo"], lib()["why"]), (1, {"compression": 1}))
+        run_job(op)
+        self.assertEqual((lib()["todo"], op.record[path]["compression"], op.record[path]["written"]), (0, "lz4", True))
+        # the dataset changes to ZSTD-3: written with LZ4, so to do again
+        comp["value"] = "zstd"
+        op.survey()
+        self.assertEqual(lib()["why"], {"compression": 1})
+        # nothing chosen at all: nothing to do
+        app.settings.update({"optimizer": {"libraries": {"1": {"sync": False}}}})
+        op.survey()
+        self.assertEqual(lib()["todo"], 0)
+
+    def test_sync_from_plex(self):
+        from types import SimpleNamespace
+        from plexcache.optimizing import Optimizing
+        app = _new_app()
+        d = tempfile.mkdtemp(dir=TMP)
+        path = os.path.join(d, "film.mkv")
+        build_mkv(path, pgs_algo=0, tail_atts=[COVER, FONT], tail=("Attachments", "Cues", "Tags"))
+        os.utime(path, (time.time() - 3600, time.time() - 3600))
+        f = SimpleNamespace(path=path, library_key="1", kind="movie", size=1, kbps=1, library="Movies",
+                            poster="/library/metadata/5/thumb/100")
+        app.files = [f]
+        app.library_records = lambda: {"1": {"rs": None, "dataset": "tank/movies", "compression": "lz4"}}
+        app.map_path = lambda p: p
+        fetched = []
+        app.plex = lambda timeout=None: SimpleNamespace(image=lambda p: fetched.append(p) or b"\x89PNG poster")
+        client = FakeOptimizer()
+        op = app.optimizing = Optimizing(app, client)
+        lib = lambda: op.snapshot()["libraries"]["1"]
+        # Compress Existing Coverart
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "compress"}}}})
+        run_job(op)
+        self.assertEqual((client.sent[-1]["images"], client.sent[-1]["cover"]), ("compress", None))
+        # both choices at once: one pass through the optimizer, which writes the file in the dataset's
+        # record size and compression as it goes — no separate rewrite
+        self.assertEqual([(x["action"], x["force"]) for x in client.sent], [("optimize", True)])
+        self.assertEqual((op.record[path]["written"], lib()["todo"]), (True, 0))
+        self.assertEqual(lib()["mkv_done"], 1)
+        # Compress and Embed Plex Coverart: done for another choice, so again — with the poster fetched and sent
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "plex"}}}})
+        op.survey()
+        self.assertEqual((lib()["mkv_done"], lib()["why"]), (0, {"cover": 1}))
+        run_job(op)
+        self.assertEqual((client.sent[-1]["images"], client.sent[-1]["cover"]), ("plex", b"\x89PNG poster"))
+        self.assertEqual(fetched, ["/library/metadata/5/thumb/100"])
+        self.assertEqual(lib()["mkv_done"], 1)
+        self.assertEqual(op.record[path]["layout"]["cover"], "/library/metadata/5/thumb/100")
+        # a new poster in Plex: the file needs it again
+        f.poster = "/library/metadata/5/thumb/200"
+        op.survey()
+        self.assertEqual(lib()["why"], {"cover": 1})
+        # back to Compress: a file with Plex's poster, compressed, is fine as it is
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "compress"}}}})
+        op.survey()
+        self.assertEqual(lib()["mkv_done"], 1)
+        # Strip Cover Art: done for another choice
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "remove"}}}})
+        op.survey()
+        self.assertEqual(lib()["why"], {"images": 1})
+        # Only Embed Plex Cover Art for Unmatched Items (the default): an unmatched item gets Plex's poster…
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True}}}})
+        f.matched = False
+        op.survey()
+        self.assertEqual(lib()["why"], {"cover": 1})
+        run_job(op)
+        self.assertEqual((client.sent[-1]["images"], client.sent[-1]["cover"]), ("plex", b"\x89PNG poster"))
+        self.assertEqual(lib()["todo"], 0)
+        # …and once Plex matches it, its cover art is taken out (Plex fetches it anyway)
+        f.matched = True
+        op.survey()
+        self.assertEqual(lib()["why"], {"images": 1})
+        run_job(op)
+        self.assertEqual((client.sent[-1]["images"], client.sent[-1]["cover"]), ("remove", None))
+        self.assertEqual(lib()["todo"], 0)
+
+
 class HealthBranchTests(unittest.TestCase):
     """The less common Health results, one situation at a time."""
 
@@ -3124,13 +3964,31 @@ class HealthBranchTests(unittest.TestCase):
         # caching off, but the record size is still checked: it matters to Plex either way
         r = self.row(self.ds(libraries=[], keys=[], off=["Films"], kinds=["movie"],
                              props={"primarycache": "metadata", "secondarycache": "all", "recordsize": 131072},
+                             blocks={"checked": 10, "single": 0, "sizes": {"1048576": 10}}))
+        # the setting itself is a separate check from whether the files use it
+        self.assertEqual((r["cache"], r["l2arc"], r["file_rs"]["status"], r["file_rs"]["badge"]), (None, None, "warn", "Some don't match"))
+        self.assertEqual(r["fixes"], [])                                  # what to do is in the column's info box
+        self.assertEqual(r["file_rs"]["text"], "10 of 10 files in 1M")
+        # files that all match: nothing to fix here (whether 128K suits the library is under Libraries)
+        r = self.row(self.ds(libraries=[], keys=[], off=["Films"], kinds=["movie"],
+                             props={"primarycache": "metadata", "secondarycache": "all", "recordsize": 131072},
                              blocks={"checked": 10, "single": 0, "sizes": {"131072": 10}}))
-        self.assertEqual((r["cache"], r["l2arc"], r["recordsize"]["status"]), (None, None, "warn"))
-        self.assertEqual([f["title"] for f in r["fixes"]], ["Record size for tank/x", "Then rewrite the existing files on tank/x"])
-        self.assertIn("(Films)", r["fixes"][0]["detail"])
-        # no TrueNAS API: the setting is unknown, but the files still tell how they were written
+        self.assertEqual((r["file_rs"]["status"], r["file_rs"]["badge"], r["fixes"]), ("pass", "All files match", []))
+        # no TrueNAS API and not readable from the dataset either: not checked, never guessed
         r = self.row(self.ds(kinds=["tv"], blocks={"checked": 10, "single": 0, "sizes": {"131072": 8, "1048576": 2}}), tn_ok=False)
-        self.assertEqual(r["recordsize"], {"status": "info", "text": "Setting not checked · ~80% of a sample at 128K"})
+        self.assertEqual(r["recordsize"], {"status": "info", "text": "Not checked"})
+        # libraries that need different record sizes on one dataset: split it, saying how
+        with mock.patch.object(self.checks, "_shared_record_check",
+                               return_value={"needs": [], "move": ["Audiobooks"], "keep": 1024 * 1024}):
+            r = self.row(self.ds())
+        self.assertEqual((r["recordsize"]["status"], en(r["recordsize"]["badge"]), r["recordsize"]["text"]), ("warn", "Split Dataset", "1M"))
+        self.assertEqual([en(x) for x in r["recordsize"]["lines"]], ["Move Audiobooks to a dataset of its own; 1M suits the rest."])
+        # compression: the badge says what's used; ZSTD-3 is all that passes
+        self.assertEqual((r["compression"]["status"], r["compression"]["text"]), ("info", "Not checked"))
+        r = self.row(self.ds(props={"primarycache": "all", "secondarycache": "all", "recordsize": 1048576, "compression": "lz4"}))
+        self.assertEqual((r["compression"]["status"], r["compression"]["badge"], en(r["compression"]["text"])), ("warn", "lz4", "Use ZSTD-3"))
+        r = self.row(self.ds(props={"primarycache": "all", "secondarycache": "all", "recordsize": 1048576, "compression": "zstd"}))
+        self.assertEqual((r["compression"]["status"], r["compression"]["badge"]), ("pass", "zstd"))
         r = self.row(self.ds(dataset=None, fstype="nfs"))
         self.assertEqual(r["cache"]["text"], "Not ZFS (nfs)")
         self.assertIn("not on ZFS here", r["fixes"][0]["title"])
@@ -3177,7 +4035,7 @@ class HealthBranchTests(unittest.TestCase):
         self.app.ram_budget = lambda: dict(real(), source="ram")
         self.assertIn("half of RAM", self.checks._ram_check(self.app)[0]["detail"])
         self.app.ram_budget = real
-        self.assertEqual(self.checks._recordsize_check(self.app, "t", None, None), ("info", []))
+        self.assertEqual(self.checks._blocks_check("t", None, None), "info")
         self.assertEqual(self.checks._l2arc_tuning_checks(self.app, {"l2arc_mfuonly": None})[0]["title"], "L2ARC settings")
         self.assertEqual((self.checks._fmt_bytes(None), self.checks._fmt_bytes(512)), ("unknown", "512 B"))
 
@@ -3556,7 +4414,6 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(post("/api/settings", {"warmup": {"reserve_gb": "20"}})[0], 400)
             self.assertEqual(post("/api/settings", {"warmup": {"reserve_gb": 20}})[0], 200)
             self.assertEqual(post("/api/checks", {"rescan": "yes"})[0], 400)
-            self.assertEqual(post("/api/blockscan", {"dataset": ["x"]})[0], 400)
             self.assertEqual(post("/login", {"username": ["a"], "password": "b"})[0], 200)  # login off: always fine
             # A prefetch choice must be for a library Prefetch covers, from the web UI as from MQTT
             tv = next(l for l in app.libraries if l["kind"] == "tv")
@@ -3688,6 +4545,11 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertTrue(newer("0.14.0", "0.13.9"))
         self.assertTrue(newer("1.0", "0.99.9"))
         self.assertFalse(newer("0.13.0", "0.13.0"))
+        # a pre-release comes before its release (so a beta is told when the release is out)
+        self.assertTrue(newer("0.16.0", "0.16.0-beta.1"))
+        self.assertFalse(newer("0.16.0-beta.1", "0.16.0"))
+        self.assertTrue(newer("0.16.0-beta.2", "0.16.0-beta.1"))
+        self.assertTrue(newer("0.16.0-beta.1", "0.15.0"))
         self.assertFalse(newer("0.12.9", "0.13.0"))
         self.assertEqual(parse_version("__version__ = '1.2.3'\n"), "1.2.3")
         self.assertIsNone(parse_version("nothing here"))
@@ -4444,11 +5306,13 @@ class CacheModeTests(unittest.TestCase):
 
         app = FakeApp(False, "present")
         titles = lambda: {en(i["title"]): i["status"] for i in checks.check_cache_mode(app)["items"]}
-        self.assertEqual(titles(), {"L2ARC caching": "pass", "Settings used as chosen": "pass"})
+        self.assertEqual(titles(), {"L2ARC caching": "pass", "Choices that need an SSD cache": "pass", "Optimizer": "info"})
+        self.assertEqual(en(checks.check_cache_mode(app)["title"]), "Plex Cache")
         app.fallbacks.note("x", M("Prefetch"), "Whole library", "Whole season")
         group = checks.check_cache_mode(app)
-        fell = [i for i in group["items"] if en(i["title"]) == "Settings not used as chosen"][0]
+        fell = [i for i in group["items"] if en(i["title"]) == "Choices that need an SSD cache"][0]
         self.assertEqual(fell["status"], "warn")
+        self.assertIn("warm-up schedule", en(fell["help"]))                # what it's about, behind an ⓘ
         self.assertIn("Prefetch (Whole library → Whole season)", en(fell["detail"]))
         app.status = "unknown"
         self.assertEqual(titles()["L2ARC not checked yet"], "info")

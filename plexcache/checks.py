@@ -5,8 +5,11 @@ from __future__ import annotations
 import os
 import time
 
+from . import zfs
 from .i18n import Fixed, M, join
 from .plex import PlexError
+from .optimizing import HEALTHCHECK_YAML, ZSTD3, not_set_up
+from .warmup import recommend_recordsize
 
 GB = 1e9
 GiB = 1024 ** 3
@@ -21,8 +24,12 @@ def _fmt_bytes(n: float | None) -> M:
     return M("{n} B", n=round(n))
 
 
-def item(status: str, title: str, detail: str = "", fix: str = "", fix_cmd: str = "") -> dict:
-    return {"status": status, "title": title, "detail": detail, "fix": fix, "fix_cmd": fix_cmd}
+def item(status: str, title: str, detail: str = "", fix: str = "", fix_cmd: str = "", help: str = "") -> dict:
+    """One Health result. ``help``: a longer explanation, behind an ⓘ next to the title."""
+    out = {"status": status, "title": title, "detail": detail, "fix": fix, "fix_cmd": fix_cmd}
+    if help:
+        out["help"] = help
+    return out
 
 
 STATUS_MAP = {"ok": "pass", "warn": "warn", "fail": "fail"}
@@ -95,9 +102,13 @@ def check_media(app) -> dict:
             row["detail"] = M("Files readable")
         rows.append(row)
     items = []
+    # Record size is a column of the table: its info box says what to do about a warning, so it
+    # isn't repeated as an item below it. (Compression is per dataset: Media datasets.)
+    for row in rows:
+        row["record"] = library_record(app, row["key"])
     if not rows:
         items.append(item("info", M("No libraries checked yet"), M("Connect Plex first.")))
-    return {"id": "media", "title": M("Media access"),
+    return {"id": "media", "title": M("Libraries"),
             "hint": M("For each library folder, a real file is opened through this app's mounts."),
             "items": items, "table": rows}
 
@@ -121,7 +132,7 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
     l2_wanted = not s["general"]["no_l2arc"]  # caching is planned around an L2ARC unless switched off
     name = d["dataset"] or d["mountpoint"]
     row = {"dataset": name, "mountpoint": d["mountpoint"], "pool": d["pool"], "libraries": d["libraries"],
-           "off": d["off"], "keys": d["keys"], "in_use": None, "cache": None, "recordsize": None, "l2arc": None,
+           "off": d["off"], "keys": d["keys"], "in_use": None, "cache": None, "recordsize": None, "file_rs": None, "compression": None, "l2arc": None,
            "fixes": []}
     fixes = row["fixes"]
 
@@ -158,18 +169,12 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
     props = d.get("props")
     pool = pools.get(d["pool"])
 
-    need = required_recordsize(d.get("kinds"))
-    # A finished "Check every file" beats the sample taken on each health check.
-    scan = (getattr(app, "block_scans", {}) or {}).get(ds) or {}
-    if scan.get("complete") and scan.get("checked"):
-        d = dict(d, blocks=dict(scan, full=True))
+    # The record size: from TrueNAS, or failing that from the dataset itself (never guessed)
+    rs = (props or {}).get("recordsize") if tn_ok else None
+    rs = rs or (zfs.recordsize(d.get("mountpoint")) if d.get("fstype") == "zfs" else None)
     # --- primarycache / secondarycache
     if not tn_ok or props is None:
         row["cache"] = cell("info", M("Not checked")) if cached else None
-        # Without the API the setting is unknown, but the files themselves still show how they were written.
-        note = _blocks_note(d.get("blocks"), need)
-        if note and not note.endswith("match"):
-            row["recordsize"] = cell("info", M("Setting not checked{note}", note=note))
     elif not cached:
         pass  # only the record size below
     else:
@@ -212,12 +217,39 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
         else:
             row["cache"] = cell("pass", f"primarycache=all, secondarycache={sec}")
 
-    # --- recordsize: checked for every library, cached or not (it's about how well the files read at all)
-    rs = (props or {}).get("recordsize") if tn_ok else None
+    # --- record size, two checks, for every library cached or not (it's about how well the files
+    # read at all). What to do about a warning is in each column's info box.
+    # 1. The setting: does it suit every library on the dataset (each one's recommended size or
+    #    second best), and can one size suit them all?
+    keys = (d.get("keys") or []) + (d.get("off_keys") or [])
     if rs:
-        st, its = _recordsize_check(app, ds, rs, pool, libs, d.get("kinds"), d.get("blocks"))
-        row["recordsize"] = cell(st, M("{size}{note}", size=_fmt_rs(rs), note=_blocks_note(d.get("blocks"), need)))
-        fixes.extend(its)
+        titles = {str(lib["key"]): lib.get("title") or str(lib["key"]) for lib in getattr(app, "libraries", []) or []}
+        unsuited = [(titles.get(str(k), str(k)), r) for k in keys for r in [library_record(app, k, rs)] if r["status"] == "warn"]
+        lines = [M("Doesn't suit {library} ({best} or {alt})", library=t, best=_fmt_rs(r["best"]), alt=_fmt_rs(r["alt"]))
+                 for t, r in unsuited]
+        shared = _shared_record_check(app, ds, keys)
+        if shared:
+            # one record size per dataset, and these libraries need different ones
+            row["recordsize"] = cell("warn", _fmt_rs(rs), badge=M("Split Dataset"))
+            row["recordsize"]["lines"] = [M("Move {libraries} to a dataset of its own; {keep} suits the rest.",
+                                            libraries=join(shared["move"]), keep=_fmt_rs(shared["keep"]))]
+        else:
+            row["recordsize"] = cell("warn" if lines else "pass", _fmt_rs(rs))
+            row["recordsize"]["lines"] = lines
+    else:
+        row["recordsize"] = cell("info", M("Not checked"))
+    # 2. The files: is every one written in blocks of that size? (A new record size only applies to
+    #    files written after it was set.)
+    st = _blocks_check(ds, rs, d.get("blocks"), libs)
+    note = _files_note(d.get("blocks"), rs) if rs else ""
+    row["file_rs"] = (cell("info", M("Not checked")) if st == "info" or not note else
+                      cell("pass", note, badge=M("All files match")) if st == "pass" else
+                      cell("warn", note, badge=M("Some don't match")))
+
+    # --- compression: always the same advice (ZSTD-3), whatever is on the dataset
+    comp = (props or {}).get("compression") if tn_ok else None
+    row["compression"] = (cell("info", M("Not checked")) if not comp else
+                          cell("pass", "", badge=comp) if comp in ZSTD3 else cell("warn", M("Use ZSTD-3"), badge=comp))
 
     # --- L2ARC on this dataset's pool
     if not cached:
@@ -253,7 +285,7 @@ def check_datasets(app) -> dict:
         why = (M("Can't check — no library folder is readable yet, so there's nothing to check.")
                if app.libraries else M("Can't check — Plex isn't connected yet."))
         items.append(item("info", M("Media datasets: not checked yet"), why,
-                          M("Fix Media access first (System → Media mappings).") if app.libraries else M("Open System → Plex.")))
+                          M("Fix the problems under Libraries first (System → Media mappings).") if app.libraries else M("Open System → Plex.")))
     elif not tn_ok:
         items.append(item("info", M("Dataset settings: not checked"),
                           M("Cache settings, record size and L2ARC devices need the TrueNAS API (see TrueNAS & ZFS).") if tn_set
@@ -324,29 +356,23 @@ def _ram_check(app) -> list[dict]:
     return [item("pass", M("RAM for Now Playing Cache and Prefetch"), M("{base}; with {reserve}, {limits}", base=base, reserve=reserve, limits=limits))]
 
 
-L2ARC_HEADER_BYTES = 96  # RAM used per block held in L2ARC (roughly; 70–100 B depending on OpenZFS version)
 PERSIST_HINT = M("To keep it after a reboot, add it (without sudo — these run as root) in TrueNAS under System → Advanced Settings → "
                  "Init/Shutdown Scripts (Type: Command, When: Post Init).")
 
 
-def _blocks_note(blocks: dict | None, need: int):
-    """How the files compare with what the dataset needs, saying whether that's a sample:
-    " · 300 sampled files match", " · ~62% of a sample at 128K", " · all 21,604 files match",
-    " · 1,203 of 21,604 files at 128K"."""
+def _files_note(blocks: dict | None, rs: int):
+    """The file record size cell: "21,604 files in 1M", or "1,203 of 21,604 files in 128K" (the
+    most common other size). Files that fit in one block don't count."""
     if not blocks or not blocks.get("checked"):
         return ""
     multi = blocks["checked"] - blocks.get("single", 0)
-    old = {int(bs): n for bs, n in (blocks.get("sizes") or {}).items() if int(bs) < need}
     if not multi:
-        return ""
-    full = blocks.get("full")
-    if not old:
-        return (M(" · all {n} files match", n=blocks["checked"]) if full
-                else M(" · {n} sampled files match", n=blocks["checked"]))
-    common = max(old, key=old.get)
-    if full:
-        return M(" · {old} of {n} files at {size}", old=sum(old.values()), n=blocks["checked"], size=_fmt_rs(common))
-    return M(" · ~{pct}% of a sample at {size}", pct=round(sum(old.values()) / multi * 100), size=_fmt_rs(common))
+        return M("{n} files, each smaller than a record", n=blocks["checked"])
+    other = {int(bs): n for bs, n in (blocks.get("sizes") or {}).items() if int(bs) != rs and n}
+    if not other:
+        return M("{n} files in {size}", n=multi, size=_fmt_rs(rs))
+    common = max(other, key=other.get)
+    return M("{old} of {n} files in {size}", old=sum(other.values()), n=multi, size=_fmt_rs(common))
 
 
 def _fmt_rs(n: int) -> str:
@@ -354,13 +380,6 @@ def _fmt_rs(n: int) -> str:
 
 
 MiB = 1024 * 1024
-OLD_BLOCKS_WARN = 0.10  # share of (multi-block) files written with smaller blocks worth a warning
-
-
-def required_recordsize(kinds) -> int:
-    """Movies and TV need 1M; a dataset holding only audio is fine with 512K or 1M."""
-    kinds = set(kinds or ())
-    return 512 * 1024 if kinds and kinds <= {"audio"} else MiB
 
 
 def rewrite_cmd(ds: str) -> str:
@@ -368,78 +387,63 @@ def rewrite_cmd(ds: str) -> str:
     return f"curl -fsSO {{APP}}/tools/rewrite_blocks.py && sudo python3 rewrite_blocks.py {ds}"
 
 
-def _recordsize_check(app, ds: str, recordsize: int | None, pool: dict | None,
-                      libs: str = "", kinds=None, blocks: dict | None = None) -> tuple[str, list[dict]]:
-    """Media files are big and read in order, so large records suit them: fewer blocks
-    means less work per read and much less RAM spent indexing what's in L2ARC.
-    Video needs 1M; audio-only datasets may use 512K (tracks are small and warm-up caches
-    whole blocks, so 512K wastes less SSD on the first seconds of each song).
-
-    Also compares the files themselves with the setting: a new recordsize only applies to
-    files written after it was set.
-
-    Returns the status for the datasets table and any problem to show below it."""
+def _blocks_check(ds: str, recordsize: int | None, blocks: dict | None, libs: str = "") -> str:
+    """That every file on the dataset is written with its record size: a new record size only
+    applies to files written after it was set, and files that fit in one block don't count
+    (they're one block of their own size whatever the setting). "warn" when some aren't (the
+    cell says how many, _files_note), "pass" when they all are, "info" when not known."""
     if not recordsize:
-        return "info", []
-    need = required_recordsize(kinds)
-    audio_only = need < MiB
-    on = M(" ({libraries})", libraries=libs) if libs else ""
-    # Files written with smaller blocks than this dataset needs, among those big enough to show it.
-    old, multi, old_bs = 0, 0, {}
+        return "info"
     if blocks and blocks.get("checked"):
-        multi = blocks["checked"] - blocks.get("single", 0)
-        for bs, n in (blocks.get("sizes") or {}).items():
-            if int(bs) < need:
-                old += n
-                old_bs[int(bs)] = n
-    share = old / multi if multi else 0
-    common = max(old_bs, key=old_bs.get) if old_bs else None
-    if not old:
-        old_text = ""
-    elif blocks.get("full"):
-        ex = (blocks.get("examples") or {}).get(str(common)) or []
-        old_text = M("Of all {n} files, {old} ({pct}%) were written with {size} blocks — "
-                     "before the record size was changed — and keep them until they're copied again.",
-                     n=blocks["checked"], old=old, pct=round(share * 100), size=_fmt_rs(common))
-        if ex:
-            old_text = M("{text} For example: {files}.", text=old_text, files=ex[:3])
-    else:
-        old_text = M("In a random sample of {n} files, about {pct}% were written with "
-                     "{size} blocks — before the record size was changed — and keep them until they're "
-                     "copied again. “Check every file” in the table counts them all.",
-                     n=blocks["checked"], pct=round(share * 100), size=_fmt_rs(common))
+        if any(int(bs) != recordsize and n for bs, n in (blocks.get("sizes") or {}).items()):
+            return "warn"
+    return "pass"
 
-    if recordsize < need:
-        l2 = (pool or {}).get("l2_total") or 0
-        ram = ""
-        if l2:
-            now = l2 / recordsize * L2ARC_HEADER_BYTES
-            at_1m = l2 / MiB * L2ARC_HEADER_BYTES
-            ram = M(" With the pool's {l2} L2ARC full of this dataset, ZFS would need about "
-                    "{ram} of RAM to index it (about {ram_1m} at 1M).",
-                    l2=_fmt_bytes(l2), ram=_fmt_bytes(now), ram_1m=_fmt_bytes(at_1m))
-        why = (M("Audio-only datasets work well with 512K or 1M records.") if audio_only else
-               M("Movies and TV need 1M: the files are large and read start to finish, so 1M records read faster "
-                 "and make L2ARC far cheaper to index in RAM."))
-        target = "512K" if audio_only and recordsize < 512 * 1024 else "1M"
-        return "warn", [item("warn", M("Record size for {dataset}", dataset=ds),
-                             M("recordsize={size}{on}. {why}{ram}", size=_fmt_rs(recordsize), on=on, why=why, ram=ram),
-                             M("1. Set it in the TrueNAS shell (only files written afterwards use it):"),
-                             f"sudo zfs set recordsize={target} {ds}"),
-                        item("info", M("Then rewrite the existing files on {dataset}", dataset=ds),
-                             M("Files already there keep their old block size until they're copied again. This script "
-                               "copies them one at a time, gently, and swaps each one in place; it only looks until you add --apply."),
-                             M("2. Run in the TrueNAS shell:"), rewrite_cmd(ds))]
-    if old and share >= OLD_BLOCKS_WARN:
-        return "warn", [item("warn", M("Older files on {dataset} use smaller blocks", dataset=ds),
-                             M("recordsize={size}{on} is right, but the files don't all match. {details}",
-                               size=_fmt_rs(recordsize), on=on, details=old_text),
-                             M("This script copies them one at a time, gently, and swaps each one in place; "
-                               "it only looks until you add --apply. Run in the TrueNAS shell:"), rewrite_cmd(ds))]
-    if old:
-        return "info", [item("info", M("A few older files on {dataset} use smaller blocks", dataset=ds), old_text,
-                             M("Not worth fixing on its own. If you want to, run in the TrueNAS shell:"), rewrite_cmd(ds))]
-    return "pass", []
+
+def _kbps_text(kbps: float):
+    return M("{n} Mbps", n=f"{kbps / 1000:.1f}") if kbps >= 1000 else M("{n} kbps", n=round(kbps))
+
+
+def library_record(app, key: str, rs: int | None = None) -> dict:
+    """Whether a library's dataset record size suits its media: "ideal" when it's the size
+    recommended from the library's average bitrate, "pass" when it's the next best (either is
+    fine, so a library on the line between two doesn't flip), "warn" otherwise; "info" when the
+    record size or the library's files aren't known yet."""
+    key = str(key)
+    info = app.library_records().get(key) or {}
+    rs = rs or info.get("rs")
+    lib = next((x for x in app.stats.libraries if str(x["key"]) == key), None)
+    out = {"rs": rs, "dataset": info.get("dataset"), "best": None, "alt": None, "status": "info"}
+    if not lib or not lib.get("count"):
+        return out
+    rec = recommend_recordsize(lib["avg_kbps"], lib.get("avg_size") or 0)
+    out.update(best=rec["best"], alt=rec["alt"], kbps=lib["avg_kbps"])
+    if rs:
+        out["status"] = "ideal" if rs == rec["best"] else "pass" if rs == rec["alt"] else "warn"
+    return out
+
+
+def _shared_record_check(app, ds: str, keys: list) -> dict | None:
+    """That one record size can suit every library on a dataset — the recommended size or the
+    second best of each — whatever the dataset is set to now. A record size is per dataset,
+    so libraries that want different ones need datasets of their own."""
+    titles = {str(lib["key"]): lib.get("title") or str(lib["key"]) for lib in getattr(app, "libraries", []) or []}
+    recs = []
+    for key in keys:
+        rec = library_record(app, key)
+        if rec["best"]:
+            recs.append((titles.get(str(key), str(key)), rec))
+    if len(recs) < 2:
+        return None
+    fits = {size: [t for t, rec in recs if size in (rec["best"], rec["alt"])]
+            for size in {x for _, rec in recs for x in (rec["best"], rec["alt"])}}
+    if any(len(v) == len(recs) for v in fits.values()):
+        return None
+    # The size that suits the most libraries stays; the others are the ones to move.
+    keep = max(fits, key=lambda size: (len(fits[size]), size))
+    move = [t for t, rec in recs if keep not in (rec["best"], rec["alt"])]
+    needs = [M("{library}: {best} or {alt}", library=t, best=_fmt_rs(rec["best"]), alt=_fmt_rs(rec["alt"])) for t, rec in recs]
+    return {"needs": needs, "move": move, "keep": keep}
 
 
 def _l2arc_tuning_checks(app, params: dict) -> list[dict]:
@@ -474,11 +478,11 @@ def _l2arc_tuning_checks(app, params: dict) -> list[dict]:
         disk = app.fastest_cached_disk()
         w = app.settings.section("warmup")
         reading = disk * w["pacing_percent"] / 100
-        from .warmup import L2ARC_RATE_SHARE, plan
+        from .warmup import L2ARC_RATE_SHARE
         rate = int(wm) * L2ARC_RATE_SHARE if w["pacing_auto"] else None
         if rate:
             # Automatic pacing matches it; say what that means for a full warm-up
-            need = plan(app.stats, w, app.l2_total(), app.index_avg())["need_max"] if app.stats.scanned_at else 0
+            need = app.lead_in_plan(w)["need_max"] if app.stats.scanned_at else 0
             hours = need / rate / 3600 if need else 0
             if app.warmup_active() and fill < 64 and hours >= 2:
                 items.append(item("info", M("Warm-up is held to {rate} MB/s by the L2ARC", rate=round(rate / 1e6)),
@@ -534,16 +538,93 @@ def check_cache_mode(app) -> dict:
                           M("Couldn't tell whether the media pool has an L2ARC, so settings use their RAM-only defaults for now."),
                           M("Connect TrueNAS in System to check.")))
     fell = app.fallbacks.recent()
+    fallback_help = M("Some choices only work with an SSD cache (L2ARC), because they read more than RAM can hold: every warm-up "
+                      "schedule (Caching → Warm-up), and Prefetch’s larger steps — Whole season, Next season, All seasons, Every "
+                      "show, and Rest of the season near the end. They’re marked with the SSD icon.<br><br>"
+                      "When the media pool has no L2ARC (or “I won’t use an L2ARC” is ticked on the SSD Cache page), the app uses "
+                      "that setting’s RAM-only default instead — so nothing breaks, but you get less than you chose — and lists it "
+                      "here for 24 hours.<br><br><strong>To fix a warning</strong>: add an L2ARC to the media pool, or pick choices "
+                      "without the SSD icon.")
     if fell:
-        items.append(item("warn", M("Settings not used as chosen"),
-                          M("These need an L2ARC, so their RAM-only default was used instead: {list}.",
+        items.append(item("warn", M("Choices that need an SSD cache"),
+                          M("These need an L2ARC, which the media pool doesn't have, so their RAM-only default was used instead: {list}.",
                             list=[M("{setting} ({chosen} → {used})", setting=f["label"], chosen=f["chosen"], used=f["used"])
                                   for f in fell]),
-                          M("Add an L2ARC, or pick a choice without the SSD icon.")))
+                          M("Add an L2ARC, or pick a choice without the SSD icon."), help=fallback_help))
     else:
-        items.append(item("pass", M("Settings used as chosen"), M("No setting has had to fall back in the last 24 hours.")))
-    return {"id": "mode", "title": M("Caching mode"),
-            "hint": M("Whether caching runs with an SSD cache (L2ARC) or RAM only, and what that changes."), "items": items}
+        items.append(item("pass", M("Choices that need an SSD cache"),
+                          M("Every warm-up schedule and Prefetch choice is running as you set it: none needed an L2ARC that "
+                            "wasn't there in the last 24 hours."), help=fallback_help))
+    items.append(_optimizer_check(app))
+    return {"id": "mode", "title": M("Plex Cache"),
+            "hint": M("How caching runs here — with an SSD cache (L2ARC) or RAM only — and the optimizer service."), "items": items}
+
+
+OPTIMIZER_HELP = M("The optimizer is the part of Plex Cache that rewrites your media files so they suit caching: in their "
+                   "dataset’s record size and compression and, for MKV files, with the attachments, index and tags after the "
+                   "video. The Optimizer page has the choices for each library and an <strong>Optimize Now</strong> button.<br><br>"
+                   "It’s optional, and runs as a second service in this app — the only part of Plex Cache that can write to your "
+                   "media. It does nothing on its own: it rewrites one file at a time when you press Optimize Now, checks each "
+                   "new file before swapping it in, and skips anything playing or just added. It has no web page and no port of "
+                   "its own; only this app talks to it, with a token both services share.")
+
+
+def optimizer_code_mount() -> str | None:
+    """Where this app's code is on the host, when it's mounted over the image's (a test copy, like
+    dev/compose.dev.yaml): the optimizer needs the same mount to run the same code. None normally."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    ml = zfs.mounts()
+    if not any(m["mountpoint"] == here for m in ml):
+        return None
+    return zfs.host_path(here, ml)
+
+
+def optimizer_yaml(app) -> str:
+    """The optimizer's service, to paste into the app's YAML. Its volumes are filled in from this
+    app's own mounts: the settings folder (read-only: the optimizer reads the app's token there),
+    the media folders (writable: what it may rewrite) and, in a test copy, the code."""
+    ml = zfs.mounts()
+    config = zfs.host_path(getattr(app, "config_dir", "/config"), ml) or "/mnt/tank/apps/plex-cache"
+    mounts = sorted({d.get("mountpoint") for d in (app.zfs or {}).get("datasets") or []
+                     if d.get("mountpoint") and (d.get("keys") or d.get("off_keys"))})
+    # a dataset mounted inside another one comes with it (bind mounts include what's below them)
+    mounts = [mp for mp in mounts if not any(mp != o and mp.startswith(o.rstrip("/") + "/") for o in mounts)] or ["/data"]
+    media = "\n".join(f"      - {zfs.host_path(mp, ml) or '/mnt/tank/plexfiles'}:{mp}" for mp in mounts)
+    code = optimizer_code_mount()
+    code_line = f"\n      - {code}:/app/plexcache:ro" if code else ""
+    return ("  plex-cache-optimizer:\n"
+            "    image: ghcr.io/drsassafras/plex-cache:latest\n"
+            "    restart: unless-stopped\n"
+            "    command: [\"python\", \"-m\", \"plexcache.optimize\", \"serve\"]\n"
+            "    user: \"568:568\"\n"
+            "    volumes:\n"
+            f"      - {config}:/config:ro\n"
+            f"{media}{code_line}\n"
+            "    security_opt:\n"
+            "      - no-new-privileges:true\n"
+            "    cap_drop:\n"
+            "      - ALL\n"
+            "    read_only: true\n"
+            "    tmpfs:\n"
+            "      - /tmp:size=64m\n"
+            f"{HEALTHCHECK_YAML}")
+
+
+def _optimizer_check(app) -> dict:
+    """The optimizer, in one line: ready, or what's left (the Optimizer page has the steps)."""
+    op = getattr(app, "optimizing", None)
+    if op is None:
+        return item("info", M("Optimizer"), M("Not available."))
+    setup = op.diagnose()
+    link = {"href": "/optimizer", "text": M("Open the Optimizer page")}
+    if setup["ready"]:
+        roots = next((x["title"] for x in setup["steps"] if x["id"] == "media"), "")
+        return dict(item("pass", M("Optimizer ready"), roots, help=OPTIMIZER_HELP))
+    first = next((x for x in setup["steps"] if not x["ok"]), None) or {"id": "yaml", "title": ""}
+    if first["id"] == "yaml":
+        return dict(item("info", M("Optimizer: not set up"),
+                         M("Optional. The Optimizer page shows how to add it."), help=OPTIMIZER_HELP), link=link)
+    return dict(item("warn", M("Optimizer: not working yet"), first["title"], help=OPTIMIZER_HELP), link=link)
 
 
 def check_effectiveness(app) -> dict | None:
@@ -640,8 +721,11 @@ def run_all(app) -> dict:
             counts[it["status"]] = counts.get(it["status"], 0) + 1
         for row in g.get("table", []):
             counts[row["status"]] = counts.get(row["status"], 0) + 1
+            for key in ("record",):  # the Libraries columns' warnings count too
+                if (row.get(key) or {}).get("status") == "warn":
+                    counts["warn"] += 1
         for row in g.get("datasets", []):
-            for key in ("in_use", "cache", "recordsize", "l2arc"):
+            for key in ("in_use", "cache", "recordsize", "file_rs", "compression", "l2arc"):
                 if row[key]:
                     counts[row[key]["status"]] = counts.get(row[key]["status"], 0) + 1
     if counts["fail"]:

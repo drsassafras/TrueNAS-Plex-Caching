@@ -28,7 +28,7 @@ from .i18n import Fixed, M, duration_text, join, msg, size_text
 from .pauses import L2arcPauses, busy_percent
 from .plex import PlexClient, PlexError
 from .reader import MiB, Pacer, Stopped, is_probe_hit, read_range
-from .warmup import library_seconds, preload_bytes
+from .warmup import align_ranges, library_seconds, preload_bytes
 
 GiB = 1024 ** 3
 MAX_START_JOBS = 5000  # starts queued per top-up (the next episode or track queues more)
@@ -160,9 +160,10 @@ def _without(ranges: list, cuts: list) -> list:
     return out
 
 
-def with_index(path: str, size: int, ranges: list, budget: int) -> list:
+def with_index(path: str, size: int, ranges: list, budget: int, record: int | None = None) -> list:
     """Read the parts a player needs from the end of the file (index etc.) first,
     then ``ranges`` — without reading anything twice, and within ``budget``.
+    ``record``: the dataset's record size, so the end is read in whole records, as ZFS does.
 
     First because they're tiny and the player can't seek (or, for some files,
     start) without them, so they should be cached even if playback begins
@@ -170,6 +171,7 @@ def with_index(path: str, size: int, ranges: list, budget: int) -> list:
     if not size:
         return ranges
     tail, _info = tail_ranges(path, size, 1024 * 1024)
+    tail = align_ranges(tail, record, size)
     extra = sum(n for _, n in tail)
     if not tail or extra >= budget:
         return ranges
@@ -291,6 +293,11 @@ class PlaybackMonitor:
                     out[j.feature] += j.length
         return out
 
+    def playing_paths(self) -> set[str]:
+        """Files being played now (as this app sees them)."""
+        with self._lock:
+            return {p for s in self.sessions.values() for p in s.get("paths", [])}
+
     def snapshot(self) -> list[dict]:
         with self._lock:
             return [dict(s, jobs=[j.to_dict() for j in s["jobs"]]) for s in self.sessions.values()]
@@ -350,7 +357,8 @@ class PlaybackMonitor:
             with self._lock:
                 info = self.sessions.get(key)
                 if info is None:
-                    info = {"key": key, "label": s.label, "player": s.player, "jobs": [], "started": time.time()}
+                    info = {"key": key, "label": s.label, "player": s.player, "jobs": [], "started": time.time(),
+                            "paths": [self.app.map_path(p) for p, _ in s.files]}  # the optimizer leaves these alone
                     self.sessions[key] = info
                     self._seen[key] = {"now": False, "start": False, "end": False, "restarted": 0.0, "no_room": False,
                                        "last_off": s.view_offset_ms, "last_t": time.time(), "last_state": s.state,
@@ -450,7 +458,8 @@ class PlaybackMonitor:
             elif pos is not None and self.app.cachelog.last(path, whole=False):
                 lib = self.app.library_info(s.library_key)
                 kind = prefetch.warm_kind(prefetch.library_kind(lib) or {"episode": "tv", "movie": "movies"}.get(s.type, "music"))
-                lead = preload_bytes(s.kbps or DEFAULT_KBPS, library_seconds(settings["warmup"], s.library_key, kind), size)
+                lead = preload_bytes(s.kbps or DEFAULT_KBPS, library_seconds(settings["warmup"], s.library_key, kind), size,
+                                     self.app.record_for(s.library_key))
                 p = self.app.cached_chance(path, False) if pos < lead else 0.0
                 cached = p >= 0.5
         reason = None
@@ -576,7 +585,7 @@ class PlaybackMonitor:
         mine = old.length if restart else 0  # the old read is being replaced
         room = budget["nowplaying"] - (budget["in_use"]["nowplaying"] - mine)
         base = plan_ranges(size, pos, want, room, wrap=True)
-        ranges = with_index(path, size, base, room)
+        ranges = with_index(path, size, base, room, self.app.record_for(s.library_key))
         if sum(n for _, n in ranges) < min(MIN_JOB, want or MIN_JOB):
             if not self._seen[key]["no_room"]:
                 self._seen[key]["no_room"] = True
@@ -694,6 +703,7 @@ class PlaybackMonitor:
         cfg = settings["nextepisode"]
         pid = s.session_key
         seconds = library_seconds(settings["warmup"], s.library_key, prefetch.warm_kind(kind))
+        record = self.app.record_for(s.library_key)  # reads come in whole records of the dataset
         # Starts land in the SSD cache with an L2ARC, so only in RAM-only mode do they count against the RAM limit
         starts_use_ram = self.app.cache_mode() != cachemode.L2ARC
         budget = self.app.ram_budget()
@@ -736,8 +746,8 @@ class PlaybackMonitor:
                 if self.app.recently_cached(path, whole=False):
                     cooled += 1
                     continue
-                n = preload_bytes(kbps or DEFAULT_KBPS, seconds, size)
-                ranges = with_index(path, size, [(0, n)], n + 8 * MiB)
+                n = preload_bytes(kbps or DEFAULT_KBPS, seconds, size, record)
+                ranges = with_index(path, size, [(0, n)], n + 8 * MiB, record)
                 length = sum(x for _, x in ranges)
                 if starts_use_ram:
                     if length > room:

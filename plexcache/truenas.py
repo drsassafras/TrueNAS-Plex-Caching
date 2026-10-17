@@ -98,10 +98,10 @@ class TrueNASClient:
         pools = self.call("pool.query", [[["name", "=", name]]])
         return pools[0] if pools else None
 
-    CACHE_PROPS = ("primarycache", "secondarycache", "recordsize")
+    CACHE_PROPS = ("primarycache", "secondarycache", "recordsize", "compression")
 
     def dataset_cache_props(self, dataset: str) -> dict | None:
-        """primarycache / secondarycache / recordsize for one dataset.
+        """primarycache / secondarycache / recordsize / compression for one dataset.
 
         pool.dataset.query doesn't always include these, so first ask ZFS for
         them by name (zfs.dataset.query with extra.properties), then fall back.
@@ -135,7 +135,17 @@ class TrueNASClient:
             return None
         rs = found.get("recordsize")
         return {"primarycache": _norm(found.get("primarycache")), "secondarycache": _norm(found.get("secondarycache")),
-                "recordsize": parse_size(rs) if rs is not None else None}
+                "recordsize": parse_size(rs) if rs is not None else None, "compression": _norm(found.get("compression"))}
+
+    def apps(self, config: bool = False) -> list[dict]:
+        """Every app, with its containers and their states (active_workloads.container_details);
+        with ``config``, its YAML too (as "config": it holds the app's secrets — never show it)."""
+        if config:
+            try:
+                return self.call("app.query", [[], {"extra": {"retrieve_config": True}}]) or []
+            except TrueNASError:
+                pass  # not allowed: without it
+        return self.call("app.query") or []
 
     def disk_sizes(self, names: list[str]) -> dict:
         if not names:

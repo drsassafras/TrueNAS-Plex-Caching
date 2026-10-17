@@ -10,6 +10,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PLEXCACHE_CONFIG=/config \
     PLEXCACHE_PORT=8642
 
+# For the optimizer service (the second container of the app): MKVToolNix (mkvmerge, mkvpropedit,
+# mkvextract) rewrites files; ffmpeg checks every stream is unchanged before a swap; oxipng and
+# jpegtran (libjpeg-turbo-utils) compress cover art losslessly.
+RUN apk add --no-cache mkvtoolnix ffmpeg oxipng libjpeg-turbo-utils
+
 WORKDIR /app
 COPY plexcache /app/plexcache
 
@@ -19,7 +24,8 @@ USER 568:568
 VOLUME ["/config"]
 EXPOSE 8642
 
-HEALTHCHECK --interval=60s --timeout=5s --start-period=20s \
-  CMD python -c "import urllib.request,os;urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('PLEXCACHE_PORT','8642'),timeout=4)"
+# Works for both services: the web app on 8642, the optimizer on 8643.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=20s \
+  CMD ["python", "-m", "plexcache.healthcheck"]
 
 CMD ["python", "-m", "plexcache"]

@@ -9,8 +9,13 @@
 #   2. Put your media dataset(s) on the /data line, mounted at the SAME path
 #      your Plex app uses inside its container (Plex's own app settings show
 #      these mounts). Add one line per mount if Plex has several.
-#   3. Put your NAS's IP in x-portals at the bottom.
-#   4. Set your own PLEXCACHE_PASSWORD (and username) below. The web UI asks for
+#   3. The optimizer (optional, the second service): give it the same two kinds of
+#      line — the settings folder, read-only, and the media it may rewrite, writable.
+#      Leave out any media you don't want changed, or the whole service.
+#   4. Put your NAS's IP in x-portals at the bottom.
+#   (Two services: plex-cache, which only reads media, and plex-cache-optimizer, the only part
+#   that writes it — it rewrites files when you ask it to, from the web UI.)
+#   5. Set your own PLEXCACHE_PASSWORD (and username) below. The web UI asks for
 #      them, and the example password is refused. Commenting both lines out
 #      turns the login off, leaving the web UI open to anyone on your network.
 #      Changing the password later signs everyone out.
@@ -47,6 +52,31 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=16m
+
+  # The optimizer (optional): rewrites media files one at a time when you press Optimize Now in
+  # the web UI. It has no web page and no published port; only plex-cache talks to it, with a
+  # token the app keeps in its settings folder (mounted here read-only). It can only change
+  # files under the media folders mounted here writable.
+  plex-cache-optimizer:
+    image: ghcr.io/drsassafras/plex-cache:latest
+    restart: unless-stopped
+    command: ["python", "-m", "plexcache.optimize", "serve"]
+    # It writes media as this user. Files it can't write are skipped, and so are files whose
+    # owner it can't keep. If your media belongs to another user, run it as that user
+    # (e.g. "1000:1000"), or as "0:0" with cap_add: [CHOWN, FOWNER, DAC_OVERRIDE] below.
+    user: "568:568"
+    volumes:
+      - /mnt/tank/apps/plex-cache:/config:ro     # CHANGE ME: the same settings folder as above, read-only
+      - /mnt/tank/plexfiles:/data                # CHANGE ME: media it may rewrite, same path as above, writable
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    healthcheck:   # its own port (8643), not the web app's
+      test: ["CMD", "python", "-m", "plexcache.healthcheck"]
 
 x-portals:
   - name: Web UI

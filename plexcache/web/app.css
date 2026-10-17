@@ -102,6 +102,9 @@ h2{font-size:17px;margin:0 0 4px;font-weight:600}
 .tbl th{text-align:left;color:var(--muted);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.5px;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 .tbl td{padding:11px 10px;border-bottom:1px solid var(--line2);vertical-align:top}
 .tbl td.nw{white-space:nowrap}
+/* Optimizer page: a library's choices on one line (wrapping on narrow screens) */
+.optline{display:flex;flex-wrap:wrap;align-items:center;gap:6px 20px}
+.optline label{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 .head{display:flex;flex-wrap:wrap;align-items:center;gap:14px}
 .head h2{font-size:19px;margin:0}
 .lede{color:var(--soft);font-size:14px;margin:6px 0 0;max-width:780px}

@@ -35,6 +35,12 @@ class MediaFile:
     kind: str  # movie | tv | audio
     library: str = ""
     library_key: str = ""
+    # Plex's poster for it (a path on the server, with a stamp that changes when the poster
+    # does): a movie's own, an episode's season poster (the show's when the season has none)
+    poster: str = ""
+    # Whether Plex matched it to an online entry (False: unmatched, its own "local://" item;
+    # None: Plex didn't say)
+    matched: bool | None = None
 
 
 @dataclass
@@ -99,6 +105,23 @@ def media_kbps(media: ET.Element, part: ET.Element) -> int:
     return kbps
 
 
+def matched_of(item: ET.Element) -> bool | None:
+    """Whether Plex matched an item to an online entry: unmatched items get a "local://" guid
+    (or, with the old agents, the "none" agent's)."""
+    guid = item.get("guid") or ""
+    if not guid:
+        return None
+    return not (guid.startswith("local://") or "agents.none" in guid)
+
+
+def poster_of(item: ET.Element) -> str:
+    if item.get("type") == "episode":
+        return item.get("parentThumb") or item.get("grandparentThumb") or ""
+    if item.get("type") == "track":
+        return item.get("parentThumb") or ""
+    return item.get("thumb") or ""
+
+
 class PlexClient:
     def __init__(self, url: str, token: str, timeout: float = 30):
         if not url:
@@ -136,6 +159,16 @@ class PlexClient:
             raise PlexError(M("Can't reach Plex at {url}: {why}", url=self.url, why=str(e.reason))) from None
         except (TimeoutError, OSError) as e:
             raise PlexError(M("Can't reach Plex at {url}: {why}", url=self.url, why=str(e))) from None
+
+    def image(self, path: str, limit: int = 32 * 1024 * 1024) -> bytes:
+        """An image Plex keeps (a poster's path from MediaFile.poster), as Plex has it — not
+        resized or re-encoded by Plex's photo transcoder."""
+        if not path.startswith("/library/"):
+            raise PlexError(M("Plex returned HTTP {code} for {path}", code="404", path=path))
+        data = self._request(path, headers={"Accept": "image/*"})
+        if len(data) > limit:
+            raise PlexError(M("Plex's poster is too large ({size})", size=f"{len(data) // (1024 * 1024)} MB"))
+        return data
 
     def get(self, path: str, params: dict | None = None, headers: dict | None = None) -> ET.Element:
         body = self._request(path, params, headers)
@@ -206,7 +239,8 @@ class PlexClient:
                     for part in media.findall("Part"):
                         path = part.get("file")
                         if path:
-                            out.append(MediaFile(path, media_kbps(media, part), _int(part.get("size")), lib.kind, lib.title, lib.key))
+                            out.append(MediaFile(path, media_kbps(media, part), _int(part.get("size")), lib.kind, lib.title, lib.key,
+                                                 poster_of(item), matched_of(item)))
             total = _int(root.get("totalSize"), -1)
             start += len(items)
             if not items or len(items) < size or (total >= 0 and start >= total):
