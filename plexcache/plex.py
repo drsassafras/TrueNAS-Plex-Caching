@@ -41,6 +41,8 @@ class MediaFile:
     # Whether Plex matched it to an online entry (False: unmatched, its own "local://" item;
     # None: Plex didn't say)
     matched: bool | None = None
+    # How Plex names it: "Title (year)", "Show · S01E05", "Album · Track"
+    title: str = ""
 
 
 @dataclass
@@ -73,6 +75,7 @@ class Session:
     credits_start_ms: int | None
     library_key: str = ""
     parent_rating_key: str = ""  # the season, or for music and audiobooks the album
+    poster: str = ""  # Plex's poster (the show's or album's for an episode or track)
 
     @property
     def progress(self) -> float:
@@ -103,6 +106,25 @@ def media_kbps(media: ET.Element, part: ET.Element) -> int:
         if size > 0 and duration_ms > 0:
             kbps = int(size * 8 / duration_ms)  # bytes*8 / ms == kbit/s
     return kbps
+
+
+def title_of(item: ET.Element) -> str:
+    """How Plex names an item: a movie "Title (year)" (and its edition: "Title (year) · Extended"),
+    an episode "Show · S01E05", a track "Album · Track"."""
+    title = item.get("title") or ""
+    if item.get("type") == "episode":
+        s, e = item.get("parentIndex"), item.get("index")
+        show = item.get("grandparentTitle") or ""
+        if s and e and s.isdigit() and e.isdigit():
+            return f"{show} · S{int(s):02d}E{int(e):02d}"
+        return f"{show} · {title}" if show else title
+    if item.get("type") == "track":
+        album = item.get("parentTitle") or ""
+        return f"{album} · {title}" if album else title
+    year = item.get("year")
+    out = f"{title} ({year})" if year and title else title
+    edition = item.get("editionTitle")  # Plex's editions: "Director's Cut", "Extended"…
+    return f"{out} · {edition}" if edition else out
 
 
 def matched_of(item: ET.Element) -> bool | None:
@@ -160,6 +182,12 @@ class PlexClient:
         except (TimeoutError, OSError) as e:
             raise PlexError(M("Can't reach Plex at {url}: {why}", url=self.url, why=str(e))) from None
 
+    def library_count(self, section_key: str) -> int:
+        """How many items a library has (its movies, shows, artists…), as Plex counts them."""
+        root = self.get(f"/library/sections/{section_key}/all",
+                        headers={"X-Plex-Container-Start": "0", "X-Plex-Container-Size": "0"})
+        return _int(root.get("totalSize") or root.get("size"))
+
     def image(self, path: str, limit: int = 32 * 1024 * 1024) -> bytes:
         """An image Plex keeps (a poster's path from MediaFile.poster), as Plex has it — not
         resized or re-encoded by Plex's photo transcoder."""
@@ -169,6 +197,13 @@ class PlexClient:
         if len(data) > limit:
             raise PlexError(M("Plex's poster is too large ({size})", size=f"{len(data) // (1024 * 1024)} MB"))
         return data
+
+    def thumb(self, path: str, width: int = 120, height: int = 180) -> bytes:
+        """A small copy of an image Plex keeps (a poster), made by Plex's photo transcoder: for lists."""
+        if not path.startswith("/library/"):
+            raise PlexError(M("Plex returned HTTP {code} for {path}", code="404", path=path))
+        return self._request("/photo/:/transcode", {"url": path, "width": width, "height": height, "minSize": 1, "upscale": 0},
+                             headers={"Accept": "image/*"})
 
     def get(self, path: str, params: dict | None = None, headers: dict | None = None) -> ET.Element:
         body = self._request(path, params, headers)
@@ -240,7 +275,7 @@ class PlexClient:
                         path = part.get("file")
                         if path:
                             out.append(MediaFile(path, media_kbps(media, part), _int(part.get("size")), lib.kind, lib.title, lib.key,
-                                                 poster_of(item), matched_of(item)))
+                                                 poster_of(item), matched_of(item), title_of(item)))
             total = _int(root.get("totalSize"), -1)
             start += len(items)
             if not items or len(items) < size or (total >= 0 and start >= total):
@@ -292,6 +327,7 @@ class PlexClient:
                     credits_start_ms=credits,
                     library_key=item.get("librarySectionID", ""),
                     parent_rating_key=item.get("parentRatingKey", ""),
+                    poster=poster_of(item),
                 )
             )
         return out

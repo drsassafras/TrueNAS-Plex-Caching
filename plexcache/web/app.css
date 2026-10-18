@@ -419,10 +419,99 @@ h2 .mode-ic{vertical-align:-3px}
 .covsw.cov0{background:#042C53}.covsw.cov1{background:#0C447C}.covsw.cov2{background:#185FA5}.covsw.cov3{background:#378ADD}.covsw.cov4{background:#85B7EB}
 .covlegend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--soft);margin:10px 0 6px;font-variant-numeric:tabular-nums}
 .covlegend span{display:flex;align-items:center;gap:5px}.covlegend b{color:var(--ink);font-weight:600}
-.covwhen{font-weight:600;color:var(--ink)}
+.covwhen{font-weight:600;color:var(--ink);margin-left:auto}
+.covlegend b{display:inline-block;min-width:3.2em}
 .covcross{stroke:var(--ink);stroke-width:1;stroke-dasharray:3 3}
 .covhit{fill:transparent}
 @media (prefers-color-scheme: dark){
   .cov0{fill:#E6F1FB;stroke:#E6F1FB}.cov1{fill:#B5D4F4;stroke:#B5D4F4}.cov2{fill:#85B7EB;stroke:#85B7EB}.cov3{fill:#378ADD;stroke:#378ADD}.cov4{fill:#185FA5;stroke:#185FA5}
   .covsw.cov0{background:#E6F1FB}.covsw.cov1{background:#B5D4F4}.covsw.cov2{background:#85B7EB}.covsw.cov3{background:#378ADD}.covsw.cov4{background:#185FA5}
 }
+
+/* Plex's poster beside a file or what plays: all the same size */
+.poster{display:block;flex:none;width:46px;height:69px;object-fit:cover;border-radius:4px;background:var(--line2)}
+.withposter{display:flex;gap:12px;align-items:center;min-width:0}
+.withposter>div{min-width:0}
+.procfiles{margin:4px 0 12px}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.btn.sm{min-height:32px;padding:0 12px;font-size:13px}
+/* Processes: a job's files, the header kept in sight while the list scrolls by (wide screens: on narrow
+   ones the table scrolls sideways, and a sideways-scrolling box can't keep a header in sight of the page) */
+@media (min-width:900px){.procfiles .tbl-wrap{overflow:visible}}
+.procfiles thead th{position:sticky;top:0;z-index:2;background:var(--panel)}
+.procfiles .hidelist{font-size:12px;text-transform:none;letter-spacing:0;white-space:nowrap}
+.good{color:var(--ok)}
+/* the files table: the file as it was on the first line, as written on the second */
+.procfiles td .ln{min-height:24px;line-height:24px}
+.procfiles td .ln .badge{vertical-align:middle}
+.procfiles th .sorter{font:inherit;color:inherit;text-transform:inherit;letter-spacing:inherit;font-weight:500;white-space:nowrap;padding:0}
+.procfiles th[aria-sort] .sorter{color:var(--ink)}
+/* the job card: the poster as tall as the lines beside it; a thin bar for the file in hand */
+.withposter.tall{align-items:stretch;margin-top:6px}
+.withposter.tall>.grow{flex:1;min-width:0}
+.posterbig{flex:none;align-self:stretch;width:64px;min-height:96px;border-radius:6px;overflow:hidden;background:var(--line2)}
+.posterbig img{display:block;width:100%;height:100%;object-fit:cover}
+.filebar{display:flex;align-items:center;gap:10px}
+.filebar .meter{flex:1;max-width:360px;margin:4px 0}
+.meter.thin{height:6px;border-radius:3px}
+.bad{color:var(--bad)}
+/* a title's files: one line under the last of them, not between them */
+.procfiles tr.ingrp td{border-bottom:0;padding-bottom:4px}
+.procfiles tr.ingrp td[rowspan]{border-bottom:1px solid var(--line2)}
+/* a library's icon beside its name, like Plex's */
+.libicon{width:1.05em;height:1.05em;vertical-align:-0.15em;margin-right:6px;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round;opacity:.75;flex:none}
+.procfiles td .link{text-align:left}
+/* Library Health: what's where in each file */
+.lhead{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:12px 0 4px}
+.lsearch{margin-left:auto;min-width:200px;font:inherit;font-size:14px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}
+.llegend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--soft);margin:8px 0 10px}
+.llegend span{display:inline-flex;align-items:center;gap:5px}
+.lsw{display:inline-block;width:12px;height:10px;border-radius:2px;vertical-align:-1px}
+.lp{stroke:var(--panel);stroke-width:.4}
+.lp-header,.lp-seekhead,.lp-info,.lp-checksum{fill:#8A948F;background:#8A948F}
+.lp-tracks{fill:#5B6F8C;background:#5B6F8C}
+.lp-chapters{fill:#9A7CC4;background:#9A7CC4}
+.lp-tags{fill:#6E5BA8;background:#6E5BA8}
+.lp-index{fill:#D9822B;background:#D9822B}
+.lp-padding{fill:#E3E6E2;background:#E3E6E2}
+.lp-video{fill:#2F6FA8;background:#2F6FA8}
+.lp-image{fill:#D45D8A;background:#D45D8A}
+.lp-font,.lp-attachment,.lp-attachments{fill:#2E9C8F;background:#2E9C8F}
+.lp-other{fill:#4C544F;background:#4C544F}
+.lfiles tr.lrow{cursor:pointer}
+.lfiles tr.lrow:hover td{background:var(--line2)}
+.lfiles tr.ingrp td{border-bottom:0;padding-bottom:4px}
+.lfiles tr.ingrp td[rowspan]{border-bottom:1px solid var(--line2)}
+.lfiles tr.open td{background:var(--line2)}
+.ldrow>td{background:var(--code-bg)}
+.lfacts{display:flex;flex-wrap:wrap;gap:4px 22px;font-size:13px;margin:0 0 10px}
+.tbl.compact td,.tbl.compact th{padding:5px 8px;font-size:13px}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .lp-padding{fill:#3A403C;background:#3A403C}}
+:root[data-theme="dark"] .lp-padding{fill:#3A403C;background:#3A403C}
+/* a file's blocks: every block the same size, filled in proportion with what's in it */
+.lblocks{display:flex;align-items:center;flex-wrap:wrap;gap:3px}
+.lblk{display:inline-flex;flex-direction:column;align-items:stretch;width:30px;padding:0;border:1px solid var(--soft);border-radius:2px;background:var(--panel);font:inherit;color:inherit;cursor:inherit}
+.lblk .lbin{display:flex;height:14px;overflow:hidden}
+.lblk .lbin>span{min-width:1px}
+.lblk.big{width:auto;flex:0 1 150px;min-width:64px;cursor:pointer;border-radius:4px}
+.lblocks.big .lgap{min-width:120px}
+.lblk.big .lbin{height:40px}
+.lblk.big:hover{border-color:var(--ink)}
+.lblk.sel{outline:2px solid var(--accent);outline-offset:1px}
+.lbn{font-size:11px;color:var(--soft);padding:2px 4px;text-align:center;white-space:nowrap}
+.lgap{flex:1 1 auto;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;padding:0 10px;font:inherit;background:none;border-left:0;border-right:0;font-size:11px;line-height:1.3;color:var(--soft);border-top:2px dotted var(--line);border-bottom:2px dotted var(--line);margin:0 4px}
+.lblocks.big .lgap{font-size:12px;min-height:40px}
+.lvid{color:var(--ink);white-space:nowrap}
+.lp-empty{background:repeating-linear-gradient(45deg,var(--line2) 0 3px,var(--panel) 3px 6px)}
+.lblkinfo{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 12px;background:var(--panel)}
+.lblkinfo .tbl{margin-top:6px}
+.lblk .lbin{position:relative}
+.lx{position:absolute;right:2px;top:50%;transform:translateY(-50%);font-size:10px;font-weight:700;color:#fff;text-shadow:0 0 2px rgba(0,0,0,.6)}
+.lblk.big .lx{font-size:13px;right:6px}
+.lblocks{flex-wrap:nowrap}
+.lblocks.big .lgap{cursor:pointer;min-height:58px}
+.lblocks.big .lgap:hover{border-color:var(--soft)}
+.lgap.sel{outline:2px solid var(--accent);outline-offset:1px}
+.lp-segment{background:#A9B2AD}
+.linspect{margin:12px 0 0}
+.linspect .meter{margin:4px 0}

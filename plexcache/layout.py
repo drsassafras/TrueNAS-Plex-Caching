@@ -5,18 +5,35 @@ jumps to the end for the index that lets it seek ("Cues" in MKV, ``moov`` in
 an MP4 written without "fast start"), and for anything else the header points
 to there (MKV tags, chapters, attachments such as subtitle fonts).
 
-``tail_ranges()`` finds those parts by reading the file's own layout, so the
-exact bytes can be cached, rather than guessing at "the last few MB".
+``tail_ranges()`` finds those parts — the file's metadata — by reading the file's own layout,
+so the exact bytes can be cached, rather than guessing at "the last few MB". Cover art counts
+too (CACHE_IMAGES): ffmpeg — Plex's transcoder, and players built on it — reads every attachment
+when it opens a file, a poster at the end included (measured: opening a film with a 181 KB
+cover at its end read 248 KB before it could start). For a file the optimizer laid out
+(images, fonts, the index and tags, at the end) that's one stretch to the end of the file.
+
+It also says where the video starts (``video_start``): what's before it — headers, attachments
+kept at the front, the room left where the optimizer moved them from — is metadata too, and
+``min_head()`` is the least of a file's start worth caching: whole records, through at least
+60% of a record of video.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import struct
 
+MIB = 1024 * 1024
 HEAD_READ = 256 * 1024  # enough to hold an MKV header and SeekHead
 MAX_TAIL = 64 * 1024 * 1024  # never cache more than this from the end of one file
 MAX_BOXES = 64  # top-level MP4 boxes to walk before giving up
+MAX_LEVEL1 = 256  # MKV top-level elements to walk looking for the first Cluster
+MAX_ATTACHMENTS = 512
+GAP = 64 * 1024  # metadata ranges this close are cached as one (padding between them costs nothing)
+VIDEO_SHARE = 0.6  # the least of a record's worth of video to cache at a file's start
+CACHE_IMAGES = True  # ffmpeg reads every attachment when it opens a file, cover art too: cached with the rest
+IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
 
 # MKV element IDs (with their length-marker bits, as they appear in the file)
 EBML = 0x1A45DFA3
@@ -26,6 +43,11 @@ SEEK = 0x4DBB
 SEEK_ID = 0x53AB
 SEEK_POS = 0x53AC
 CLUSTER = 0x1F43B675
+ATTACHMENTS = 0x1941A469
+ATTACHED_FILE = 0x61A7
+FILE_NAME = 0x466E
+FILE_MIME = 0x4660
+FILE_DATA = 0x465C
 WANTED = {  # level-1 elements a player may read when it opens the file
     0x1C53BB6B: "index",        # Cues
     0x1254C367: "tags",         # Tags
@@ -102,6 +124,80 @@ def _seekhead_entries(buf: bytes, start: int, end: int) -> list[tuple[int, int]]
     return out
 
 
+def _first_cluster(fd: int, seg: int, size: int) -> int | None:
+    """Where the video starts: the first Cluster, walking the top-level elements one header at a
+    time (attachments in front of it can be megabytes)."""
+    p = seg
+    for _ in range(MAX_LEVEL1):
+        if p >= size:
+            return None
+        try:
+            eid, esize, hl = _element(_pread(fd, p, 16), 0)
+        except ValueError:
+            return None
+        if eid == CLUSTER:
+            return p
+        if esize is None:
+            return None
+        p += hl + esize
+    return None
+
+
+def _is_image(name: str, mime: str) -> bool:
+    return mime.lower().startswith("image/") or name.lower().endswith(IMAGE_EXT)
+
+
+def _attachments(fd: int, at: int, size: int) -> tuple[list[tuple[int, int]], int, int]:
+    """The parts of the Attachments element at ``at`` a player needs: (ranges, bytes kept, bytes of
+    images left out). Each attachment's name and type come before its data, so only the start of
+    each is read."""
+    eid, esize, hl = _element(_pread(fd, at, 16), 0)
+    if eid != ATTACHMENTS or esize is None:
+        return [], 0, 0
+    if CACHE_IMAGES:
+        return [(at, min(hl + esize, size - at))], hl + esize, 0
+    out, kept, images = [], 0, 0  # (not the element's own header: alone, it'd pull a record of images in)
+    p, end = at + hl, min(at + hl + esize, size)
+    for _ in range(MAX_ATTACHMENTS):
+        if p >= end:
+            break
+        cid, csize, chl = _element(_pread(fd, p, 16), 0)
+        if csize is None:
+            break
+        if cid == ATTACHED_FILE:
+            head = _pread(fd, p + chl, min(csize, 4096))
+            name = mime = ""
+            q = 0
+            while q < len(head) - 2:
+                try:
+                    fid, fsize, fhl = _element(head, q)
+                except ValueError:
+                    break
+                if fid == FILE_DATA or fsize is None:
+                    break
+                if fid == FILE_NAME:
+                    name = head[q + fhl:q + fhl + fsize].decode("utf-8", "replace")
+                elif fid == FILE_MIME:
+                    mime = head[q + fhl:q + fhl + fsize].decode("utf-8", "replace")
+                q += fhl + fsize
+            if _is_image(name, mime):
+                images += chl + csize
+            else:
+                out.append((p, chl + csize))
+                kept += chl + csize
+        p += chl + csize
+    return out, kept, images
+
+
+def min_head(video_start: int | None, record: int | None, size: int = 0) -> int:
+    """The least of a file's start to cache: whole records (or MiB, the record size unknown) until
+    they hold at least 60% of a record of video — everything before the video (metadata) included.
+    A 1.2 MB poster in front, 1 MB records: 2 records (the second holds 0.8 MB of video)."""
+    unit = record or MIB
+    n = math.ceil(((video_start or 0) + VIDEO_SHARE * unit) / unit) * unit
+    return min(n, size) if size > 0 else n
+
+
 def _mkv(fd: int, size: int, head_bytes: int) -> tuple[list[tuple[int, int]], dict]:
     buf = _pread(fd, 0, min(size, HEAD_READ))
     eid, esize, hl = _element(buf, 0)
@@ -161,14 +257,21 @@ def _mkv(fd: int, size: int, head_bytes: int) -> tuple[list[tuple[int, int]], di
             continue
         if hid != sid or hsize is None:
             continue
+        if sid == ATTACHMENTS:  # the fonts and such; cover art left out
+            got, kept, images = _attachments(fd, at, size)
+            ranges += got
+            parts["attachments"] = parts.get("attachments", 0) + kept
+            if images:
+                parts["images_left_out"] = parts.get("images_left_out", 0) + images
+            continue
         length = min(hhl + hsize, size - at)
         ranges.append((at, length))
         parts[WANTED[sid]] = parts.get(WANTED[sid], 0) + length
-    return ranges, {"format": "mkv", "parts": parts}
+    return ranges, {"format": "mkv", "parts": parts, "video_start": _first_cluster(fd, seg, size)}
 
 
 def _mp4(fd: int, size: int, head_bytes: int) -> tuple[list[tuple[int, int]], dict]:
-    pos = 0
+    pos, video = 0, None
     for _ in range(MAX_BOXES):
         if pos + 8 > size:
             break
@@ -184,14 +287,33 @@ def _mp4(fd: int, size: int, head_bytes: int) -> tuple[list[tuple[int, int]], di
             box_size = size - pos
         if box_size < 8:
             break
+        if kind == b"mdat" and video is None:
+            video = pos + (16 if struct.unpack(">I", hdr[:4])[0] == 1 else 8)  # where the video data starts
         if kind == b"moov":
             if pos + box_size <= head_bytes:
-                return [], {"format": "mp4", "index_at": "start", "parts": {}}
+                return [], {"format": "mp4", "index_at": "start", "parts": {}, "video_start": _mdat(fd, pos + box_size, size)}
             start = max(pos, head_bytes)
             length = min(pos + box_size, size) - start
-            return [(start, length)], {"format": "mp4", "index_at": "end", "parts": {"index": length}}
+            return [(start, length)], {"format": "mp4", "index_at": "end", "parts": {"index": length}, "video_start": video}
         pos += box_size
     return [], {"format": "mp4", "note": "no moov box found"}
+
+
+def _mdat(fd: int, pos: int, size: int) -> int | None:
+    """Where an MP4's video data starts, looking on from ``pos`` (after a moov at the front)."""
+    for _ in range(MAX_BOXES):
+        if pos + 8 > size:
+            return None
+        hdr = _pread(fd, pos, 16)
+        box_size, kind = struct.unpack(">I4s", hdr[:8])
+        if kind == b"mdat":
+            return pos + (16 if box_size == 1 else 8)
+        if box_size == 1:
+            box_size = struct.unpack(">Q", hdr[8:16])[0]
+        if box_size < 8:
+            return None
+        pos += box_size
+    return None
 
 
 def tail_ranges(path: str, size: int, head_bytes: int) -> tuple[list[tuple[int, int]], dict]:
@@ -217,11 +339,11 @@ def tail_ranges(path: str, size: int, head_bytes: int) -> tuple[list[tuple[int, 
         ranges, info = [], {"format": "unparsed", "note": str(e)}
     finally:
         os.close(fd)
-    # Merge neighbours and cap the total.
-    ranges.sort()
+    # Merge neighbours (and near neighbours: what's between them is padding) and cap the total.
+    ranges = sorted((max(off, head_bytes), off + n - max(off, head_bytes)) for off, n in ranges if off + n > head_bytes)
     merged: list[list[int]] = []
     for off, n in ranges:
-        if merged and off <= merged[-1][0] + merged[-1][1]:
+        if merged and off <= merged[-1][0] + merged[-1][1] + GAP:
             merged[-1][1] = max(merged[-1][1], off + n - merged[-1][0])
         else:
             merged.append([off, n])

@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import cachemode, prefetch, zfs
-from .layout import tail_ranges
+from .layout import min_head, tail_ranges
 from .i18n import Fixed, M, duration_text, join, msg, size_text
 from .pauses import L2arcPauses, busy_percent
 from .plex import PlexClient, PlexError
@@ -160,17 +160,26 @@ def _without(ranges: list, cuts: list) -> list:
     return out
 
 
+def start_bytes(path: str, size: int, kbps: int, seconds: float, record: int | None) -> int:
+    """How much of a file's start to cache: its lead-in, never less than the metadata in front of
+    the video and 60% of a record of video (layout.min_head)."""
+    _ranges, info = tail_ranges(path, size, 0) if size else ([], {})
+    return max(preload_bytes(kbps, seconds, size, record), min_head(info.get("video_start"), record, size))
+
+
 def with_index(path: str, size: int, ranges: list, budget: int, record: int | None = None) -> list:
-    """Read the parts a player needs from the end of the file (index etc.) first,
+    """Read the file's metadata at the end (the index, tags, fonts…) first,
     then ``ranges`` — without reading anything twice, and within ``budget``.
     ``record``: the dataset's record size, so the end is read in whole records, as ZFS does.
 
-    First because they're tiny and the player can't seek (or, for some files,
+    First because they're small and the player can't seek (or, for some files,
     start) without them, so they should be cached even if playback begins
     before the rest has been read."""
     if not size:
         return ranges
-    tail, _info = tail_ranges(path, size, 1024 * 1024)
+    tail, info = tail_ranges(path, size, 0)
+    start = info.get("video_start")
+    tail = [(o, n) for o, n in tail if o >= (start if start is not None else 1024 * 1024)]  # the end's, not the front's
     tail = align_ranges(tail, record, size)
     extra = sum(n for _, n in tail)
     if not tail or extra >= budget:
@@ -357,7 +366,7 @@ class PlaybackMonitor:
             with self._lock:
                 info = self.sessions.get(key)
                 if info is None:
-                    info = {"key": key, "label": s.label, "player": s.player, "jobs": [], "started": time.time(),
+                    info = {"key": key, "label": s.label, "player": s.player, "poster": s.poster, "jobs": [], "started": time.time(),
                             "paths": [self.app.map_path(p) for p, _ in s.files]}  # the optimizer leaves these alone
                     self.sessions[key] = info
                     self._seen[key] = {"now": False, "start": False, "end": False, "restarted": 0.0, "no_room": False,
@@ -746,7 +755,7 @@ class PlaybackMonitor:
                 if self.app.recently_cached(path, whole=False):
                     cooled += 1
                     continue
-                n = preload_bytes(kbps or DEFAULT_KBPS, seconds, size, record)
+                n = start_bytes(path, size, kbps or DEFAULT_KBPS, seconds, record)
                 ranges = with_index(path, size, [(0, n)], n + 8 * MiB, record)
                 length = sum(x for _, x in ranges)
                 if starts_use_ram:

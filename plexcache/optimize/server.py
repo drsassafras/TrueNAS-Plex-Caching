@@ -11,6 +11,17 @@ one file at a time, and reads the result back.
     POST /api/check      {"path", "images"}: is the file optimized, and if not why
     POST /api/rewrite    {"path"}: write any file again, byte for byte, so it takes its dataset's
                          current record size and compression (one at a time, like optimize)
+    POST /api/claim      {"dir", "key", "instance", "release"}: claim a file before optimizing it,
+                         for systems sharing a library (Syncthing): one small file per system in
+                         <dir>/.plexcache/claims/, so two systems never write the same file. The
+                         answer lists every claim on that file and the other systems seen there
+    POST /api/conflict   {"copy", "original"}: a Syncthing conflict copy next to a file: deleted
+                         if it's one of ours — both tagged by the optimizer, every stream the same
+    POST /api/folder     turning a library folder into a dataset (optimize/migrate.py), by "action":
+                         "probe" {"path"}; "copy" {"path", "to", "mirror"} (a job: progress in
+                         /api/status); "pause" / "resume" / "stop"; "compare" {"path", "to"};
+                         "rename" {"path", "name"}; "delete" {"path"} — the last two only for the
+                         wizard's own .<name>.plexcache-old folders
     POST /api/optimize   {"path", "images", "cover", "force"}: start optimizing it (one at a time).
                          "images": "compress" (default), "remove", "plex" or "keep" (see
                          optimizer.py); "cover": Plex's poster for "plex", base64; "force"
@@ -36,9 +47,10 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import VERSION
+from . import claims, migrate
 from . import images as imgs
 from . import mkv, tools
-from .optimizer import IMAGE_MODES, Skipped, optimize_file, rewrite_file
+from .optimizer import IMAGE_MODES, Skipped, optimize_file, resolve_conflict, rewrite_file
 
 RECENT = 200  # results kept for the app to read back
 MAX_BODY = 48 * 1024 * 1024  # room for a large poster, base64
@@ -54,6 +66,7 @@ class Service:
         self.current: dict | None = None
         self.results: list[dict] = []
         self.versions = {n: tools.version(n) for n in tools.NAMES + tools.OPTIONAL}
+        self.copy_ctl = migrate.Paused()
 
     @property
     def token(self) -> str:
@@ -86,7 +99,9 @@ class Service:
 
     def status(self) -> dict:
         with self.lock:
-            return {"version": VERSION, "tools": self.versions, "missing": [n for n in tools.NAMES if not self.versions[n]],
+            return {"version": VERSION, "tools": self.versions, "paused": not self.copy_ctl.go.is_set(),
+                    # whether a dataset made while this runs shows up here without a restart (rslave)
+                    "propagation": {r: migrate.propagates(r) for r in self.roots}, "missing": [n for n in tools.NAMES if not self.versions[n]],
                     "missing_optional": [n for n in tools.OPTIONAL if not self.versions[n]],
                     "roots": self.roots, "current": dict(self.current) if self.current else None,
                     "results": list(self.results[-RECENT:]), "uid": os.getuid(), "gid": os.getgid(),
@@ -101,19 +116,57 @@ class Service:
         threading.Thread(target=self._work, args=(path, images, force, cover, action), daemon=True).start()
         return {"started": True}
 
+    def start_copy(self, src: str, dst: str, mirror: bool) -> dict:
+        """Copy a library folder into its new dataset, in the background (one job at a time)."""
+        with self.lock:
+            if self.current:
+                return {"started": False, "error": "busy", "current": self.current["path"]}
+            self.current = {"path": src, "action": "copy", "to": dst, "started": time.time(), "step": "copying"}
+        self.copy_ctl = migrate.Paused()
+
+        def report(**counts):
+            with self.lock:
+                if self.current:
+                    self.current.update(counts)
+
+        def work():
+            res = {"path": src, "action": "copy", "to": dst, "at": time.time()}
+            try:
+                res.update(migrate.copy_tree(src, dst, self.copy_ctl, report, mirror))
+            except InterruptedError:
+                res.update(result="stopped")
+            except Exception as e:  # never leave the service stuck "busy"
+                res.update(result="failed", reason=str(e))
+            res["finished"] = time.time()
+            with self.lock:
+                self.results.append(res)
+                del self.results[:-RECENT]
+                self.current = None
+        threading.Thread(target=work, daemon=True).start()
+        return {"started": True}
+
     def _work(self, path: str, images: str, force: bool, cover: bytes | None, action: str = "optimize") -> None:
         def step(text):
             with self.lock:
                 if self.current:
                     self.current["step"] = text
+
+        def progress(pct):  # how far through the file (%), for the app's second bar
+            with self.lock:
+                if self.current:
+                    self.current["pct"] = pct
         res = {"path": path, "action": action, "images": images, "at": time.time()}
         try:
             if action == "rewrite":
-                res.update(rewrite_file(path, log=step))
+                res.update(rewrite_file(path, log=step, progress=progress))
+            elif action == "conflict":
+                res.update(resolve_conflict(path, cover, log=step))  # cover: the original's path here
             else:
-                res.update(optimize_file(path, images, cover=cover, force=force, log=step))
+                res.update(optimize_file(path, images, cover=cover, force=force, log=step, progress=progress))
         except Skipped as e:
             res.update(result="skipped", reason=str(e))
+        except tools.VerifyError as e:
+            res.update(result="failed", reason=str(e), verified="failed")  # the new file failed a check: thrown away
         except (tools.ToolError, OSError, mkv.NotMatroska) as e:
             res.update(result="failed", reason=str(e))
         except Exception as e:  # never leave the service stuck "busy"
@@ -123,6 +176,41 @@ class Service:
             self.results.append(res)
             del self.results[:-RECENT]
             self.current = None
+
+
+def folder_action(svc: Service, body: dict) -> tuple[int, dict]:
+    """/api/folder: the steps of turning a library folder into a dataset (optimize/migrate.py)."""
+    action = body.get("action")
+    if action in ("pause", "resume", "stop"):
+        {"pause": svc.copy_ctl.go.clear, "resume": svc.copy_ctl.go.set,
+         "stop": lambda: (svc.copy_ctl.stop.set(), svc.copy_ctl.go.set())}[action]()
+        return 200, {"ok": True}
+    path = svc.allowed(str(body.get("path") or ""))
+    to = svc.allowed(str(body.get("to") or "")) if body.get("to") else None
+    if not path or (body.get("to") and not to):
+        return 403, {"error": "path is outside the media folders"}
+    try:
+        if action == "probe":
+            return 200, migrate.probe(path)
+        if action == "copy":
+            return 200, svc.start_copy(path, to, bool(body.get("mirror")))
+        if action == "compare":
+            return 200, migrate.compare(path, to)
+        if action == "rename":
+            return 200, {"path": migrate.rename_folder(path, str(body.get("name") or ""))}
+        if action == "delete":
+            migrate.delete_old(path)
+            return 200, {"deleted": True}
+        if action == "cleanup":  # a work folder left by an optimizer stopped mid-way (only those)
+            from .optimizer import WORK
+            if not WORK.match(os.path.basename(path.rstrip("/"))) or not os.path.isdir(path) or os.path.islink(path):
+                return 400, {"error": "not an optimizer work folder"}
+            import shutil
+            shutil.rmtree(path)
+            return 200, {"deleted": True}
+    except (OSError, ValueError) as e:
+        return 400, {"error": str(e)}
+    return 404, {"error": "not found"}
 
 
 def make_handler(svc: Service):
@@ -167,6 +255,14 @@ def make_handler(svc: Service):
                 if n > MAX_BODY:
                     return self._send(413, {"error": "too large"})
                 body = json.loads(self.rfile.read(n) or b"{}")
+                if self.path == "/api/folder":
+                    return self._send(*folder_action(svc, body))
+                if self.path == "/api/claim":
+                    folder = svc.allowed(str(body.get("dir") or ""))
+                    if not folder:
+                        return self._send(403, {"error": "folder is outside the media folders"})
+                    return self._send(200, claims.claim(folder, str(body.get("key") or ""), str(body.get("instance") or ""),
+                                                        bool(body.get("release"))))
                 path = svc.allowed(str(body.get("path") or ""))
                 images = body.get("images") or ("compress" if body.get("keep_images", True) else "remove")
                 force = bool(body.get("force", False))
@@ -183,6 +279,11 @@ def make_handler(svc: Service):
                 return self._send(200, svc.start(path, images, force, cover))
             if self.path == "/api/rewrite":
                 return self._send(200, svc.start(path, action="rewrite"))
+            if self.path == "/api/conflict":
+                original = svc.allowed(str(body.get("original") or ""))
+                if not original:
+                    return self._send(403, {"error": "path is outside the media folders"})
+                return self._send(200, svc.start(path, cover=original, action="conflict"))
             self._send(404, {"error": "not found"})
 
     return Handler

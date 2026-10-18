@@ -1,0 +1,470 @@
+{
+ "anime.mkv compress": {
+  "attachments": [
+   [
+    "Small Font.otf",
+    "font/otf",
+    ""
+   ],
+   [
+    "Fixture Sans.ttf",
+    "font/ttf",
+    ""
+   ]
+  ],
+  "chapters": 2,
+  "front": [
+   "SeekHead",
+   "Info",
+   "Tracks"
+  ],
+  "ours": {
+   "PLEXCACHE_OPTIMIZER": "0.1.2"
+  },
+  "tags": [
+   "PLEXCACHE_OPTIMIZER"
+  ],
+  "tail": [
+   "Attachments",
+   "Chapters",
+   "Cues",
+   "Tags"
+  ],
+  "title": null,
+  "tracks": [
+   {
+    "codec_id": "V_MPEGH/ISO/HEVC",
+    "default_track": false,
+    "forced_track": false,
+    "language": "und",
+    "language_ietf": "und",
+    "pixel_dimensions": "160x90",
+    "type": "video"
+   },
+   {
+    "audio_channels": 2,
+    "codec_id": "A_OPUS",
+    "default_track": false,
+    "forced_track": false,
+    "language": "jpn",
+    "language_ietf": "ja",
+    "type": "audio"
+   },
+   {
+    "codec_id": "S_TEXT/ASS",
+    "default_track": true,
+    "forced_track": false,
+    "language": "eng",
+    "language_ietf": "en",
+    "type": "subtitles"
+   }
+  ]
+ },
+ "anime.mkv remove": {
+  "attachments": [
+   [
+    "Small Font.otf",
+    "font/otf",
+    ""
+   ],
+   [
+    "Fixture Sans.ttf",
+    "font/ttf",
+    ""
+   ]
+  ],
+  "chapters": 2,
+  "front": [
+   "SeekHead",
+   "Info",
+   "Tracks"
+  ],
+  "ours": {
+   "PLEXCACHE_OPTIMIZER": "0.1.2"
+  },
+  "tags": [
+   "PLEXCACHE_OPTIMIZER"
+  ],
+  "tail": [
+   "Attachments",
+   "Chapters",
+   "Cues",
+   "Tags"
+  ],
+  "title": null,
+  "tracks": [
+   {
+    "codec_id": "V_MPEGH/ISO/HEVC",
+    "default_track": false,
+    "forced_track": false,
+    "language": "und",
+    "language_ietf": "und",
+    "pixel_dimensions": "160x90",
+    "type": "video"
+   },
+   {
+    "audio_channels": 2,
+    "codec_id": "A_OPUS",
+    "default_track": false,
+    "forced_track": false,
+    "language": "jpn",
+    "language_ietf": "ja",
+    "type": "audio"
+   },
+   {
+    "codec_id": "S_TEXT/ASS",
+    "default_track": true,
+    "forced_track": false,
+    "language": "eng",
+    "language_ietf": "en",
+    "type": "subtitles"
+   }
+  ]
+ },
+ "feature-rich.mkv compress": {
+  "attachments": [
+   [
+    "cover.jpg",
+    "image/jpeg",
+    "Poster"
+   ],
+   [
+    "cover_land.png",
+    "image/png",
+    ""
+   ],
+   [
+    "notes.nfo",
+    "text/plain",
+    ""
+   ],
+   [
+    "Fixture Sans.ttf",
+    "font/ttf",
+    ""
+   ]
+  ],
+  "chapters": 2,
+  "front": [
+   "SeekHead",
+   "Info",
+   "Tracks"
+  ],
+  "ours": {
+   "PLEXCACHE_OPTIMIZER": "0.1.2"
+  },
+  "tags": [
+   "COMMENT",
+   "DATE_RELEASED",
+   "FIXTURE_TRACK_NOTE",
+   "PLEXCACHE_OPTIMIZER",
+   "TITLE"
+  ],
+  "tail": [
+   "Attachments",
+   "Chapters",
+   "Cues",
+   "Tags"
+  ],
+  "title": "Fixture Film",
+  "tracks": [
+   {
+    "codec_id": "V_MPEG4/ISO/AVC",
+    "color_matrix_coefficients": 9,
+    "color_primaries": 9,
+    "color_transfer_characteristics": 16,
+    "default_track": false,
+    "forced_track": false,
+    "language": "und",
+    "language_ietf": "und",
+    "max_content_light": 1000,
+    "max_frame_light": 400,
+    "pixel_dimensions": "160x90",
+    "track_name": "Main video",
+    "type": "video"
+   },
+   {
+    "audio_channels": 2,
+    "codec_id": "A_AAC",
+    "default_track": true,
+    "forced_track": false,
+    "language": "eng",
+    "language_ietf": "en",
+    "type": "audio"
+   },
+   {
+    "audio_channels": 6,
+    "codec_id": "A_AC3",
+    "default_track": false,
+    "forced_track": false,
+    "language": "fre",
+    "language_ietf": "fr-CA",
+    "track_name": "Français 5.1",
+    "type": "audio"
+   },
+   {
+    "audio_channels": 2,
+    "codec_id": "A_OPUS",
+    "default_track": false,
+    "flag_commentary": true,
+    "forced_track": false,
+    "language": "eng",
+    "language_ietf": "en",
+    "track_name": "Commentary",
+    "type": "audio"
+   },
+   {
+    "audio_channels": 1,
+    "codec_id": "A_FLAC",
+    "default_track": false,
+    "forced_track": false,
+    "language": "ger",
+    "language_ietf": "de",
+    "type": "audio"
+   },
+   {
+    "codec_id": "S_TEXT/UTF8",
+    "default_track": true,
+    "forced_track": true,
+    "language": "eng",
+    "language_ietf": "en",
+    "track_name": "Signs",
+    "type": "subtitles"
+   },
+   {
+    "codec_id": "S_TEXT/ASS",
+    "default_track": true,
+    "forced_track": false,
+    "language": "eng",
+    "language_ietf": "en",
+    "type": "subtitles"
+   },
+   {
+    "codec_id": "S_HDMV/PGS",
+    "content_encoding_algorithms": "0",
+    "default_track": true,
+    "forced_track": false,
+    "language": "eng",
+    "language_ietf": "en",
+    "type": "subtitles"
+   },
+   {
+    "codec_id": "S_VOBSUB",
+    "content_encoding_algorithms": "0",
+    "default_track": false,
+    "forced_track": false,
+    "language": "spa",
+    "language_ietf": "es",
+    "type": "subtitles"
+   }
+  ]
+ },
+ "feature-rich.mkv remove": {
+  "attachments": [
+   [
+    "notes.nfo",
+    "text/plain",
+    ""
+   ],
+   [
+    "Fixture Sans.ttf",
+    "font/ttf",
+    ""
+   ]
+  ],
+  "chapters": 2,
+  "front": [
+   "SeekHead",
+   "Info",
+   "Tracks"
+  ],
+  "ours": {
+   "PLEXCACHE_OPTIMIZER": "0.1.2"
+  },
+  "tags": [
+   "COMMENT",
+   "DATE_RELEASED",
+   "FIXTURE_TRACK_NOTE",
+   "PLEXCACHE_OPTIMIZER",
+   "TITLE"
+  ],
+  "tail": [
+   "Attachments",
+   "Chapters",
+   "Cues",
+   "Tags"
+  ],
+  "title": "Fixture Film",
+  "tracks": [
+   {
+    "codec_id": "V_MPEG4/ISO/AVC",
+    "color_matrix_coefficients": 9,
+    "color_primaries": 9,
+    "color_transfer_characteristics": 16,
+    "default_track": false,
+    "forced_track": false,
+    "language": "und",
+    "language_ietf": "und",
+    "max_content_light": 1000,
+    "max_frame_light": 400,
+    "pixel_dimensions": "160x90",
+    "track_name": "Main video",
+    "type": "video"
+   },
+   {
+    "audio_channels": 2,
+    "codec_id": "A_AAC",
+    "default_track": true,
+    "forced_track": false,
+    "language": "eng",
+    "language_ietf": "en",
+    "type": "audio"
+   },
+   {
+    "audio_channels": 6,
+    "codec_id": "A_AC3",
+    "default_track": false,
+    "forced_track": false,
+    "language": "fre",
+    "language_ietf": "fr-CA",
+    "track_name": "Français 5.1",
+    "type": "audio"
+   },
+   {
+    "audio_channels": 2,
+    "codec_id": "A_OPUS",
+    "default_track": false,
+    "flag_commentary": true,
+    "forced_track": false,
+    "language": "eng",
+    "language_ietf": "en",
+    "track_name": "Commentary",
+    "type": "audio"
+   },
+   {
+    "audio_channels": 1,
+    "codec_id": "A_FLAC",
+    "default_track": false,
+    "forced_track": false,
+    "language": "ger",
+    "language_ietf": "de",
+    "type": "audio"
+   },
+   {
+    "codec_id": "S_TEXT/UTF8",
+    "default_track": true,
+    "forced_track": true,
+    "language": "eng",
+    "language_ietf": "en",
+    "track_name": "Signs",
+    "type": "subtitles"
+   },
+   {
+    "codec_id": "S_TEXT/ASS",
+    "default_track": true,
+    "forced_track": false,
+    "language": "eng",
+    "language_ietf": "en",
+    "type": "subtitles"
+   },
+   {
+    "codec_id": "S_HDMV/PGS",
+    "content_encoding_algorithms": "0",
+    "default_track": true,
+    "forced_track": false,
+    "language": "eng",
+    "language_ietf": "en",
+    "type": "subtitles"
+   },
+   {
+    "codec_id": "S_VOBSUB",
+    "content_encoding_algorithms": "0",
+    "default_track": false,
+    "forced_track": false,
+    "language": "spa",
+    "language_ietf": "es",
+    "type": "subtitles"
+   }
+  ]
+ },
+ "plain.mkv compress": {
+  "attachments": [],
+  "chapters": 0,
+  "front": [
+   "SeekHead",
+   "Info",
+   "Tracks"
+  ],
+  "ours": {
+   "PLEXCACHE_OPTIMIZER": "0.1.2"
+  },
+  "tags": [
+   "PLEXCACHE_OPTIMIZER"
+  ],
+  "tail": [
+   "Cues",
+   "Tags"
+  ],
+  "title": null,
+  "tracks": [
+   {
+    "codec_id": "V_MPEG4/ISO/AVC",
+    "default_track": false,
+    "forced_track": false,
+    "language": "und",
+    "language_ietf": "und",
+    "pixel_dimensions": "160x90",
+    "type": "video"
+   },
+   {
+    "audio_channels": 2,
+    "codec_id": "A_AAC",
+    "default_track": false,
+    "forced_track": false,
+    "language": "und",
+    "language_ietf": "und",
+    "type": "audio"
+   }
+  ]
+ },
+ "plain.mkv remove": {
+  "attachments": [],
+  "chapters": 0,
+  "front": [
+   "SeekHead",
+   "Info",
+   "Tracks"
+  ],
+  "ours": {
+   "PLEXCACHE_OPTIMIZER": "0.1.2"
+  },
+  "tags": [
+   "PLEXCACHE_OPTIMIZER"
+  ],
+  "tail": [
+   "Cues",
+   "Tags"
+  ],
+  "title": null,
+  "tracks": [
+   {
+    "codec_id": "V_MPEG4/ISO/AVC",
+    "default_track": false,
+    "forced_track": false,
+    "language": "und",
+    "language_ietf": "und",
+    "pixel_dimensions": "160x90",
+    "type": "video"
+   },
+   {
+    "audio_channels": 2,
+    "codec_id": "A_AAC",
+    "default_track": false,
+    "forced_track": false,
+    "language": "und",
+    "language_ietf": "und",
+    "type": "audio"
+   }
+  ]
+ }
+}

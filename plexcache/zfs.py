@@ -122,7 +122,8 @@ def mounts() -> list[dict]:
         if len(lf) < 5 or len(rf) < 2:
             continue
         out.append({"root": _unescape(lf[3]), "mountpoint": _unescape(lf[4]), "fstype": rf[0], "source": _unescape(rf[1]),
-                    "options": lf[5].split(",") if len(lf) > 5 else []})
+                    "options": lf[5].split(",") if len(lf) > 5 else [],
+                    "optional": lf[6:]})  # e.g. shared:12 or master:12 (a mount that follows the host's)
     return out
 
 

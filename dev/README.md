@@ -8,6 +8,7 @@ This folder holds what you need to try changes on a real TrueNAS before pushing 
 | `tnsync` | A small script that **copies your code to the NAS, restarts the test app and runs the tests** — in one command, from your Mac. |
 | `coverage.py` | Runs the tests and shows how much of the code they reach, per file. No installs needed (Python 3.12+). |
 | `screenshots.js` | Makes the README screenshots from the demo (see below). |
+| `make_fixtures.py` | Makes the optimizer's test files (`tests/fixtures/*.mkv`: many real-world features, a few hundred KB) and the snapshot of what optimizing them gives. Run it with `--snapshot` after checking a change the tests caught (needs ffmpeg and MKVToolNix). |
 
 The loop is: edit on your Mac → `tnsync local -y` → refresh `http://<nas-ip>:8643`. Nothing reaches GitHub (or the real app) until you commit and push.
 

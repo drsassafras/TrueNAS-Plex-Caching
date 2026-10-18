@@ -19,7 +19,7 @@ from .plex import PlexError, check_pin, create_pin
 
 log = logging.getLogger("plexcache")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
-PAGES = {"/", "/health", "/caching", "/ssd", "/optimizer", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
+PAGES = {"/", "/health", "/caching", "/ssd", "/library", "/optimizer", "/processes", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
 MAX_BODY = 1024 * 1024
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
@@ -163,6 +163,61 @@ def make_handler(app):
                 return self._json({"ok": True, "version": app.version})
             if path == "/api/state":
                 return self._json(dict(app.state(), build=BUILD))  # (build: see app.js load())
+            if path.startswith("/api/library"):
+                # The Library Health page: a library's files with their layouts, or one file in full
+                q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                arg = lambda k, d="": (q.get(k) or [d])[0]
+                if path == "/api/library":
+                    try:
+                        off, lim = max(0, int(arg("offset", "0"))), min(500, max(1, int(arg("limit", "100"))))
+                    except ValueError:
+                        return self._error("bad request", 400)
+                    if not app.library_info(arg("key")):
+                        return self._error("not found", 404)
+                    return self._json(jsonable(app.library_view(arg("key"), off, lim, arg("q"))))
+                if path == "/api/library/blocks":
+                    try:
+                        numbers = [int(x) for x in arg("n").split(",") if x]
+                        got = app.block_estimates(arg("path"), numbers)
+                    except (ValueError, OSError) as e:
+                        return self._error(str(e), 400)
+                    return self._json({"blocks": got}) if got is not None else self._error("not found", 404)
+                if path == "/api/library/file":
+                    try:
+                        got = app.file_view(arg("path"))
+                    except OSError as e:
+                        return self._error(str(e), 404)
+                    return self._json(jsonable(got)) if got else self._error("not found", 404)
+                return self._error("not found", 404)
+            if path == "/api/poster":
+                # a small poster beside a file or what plays (from Plex, through this app: the browser has no Plex token)
+                p = (urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "").get("path") or [""])[0]
+                if not re.fullmatch(r"/library/metadata/\d+/(thumb|art)/\d+", p):
+                    return self._error("not found", 404)
+                try:
+                    data = app.poster_thumb(p)
+                except Exception:  # noqa: BLE001 — Plex unreachable, or no such poster: no thumbnail
+                    return self._error("not found", 404)
+                return self._send(200, data, "image/jpeg", {"Cache-Control": "private, max-age=86400"})
+            if path.startswith("/api/processes"):
+                # The Processes page: the job running now, every job in the log, a job's files, and the export
+                q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                arg = lambda k, d="": (q.get(k) or [d])[0]
+                if path == "/api/processes":
+                    return self._json({"job": app.jobs.snapshot(), "queue": app.jobs.queued(), "jobs": app.jobs.log.jobs()})
+                if path == "/api/processes/files":
+                    try:
+                        off, lim = max(0, int(arg("offset", "0"))), min(1000, max(1, int(arg("limit", "200"))))
+                    except ValueError:
+                        return self._error("bad request", 400)
+                    d = app.jobs.log.files(arg("job"), off, lim, sort=arg("sort") or "file", fill=lambda rows: app.optimizing.describe(rows, arg("job")))
+                    return self._json(d)
+                if path == "/api/processes/export":
+                    fmt = "json" if arg("format") == "json" else "csv"
+                    body, ctype = app.jobs.log.export(fmt)
+                    return self._send(200, body, ctype, {"Content-Disposition": f'attachment; filename="plex-cache-jobs.{fmt}"',
+                                                         "Cache-Control": "no-store"})
+                return self._error("not found", 404)
             if path == "/api/coverage":
                 # How much of each library was cached, hour by hour (asked for when the card is shown)
                 return self._json(app.coverage.series({lib["key"]: lib.get("title") for lib in app.libraries}))
@@ -267,13 +322,67 @@ def make_handler(app):
                     key = body.get("library")
                     if not isinstance(key, str) or not app.library_info(key):
                         raise SettingsError(M("unknown library: {key}", key=str(key)))
-                    return self._json({"started": app.optimizing.start_library(key)})
+                    mode = body.get("mode", "optimize")
+                    if mode not in ("optimize", "covers"):
+                        raise SettingsError(M("mode must be optimize or covers"))
+                    got = app.optimizing.queue(key, mode)  # now, or after the jobs before it
+                    return self._json({"started": got == "started", "queued": got == "queued"})
+                if path == "/api/migration":
+                    # Turning a library folder into a dataset (migrating.py): one action at a time
+                    mig, action = app.migration, body.get("action")
+                    try:
+                        if action == "plan":
+                            return self._json(jsonable(mig.plan(str(body.get("library") or ""), str(body.get("folder") or ""))))
+                        if action == "check":
+                            return self._json(jsonable(mig.refresh()))
+                        if action in ("copy", "catchup"):
+                            return self._json(jsonable(mig.start_copy(mirror=action == "catchup")))
+                        if action in ("pause", "resume"):
+                            app.jobs.pause(action == "pause")
+                            return self._json(jsonable(mig.refresh()))
+                        if action == "stop":
+                            app.jobs.cancel()
+                            return self._json(jsonable(mig.refresh()))
+                        if action == "rename_old":
+                            return self._json(jsonable(mig.rename_old()))
+                        if action == "undo_rename":
+                            return self._json(jsonable(mig.undo_rename()))
+                        if action == "delete_old":
+                            return self._json(jsonable(mig.delete_old()))
+                        if action == "cancel":
+                            mig.cancel()
+                            return self._json({"cancelled": True})
+                    except ValueError as e:
+                        raise SettingsError(M("{why}", why=str(e))) from None
+                    raise SettingsError(M("unknown action"))
+                if path == "/api/library/survey":
+                    # read the layout of every file in a library (a file job, queued like the others)
+                    key = body.get("library")
+                    if not isinstance(key, str) or not app.library_info(key):
+                        raise SettingsError(M("unknown library: {key}", key=str(key)))
+                    # "force": every file again; otherwise only files new or changed since they were inspected
+                    item = app.jobs.enqueue("survey", {"library": key, "force": bool(body.get("force"))}, library=key, mode="survey",
+                                            title=(app.library_info(key) or {}).get("title"))
+                    started = item is not None and all(q["id"] != item["id"] for q in app.jobs.queued())
+                    return self._json({"started": started, "queued": item is not None and not started})
                 if path == "/api/optimizer/check":
                     # The optimizer's setup steps, checked again now (the Optimizer page's "Check again")
                     return self._json(jsonable(app.optimizing.diagnose()))
-                if path == "/api/optimize/stop":
-                    app.optimizing.stop()
-                    return self._json({"stopping": True})
+                if path == "/api/job":
+                    # The file job running now, whatever kind: {"action": "pause" | "resume" | "cancel"}
+                    a = body.get("action")
+                    if a == "dismiss":
+                        app.jobs.dismiss()
+                        return self._json({"ok": True})
+                    if a == "retry":  # a failed file (from the job log), tried again after the file in hand
+                        got = app.optimizing.retry(str(body.get("job") or ""), str(body.get("file") or ""))
+                        return self._json({"ok": got is not None})
+                    if a == "remove":  # queued work, taken off the queue
+                        return self._json({"ok": app.jobs.remove(str(body.get("id") or ""))})
+                    ok = app.jobs.pause(a == "pause") if a in ("pause", "resume") else app.jobs.cancel() if a == "cancel" else None
+                    if ok is None:
+                        raise SettingsError(M("unknown action"))
+                    return self._json({"ok": ok})
                 if path == "/api/warmup/stop":
                     app.stop_warmup()
                     return self._json({"stopping": True})

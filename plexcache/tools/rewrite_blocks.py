@@ -287,7 +287,7 @@ def main() -> int:
     stop = {"now": False}
     signal.signal(signal.SIGINT, lambda *a: stop.update(now=True))
     pacer = Pacer(args.mb_per_sec)
-    busy, busy_at = set(), 0.0
+    busy, busy_at = set(), None
     done = skipped = 0
     for i, (path, st, dir_st) in enumerate(todo, 1):
         if stop["now"]:
@@ -301,7 +301,7 @@ def main() -> int:
             skipped += 1
             print(f"[{i}/{len(todo)}] skipped (hard-linked): {path}")
             continue
-        if time.monotonic() - busy_at > OPEN_FILES_TTL:
+        if busy_at is None or time.monotonic() - busy_at > OPEN_FILES_TTL:  # (the clock may start near 0)
             busy, busy_at = open_files(), time.monotonic()
         if (st.st_dev, st.st_ino) in busy:
             skipped += 1

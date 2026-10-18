@@ -251,6 +251,11 @@ PCI18N.ready.then(function () {
       H("Checks run on startup, every 6 hours, and whenever settings change. Last run {when}.", { when: ago(h.at) }),
       '<button class="btn pri" data-act="recheck"' + (ST.checking ? " disabled" : "") + ">" + (ST.checking ? H("Checking…") : H("Re-run all checks")) + "</button>");
     out += banner(h.summary, false);
+    var hj = ST.job;
+    if (hj && hj.running) {
+      out += '<div class="note"><strong>' + esc(jobTitle(hj)) + "</strong>" + jobProgress(hj) +
+        '<div><a href="/optimizer" data-nav>' + H("Open the Optimizer page") + '</a> · <button class="link" type="button" data-act="job" data-job="cancel">' + H("Cancel") + "</button></div></div>";
+    }
     out += '<div class="tiles">' +
       tile(c.pass, P(c.pass, "check passed", "checks passed"), "var(--ok)") +
       tile(c.warn, P(c.warn, "warning — features still run", "warnings — features still run"), "var(--warn)") +
@@ -265,7 +270,7 @@ PCI18N.ready.then(function () {
           var folders = r.folders.length ? r.folders.map(function (f) {
             return '<div class="mono">' + esc(f.plex_path) + (f.local_path !== f.plex_path ? ' <span class="muted">→ ' + esc(f.local_path) + "</span>" : "") + "</div>";
           }).join("") : '<span class="muted">' + esc(r.detail || "") + "</span>";
-          out += "<tr><td>" + esc(r.library) + "</td><td>" + folders + '</td><td class="nw">' + (r.status === "info" ? "—" : fmtNum(r.count)) +
+          out += "<tr><td>" + libIcon(r.library) + esc(r.library) + "</td><td>" + folders + '</td><td class="nw">' + (r.status === "info" ? "—" : fmtNum(r.count)) +
             "</td><td>" + badge(r.status, r.badge || STATUS_TEXT[r.status] || r.status) +
             (r.status !== "pass" && r.status !== "info" ? '<div class="det">' + esc(r.detail) + "</div>" : "") + "</td><td>" + recordCell(r.record) + "</td></tr>";
         });
@@ -312,9 +317,12 @@ PCI18N.ready.then(function () {
     "<strong>Why it matters</strong>: ZFS uses a record size only for files written after it’s set. Files written before keep their old block size — and with it the slower reads " +
     "and cache use the dataset’s setting was chosen to avoid — until they’re written again.<br><br>" +
     "<strong>To fix a warning</strong>: on the Optimizer page, <strong>TrueNAS Compression &amp; Recordsize</strong> writes those files again, one at a time.");
-  var COMP_HELP = H("The dataset’s compression. <strong>ZSTD-3</strong> compresses what can be compressed in media files — fonts, the index, tags and the padding at the end of each file — better than LZ4, at little cost.<br><br>" +
-    "<strong>To fix a warning</strong>: in TrueNAS, Datasets → the dataset → Edit → Advanced Options → <strong>Compression Level</strong>: ZSTD (that’s level 3). " +
-    "Files keep the compression they were written with; on the Optimizer page, <strong>TrueNAS Compression &amp; Recordsize</strong> writes the existing ones again.");
+  var COMP_HELP = H("<strong>What it checks</strong>: the dataset’s compression. Video barely compresses, but fonts, the index, tags and the padding at the end of each file do — and the index is cached with the start of every file, so the smaller it is, the more fits in the cache.<br><br>" +
+    "<strong>Pass</strong>: ZSTD at levels 3 to 19. <strong>ZSTD-3</strong> (plain “ZSTD” in TrueNAS) is recommended. From level 3, ZFS gives up early on what won’t compress, so video costs almost nothing to try. " +
+    "Higher levels make marginally smaller files but use more CPU when writing (imports, the optimizer); reading is no slower at any level. On a mostly idle NAS, a higher level is fine — your choice.<br><br>" +
+    "<strong>Warning</strong>: ZSTD-1 and 2 (slightly less compression, and no faster in practice), LZ4 and ZSTD-FAST (less compression), and anything else (off, GZIP — also slower to read —, ZLE, LZJB).<br><br>" +
+    "<strong>To fix a warning</strong>: in TrueNAS, Datasets → the dataset → Edit → Advanced Options → <strong>Compression Level</strong>: ZSTD. " +
+    "Files keep the compression they were written with; on the Optimizer page, <strong>TrueNAS Compression &amp; Recordsize</strong> writes them again. Files already written with ZSTD 3 to 19 are never written again just because the level changed.");
   function recordCell(rec) {
     if (!rec || !rec.best) return '<span class="muted">—</span>';
     var badges = { ideal: badge("pass", T("Ideal")), pass: badge("pass", T("Pass")), warn: badge("warn", T("Warning")), info: badge("info", T("Not checked")) };
@@ -326,7 +334,8 @@ PCI18N.ready.then(function () {
     var x = r.recordsize;
     if (!x) return '<span class="muted">—</span>';
     return badge(x.status, x.badge || STATUS_TEXT[x.status] || x.status) + (x.text ? '<div class="det mono">' + esc(x.text) + "</div>" : "") +
-      (x.lines || []).map(function (l) { return '<div class="det">' + esc(l) + "</div>"; }).join("");
+      (x.lines || []).map(function (l) { return '<div class="det">' + esc(l) + "</div>"; }).join("") +
+      (x.split ? '<div class="det"><a href="/optimizer" data-nav>' + H("Move a folder to its own dataset") + "</a></div>" : "");
   }
 
 
@@ -355,7 +364,8 @@ PCI18N.ready.then(function () {
       if (cmd) out += '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) + '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button></div>";
       out += "</div>";
     }
-    if (it.link) out += '<div class="det"><a href="' + esc(it.link.href) + '" data-nav>' + esc(it.link.text) + "</a></div>";
+    if (it.link && it.link.job) out += '<div class="det"><button class="link" type="button" data-act="proc-failed" data-job="' + esc(it.link.job) + '">' + esc(it.link.text) + "</button></div>";
+    else if (it.link) out += '<div class="det"><a href="' + esc(it.link.href) + '" data-nav>' + esc(it.link.text) + "</a></div>";
     return out + (extra || "") + "</div></div>";
   }
 
@@ -489,10 +499,12 @@ PCI18N.ready.then(function () {
   var SSD_SIZES = [128, 256, 500, 1000, 2000, 4000, 8000];  // GB, as drives are sold
   var L2_HEADER = 96;  // RAM the L2ARC uses per record it holds (plexcache/warmup.py L2ARC_HEADER_BYTES)
 
-  // What one file takes in the cache at a record size (plexcache/warmup.py cached_bytes()).
+  // What one file takes in the cache at a record size (plexcache/warmup.py cached_bytes()): its start —
+  // the lead-in, never less than the metadata in front of the video and 60% of a record of video — in
+  // whole records, and the whole records its metadata at the end takes.
   function wholeRecords(n, record) { return n > 0 ? Math.ceil(n / record) * record : 0; }
-  function cachedBytes(lead, index, share, record, size, first) {
-    var head = lead + (first ? index * share : 0);
+  function cachedBytes(lead, index, share, record, size, first, front) {
+    var head = Math.max(lead, (front || 0) + 0.6 * record) + (first ? index * share : 0);
     if (size && (size <= record || head >= size)) return size;
     var total = (head <= record ? record : head + record / 2) + (first || !index ? 0 : share * wholeRecords(index, record));
     return size ? Math.min(total, size) : total;
@@ -501,18 +513,19 @@ PCI18N.ready.then(function () {
   // The four sizes of one library, in bytes and in L2ARC records (each record costs RAM to track).
   // Target follows the sliders; the others use the library's own seconds.
   function libSizes(r) {
-    var one = function (b) { return r.avg_size ? Math.min(b, r.avg_size) : b; };
     var out = {
-      tmin: { bytes: r.count * one(r.rs_best), recs: r.count },
-      target: { bytes: r.count * cachedBytes(r.bps * estSec(r), r.index_avg, r.index_share, r.rs_best, r.avg_size, true) }
+      // Target: the files as the optimizer lays them out — next to nothing in front of the video, the metadata at the end
+      tmin: { bytes: r.count * cachedBytes(0, r.index_avg, 1, r.rs_best, r.avg_size, false) },
+      target: { bytes: r.count * cachedBytes(r.bps * estSec(r), r.index_avg, 1, r.rs_best, r.avg_size, false) }
     };
+    out.tmin.recs = out.tmin.bytes / r.rs_best;
     out.target.recs = out.target.bytes / r.rs_best;
     if (r.rs) {
-      var idx = r.index_share * wholeRecords(r.index_avg, r.rs);  // the index at the end, in whole records
-      out.ymin = { bytes: r.count * (one(r.rs) + idx), recs: r.count * (1 + idx / r.rs) };
+      var ymin = cachedBytes(0, r.index_avg, r.index_share, r.rs, r.avg_size, false, r.front);
+      out.ymin = { bytes: r.count * ymin, recs: r.count * ymin / r.rs };
       var lead = r.bps * r.set_sec, b = 0, n = 0;
       (r.blocks || []).forEach(function (m) {
-        var c = cachedBytes(lead, r.index_avg, r.index_share, m[0], r.avg_size, false);
+        var c = cachedBytes(lead, r.index_avg, r.index_share, m[0], r.avg_size, false, r.front);
         b += m[1] * c; n += m[1] * c / m[0];
       });
       out.your = { bytes: r.count * b, recs: r.count * n };
@@ -539,16 +552,16 @@ PCI18N.ready.then(function () {
     var kbps = function (v) { return v >= 1000 ? T("{n} Mbps", { n: dec(v / 1000, 1) }) : T("{n} kbps", { n: Math.round(v) }); };
     var notChecked = '<span class="muted">' + H("Not checked") + "</span>";
     var cell = function (z, sub, est) { return '<td class="nw' + (est ? " estc" : "") + '">' + (z ? esc(fmtBytes(z.bytes)) + (sub ? ' <span class="muted">· ' + esc(sub) + "</span>" : "") : notChecked) + "</td>"; };
-    var head4 = [[H("Target minimum"), H("The first record of each file at the record size recommended for the library, with its index assumed to be at the front. The least warm-up could cache, if the files were laid out that way.")],
-      [H("Your minimum"), H("The first record of each file at your dataset’s record size, plus the whole records the index takes for files that keep it at the end. The least warm-up caches: when the L2ARC is too small, it shortens lead-ins toward this.")],
-      [H("Target"), H("The recommended record size, indexes at the front, at the lead-in lengths on the sliders above. All the way down is one record.")],
-      [H("Your library"), H("As your files are written now — the block sizes found on the dataset, indexes where they are — at your lead-in lengths.")]];
+    var head4 = [[H("Target minimum"), H("Each file optimized, at the record size recommended for the library: its first record (enough for 60% of a record of video), and the whole records its metadata at the end takes — the index, tags, fonts and cover art. The least warm-up could cache, if the files were laid out that way.")],
+      [H("Your minimum"), H("Each file as it is, at your dataset’s record size: whole records through the metadata in front of the video and 60% of a record of video, plus the whole records its metadata at the end takes. The least warm-up caches: when the L2ARC is too small, it shortens lead-ins toward this.")],
+      [H("Target"), H("Each file optimized, at the recommended record size, at the lead-in lengths on the sliders above. All the way down is the Target minimum.")],
+      [H("Your library"), H("As your files are written now — the block sizes found on the dataset, their metadata where it is — at your lead-in lengths.")]];
     var table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">' + H("Titles") + '</th><th scope="col">' + H("Avg bitrate") + "</th>" +
       '<th scope="col">' + H("Avg file") + "</th>" + head4.map(function (h, i) { return '<th scope="col"' + (i === 2 ? ' class="estc"' : "") + ">" + h[0] + info(h[1], h[0]) + "</th>"; }).join("") + "</tr></thead><tbody>";
     rows.forEach(function (r) {
       var kind = KIND_NAME[r.kind], z = libSizes(r);
       var mine = r.rs ? fmtRs(r.rs) : "";
-      table += "<tr><td>" + esc(r.name) + (r.name.toLowerCase().indexOf(kind.toLowerCase()) < 0 ? ' <span class="muted">· ' + esc(kind) + "</span>" : "") + '</td><td class="nw">' + fmtNum(r.count) + '</td><td class="nw">' + (r.count ? kbps(r.kbps) : "—") +
+      table += "<tr><td>" + libIcon(r.key) + esc(r.name) + (r.name.toLowerCase().indexOf(kind.toLowerCase()) < 0 ? ' <span class="muted">· ' + esc(kind) + "</span>" : "") + '</td><td class="nw">' + fmtNum(r.count) + '</td><td class="nw">' + (r.count ? kbps(r.kbps) : "—") +
         '</td><td class="nw">' + (r.avg_size ? esc(fmtBytes(r.avg_size)) : "—") + "</td>" +
         cell(z.tmin, fmtRs(r.rs_best)) + cell(z.ymin, mine) +
         '<td class="nw estc" data-estcell="' + esc(r.key) + '">' + estCell(r) + "</td>" +
@@ -577,8 +590,8 @@ PCI18N.ready.then(function () {
         T("Your {size} L2ARC is smaller than the minimum ({min}).", lv);
     }
     var why = H("Each title’s lead-in (its length is set per library on the Caching page) × its library’s average bitrate ({video}% extra for video, {audio}% for audio, for bitrate spikes), " +
-      "and its seek index ({how}). ZFS caches whole records, so a lead-in rounds up to the record size, and an index at the end of a file costs the records it touches there as well. " +
-      "Moving indexes to the front (remuxing with mkclean, or ffmpeg’s faststart for MP4) and using the recommended record size give the Target columns; Health → Libraries shows each library’s record size and the one recommended for it. " +
+      "and its metadata ({how}): what's in front of the video, and at the end the index, tags, fonts and cover art. ZFS caches whole records, so a lead-in rounds up to the record size — never less than 60% of a record of video — and metadata at the end of a file costs the records it touches there as well. " +
+      "Optimizing the files (the Optimizer page) and using the recommended record size give the Target columns; Health → Libraries shows each library’s record size and the one recommended for it. " +
       "Sizes are for your libraries as they are today: leave room on top for how much they’ll grow.",
       { video: w.padding_video, audio: w.padding_audio, how: ST.index_avg ? T("measured by warm-up") : T("estimated until warm-up has measured yours") });
     var body = '<p style="font-weight:600;margin:12px 0 8px">' + esc(head) + info(why, T("L2ARC sizing")) + "</p>" + table +
@@ -609,7 +622,7 @@ PCI18N.ready.then(function () {
     if (!p || !p.libraries.length) return "";
     return '<div class="estgrid">' + p.libraries.map(function (r) {
       var lim = SEC_LIMITS[r.kind], id = "est-" + r.key;
-      return '<div class="fld" style="margin:0"><label for="' + id + '">' + esc(r.name) + ' <span class="val" data-val="' + id + '">' + esc(secText(estSec(r))) + "</span></label>" +
+      return '<div class="fld" style="margin:0"><label for="' + id + '">' + libIcon(r.key) + esc(r.name) + ' <span class="val" data-val="' + id + '">' + esc(secText(estSec(r))) + "</span></label>" +
         '<input id="' + id + '" type="range" min="' + lim[0] + '" max="' + lim[1] + '" step="1" value="' + estSec(r) + '" data-est="' + esc(r.key) + '"></div>';
     }).join("") + "</div>";
   }
@@ -638,7 +651,7 @@ PCI18N.ready.then(function () {
   }
   function sizingAdvanced() {
     return details("l2-advanced", H("Safety margins"),
-      '<p class="help" style="margin:8px 0 0">' + H("When the L2ARC is too small for your seconds, warm-up shortens them, but never below the first record of each file (and the last one, for files with their index at the end).") + "</p>" +
+      '<p class="help" style="margin:8px 0 0">' + H("When the L2ARC is too small for your seconds, warm-up shortens them, but never below each file’s metadata: at its start, whole records through 60% of a record of video, and at its end the index, tags, fonts and cover art.") + "</p>" +
       '<div class="grid" style="margin-top:8px">' +
       number("warmup", "padding_video", T("Video safety margin (%)"), 0, 100, H("Extra on top of the average bitrate, for scenes that run higher.")) +
       number("warmup", "padding_audio", T("Audio safety margin (%)"), 0, 100, "") + "</div>");
@@ -888,13 +901,17 @@ PCI18N.ready.then(function () {
     var lib = ((S.optimizer || {}).libraries || {})[key] || {};
     return { sync: lib.sync !== false, mkv: lib.mkv === true, images: { remove: 1, compress: 1, plex: 1 }[lib.images] ? lib.images : "unmatched" };
   }
-  var COVER_HELP = H("What happens to the cover art in MKV files — the images some DLNA players and TVs show. Fonts and other attachments are always kept.<br><br>" +
+  var COVER_HELP = H("What happens to the cover art in MKV files — the images some DLNA players and TVs show — when they’re first optimized. Fonts and other attachments are always kept. " +
+    "A Plex poster already in a file is kept (unless you choose Strip Cover Art); <strong>Sync Cover Art</strong> updates optimized files later.<br><br>" +
     "<strong>Only Embed Plex Cover Art for Unmatched Items</strong> (the default): when Plex can’t match something to an online entry — home videos, concerts, rare releases — " +
     "it has nowhere to fetch artwork from again, and the most reliable place to keep it is in the file itself. So those get Plex’s poster (whatever you set in Plex), losslessly compressed; " +
     "matched items have their cover art taken out, since Plex fetches it anyway.<br><br>" +
     "<strong>Strip Cover Art</strong> takes it out of every file. <strong>Compress Existing Cover Art</strong> keeps what’s there, losslessly compressed " +
     "(PNG with oxipng, JPEG with jpegtran: every pixel stays the same). <strong>Compress and Embed Plex Cover Art</strong> puts Plex’s poster in every file — the movie’s, " +
     "or for an episode its season’s — and writes the file again whenever the poster in Plex changes.");
+  var SYNC_COVER_HELP = H("Cover art is set once, when a file is first optimized: a later change of choice, or a new poster in Plex, doesn’t touch optimized files. " +
+    "<strong>Sync Cover Art</strong> does, when you ask: files whose Plex poster has changed get the new one, and with <strong>Strip Cover Art</strong> chosen, cover art is taken out. " +
+    "Each Plex poster in a file is marked with a checksum of the poster as Plex has it, so only the ones that changed are written again.");
   var SORT_HELP = H("The last record of a file is usually only partly filled: with a 1M record size, the end of a file might hold only 500K. " +
     "ZFS keeps a record compressed only when compression saves at least 12.5%, so a record that mixes a little compressible data with a lot that isn’t (video, images) is often stored as it is.<br><br>" +
     "So the optimizer puts the cover art straight after the video — it barely compresses, but it’s large enough to fill out a record — and the fonts, index and tags after it. " +
@@ -922,9 +939,134 @@ PCI18N.ready.then(function () {
       '<span class="muted">' + H("checked {when}", { when: ago(su.at) }) + "</span></div>";
     return out + "</section>";
   }
+  var OPT_CONFIRM = null;  // the library whose Optimize Now is waiting for "Optimize Anyway" (ZFS settings off)
+  var ZFS_CFG_HELP = H("Whether the library’s dataset is set up for the best result: its record size (see Health → Libraries) and its compression. " +
+    "<strong>Ideal</strong>: the recommended record size and ZSTD-3. <strong>Pass</strong>: the second-best record size, or ZSTD at levels 4 to 19. " +
+    "<strong>Warning</strong>: either is off.<br><br>Files take their dataset’s settings when they’re written, so change these first, in TrueNAS " +
+    "(Datasets → the dataset → Edit → Advanced Options): optimizing before that means writing every file twice.");
+  // Is a file activity running (an optimizer job, or a folder being copied to its own dataset)? Only one at a time.
+  function fileBusy() {
+    var job = ST.job, mig = ((ST.migration || {}).state) || {};
+    return !!((job && job.running) || mig.copying);
+  }
+  // The file job running now (jobs.py: optimizing, syncing cover art, copying a folder), one card for every kind:
+  // its progress, Pause and Cancel — on the Optimizer page and on Health
+  function jobProgress(job, extra) {
+    var checking = job.phase === "checking";
+    var n = checking ? job.checked : job.done, total = checking ? job.files : job.total;
+    var pct = total ? Math.min(100, Math.round(100 * n / total)) : 0;
+    // the count, then the file in hand (with its poster), a pause, and the estimate
+    var lines = '<div class="det">' + (checking ? H("Checking which files need it: {n} of {total}", { n: fmtNum(n || 0), total: fmtNum(total || 0) })
+        : H("{done} of {total} files · {pct}%", { done: fmtNum(n || 0), total: fmtNum(total || 0), pct: pct })) + "</div>" +
+      (!checking && job.current ? '<div class="det">' + fileTitle(job.current_title, job.current) + (job.step ? ' <span class="muted">(' + esc(job.step) + ")</span>" : "") + "</div>" : "") +
+      // the file in hand: how far through it is (remuxing, then checking both copies)
+      (!checking && job.current && job.file_pct != null ? '<div class="filebar"><div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
+        Math.round(job.file_pct) + '" aria-label="' + esc(T("This file")) + '"><div style="width:' + Math.min(100, job.file_pct) + '%"></div></div></div>' : "") +
+      (job.paused_by ? '<div class="det">' + badge("info", job.paused_by === "resilver" ? T("Paused: {why}", { why: job.paused_why || "" }) : T("Paused")) +
+        (job.paused_by === "resilver" ? " " + H("It carries on when the resilver is done.") : "") + "</div>" : "") +
+      (!checking ? '<div class="det">' + jobEta(job) + "</div>" : "") + (extra || "");
+    // the poster as tall as everything beside it
+    var poster = !checking && job.current && job.kind === "optimize";
+    return '<div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>' +
+      (poster ? '<div class="withposter tall">' + '<div class="posterbig">' + (job.poster ? '<img alt="" src="/api/poster?path=' + encodeURIComponent(job.poster) +
+        '" onerror="this.style.visibility=\'hidden\'">' : "") + '</div><div class="grow">' + lines + "</div></div>" : lines);
+  }
+  // How long is left, from how fast files are really written here (the estimate firms up as it goes)
+  function jobEta(job) {
+    if (job.eta == null) return H("Working out how long it will take…");
+    if (job.eta < 60) return H("Almost done");
+    var t = job.eta, d = Math.floor(t / 86400), h = Math.floor((t % 86400) / 3600), m = Math.floor((t % 3600) / 60);
+    var left = d ? T("{d} d {h} h", { d: d, h: h }) : h ? T("{h} h {m} min", { h: h, m: m }) : T("{m} min", { m: Math.max(1, m) });
+    // the time it'll be done, rounded: estimates aren't that exact (to 5 minutes; 15 past an hour away; 30 past 6 hours)
+    var step = (t > 6 * 3600 ? 30 : t > 3600 ? 15 : 5) * 60000;
+    var at = new Date(Math.round((Date.now() + t * 1000) / step) * step);
+    var when = at.toLocaleString(LOCALE, d >= 6 ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" } : { weekday: "short", hour: "2-digit", minute: "2-digit" });
+    return H("About {left} left — done around {when}", { left: left, when: when }) + (job.paused_by ? " " + H("(not counting the pause)") : "");
+  }
+  function jobLibrary(job) {
+    return (((ST.library || {}).libraries || []).filter(function (l) { return String(l.key) === String(job.library); })[0] || {}).title || job.title || job.library;
+  }
+  function jobTitle(job) {
+    var lib = jobLibrary(job), t;
+    if (job.kind === "copy") t = T("Copying {library} to Its Own Dataset", { library: lib });
+    else if (job.kind === "survey") t = T("Inspecting the Files in {library} Library", { library: lib });
+    else if (job.mode === "covers") t = T("Syncing Cover Art in {library} Library", { library: lib });
+    else t = T("Optimizing {library} Library", { library: lib });
+    var n = job.resumes || 0;  // restarts it carried on after
+    return !n ? t : t + " " + (n === 1 ? T("(resumed)") : n === 2 ? T("(resumed twice)") : T("(resumed {n} times)", { n: n }));
+  }
+  // How Plex names a file ("Title (year)", "Show · S01E05"); click it for the file's name (and again to hide it)
+  var SHOWFILE = {};
+  function fileTitle(title, file, cls) {
+    var name = (file || "").split("/").pop();
+    if (!title) return '<span class="mono">' + esc(name) + "</span>";
+    return '<button class="link ' + (cls || "") + '" type="button" data-act="file-toggle" data-file="' + esc(file) + '" aria-expanded="' + !!SHOWFILE[file] + '">' + esc(title) + "</button>" +
+      (SHOWFILE[file] ? '<div class="det mono">' + esc(name) + "</div>" : "");
+  }
+  // Plex's poster for a file or what plays, small (through this app: /api/poster); all the same size
+  function posterImg(path) {
+    return path ? '<img class="poster" loading="lazy" alt="" src="/api/poster?path=' + encodeURIComponent(path) + '" onerror="this.style.visibility=\'hidden\'">'
+      : '<span class="poster" aria-hidden="true"></span>';
+  }
+  // The files a job couldn't do: how many, and a link to them (and why) in its file history, failed first
+  function jobFailures(job) {
+    var n = (job.errors || []).length;
+    if (!n) return "";
+    return '<div class="det" style="margin-top:6px">' + badge("fail", P(n, "{n} file failed", "{n} files failed", { n: fmtNum(n) })) + " " +
+      H("The originals are unchanged.") + ' <button class="link" type="button" data-act="proc-failed" data-job="' + esc(job.id || "") + '">' +
+      H("See why") + "</button></div>";
+  }
+  function jobCard() {
+    var job = ST.job;
+    if (job && job.waiting) {
+      // after a restart, before it carries on (once the optimizer is ready)
+      return '<section class="card">' + heading(esc(jobTitle(Object.assign({}, job, { resumes: (job.resumes || 0) + 1 }))), "") +
+        '<div class="det">' + H("Carries on where it was ({done} of {total} files) once the optimizer is ready.", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) }) +
+        "</div>" + jobFailures(job) + "</section>";
+    }
+    if (job && !job.running) {
+      // the last job that ended: its counts and failures, until dismissed
+      return '<section class="card">' + heading(esc(jobTitle(job)), job.cancelled ? H("Cancelled") : H("Finished")) +
+        '<div class="det">' + (job.kind === "survey" ? H("{done} of {total} files inspected", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) })
+          : job.kind === "copy" ? H("{done} of {total} files copied", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) })
+          : H("{optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed", job)) + "</div>" + jobFailures(job) +
+        '<div style="margin-top:10px"><button class="btn" type="button" data-act="job" data-job="dismiss">' + H("Dismiss") + "</button></div></section>";
+    }
+    if (!job || !job.running) return "";
+    var pauseBtn = job.paused ? '<button class="btn pri" type="button" data-act="job" data-job="resume"' + (job.paused_by === "resilver" ? " disabled" : "") + ">" + H("Resume") + "</button> "
+      : '<button class="btn" type="button" data-act="job" data-job="pause">' + H("Pause") + "</button> ";
+    if (job.paused_by === "resilver" && !job.paused) pauseBtn = "";  // a resilver pause can't be overridden
+    var sub = job.kind === "copy" ? H("{folder} → {dataset}", { folder: job.folder || "", dataset: job.child || "" }) : "";
+    return '<section class="card">' + heading(esc(jobTitle(job)), sub) + jobProgress(job, jobFailures(job)) +
+      '<div style="margin-top:10px">' + pauseBtn + '<button class="btn" type="button" data-act="job" data-job="cancel">' + H("Cancel") + "</button> " +
+      '<span class="muted">' + (job.kind === "copy" ? H("Pausing and cancelling take effect straight away; a copy carries on where it was.")
+        : H("Pausing and cancelling take effect after the file in hand.")) + " " + H("File jobs started meanwhile wait in the queue.") + "</span></div></section>";
+  }
+  // File work waiting its turn (jobs.py queue): each starts when the jobs before it are done; any can be removed
+  function queuedFor(kind, args) {
+    return (ST.queue || []).filter(function (q) {
+      return q.kind === kind && Object.keys(args).every(function (k) { return String(q.args[k]) === String(args[k]); });
+    })[0];
+  }
+  function queueCard() {
+    var q = ST.queue || [];
+    if (!q.length) return "";
+    return '<section class="card">' + heading(esc(T("Queue")), H("Each starts when the ones before it are done.")) +
+      q.map(function (item, i) {
+        var sub = item.kind === "copy" ? H("{folder} → {dataset}", { folder: item.folder || "", dataset: item.child || "" }) : "";
+        return '<div class="row">' + badge("info", String(i + 1)) + '<div class="grow"><div class="what">' + esc(jobTitle(item)) + "</div>" +
+          '<div class="det">' + (sub ? sub + " · " : "") + H("Added {when}", { when: fmtWhen(item.queued) }) + "</div></div>" +
+          '<button class="btn" type="button" data-act="queue-remove" data-id="' + esc(item.id) + '">' + H("Remove") + "</button></div>";
+      }).join("") + "</section>";
+  }
   function pageOptimizer() {
-    var op = ST.optimizer || {}, job = op.job, sums = op.libraries || {};
-    var out = top(T("Optimizer"), H("Rewrites your media files so they suit caching — one library at a time, only when you press Optimize Now."), "");
+    var op = ST.optimizer || {}, sums = op.libraries || {};
+    // The optimizer's version (written into every file it optimizes): the running service's, and this app's if they differ
+    var svcV = (op.service || {}).version, appV = op.version;
+    var ver = svcV ? H("Optimizer version {version}", { version: svcV }) + (appV && String(svcV) !== String(appV) ? " " + H("(this app expects {version})", { version: appV }) : "")
+      : appV ? H("Optimizer version {version} (not running)", { version: appV }) : "";
+    var out = top(T("Optimizer"), H("Rewrites your media files so they suit caching — one library at a time, only when you press Optimize Now.") +
+      (ver ? '<br><span class="muted">' + ver + "</span>" : ""), "");
     out += '<div class="stack">' + optimizerSetup(op);
     out += '<section class="card">' + heading(esc(T("What it does")), "") + '<ul class="help">' +
       "<li>" + H("<strong>TrueNAS Compression &amp; Recordsize</strong>: writes each file again, byte for byte, so it takes its dataset’s current record size and compression — ZFS applies them only to files as they’re written. Any kind of file. A file’s compression can’t be read back, so every file counts until the optimizer has written it once.") + "</li>" +
@@ -932,8 +1074,9 @@ PCI18N.ready.then(function () {
         "<li>" + H("moves the fonts, cover art, index and tags to the end of the file, sorted so the parts not needed to play the file can be skipped") + "</li>" +
         "<li>" + H("sorts that metadata so the most compressible parts sit nearest the end. This maximizes how much TrueNAS can cache, sometimes significantly.") + info(SORT_HELP, T("Sorting the metadata")) + "</li>" +
         "<li>" + H("compresses image subtitles (PGS, VobSub) with zlib, as MKVToolNix does by default; video, audio and text subtitles are copied as they are") + "</li>" +
-        "<li>" + H("handles cover art as you choose: by default, embeds Plex’s poster only in items Plex hasn’t matched, where the file is the most reliable place to keep it — compressed losslessly") + "</li></ul></li>" +
-      "</ul></section>";
+        "<li>" + H("handles cover art as you choose: by default, embeds Plex’s poster only in items Plex hasn’t matched, where the file is the most reliable place to keep it — compressed losslessly") + "</li>" +
+        "<li>" + H("marks each file it optimizes with a tag inside the file (the optimizer’s version), so a file copied or synced to another system isn’t done again there") + "</li></ul></li>" +
+      "</ul></section>" + jobCard() + queueCard();
     var libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind && !l.excluded; });
     out += '<section class="card">' + heading(esc(T("Optimize Files")), H("Choose what to do for each library, then press Optimize Now."));
     if (!libs.length) {
@@ -944,9 +1087,9 @@ PCI18N.ready.then(function () {
       return out + '<p class="muted">' + why + "</p></section></div>";
     }
     out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library") + '</th><th scope="col">' + H("Options") +
-      '</th><th scope="col">' + H("Status") + '</th><th scope="col"></th></tr></thead><tbody>';
+      '</th><th scope="col">' + H("ZFS Settings") + info(ZFS_CFG_HELP, T("ZFS Settings")) + '</th><th scope="col">' + H("Status") + '</th><th scope="col"></th></tr></thead><tbody>';
     libs.forEach(function (l) {
-      var key = String(l.key), c = optChoices(key), sm = sums[key], running = job && job.running && job.library === key;
+      var key = String(l.key), c = optChoices(key), sm = sums[key];
       // the choices on one line: two checkboxes, and with MKV the cover art choice
       var opts = '<div class="optline"><label class="nw"><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="sync"' + (c.sync ? " checked" : "") + "> " + H("TrueNAS Compression &amp; Recordsize") + "</label>" +
         '<label class="nw"><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="mkv"' + (c.mkv ? " checked" : "") + "> " + H("Optimize MKV Files") + "</label>";
@@ -961,20 +1104,504 @@ PCI18N.ready.then(function () {
       if (!sm) st = '<span class="muted">—</span>';
       else if (!c.sync && !c.mkv) st = '<span class="muted">' + H("Nothing chosen") + "</span>";
       else st = sm.todo ? badge("warn", P(sm.todo, "{n} file", "{n} files", { n: fmtNum(sm.todo) })) : badge("pass", T("Complete"));
+      if (sm && (sm.conflicts || []).length) st += '<div class="det">' + PH((sm.conflicts || []).length, "{n} Syncthing conflict copy", "{n} Syncthing conflict copies") + "</div>";
+      // the dataset set up for the best result before files are written with it
+      var z = (sm || {}).zfs, zcell = '<span class="muted">—</span>';
+      if (z) zcell = badge(z.status === "ideal" || z.status === "pass" ? "pass" : z.status, { ideal: T("Ideal"), pass: T("Pass"), warn: T("Warning"), info: T("Not checked") }[z.status]) +
+        (z.issues || []).map(function (x) { return '<div class="det">' + esc(x) + "</div>"; }).join("");
       var act;
-      if (running) {
-        act = '<div class="det">' + H("{done} of {total}: {file}", { done: fmtNum(job.done + 1), total: fmtNum(job.total), file: job.current || "…" }) +
-          (job.step ? ' <span class="muted">(' + esc(job.step) + ")</span>" : "") + '</div><div class="det"><button class="link" type="button" data-act="optimize-stop">' + H("Stop") + "</button></div>";
+      var qOpt = queuedFor("optimize", { library: key, mode: "optimize" }), qCov = queuedFor("optimize", { library: key, mode: "covers" });
+      var runs = function (mode) { var j = ST.job; return !!(j && j.running && j.kind === "optimize" && j.library === key && j.mode === mode); };
+      if (OPT_CONFIRM === key) {
+        // optimizing now with the ZFS settings off: every file would be written twice
+        act = '<div class="det" style="max-width:320px">' + H("Optimizing before changing the ZFS settings means each file is written now and again after the change. Change the settings first to write each file only once.") + "</div>" +
+          '<div class="det"><button class="btn" type="button" data-act="optimize-lib" data-key="' + esc(key) + '" data-confirmed="1">' + H("Optimize Anyway") + "</button> " +
+          '<button class="link" type="button" data-act="optimize-cancel">' + H("Cancel") + "</button></div>";
       } else {
-        act = '<button class="btn pri" type="button" data-act="optimize-lib" data-key="' + esc(key) + '"' +
-          (!op.configured || (job && job.running) || !sm || !sm.todo ? " disabled" : "") + ">" + H("Optimize Now") + "</button>";
-        if (job && !job.running && job.library === key && job.finished)
-          act += '<div class="det muted">' + H("Last run: {optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed", job) + "</div>";
+        // one file job at a time: while one runs, these add to the queue (shown at the top)
+        var later = fileBusy(), off = !op.configured;
+        if (qOpt || runs("optimize")) act = badge("info", qOpt ? T("Queued") : T("Running"));
+        else act = '<button class="btn pri" type="button" data-act="optimize-lib" data-key="' + esc(key) + '"' +
+          (off || !sm || (!sm.todo && !(sm.conflicts || []).length) ? " disabled" : "") + ">" + (later ? H("Add to Queue") : H("Optimize Now")) + "</button>";
+        // cover art is set when a file is first optimized; this brings optimized files in line with the choice and Plex now
+        if (c.mkv && c.images !== "compress") act += " " + (qCov || runs("covers") ? badge("info", qCov ? T("Cover art sync queued") : T("Syncing cover art"))
+          : '<button class="btn" type="button" data-act="optimize-covers" data-key="' + esc(key) + '"' +
+          (off || !sm || !sm.mkv_done ? " disabled" : "") + ">" + (later ? H("Queue Cover Art Sync") : H("Sync Cover Art")) + "</button>") + info(SYNC_COVER_HELP, T("Sync Cover Art"));
+        var lj = ST.job;
+        if (lj && lj.kind === "optimize" && !lj.running && lj.library === key && lj.finished)
+          act += '<div class="det muted">' + H("Last run: {optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed", lj) + "</div>";
       }
-      out += "<tr><td>" + esc(l.title) + "</td><td>" + opts + "</td><td>" + st + '</td><td class="nw">' + act + "</td></tr>";
+      out += "<tr><td>" + libIcon(l.key) + esc(l.title) + "</td><td>" + opts + "</td><td>" + zcell + "</td><td>" + st + '</td><td class="nw">' + act + "</td></tr>";
     });
-    return out + "</tbody></table></div></section></div>";
+    return out + "</tbody></table></div></section>" + migrationCard() + "</div>";
   }
+
+  // ------------------------------------------------------------ a folder into its own dataset
+  // The steps (migrating.py): Create → Copy → Switch → Verify. Each step's checks come from the
+  // server; this shows them, what to do (shell and TrueNAS web UI), and the buttons.
+  var MIG_CONFIRM_DELETE = false;
+  function cmdBox(cmd) {
+    return '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) + '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button></div>";
+  }
+  function migChecks(checks) {
+    return (checks || []).map(function (c) {
+      return '<div class="row">' + badge(c.ok ? "pass" : "warn", c.ok ? T("Done") : T("To do")) + '<div class="grow"><div class="what">' + esc(c.title) + "</div>" +
+        (c.detail ? '<div class="det">' + esc(c.detail) + "</div>" : "") + "</div></div>";
+    }).join("");
+  }
+  function rsOr(n) { return n ? fmtRs(n) : "?"; }
+  function migrationCard() {
+    var mg = ST.migration || {}, st = mg.state, checks = mg.checks || [];
+    var out = '<section class="card">' + heading(esc(T("Move a Folder to Its Own Dataset")),
+      H("A library that needs a different record size than the rest of its dataset gets a dataset of its own, at the same path — so Plex keeps every file’s metadata. Plex keeps running; it’s restarted once, at the end.") +
+      info(H("A folder can’t become a dataset in place: its files are copied into a new dataset, which then takes the folder’s place. The copy is also what gives the files the new dataset’s record size and compression. " +
+        "You’ll need room for a second copy until the old one is deleted. Snapshots of the dataset keep the old copy’s space until they expire."), T("Moving a folder")));
+    if (!st || st.step === "done") {
+      if (st && st.step === "done") out += '<div class="note">' + H("{folder} is now the dataset {name}.", { folder: st.folder, name: st.child }) +
+        ' <button class="link" type="button" data-act="mig" data-mig="cancel">' + H("Close") + "</button></div>";
+      var cands = mg.candidates || [];
+      if (!cands.length) return out + '<p class="muted">' + H("No library folders yet.") + "</p></section>";
+      out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library folder") + '</th><th scope="col">' + H("Would become") +
+        '</th><th scope="col">' + H("Size") + '</th><th scope="col"></th></tr></thead><tbody>';
+      cands.forEach(function (c) {
+        out += "<tr><td>" + libIcon(c.library) + esc(c.title) + '<div class="det mono">' + esc(c.folder) + "</div>" + (c.suggested ? '<div class="det">' + badge("warn", T("Split Dataset")) + "</div>" : "") +
+          "</td><td>" + (c.child ? '<span class="mono">' + esc(c.child) + '</span><div class="det">' + H("Record size {size}, ZSTD-3", { size: rsOr(c.rs) }) + "</div>" : '<span class="muted">' + esc(c.why || "") + "</span>") +
+          '</td><td class="nw">' + esc(fmtGB(c.size)) + "</td><td>" + (c.child ? '<button class="btn" type="button" data-act="mig" data-mig="plan" data-lib="' + esc(c.library) +
+          '" data-folder="' + esc(c.folder) + '">' + H("Start") + "</button>" : "") + "</td></tr>";
+      });
+      return out + "</tbody></table></div></section>";
+    }
+    var steps = [["create", T("Create the dataset")], ["copy", T("Copy")], ["switch", T("Switch")], ["verify", T("Verify")]];
+    var at = steps.map(function (s) { return s[0]; }).indexOf(st.step);
+    out += '<div class="det"><strong>' + esc(st.title) + "</strong> · " + '<span class="mono">' + esc(st.folder) + "</span> → " + '<span class="mono">' + esc(st.child) + "</span></div>";
+    out += '<div class="det" style="margin:8px 0">' + steps.map(function (s, i) {
+      return (i < at ? "✓ " : i === at ? "▶ " : "") + (i === at ? "<strong>" + esc(s[1]) + "</strong>" : esc(s[1]));
+    }).join(" &nbsp;→&nbsp; ") + "</div>";
+    var optBusy = !!((ST.job || {}).running);  // one file job at a time
+    var btn = function (act, label, pri, disabled) {
+      var blocked = optBusy && ["copy", "catchup", "rename_old", "undo_rename", "delete_old", "ask_delete"].indexOf(act) >= 0;
+      return '<button class="btn' + (pri ? " pri" : "") + '" type="button" data-act="mig" data-mig="' + act + '"' + (disabled || blocked ? " disabled" : "") + ">" + label + "</button> ";
+    };
+    var temp = st.temp, rs = rsOr(st.rs), owner = st.owner || {};
+    if (st.step === "create") {
+      out += '<p class="help">' + H("Create the new dataset next to the folder, with these settings. It’s checked before anything is copied.") + "</p>";
+      out += '<div class="fix"><strong>' + H("In the TrueNAS shell") + "</strong>" + cmdBox("sudo zfs create -o recordsize=" + rs + " -o compression=zstd \"" + temp + "\"\n" +
+        "sudo chown " + (owner.uid != null ? owner.uid + ":" + owner.gid : "568:568") + " \"" + st.temp_host + "\"") + "</div>";
+      out += '<div class="fix"><strong>' + H("Or in the TrueNAS web UI") + "</strong><ol style=\"margin:4px 0 0 18px\">" +
+        "<li>" + H("Datasets → select {parent} → Add Dataset.", { parent: st.dataset }) + "</li>" +
+        "<li>" + H("Name: {name}. Under Advanced Options: Record Size {size}, Compression Level ZSTD. Save.", { name: temp.split("/").pop(), size: rs }) + "</li>" +
+        "<li>" + H("Select it → Edit Permissions: owner {uid}, group {gid} (the folder’s). Save.", { uid: owner.uid != null ? owner.uid : 568, gid: owner.gid != null ? owner.gid : 568 }) + "</li></ol></div>";
+      out += migChecks(checks);
+      var ready = checks.length && checks.every(function (c) { return c.ok; });
+      out += '<div style="margin-top:10px">' + btn("check", H("Check Again")) + btn("copy", H("Start Copying"), true, !ready) + btn("cancel", H("Cancel")) + "</div>";
+    } else if (st.step === "copy" || (st.step === "switch" && st.copying)) {
+      // the copy runs as the file job: its progress, Pause and Cancel are in the card above
+      if (st.copying && st.queued) out += '<p class="help">' + H("Waiting in the queue: it starts when the file jobs before it are done.") + "</p>" +
+        '<div style="margin-top:10px"><button class="btn" type="button" data-act="queue-remove" data-id="' + esc((queuedFor("copy", { folder: st.folder }) || {}).id || "") + '">' +
+        H("Remove from the Queue") + "</button></div>";
+      else if (st.copying) out += '<p class="help">' + H("Copying — the progress, with Pause and Cancel, is shown above.") + "</p>";
+      else out += '<div class="det">' + H("Stopped: {why}", { why: (st.copy || {}).reason || (st.copy || {}).result || "" }) + "</div>" +
+        '<div style="margin-top:10px">' + btn("copy", H("Carry On Copying"), true) + btn("cancel", H("Cancel")) + "</div>";
+    } else if (st.step === "switch") {
+      out += '<ol class="help" style="margin-left:18px">' +
+        "<li>" + H("<strong>The last pass</strong> copies what changed in the folder meanwhile and compares both copies, file by file.") + " " + btn("catchup", H("Run the Last Pass"), !st.compare) + "</li>" +
+        "<li>" + H("In Plex, turn off <strong>Empty trash automatically after every scan</strong> (Settings → Library) until the end, so files briefly out of sight don’t lose their metadata.") + "</li>" +
+        "<li>" + H("Move the old folder out of the way:") + " " + (st.old_path ? '<span class="mono">' + esc(st.old_path.split("/").pop()) + "</span> " + btn("undo_rename", H("Undo"))
+          : btn("rename_old", H("Move It"), !!(st.compare && st.compare.same), !(st.compare && st.compare.same))) + "</li>" +
+        "<li>" + H("Rename the dataset to the folder’s name:") + cmdBox("sudo zfs rename \"" + temp + "\" \"" + st.child + "\"") +
+          '<div class="det">' + H("Or in the TrueNAS web UI, if your version offers it: Datasets → select {name} → Rename.", { name: temp.split("/").pop() }) + "</div></li>" +
+        "</ol>" + migChecks(checks) + '<div style="margin-top:10px">' + btn("check", H("Check Again")) + (st.old_path ? "" : btn("cancel", H("Cancel"))) + "</div>";
+    } else if (st.step === "verify") {
+      out += '<p class="help">' + H("Now restart Plex (TrueNAS: Apps → Plex → Restart) so it sees the dataset, and let it scan. Then check again.") + "</p>" + migChecks(checks);
+      var ok = checks.length && checks.every(function (c) { return c.ok; });
+      out += '<div style="margin-top:10px">' + btn("check", H("Check Again"));
+      if (MIG_CONFIRM_DELETE) out += '<span class="det">' + H("Delete {path} for good?", { path: (st.old_path || "").split("/").pop() }) + "</span> " + btn("delete_old", H("Delete"), true) +
+        '<button class="link" type="button" data-act="mig-nodelete">' + H("Cancel") + "</button>";
+      else out += btn("ask_delete", H("Delete the Old Copy"), true, !ok);
+      out += "</div>" + '<p class="help">' + H("Then turn Plex’s Empty trash automatically after every scan back on, if you use it.") + "</p>";
+    }
+    return out + "</section>";
+  }
+  function fmtGB(n) { return ((n || 0) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 1 }) + " GB"; }
+
+  // ------------------------------------------------------------ processes
+  // Every file job (jobs.py, joblog.py): the one running now, with its controls, and the log — each
+  // job with its resume points and pauses, and its files. The log is fetched on its own.
+  var PROC = null, procAt = 0, procOpen = null, procFiles = {}, procOffset = {}, procSort = {};
+  function procFetch(force) {
+    if (!force && Date.now() - procAt < 10000) return;
+    procAt = Date.now();
+    api("/api/processes").then(function (d) { PROC = d; if (page === "processes" && !editing()) render(); }).catch(function () { procAt = 0; });
+    if (procOpen) procFilesFetch(procOpen, procOffset[procOpen] || 0);  // the open list follows too: files done, retries' results
+  }
+  // A retry starting or ending: the lists again straight away (not on the next round)
+  var retrySig = "";
+  function retriesChanged(st) {
+    var sig = (st.retries || []).map(function (r) { return r.file + (r.active ? "*" : ""); }).join("|");
+    if (sig !== retrySig && page === "processes") procFetch(true);
+    retrySig = sig;
+  }
+  function procFilesFetch(id, offset) {
+    api("/api/processes/files?job=" + encodeURIComponent(id) + "&offset=" + (offset || 0) + "&limit=200" + (procSort[id] ? "&sort=" + encodeURIComponent(procSort[id]) : "")).then(function (d) {
+      procFiles[id] = d; procOffset[id] = offset || 0; if (page === "processes") render();
+    });
+  }
+  function fmtWhen(t) { return t ? new Date(t * 1000).toLocaleString(LOCALE, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"; }
+  function fmtBytesShort(n) {
+    if (n == null) return "—";
+    if (n < 1000) return T("{n} B", { n: fmtNum(n) });
+    return n >= 1e9 ? dec(n / 1e9, 2) + " GB" : n >= 1e6 ? dec(n / 1e6, 1) + " MB" : fmtNum(Math.round(n / 1e3)) + " KB";
+  }
+  function fmtSecs(t) {
+    if (t == null) return "—";
+    if (t < 60) return T("{n} s", { n: Math.round(t) });
+    if (t < 3600) return T("{m} min {s} s", { m: Math.floor(t / 60), s: Math.round(t % 60) });
+    return T("{h} h {m} min", { h: Math.floor(t / 3600), m: Math.round((t % 3600) / 60) });
+  }
+  function procEvent(ev) {
+    var at = fmtWhen(ev.at), where = ev.total ? T("{done} of {total}", { done: fmtNum(ev.done || 0), total: fmtNum(ev.total) }) : "";
+    var name = { started: T("Started"), resumed: T("Resumed after a restart, at {where}", { where: where || "0" }), paused: T("Paused: {why}", { why: ev.why || "" }),
+      unpaused: T("Carried on"), finished: T("Finished"), cancelled: T("Cancelled") }[ev.event] || ev.event;
+    return "<li>" + esc(at) + " — " + esc(name) + "</li>";
+  }
+  function pageProcesses() {
+    procFetch();
+    var out = top(T("Processes"), H("File jobs — optimizing, syncing cover art, copying a folder to its own dataset — one at a time: the one running now, the ones queued after it, and what each did, file by file, for six months."),
+      '<a class="btn" href="/api/processes/export?format=csv" download>' + H("Export CSV") + '</a> <a class="btn" href="/api/processes/export?format=json" download>' + H("Export JSON") + "</a>");
+    out += '<div class="stack">';
+    var cur = jobCard();
+    out += cur || '<section class="card">' + heading(esc(T("Running Now")), "") + '<p class="muted">' + H("No file job is running. Start one on the Optimizer page.") + "</p></section>";
+    out += queueCard();
+    out += '<section class="card">' + heading(esc(T("History")), H("Kept six months. Open a job to see its files."));
+    if (!PROC) return out + '<p class="muted">' + H("Loading…") + "</p></section></div>";
+    var jobs = PROC.jobs || [];
+    if (!jobs.length) return out + '<p class="muted">' + H("Nothing yet.") + "</p></section></div>";
+    jobs.forEach(function (j) {
+      var titleJob = { kind: j.kind, mode: j.mode, library: j.library, title: j.title, resumes: j.events.filter(function (e) { return e.event === "resumed"; }).length };
+      var now = ST.job && ST.job.id === j.job && (ST.job.running || ST.job.waiting);
+      var status = j.status === "running" ? (now ? badge("info", ST.job.waiting ? T("Waiting") : T("Running")) : badge("warn", T("Stopped")))
+        : { finished: badge("pass", T("Finished")), cancelled: badge("warn", T("Cancelled")) }[j.status] || "";
+      var c = j.counts || {};
+      out += '<div class="row" id="proc-' + esc(j.job) + '">' + status + '<div class="grow"><div class="what">' + esc(jobTitle(titleJob)) + "</div>" +
+        '<div class="det">' + (j.planned > j.files ? H("{start} → {end} · {files} of {planned} files tried", { start: fmtWhen(j.started), end: j.ended ? fmtWhen(j.ended) : T("now"), files: fmtNum(j.files), planned: fmtNum(j.planned) })
+          : H("{start} → {end} · {files} files logged", { start: fmtWhen(j.started), end: j.ended ? fmtWhen(j.ended) : T("now"), files: fmtNum(j.files) })) +
+        (j.status === "running" && !now ? " · " + H("Stopped without finishing (the app was stopped or restarted)") : "") +
+        (j.status !== "running" && j.kind !== "copy" ? " · " + H("{optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed",
+          { optimized: c.optimized || 0, rewritten: c.rewritten || 0, skipped: c.skipped || 0, failed: c.failed || 0 }) : "") + "</div>" +
+        procTally(j.tally) +
+        (j.events.length > 2 ? '<ul class="help">' + j.events.map(procEvent).join("") + "</ul>" :
+          '<ul class="help">' + j.events.filter(function (e) { return e.event !== "started"; }).map(procEvent).join("") + "</ul>") +
+        '<div class="det"><button class="link" type="button" data-act="proc-open" data-job="' + esc(j.job) + '">' + (procOpen === j.job ? H("Hide files") : H("Show files")) + "</button></div>" +
+        "</div></div>" + (procOpen === j.job ? '<div class="procfiles">' + procFilesTable(j.job) + "</div>" : "");
+    });
+    return out + "</section></div>";
+  }
+  // A job's running tally, as its files are done: what was put right, the space saved, the posters
+  function procTally(t) {
+    t = t || {};
+    if (!t.written) return "";
+    var mb = function (n) { return (n < 0 ? "+" : "") + fmtBytesShort(Math.abs(n)); };
+    var bits = [P(t.written, "{n} file written", "{n} files written", { n: fmtNum(t.written) })];
+    if (t.rs_fixed) bits.push(P(t.rs_fixed, "{n} now at the dataset’s record size", "{n} now at the dataset’s record size", { n: fmtNum(t.rs_fixed) }));
+    if (t.compression_set) bits.push(P(t.compression_set, "{n} now with the dataset’s compression", "{n} now with the dataset’s compression", { n: fmtNum(t.compression_set) }));
+    if (t.disk_saved) bits.push(T("{size} saved on disk", { size: mb(t.disk_saved) }));
+    if (t.size_saved) bits.push(T("files {size} smaller", { size: mb(t.size_saved) }));
+    if (t.posters_removed) bits.push(P(t.posters_removed, "{n} poster removed", "{n} posters removed", { n: fmtNum(t.posters_removed) }));
+    if (t.posters_added) bits.push(P(t.posters_added, "{n} Plex poster added", "{n} Plex posters added", { n: fmtNum(t.posters_added) }));
+    if (t.posters_saved) bits.push(T("posters compressed: {size} saved", { size: fmtBytesShort(t.posters_saved) }));
+    return '<div class="det tally">' + esc(bits.join(" · ")) + "</div>";
+  }
+  // A library's icon, like Plex's own (film, TV, music, photos), by its key or its name; nothing if it's not a library
+  var LIB_ICONS = {
+    movie: '<path d="M3 2h10v12H3z"/><path d="M5 2v12M11 2v12M3 5h2M3 8h2M3 11h2M11 5h2M11 8h2M11 11h2"/>',
+    show: '<path d="M2 3h12v8H2z"/><path d="M5 14h6M8 11v3"/>',
+    artist: '<path d="M6 12V3l7-1.5v9"/><circle cx="4.5" cy="12" r="1.8"/><circle cx="11.5" cy="10.5" r="1.8"/><path d="M6 5.5l7-1.5"/>',
+    photo: '<path d="M2 4.5h3l1-1.5h4l1 1.5h3v8.5H2z"/><circle cx="8" cy="8.5" r="2.3"/>'
+  };
+  function libIcon(k) {
+    var l = ((ST.library || {}).libraries || []).filter(function (x) { return String(x.key) === String(k) || x.title === k; })[0];
+    var svg = l && LIB_ICONS[l.type];
+    return svg ? '<svg class="libicon" viewBox="0 0 16 16" aria-hidden="true">' + svg + "</svg>" : "";
+  }
+  // A message as a sentence: a capital to start, a full stop to end
+  function sentence(x) {
+    x = String(x || "").trim();
+    if (!x) return x;
+    x = x.charAt(0).toUpperCase() + x.slice(1);
+    return /[.!?…)]$/.test(x) ? x : x + ".";
+  }
+  function procFilesTable(id) {
+    var d = procFiles[id];
+    if (!d) return '<p class="muted">' + H("Loading…") + "</p>";
+    if (!d.files.length) return '<p class="muted">' + H("No files logged.") + "</p>";
+    // a header sorts by its column (Result: failed at the top; Size: most smaller first, then the biggest); again, back to the order done
+    var th = function (key, label) {
+      var on = procSort[id] === key || (!procSort[id] && key === "file");
+      return '<th scope="col"' + (on ? ' aria-sort="ascending"' : "") + '><button class="link sorter" type="button" data-act="proc-sort" data-job="' + esc(id) + '" data-key="' + key + '">' +
+        label + (on ? " ▾" : "") + "</button></th>";
+    };
+    var rs = function (n) { return n ? fmtRs(n) : "—"; };
+    var comp = function (c) { return !c || c === "unknown" ? "?" : String(c).toUpperCase(); };  // "?" until the optimizer wrote it
+    // the header stays at the top while the list scrolls by, with a button to hide the list
+    var out = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"><button class="link hidelist" type="button" data-act="proc-open" data-job="' + esc(id) +
+      '" title="' + esc(T("Hide files")) + '">▲ ' + H("Hide") + "</button></th>" + th("file", H("File")) + th("result", H("Result")) + th("time", H("Time")) +
+      th("size", H("Size")) + th("verified", H("Verified")) + th("rs", H("Record size")) + th("compression", H("ZFS Compression")) + th("optimized", H("Optimized")) +
+      th("cover", H("Cover art")) + "</tr></thead><tbody>";
+    // a failed file can be tried again, after the file in hand: waiting for that, or being tried now
+    var queuedFiles = {}, nowFiles = {};
+    (ST.retries || []).forEach(function (r) { (r.active ? nowFiles : queuedFiles)[r.file] = true; });
+    // by title (the default): each title's (each edition's) files grouped under one poster and title
+    var byTitle = !procSort[id] || procSort[id] === "file", key = function (x) { return x.label || x.file; };
+    var job = ST.job && ST.job.running ? ST.job : null;
+    d.files.forEach(function (f, i) {
+      var first = !byTitle || i === 0 || key(d.files[i - 1]) !== key(f);
+      var span = 1;
+      while (byTitle && first && i + span < d.files.length && key(d.files[i + span]) === key(f)) span++;
+      // the file being optimized now: Optimizing, and how far through it is
+      var now = job && job.current_file === f.file;
+      var retry = f.result !== "failed" || f.kind !== "optimize" ? "" : (nowFiles[f.file] || queuedFiles[f.file] ? '<button class="btn sm" type="button" disabled>' + H("Retrying") + "</button>"
+        : '<button class="btn sm" type="button" data-act="proc-retry" data-job="' + esc(id) + '" data-file="' + esc(f.file) + '">' + H("Retry") + "</button>");
+      var res = { optimized: badge("pass", T("Optimized")), rewritten: badge("pass", T("Written again")), already: badge("info", T("Already done")),
+        copied: badge("pass", T("Copied")), skipped: badge("info", T("Skipped")), failed: badge("fail", T("Failed")),
+        waiting: badge("info", T("Waiting")), "not done": badge("info", T("Not done")), cancelled: badge("warn", T("Cancelled")) }[f.result] || esc(f.result || "");
+      var tried = f.result !== "waiting" && f.result !== "not done" && f.result !== "cancelled";  // not tried yet: just the first line (the file as it is)
+      if (now) {
+        res = badge("info", T("Optimizing"));
+        tried = false;
+        if (job.file_pct != null) retry = '<div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
+          Math.round(job.file_pct) + '" aria-label="' + esc(T("This file")) + '"><div style="width:' + Math.min(100, job.file_pct) + '%"></div></div>';
+      }
+      // each column: the file as it was on the first line, as written on the second (and a third: what changed)
+      var wrote = !now && (f.result === "optimized" || f.result === "rewritten");
+      var ln = function (x, cls) { return '<div class="ln' + (cls ? " " + cls : "") + '">' + (x == null || x === "" ? "&nbsp;" : x) + "</div>"; };
+      var pct = function (b, a) {  // how much smaller (−) or larger (+), to 3 decimals; nothing when that rounds to 0
+        if (a == null || !b) return null;
+        var v = Math.round((a - b) / b * 100000) / 1000;
+        return v ? '<span class="' + (v < 0 ? "good" : "muted") + '">' + esc((v < 0 ? "−" : "+") + dec(Math.abs(v), 3) + "%") + "</span>" : null;
+      };
+      var thumb = posterImg(f.poster);
+      var size = ln(esc(fmtBytesShort(f.size_before))) + (wrote ? ln(esc(fmtBytesShort(f.size_after))) + (pct(f.size_before, f.size_after) ? ln(pct(f.size_before, f.size_after)) : "") : "");
+      var zc = ln(esc(comp(f.compression_before))) + (wrote && f.compression_after ? ln(esc(comp(f.compression_after))) : "");
+      var onDisk = wrote && f.disk_before != null && f.disk_after != null && f.disk_after !== f.disk_before ? f.disk_after - f.disk_before : null;
+      if (onDisk != null) zc += ln('<span class="' + (onDisk < 0 ? "good" : "muted") + '">' + esc(T("{size} on disk", { size: (onDisk < 0 ? "−" : "+") + fmtBytesShort(Math.abs(onDisk)) })) + "</span>");
+      // the optimizer's version: the one already in the file (grey), and the one that just laid it out (green)
+      var v = function (x) { return "v" + String(x).replace(/^v/, ""); };
+      var opt = ln(f.version_before ? '<span class="muted">' + esc(v(f.version_before)) + "</span>" : "—") +
+        (f.layout ? ln(f.version ? '<span class="good">' + esc(v(f.version)) + "</span>" : esc(T("Yes"))) : "");
+      // cover art: the images it had; then what happened (removed, Plex's poster added, compressed: how much smaller)
+      var cov1 = f.images_before == null ? "" : f.images_before ? esc(P(f.images_before, "{n} image", "{n} images", { n: f.images_before })) : esc(T("None"));
+      var cov2 = f.images_before == null ? (f.cover ? esc(f.cover) : null)
+        : f.poster_added ? esc(T("Plex poster added"))
+        : (f.images_after || 0) < f.images_before ? esc(f.images_after ? T("{n} removed", { n: f.images_before - f.images_after }) : T("Removed"))
+        : f.images_saved ? '<span class="good">' + esc(T("Compressed, −{size}", { size: fmtBytesShort(f.images_saved) })) + "</span>"
+        : f.cover ? esc(f.cover) : null;
+      var cover = ln(cov1) + (cov2 ? ln(cov2) : "");
+      // a title with several files: its poster and title once, then each file on its own line
+      var name = span > 1 || (byTitle && !first) ? (first ? '<div class="what">' + esc(f.label) + "</div>" : "") + '<div class="det mono">' + esc((f.file || "").split("/").pop()) + "</div>"
+        : fileTitle(f.label, f.file);
+      var more = byTitle && i + 1 < d.files.length && key(d.files[i + 1]) === key(f);  // the title's next file follows
+      out += '<tr' + (more ? ' class="ingrp"' : "") + ">" + (first ? "<td" + (span > 1 ? ' rowspan="' + span + '"' : "") + ">" + thumb + "</td>" : "") +
+        '<td style="min-width:240px">' + name + (f.reason && !now && f.result !== "cancelled" ? '<div class="det bad">' + esc(sentence(f.reason)) + "</div>" : "") +
+        (f.at ? '<div class="det muted">' + esc(fmtWhen(f.at)) + "</div>" : "") + "</td><td>" + ln(res) + (retry ? '<div class="ln">' + retry + "</div>" : "") +
+        '</td><td class="nw">' + (tried ? ln("") + ln(esc(fmtSecs(f.seconds))) : "") +
+        '</td><td class="nw">' + size +
+        "</td><td>" + (!tried ? "" : ln("") + ln(esc({ passed: T("Passed"), failed: T("Failed"), skipped: T("Not checked"), "not needed": T("Not needed") }[f.verified] || "—"))) +
+        '</td><td class="nw">' + ln(esc(rs(f.rs_before))) + (wrote && f.rs_after ? ln(esc(rs(f.rs_after))) : "") +
+        '</td><td class="nw">' + zc + '</td><td class="nw">' + opt + '</td><td class="nw">' + cover + "</td></tr>";
+    });
+    out += "</tbody></table></div>";
+    var off = procOffset[id] || 0;
+    if (d.total > 200) out += '<div class="det">' + H("{from}–{to} of {total}", { from: fmtNum(off + 1), to: fmtNum(Math.min(off + 200, d.total)), total: fmtNum(d.total) }) + " " +
+      (off > 0 ? '<button class="link" type="button" data-act="proc-page" data-job="' + esc(id) + '" data-offset="' + (off - 200) + '">' + H("Previous") + "</button> " : "") +
+      (off + 200 < d.total ? '<button class="link" type="button" data-act="proc-page" data-job="' + esc(id) + '" data-offset="' + (off + 200) + '">' + H("Next") + "</button>" : "") + "</div>";
+    return out;
+  }
+
+  // ------------------------------------------------------------ Library Health
+  // Each title's files (the files list's layout: poster and title once, a line per file), each shown
+  // as the blocks caching always keeps of it: at its start, through the metadata in front of the
+  // video and 60% of a block of video; at its end, every block holding metadata. Every block the
+  // same size, filled in proportion with what's in it. Layouts come from Read the Files (filemap.py);
+  // a file opened shows its blocks larger: click one for what's in it and how ZFS might store it.
+  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, auto: {} };
+  var PART_NAMES = { header: N("Matroska header"), segment: N("Segment start"), seekhead: N("Table of contents"), info: N("File info"), tracks: N("Track list"), chapters: N("Chapters"),
+    attachments: N("Attachments"), tags: N("Tags"), index: N("Index"), padding: N("Padding"), checksum: N("Checksum"), video: N("Video"),
+    other: N("Other"), image: N("Cover art"), font: N("Font"), attachment: N("Attachment"), empty: N("Unused (zeros)") };
+  function libFetch(force) {
+    if (!LIB.key) return;
+    if (!force && LIB.data && LIB.data.library === LIB.key && Date.now() - LIB.at < 15000) return;
+    LIB.at = Date.now();
+    api("/api/library?key=" + encodeURIComponent(LIB.key) + "&offset=" + LIB.offset + "&limit=100" + (LIB.q ? "&q=" + encodeURIComponent(LIB.q) : ""))
+      .then(function (d) {
+        LIB.data = d;
+        // files new or changed since they were inspected: inspect them now (once each time the library's opened)
+        if (d.surveyed < d.total && !LIB.auto[d.library] && !libJob(d.library).running && !libJob(d.library).queued) {
+          LIB.auto[d.library] = true;
+          api("/api/library/survey", { library: d.library }).then(function () { load(); });
+        }
+        if (page === "library" && !editing()) render();
+      }).catch(function () { LIB.at = 0; });
+  }
+  // The inspection of a library: running (and paused?), or waiting in the queue
+  function libJob(key) {
+    var j = ST.job && ST.job.running && ST.job.kind === "survey" && ST.job.library === key ? ST.job : null;
+    return { running: j, queued: (ST.queue || []).some(function (q) { return q.kind === "survey" && q.args.library === key; }) };
+  }
+  function libDetailFetch(path) {
+    api("/api/library/file?path=" + encodeURIComponent(path)).then(function (d) {
+      LIB.detail[path] = d;
+      // one block of each run is enough: the run's others hold the same
+      var bm = d.blocks, ns = bm ? libRuns(bm.start).concat(libRuns(bm.end)).map(function (r) { return r.b.n; }).slice(0, 32) : [];
+      if (ns.length) api("/api/library/blocks?path=" + encodeURIComponent(path) + "&n=" + ns.join(",")).then(function (e) {
+        var by = {};
+        (e.blocks || []).forEach(function (b) { by[b.n] = b; });
+        LIB.est[path] = by;
+        if (page === "library") render();
+      });
+      if (page === "library") render();
+    }).catch(function (e) { LIB.detail[path] = { error: e.message }; if (page === "library") render(); });
+  }
+  // Blocks in a row holding only one thing, full (200 blocks of index): one block, marked ×200
+  function libRuns(blocks) {
+    var out = [];
+    blocks.forEach(function (b) {
+      var one = b.pieces.length === 1 ? b.pieces[0].kind : null, last = out[out.length - 1];
+      if (one && last && last.only === one) { last.count++; last.last = b.n; return; }
+      out.push({ b: b, only: one, count: 1, last: b.n });
+    });
+    return out;
+  }
+  // One block: its contents side by side, in proportion; past the end of the file, the unused rest
+  function libBlock(b, path, big, sel, count, est) {
+    var inner = b.pieces.map(function (p) {
+      return '<span class="lp-' + p.kind + '" style="flex:' + p.bytes + ' 0 0" title="' + esc(T(PART_NAMES[p.kind] || p.kind) + (p.name ? " · " + p.name : "") + " · " + fmtBytesShort(p.bytes)) + '"></span>';
+    }).join("");
+    // under a big block: how much ZFS compresses it (estimated), or its number until that's known
+    var e = est && est[b.n], rs = b.data + (b.pieces.filter(function (p) { return p.kind === "empty"; })[0] || { bytes: 0 }).bytes;
+    var what = e ? (e.compressed ? T("{pct}% compressed", { pct: Math.round(100 * (1 - e.stored / rs)) }) : T("Not compressed")) : T("Block {n}", { n: fmtNum(b.n) });
+    var label = big ? '<span class="lbn">' + esc(what) + "</span>" : "";
+    var times = count > 1 ? '<span class="lx">×' + esc(fmtNum(count)) + "</span>" : "";
+    return '<button type="button" class="lblk' + (big ? " big" : "") + (sel ? " sel" : "") + '"' + (big ? ' data-act="lib-block" data-file="' + esc(path) + '" data-n="' + b.n + '"' : "") +
+      ' aria-label="' + esc(T("Block {n}", { n: fmtNum(b.n) })) + '"><span class="lbin">' + inner + times + "</span>" + label + "</button>";
+  }
+  // A file's blocks: the start's, then the video (its size, not to scale), then the end's
+  function libBlocks(row, big, path) {
+    var bm = row.blocks;
+    if (!bm) return '<span class="muted det">' + (row.missing ? H("File not found") : row.read ? H("Too small to have blocks") : H("Not read yet")) + "</span>";
+    var sel = (LIB.block[path] || null);
+    var est = big ? LIB.est[path] : null;
+    var draw = function (list) { return libRuns(list).map(function (r) { return libBlock(r.b, path, big, sel === r.b.n, r.count, est); }).join(""); };
+    var start = draw(bm.start), end = draw(bm.end);
+    // the video between them, not to scale (clickable when big: its tracks, and how much of it is cached)
+    var vid = '<span class="lvid">' + esc(T("Video")) + " " + esc(fmtBytesShort(bm.video)) + "</span>" +
+      (bm.lead_blocks ? '<span class="muted">' + esc(P(bm.lead_blocks, "+ {n} lead-in block", "+ {n} lead-in blocks", { n: fmtNum(bm.lead_blocks) })) + "</span>" : "");
+    var gap = big ? '<button type="button" class="lgap' + (sel === "video" ? " sel" : "") + '" data-act="lib-block" data-file="' + esc(path) + '" data-n="video">' + vid + "</button>"
+      : '<span class="lgap">' + vid + "</span>";
+    return '<div class="lblocks' + (big ? " big" : "") + '">' + start + gap + end + "</div>";
+  }
+  function libLegend() {
+    return '<div class="llegend">' + ["header", "segment", "seekhead", "info", "tracks", "chapters", "padding", "video", "image", "font", "index", "tags", "empty", "other"].map(function (k) {
+      return '<span><i class="lsw lp-' + k + '"></i>' + esc(T(PART_NAMES[k])) + "</span>";
+    }).join("") + "</div>";
+  }
+  function libDetail(path) {
+    var d = LIB.detail[path];
+    if (!d) return '<p class="muted">' + H("Reading the file…") + "</p>";
+    if (d.error && !d.blocks) return '<p class="bad">' + esc(sentence(d.error)) + "</p>";
+    var bm = d.blocks, est = LIB.est[path] || {}, rec = d.record;
+    var shown = bm ? bm.start.concat(bm.end) : [];
+    var facts = [
+      [T("File size"), fmtBytesShort(d.size)],
+      [T("On disk"), d.disk != null ? fmtBytesShort(d.disk) : "—"],
+      [T("ZFS compression saved"), d.saved != null ? fmtBytesShort(d.saved) + " · " + T("almost all of it in the metadata blocks") : "—"],
+      [T("Always cached"), bm ? P(bm.start.length + bm.end.length, "{n} block", "{n} blocks", { n: bm.start.length + bm.end.length }) +
+        (bm.lead_blocks ? " · " + T("plus {n} for the lead-in", { n: fmtNum(bm.lead_blocks) }) : "") : "—"]];
+    var out = '<div class="ldetail"><div class="lfacts">' + facts.map(function (f) { return "<div><span class=\"muted\">" + esc(f[0]) + "</span> " + esc(f[1]) + "</div>"; }).join("") + "</div>";
+    out += libBlocks(d, true, path) + '<p class="help" style="margin:4px 0 8px">' + H("Click a block, or the video, to see what’s in it.") + "</p>";
+    var sel = LIB.block[path];
+    if (sel === "video" && bm) {
+      // the video: its tracks, and how much of it is cached with the lead-in
+      out += '<div class="lblkinfo"><div class="what">' + esc(T("Video")) + "</div>" +
+        '<div class="det">' + esc(T("{size} in {n} blocks of {rs}", { size: fmtBytesShort(bm.video), n: fmtNum(Math.ceil(bm.video / rec)), rs: fmtRs(rec) })) +
+        (bm.lead_blocks ? " · " + esc(P(bm.lead_blocks, "the first {n} cached with the lead-in", "the first {n} cached with the lead-in", { n: fmtNum(bm.lead_blocks + bm.start.length) })) : "") + "</div>";
+      if ((d.tracks || []).length) {
+        out += '<table class="tbl compact"><thead><tr><th scope="col">#</th><th scope="col">' + H("Track") + '</th><th scope="col">' + H("Codec") +
+          '</th><th scope="col">' + H("Language") + '</th><th scope="col">' + H("Name") + '</th><th scope="col">' + H("Compression") + "</th></tr></thead><tbody>" +
+          d.tracks.map(function (t) {
+            return "<tr><td>" + esc(t.number) + "</td><td>" + esc(T({ video: "Video", audio: "Audio", subtitles: "Subtitles" }[t.type] || t.type || "")) + (t.width ? ' <span class="muted">' + esc(t.width + "×" + t.height) + "</span>" : "") +
+              '</td><td class="mono">' + esc(t.codec) + "</td><td>" + esc(t.language || "—") + "</td><td>" + esc(t.name || "—") + "</td><td>" + esc(t.compression || "—") + "</td></tr>";
+          }).join("") + "</tbody></table>";
+      }
+      out += "</div>";
+    }
+    // a block: its file data and what it takes on disk, then what's in it
+    var b = shown.filter(function (x) { return x.n === sel; })[0];
+    if (b) {
+      var run = libRuns(shown).filter(function (r) { return r.b.n === b.n; })[0] || { count: 1 };
+      var e = est[b.n], zeros = (b.pieces.filter(function (p) { return p.kind === "empty"; })[0] || { bytes: 0 }).bytes;
+      var line = T("{data} of the file", { data: fmtBytesShort(b.data) }) + (zeros ? " " + T("+ {z} of zeros", { z: fmtBytesShort(zeros) }) : "") +
+        (e ? " · " + T("{stored} on disk", { stored: fmtBytesShort(e.stored) }) : "");
+      out += '<div class="lblkinfo"><div class="what">' + esc(run.count > 1 ? T("Blocks {a}–{b} ({n}, all like this)", { a: fmtNum(b.n), b: fmtNum(run.last), n: fmtNum(run.count) }) : T("Block {n}", { n: fmtNum(b.n) })) + "</div>" +
+        '<div class="det">' + esc(line) + "</div>" +
+        '<table class="tbl compact"><thead><tr><th scope="col">' + H("In this block") + '</th><th scope="col">' + H("Size") + '</th><th scope="col">' + H("Share") + "</th></tr></thead><tbody>" +
+        b.pieces.map(function (p) {
+          return '<tr><td><i class="lsw lp-' + p.kind + '"></i> ' + esc(T(PART_NAMES[p.kind] || p.kind)) + (p.name ? ' <span class="mono muted">' + esc(p.name) + "</span>" : "") +
+            '</td><td class="nw">' + esc(fmtBytesShort(p.bytes)) + '</td><td class="nw">' + esc(dec(100 * p.bytes / rec, 1) + "%") + "</td></tr>";
+        }).join("") + "</tbody></table></div>";
+    }
+    return out + "</div>";
+  }
+  function pageLibrary() {
+    var libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
+    if (!LIB.key || !libs.some(function (l) { return String(l.key) === String(LIB.key); })) LIB.key = libs.length ? String(libs[0].key) : null;
+    libFetch();
+    var lj = LIB.key ? libJob(LIB.key) : {}, job = lj.running;
+    if (job) LIB.inspecting = true;
+    else if (LIB.inspecting) { LIB.inspecting = false; libFetch(true); }  // just finished: the files as they are now
+    // one button: Pause (and Resume) while inspecting, otherwise inspect every file again
+    var btn = !LIB.key ? "" : job ? '<button class="btn" type="button" data-act="job" data-job="' + (job.paused ? "resume" : "pause") + '">' + (job.paused ? H("Resume") : H("Pause")) + "</button>"
+      : lj.queued ? '<button class="btn" type="button" disabled>' + H("Queued") + "</button>"
+      : '<button class="btn" type="button" data-act="lib-survey">' + H("Inspect Files Again") + "</button>";
+    var out = top(T("Library Health"), H("What’s where in each file — its start, the video, and the metadata at its end — the blocks they land on, and what caching keeps of it.") +
+      " " + H("Files are inspected when the page opens: only ones new or changed since."), btn);
+    out += '<div class="stack"><section class="card">';
+    out += '<div class="lctl"><div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + libs.map(function (l) {
+      return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(LIB.key)) + '" data-act="lib-tab" data-key="' + esc(l.key) + '">' + libIcon(l.key) + esc(l.title) + "</button>";
+    }).join("") + "</div></div>";
+    var d = LIB.data && LIB.data.library === LIB.key ? LIB.data : null;
+    if (!LIB.key) return out + '<p class="muted">' + H("No libraries yet.") + "</p></section></div>";
+    // while inspecting (or waiting to): a progress bar
+    if (job) {
+      var pct = job.total ? Math.round(100 * (job.done || 0) / job.total) : 0;
+      out += '<div class="linspect"><div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>' +
+        '<div class="det">' + (job.paused ? H("Inspecting paused: {done} of {total} files", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) })
+          : H("Inspecting files: {done} of {total}", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) })) + "</div></div>";
+    } else if (lj.queued) out += '<div class="linspect det">' + H("Inspecting the files waits for the file job running now.") + "</div>";
+    out += '<div class="lhead"><input type="search" id="lib-q" class="lsearch" placeholder="' + esc(T("Find a title")) + '" value="' + esc(LIB.q) + '"></div>' + libLegend();
+    if (!d) return out + "</section></div>";
+    if (!d.files.length) return out + '<p class="muted">' + H("No files.") + "</p></section></div>";
+    var key = function (x) { return x.label; };
+    out += '<div class="tbl-wrap"><table class="tbl lfiles"><thead><tr><th scope="col"></th><th scope="col">' + H("File") + '</th><th scope="col">' + H("Size") +
+      '</th><th scope="col" style="width:50%">' + H("Blocks always cached: the start · the end") + "</th></tr></thead><tbody>";
+    d.files.forEach(function (f, i) {
+      var first = i === 0 || key(d.files[i - 1]) !== key(f), span = 1;
+      while (first && i + span < d.files.length && key(d.files[i + span]) === key(f)) span++;
+      var more = i + 1 < d.files.length && key(d.files[i + 1]) === key(f);
+      var name = (first ? '<div class="what">' + esc(f.label) + "</div>" : "") + '<div class="det mono">' + esc(f.file.split("/").pop()) + "</div>";
+      out += '<tr class="lrow' + (more ? " ingrp" : "") + (LIB.open === f.file ? " open" : "") + '" data-act="lib-open" data-file="' + esc(f.file) + '">' +
+        (first ? "<td" + (span > 1 ? ' rowspan="' + span + '"' : "") + ">" + posterImg(f.poster) + "</td>" : "") +
+        '<td style="min-width:200px">' + name + '</td><td class="nw">' + esc(fmtBytesShort(f.size)) + "</td><td>" + libBlocks(f, false, f.file) + "</td></tr>";
+      if (LIB.open === f.file) out += '<tr class="ldrow"><td colspan="4">' + libDetail(f.file) + "</td></tr>";
+    });
+    out += "</tbody></table></div>";
+    if (d.total > 100) out += '<div class="det">' + H("{from}–{to} of {total}", { from: fmtNum(d.offset + 1), to: fmtNum(Math.min(d.offset + 100, d.total)), total: fmtNum(d.total) }) + " " +
+      (d.offset > 0 ? '<button class="link" type="button" data-act="lib-page" data-offset="' + (d.offset - 100) + '">' + H("Previous") + "</button> " : "") +
+      (d.offset + 100 < d.total ? '<button class="link" type="button" data-act="lib-page" data-offset="' + (d.offset + 100) + '">' + H("Next") + "</button>" : "") + "</div>";
+    return out + "</section></div>";
+  }
+  document.addEventListener("change", function (e) {
+    if (e.target && e.target.id === "lib-q") { LIB.q = e.target.value.trim(); LIB.offset = 0; LIB.open = null; libFetch(true); }
+  });
 
   function pageSsd() {
     var c = ST.cache || {}, pools = ST.zfs.pools || {}, names = Object.keys(pools).filter(function (k) { return pools[k]; });
@@ -1034,9 +1661,9 @@ PCI18N.ready.then(function () {
     var libs = S.nextepisode.libraries || {}, c = (libs[key] || libs["*"] || {})[field];
     return c || (field === "end_at" ? "90" : "default");
   }
-  // All the way down (0) is one record: the first record of each file, plus its index if that's at the end.
+  // All the way down (0) is the least: each file's metadata (its start through 60% of a record of video, and its end).
   var SEC_LIMITS = { movie: [0, 180], tv: [0, 180], audio: [0, 60] };
-  function secText(n, unit) { return Number(n) === 0 ? T("1 record") : n + " " + (unit || "s"); }
+  function secText(n, unit) { return Number(n) === 0 ? T("Metadata only") : n + " " + (unit || "s"); }
   var WARM_NAMES = { none: T("No warm-up"), boot: T("At boot only"), twice_monthly: T("At boot + twice monthly"), weekly: T("At boot + weekly"),
     twice_weekly: T("At boot + twice weekly"), daily: T("At boot + daily") };
   var WARM_ORDER = ["none", "boot", "twice_monthly", "weekly", "twice_weekly", "daily"];
@@ -1046,7 +1673,7 @@ PCI18N.ready.then(function () {
   function cacheLibs() { return ((ST.library && ST.library.libraries) || []).filter(function (l) { return !l.excluded && l.kind; }); }
   function libKind(l) { return l.prefetch_kind || (l.kind === "movie" ? "movies" : l.kind === "tv" ? "tv" : "music"); }
   function libHead(l, kind, extra) {
-    return '<div class="pflib-head">' + esc(l.title) + ' <span class="muted">· ' + esc(PF_KIND[kind]) + "</span>" + (extra || "") + "</div>";
+    return '<div class="pflib-head">' + libIcon(l.key) + esc(l.title) + ' <span class="muted">· ' + esc(PF_KIND[kind]) + "</span>" + (extra || "") + "</div>";
   }
 
   var L2ARC_NOTE = H("What’s needed soon is read straight away, into RAM: RAM keeps one-off reads for hours at most. What’s needed later goes to the SSD: choices with the grey SSD icon need an L2ARC, " +
@@ -1058,10 +1685,10 @@ PCI18N.ready.then(function () {
   function leadInCard() {
     var w = S.warmup, noL2 = ST.l2arc === "absent";
     var out = '<section class="card" id="leadin"><div class="head"><h2>' + H("Lead-in Cache") + '</h2><span style="flex:1"></span>' + guideBtn("leadin") + "</div>" +
-      '<p class="lede">' + H("The first seconds of each file, plus its index, kept ready so anything you press play on starts instantly.") + "</p>" +
+      '<p class="lede">' + H("The first seconds of each file, plus its metadata, kept ready so anything you press play on starts instantly.") + "</p>" +
       guide("leadin", [
         [H("Lead-in length"), H("How many seconds of playback each lead-in holds, set per library and scaled by each file’s own bitrate, so a 4K remux gets more bytes than a 720p episode. " +
-          "The seek index (MKV Cues, MP4 <span class=\"mono\">moov</span>) is found from the file’s own layout and always included — players read it before they start.")],
+          "Its metadata is found from the file’s own layout and always included, read first — the seek index (MKV Cues, MP4 <span class=\"mono\">moov</span>), tags, subtitle fonts and cover art at the end (players read them all when they open a file), and at the start everything in front of the video, plus at least 60% of a record of video.")],
         [H("Warm-up"), H("Reads the lead-in of every movie, episode and track in a library onto the SSD cache (L2ARC): at boot, and if you like again twice a month (the 1st and 15th), weekly, twice weekly (the chosen day and three days later) or daily. " +
           "Press play on anything — especially titles nobody has watched in a while — and it starts at SSD speed. Large libraries on HDD pools gain the most. " +
           "Needs an L2ARC on the media pool, plus <span class=\"mono\">primarycache=all</span> and <span class=\"mono\">secondarycache=all</span> on the media dataset; Health checks all three. " +
@@ -1102,8 +1729,8 @@ PCI18N.ready.then(function () {
       var secs = warmChoice(l.key, "seconds") != null ? warmChoice(l.key, "seconds") : def, sched = warmChoice(l.key, "schedule") || "default";
       var order = PF_START.filter(function (v) { return names[v]; });
       var start = libChoice(l.key, "start");
-      // Video and audiobooks (M4B) have an index players read before starting; music files don't
-      var id = "f-lib-" + l.key, unit = kind === "music" ? T("s of playback") : T("s of playback + index");
+      // Video and audiobooks (M4B) have metadata players read before starting; music files don't
+      var id = "f-lib-" + l.key, unit = kind === "music" ? T("s of playback") : T("s of playback + metadata");
       return '<div class="pflib">' + libHead(l, kind) +
         '<div class="pflib-grid">' +
         '<div><label class="sublbl" for="' + id + '" aria-label="' + H("Lead-in length") + '"><span class="val" data-val="' + id + '">' + esc(secText(secs, unit)) + "</span>" +
@@ -1270,7 +1897,7 @@ PCI18N.ready.then(function () {
       '<div class="fhead R" style="flex:' + (100 - mid) / 2 + ' 1 0"><strong>' + H("Stale cache") + '</strong><div class="help">' + H("Cached more than {age} ago", { age: age }) + "</div></div></div>";
     return out + [all].concat(libs).map(function (l) {
       var o = split(l), half = (100 - o.mid) / 2;
-      var name = '<div class="lname' + (l.all ? " all" : "") + '">' + esc(l.name) + "</div>";
+      var name = '<div class="lname' + (l.all ? " all" : "") + '">' + (l.all ? "" : libIcon(l.key)) + esc(l.name) + "</div>";
       // Nothing to show is worth knowing too: say why instead of leaving the library out
       if (!l.all && !(o.n + l.first[0] + l.first[1])) {
         var why = lastsNone(l, H("No reads"));
@@ -1400,9 +2027,10 @@ PCI18N.ready.then(function () {
     for (var j = n - 1; j >= 0 && !last; j--) last = d.v[j] && { i: j, v: d.v[j] };
     var at = covHover != null && d.v[covHover] ? { i: covHover, v: d.v[covHover] } : last;
     var when = at ? new Date(d.t[at.i] * 1000).toLocaleString(LOCALE, { weekday: "short", month: "short", day: "numeric", hour: "numeric" }) : "";
-    var legend = '<div class="covlegend"><span class="covwhen">' + esc(at && covHover != null ? when : T("Now")) + "</span>" + [4, 3, 2, 1, 0].map(function (k) {
+    // the shares first, then the hour on the right: a changing date doesn't push the numbers about
+    var legend = '<div class="covlegend">' + [4, 3, 2, 1, 0].map(function (k) {
       return '<span><i class="covsw cov' + k + '"></i>' + esc(T(COV_NAMES[k])) + " <b>" + (at ? (Math.round(at.v[k] * 10) / 10) + "%" : "—") + "</b></span>";
-    }).join("") + "</div>";
+    }).join("") + '<span class="covwhen">' + esc(at && covHover != null ? when : T("Now")) + "</span></div>";
     var W = 700, Hh = 260, L = covMode === "lines" ? 44 : 10, R = 10, Tp = 10, B = 26;
     var X = function (i) { return L + (W - L - R) * (n > 1 ? i / (n - 1) : 0.5); };
     var step = Math.max(1, Math.ceil(n / 350)), pts = [];
@@ -1410,10 +2038,16 @@ PCI18N.ready.then(function () {
       var chunk = d.v.slice(i, i + step).filter(Boolean);
       if (chunk.length) pts.push({ i: i + Math.floor((Math.min(n, i + step) - i - 1) / 2), v: [0, 1, 2, 3, 4].map(function (k) { return chunk.reduce(function (a, r) { return a + r[k]; }, 0) / chunk.length; }) });
     }
+    // the scale: up to the most shown, rounded up to a round share (a library mostly in RAM may be a few %)
+    var most = pts.reduce(function (a, p) { return Math.max(a, Math.max.apply(null, p.v)); }, 0);
+    var topPct = [1, 2, 5, 10, 20, 25, 50, 100].filter(function (v) { return v >= most * 1.1; })[0] || 100;
     var svg = '<svg viewBox="0 0 ' + W + " " + Hh + '" class="covchart" role="img" aria-label="' + esc(T("Share of the library cached, hour by hour")) + '">';
     if (covMode === "lines") {
-      var Y = function (v) { return Tp + (Hh - Tp - B) * (1 - v / 100); };
-      [0, 25, 50, 75, 100].forEach(function (v) { svg += '<line class="fcgrid" x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '"/><text class="fctick" x="' + (L - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + v + "%</text>"; });
+      var Y = function (v) { return Tp + (Hh - Tp - B) * (1 - v / topPct); };
+      [0, 0.25, 0.5, 0.75, 1].forEach(function (f) {
+        var v = topPct * f;
+        svg += '<line class="fcgrid" x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '"/><text class="fctick" x="' + (L - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + (Math.round(v * 100) / 100) + "%</text>";
+      });
       [4, 3, 2, 1, 0].forEach(function (k) {
         var path = pts.map(function (p, m) { return (m ? "L" : "M") + X(p.i).toFixed(1) + " " + Y(p.v[k]).toFixed(1); }).join("");
         svg += '<path class="covline cov' + k + '" d="' + path + '"/>';
@@ -1423,11 +2057,11 @@ PCI18N.ready.then(function () {
       var mid = Tp + (Hh - Tp - B) / 2, half = (Hh - Tp - B) / 2;
       svg += '<line class="fcgrid" x1="' + L + '" x2="' + (W - R) + '" y1="' + mid + '" y2="' + mid + '"/>';
       [4, 3, 2, 1, 0].forEach(function (k) {
-        var top = pts.map(function (p) { return X(p.i).toFixed(1) + "," + (mid - half * p.v[k] / 100).toFixed(1); });
-        var bot = pts.map(function (p) { return X(p.i).toFixed(1) + "," + (mid + half * p.v[k] / 100).toFixed(1); }).reverse();
+        var top = pts.map(function (p) { return X(p.i).toFixed(1) + "," + (mid - half * p.v[k] / topPct).toFixed(1); });
+        var bot = pts.map(function (p) { return X(p.i).toFixed(1) + "," + (mid + half * p.v[k] / topPct).toFixed(1); }).reverse();
         svg += '<polygon class="cov' + k + '" points="' + top.concat(bot).join(" ") + '"/>';
       });
-      svg += '<text class="fctick" x="' + (W - R) + '" y="' + (Tp + 10) + '" text-anchor="end">' + esc(T("full height = the whole library")) + "</text>";
+      svg += '<text class="fctick" x="' + (W - R) + '" y="' + (Tp + 10) + '" text-anchor="end">' + esc(topPct === 100 ? T("full height = the whole library") : T("full height = {pct}% of the library", { pct: topPct })) + "</text>";
     }
     for (var q = 0; q <= 5; q++) {
       var ii = Math.round((n - 1) * q / 5), dd = new Date(d.t[ii] * 1000);
@@ -1447,7 +2081,7 @@ PCI18N.ready.then(function () {
     return '<section class="card" id="coverage" style="margin-bottom:20px"><h2>' + H("Library cached over time") + "</h2>" +
       '<p class="hint">' + H("Each hour: the share of the library this app cached within the last hour, 24 hours, 7 days, 30 days and 6 months — in RAM or on the SSD. Wider means more of it. Hover for any hour.") + "</p>" +
       '<div class="lctl"><div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + tab("data-cov-lib", "*", covLib, H("All libraries")) +
-      libs.map(function (l) { return tab("data-cov-lib", l.key, covLib, esc(l.title)); }).join("") + "</div>" +
+      libs.map(function (l) { return tab("data-cov-lib", l.key, covLib, libIcon(l.key) + esc(l.title)); }).join("") + "</div>" +
       '<div class="seg small strong" role="tablist" aria-label="' + H("Chart") + '">' + tab("data-cov-mode", "bands", covMode, H("Bands")) + tab("data-cov-mode", "lines", covMode, H("Lines")) + "</div>" +
       '<div class="seg small strong" role="tablist" aria-label="' + H("Count") + '">' + tab("data-cov-by", 0, covBy, H("By files")) + tab("data-cov-by", 1, covBy, H("By size")) + "</div></div>" +
       '<div class="fslider"><label for="cov-range">' + H("Show the last") + '</label><input type="range" id="cov-range" min="0" max="1000" step="1" value="' + covRange + '" data-cov-range><strong id="cov-range-val">' + esc(span) + "</strong></div>" +
@@ -1507,8 +2141,8 @@ PCI18N.ready.then(function () {
     if (ST.playback.error) out += '<div class="note">' + esc(ST.playback.error) + "</div>";
     if (!ss.length) out += '<p class="muted" style="margin:0">' + H("Nothing is playing.") + "</p>";
     ss.forEach(function (s) {
-      out += '<div class="sess"><div><div class="what">' + esc(s.label) + '</div><div class="muted" style="font-size:13px">' + esc(s.player || T("Unknown player")) + " · " +
-        (s.local === false ? H("remote") : H("local")) + " · " + (s.transcoding ? H("transcoding") : H("direct play")) + " · " + H("{pct}% watched", { pct: s.progress }) + "</div></div><div>";
+      out += '<div class="sess"><div class="withposter">' + posterImg(s.poster) + '<div><div class="what">' + esc(s.label) + '</div><div class="muted" style="font-size:13px">' + esc(s.player || T("Unknown player")) + " · " +
+        (s.local === false ? H("remote") : H("local")) + " · " + (s.transcoding ? H("transcoding") : H("direct play")) + " · " + H("{pct}% watched", { pct: s.progress }) + "</div></div></div><div>";
       if (!s.jobs.length) out += '<span class="muted" style="font-size:13px">' + H("No cache work for this stream yet") + "</span>";
       var nextJobs = s.jobs.filter(function (j) { return j.feature === "nextepisode" && j.state !== "cancelled"; });
       var shown = s.jobs;
@@ -1625,12 +2259,12 @@ PCI18N.ready.then(function () {
     var out = '<section class="card" id="skips" style="margin-bottom:20px"><h2>' + H("Skips served from cache") + "</h2>" +
       '<p class="hint">' + H("{period}: each skip counted by how likely it came from cache — where it landed, how long ago that part was cached, and how long cached data lasts in its library.", { period: r.span }) + "</p>";
     out += '<div class="srows">' + rows.map(function (l) {
-      return '<div class="lname' + (l.all ? " all" : "") + '">' + esc(l.name) + '</div><div>' + bar(l.expected, l.total) + "</div>" +
+      return '<div class="lname' + (l.all ? " all" : "") + '">' + (l.all ? "" : libIcon(l.key)) + esc(l.name) + '</div><div>' + bar(l.expected, l.total) + "</div>" +
         '<div class="scount">' + (l.total ? PH(l.total, "{n} skip", "{n} skips") : "") + "</div>";
     }).join("") + "</div>";
     // Over the period: one bar per hour, day or month, as tall as the share expected from cache
     var chips = rows.filter(function (l) { return l.key !== "?"; }).map(function (l) {
-      return '<button role="tab" type="button" aria-selected="' + (l.key === skipsLib) + '" data-skips-lib="' + l.key + '">' + esc(l.name) + "</button>";
+      return '<button role="tab" type="button" aria-selected="' + (l.key === skipsLib) + '" data-skips-lib="' + l.key + '">' + libIcon(l.key) + esc(l.name) + "</button>";
     }).join("");
     out += '<div class="seg small strong" role="tablist" aria-label="' + H("Library") + '" style="margin:16px 0 8px">' + chips + "</div>";
     var data = (r.series || []).map(function (d) {
@@ -2088,7 +2722,7 @@ PCI18N.ready.then(function () {
   }
 
   // --------------------------------------------------------------- render
-  var PAGES = { health: pageHealth, caching: pageCaching, ssd: pageSsd, optimizer: pageOptimizer, activity: pageActivity, system: pageSystem };
+  var PAGES = { health: pageHealth, caching: pageCaching, ssd: pageSsd, library: pageLibrary, optimizer: pageOptimizer, processes: pageProcesses, activity: pageActivity, system: pageSystem };
   var ALIAS = { features: "caching", settings: "system" };  // pages before 0.15
 
   // The side menu folds down to its icons (remembered in this browser); folded, each item's
@@ -2116,6 +2750,11 @@ PCI18N.ready.then(function () {
     }
   } catch (e) { /* storage unavailable */ }
 
+  // A tall poster's width from its height (2:3): browsers don't take it from a height that's stretched
+  function fitPosters() {
+    document.querySelectorAll(".posterbig").forEach(function (el) { el.style.width = Math.round(el.offsetHeight * 2 / 3) + "px"; });
+  }
+  window.addEventListener("resize", fitPosters);
   function render() {
     if (!ST) return;
     document.querySelectorAll(".nav").forEach(function (a) {
@@ -2148,6 +2787,7 @@ PCI18N.ready.then(function () {
       document.querySelector(".shell").appendChild(bar);
     }
     main.innerHTML = PAGES[page]();
+    fitPosters();
     reattachInfo();
   }
 
@@ -2166,6 +2806,7 @@ PCI18N.ready.then(function () {
       if (build && st.build && st.build !== build && !Object.keys(pending).length) { location.reload(); return; }
       build = build || st.build;
       ST = st;
+      retriesChanged(st);
       if (!Object.keys(pending).length) S = st.settings;
       if (!editing()) render();
     }).catch(function () {
@@ -2179,7 +2820,7 @@ PCI18N.ready.then(function () {
     if (page === "ssd") EST = {};  // the what-if sliders start from your settings every time
     if (push) history.pushState({}, "", "/" + page);
     else if (location.pathname !== "/" + page && location.pathname !== "/") history.replaceState({}, "", "/" + page + location.hash);
-    document.title = "Plex Cache – " + { health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), optimizer: T("Optimizer"), activity: T("Metrics"), system: T("System") }[page];
+    document.title = "Plex Cache – " + { health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), library: T("Library Health"), optimizer: T("Optimizer"), processes: T("Processes"), activity: T("Metrics"), system: T("System") }[page];
     render();
     window.scrollTo(0, 0);
     main.focus({ preventScroll: true });
@@ -2366,16 +3007,87 @@ PCI18N.ready.then(function () {
   function action(act, el) {
     if (act === "recheck") { api("/api/checks", { rescan: true }).then(function () { toast(T("Checking…")); ST.checking = true; render(); }); }
     else if (act === "optimize-lib") {
+      // ZFS settings not right yet: ask first (each file would be written now and again after the change)
+      var zs = ((((ST.optimizer || {}).libraries || {})[el.dataset.key] || {}).zfs || {}).status;
+      if (zs === "warn" && !el.dataset.confirmed) { OPT_CONFIRM = el.dataset.key; render(); return; }
+      OPT_CONFIRM = null;
       api("/api/optimize/library", { library: el.dataset.key }).then(function (r) {
-        toast(r.started ? T("Optimizing…") : T("The optimizer is busy or not set up"));
+        toast(r.started ? T("Optimizing…") : r.queued ? T("Added to the queue") : T("Already queued, or the optimizer isn’t set up"));
         load();
       });
     }
+    else if (act === "optimize-cancel") { OPT_CONFIRM = null; render(); }
     else if (act === "optimizer-check") {
       el.disabled = true;
       api("/api/optimizer/check", {}).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
     }
-    else if (act === "optimize-stop") { api("/api/optimize/stop", {}).then(function () { toast(T("Stopping after this file")); load(); }); }
+    else if (act === "optimize-covers") {
+      api("/api/optimize/library", { library: el.dataset.key, mode: "covers" }).then(function (r) {
+        toast(r.started ? T("Syncing cover art…") : r.queued ? T("Added to the queue") : T("Already queued, or the optimizer isn’t set up")); load();
+      });
+    }
+    else if (act === "mig") {
+      // the folder-to-dataset steps (migrating.py)
+      var m = el.dataset.mig;
+      if (m === "ask_delete") { MIG_CONFIRM_DELETE = true; render(); return; }
+      MIG_CONFIRM_DELETE = false;
+      el.disabled = true;
+      api("/api/migration", { action: m, library: el.dataset.lib, folder: el.dataset.folder })
+        .then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+    }
+    else if (act === "queue-remove") {
+      el.disabled = true;
+      api("/api/job", { action: "remove", id: el.dataset.id }).then(function () { toast(T("Removed from the queue")); load(); procFetch(true); });
+    }
+    else if (act === "mig-nodelete") { MIG_CONFIRM_DELETE = false; render(); }
+    else if (act === "proc-open") {
+      var pj = el.dataset.job;
+      procOpen = procOpen === pj ? null : pj;
+      if (procOpen) procFilesFetch(pj, 0);
+      render();
+      if (!procOpen) { var pr = document.getElementById("proc-" + pj); if (pr && pr.getBoundingClientRect().top < 0) pr.scrollIntoView({ block: "start" }); }
+    }
+    else if (act === "proc-failed") {
+      // from a job's failures (Optimizer, Health, Processes): its files on the Processes page, failed first
+      var fj = el.dataset.job;
+      procOpen = fj; procSort[fj] = "result"; procFiles[fj] = null;
+      procFilesFetch(fj, 0); procFetch(true);
+      go("processes", true);
+      setTimeout(function () { var x = document.getElementById("proc-" + fj); if (x) x.scrollIntoView({ block: "start" }); }, 600);
+    }
+    else if (act === "proc-retry") {
+      el.disabled = true;
+      api("/api/job", { action: "retry", job: el.dataset.job, file: el.dataset.file }).then(function (r) {
+        toast(r.ok ? T("It’s tried again after the file in hand") : T("Already waiting to be tried again")); load(); procFetch(true);
+      }).catch(function (e) { toast(e.message); el.disabled = false; });
+    }
+    else if (act === "file-toggle") { SHOWFILE[el.dataset.file] = !SHOWFILE[el.dataset.file]; render(); }
+    else if (act === "lib-tab") { LIB.key = el.dataset.key; LIB.offset = 0; LIB.open = null; LIB.data = null; libFetch(true); render(); }
+    else if (act === "lib-page") { LIB.offset = Number(el.dataset.offset) || 0; LIB.open = null; libFetch(true); }
+    else if (act === "lib-block") {
+      var bn = el.dataset.n === "video" ? "video" : Number(el.dataset.n);
+      LIB.block[el.dataset.file] = LIB.block[el.dataset.file] === bn ? null : bn;
+      render();
+    }
+    else if (act === "lib-open") {
+      var lf = el.dataset.file;
+      LIB.open = LIB.open === lf ? null : lf;
+      if (LIB.open) libDetailFetch(lf);
+      render();
+    }
+    else if (act === "lib-survey") {
+      el.disabled = true;
+      api("/api/library/survey", { library: LIB.key, force: true }).then(function (r) { toast(r.started ? T("Inspecting the files…") : r.queued ? T("Added to the queue") : T("Already queued")); load(); });
+    }
+    else if (act === "proc-sort") { var sj = el.dataset.job, sk = el.dataset.key; procSort[sj] = procSort[sj] === sk ? null : sk; procFilesFetch(sj, 0); }
+    else if (act === "proc-page") { procFilesFetch(el.dataset.job, Number(el.dataset.offset) || 0); }
+    else if (act === "job") {
+      // the file job running now: pause, resume or cancel (jobs.py)
+      var ja = el.dataset.job;
+      api("/api/job", { action: ja }).then(function () {
+        if (ja !== "dismiss") toast({ pause: T("Pausing"), resume: T("Resuming"), cancel: T("Cancelling") }[ja]); load();
+      });
+    }
     else if (act === "benchmark") { api("/api/benchmark", {}).then(function () { toast(T("Measuring disk speed…")); ST.benchmark.running = true; render(); }); }
     else if (act === "warmup-run") { api("/api/warmup/run", {}).then(function (r) { toast(r.started ? T("Warm-up started") : T("Already running")); load(); }); }
     else if (act === "lasts-reset") { api("/api/cachelog/reset", {}).then(function () { toast(T("Started again")); load(); }); }

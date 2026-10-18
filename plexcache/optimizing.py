@@ -27,6 +27,7 @@ inode unchanged), so telling which files are done reads none of them.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -35,16 +36,18 @@ import time
 import urllib.error
 import urllib.request
 
-from . import zfs
+from . import zfs, zfslog
 from .i18n import M, join as join_names, msg
-from .optimize import VERSION, mkv
+from .jobs import Job
+from .optimize import VERSION, compare as version_of, mkv
+from .optimize.optimizer import COVER_PREFIX, WORK, conflict_original
 from .plex import PlexError
 
-ZSTD3 = ("zstd", "zstd-3")  # compression=zstd is level 3
 IMAGE_MODES = ("unmatched", "remove", "compress", "plex")
 DEFAULTS = {"sync": True, "mkv": False, "images": "unmatched"}  # each library's choices unless set
 SYNC_PROBLEMS = ("compression", "blocks")  # fixed by writing the file again
 RECORD = "optimized.json"
+ZFS_RECORD = "zfs-record.json"
 # The optimizer's own health check, for its service in the YAML (images older than the optimizer
 # check the web app's port instead, so Docker never sees it healthy)
 HEALTHCHECK_YAML = ('    healthcheck:\n'
@@ -109,6 +112,12 @@ class OptimizerClient:
         except (OSError, ValueError, urllib.error.URLError) as e:
             return {"error": str(getattr(e, "reason", e))}
 
+    def claim(self, folder: str, key: str, instance: str, release: bool = False) -> dict:
+        return self._call("/api/claim", {"dir": folder, "key": key, "instance": instance, "release": release})
+
+    def conflict(self, copy: str, original: str) -> dict:
+        return self._call("/api/conflict", {"path": copy, "original": original})
+
     def rewrite(self, path: str) -> dict:
         return self._call("/api/rewrite", {"path": path}, timeout=60)
 
@@ -122,15 +131,22 @@ class OptimizerClient:
 class Optimizing:
     """The record of what the optimizer did, per-library summaries, and the "optimize a library" job."""
 
+    IDLE_LIMIT = 30  # seconds the optimizer may show nothing running (and no result) before it counts as restarted
+
     def __init__(self, app, client: OptimizerClient | None = None):
         self.app = app
         self.client = client or OptimizerClient(token=self.token())
         self.lock = threading.Lock()
         saved = app._load_json(RECORD) or {}
-        self.record: dict[str, dict] = saved.get("files") or {}  # path -> what the optimizer did
+        # path -> {size, mtime_ns, ino, ours (our tags), problems (layout), images, and the last result}:
+        # what each file's tags said, kept with its identity so it's read once (a cache: rebuilt if lost)
+        self.record: dict[str, dict] = (saved.get("files") or {}) if saved.get("version") == 2 else {}
+        self.zfs = zfslog.ZfsLog(lambda: app._load_json(ZFS_RECORD), lambda d: app._save_json(ZFS_RECORD, d))
+        # a saved optimize job (a restart in the middle of one) is started again by the shared jobs
+        app.jobs.register("optimize", lambda args, saved: OptimizeJob(self, args.get("library"), args.get("mode") or "optimize", saved))
+        self.retries: list[dict] = []  # failed files to try again, after the file in hand (not queued: retry())
+        self._retrying = False  # the worker that does them when no optimizing job runs
         self.summary: dict[str, dict] = {}
-        self.job: dict | None = None
-        self._stop = threading.Event()
         self.surveying = False
         self.setup: dict = {"ready": False, "steps": [], "at": 0}  # diagnose(): what's left to set up
         self._diagnosing = False
@@ -354,7 +370,7 @@ class Optimizing:
 
     @staticmethod
     def cover_for(images: str, poster: str, matched: bool | None) -> str:
-        """What a file's cover art becomes under a library's choice: "remove", "compress" or
+        """What a file's cover art should be under a library's choice: "remove", "compress" or
         "plex". "unmatched": Plex's poster for an item Plex hasn't matched (the file is the most
         reliable place to keep it), none for a matched one; when Plex didn't say, or has no
         poster, what's there is kept, compressed."""
@@ -364,62 +380,113 @@ class Optimizing:
             return "remove"
         return "plex" if matched is False and poster else "compress"
 
-    def file_status(self, path: str, library_key: str, rec: dict, poster: str = "", matched: bool | None = None) -> dict:
-        """{"applies", "mkv", "problems": [...]} for one file under its library's choices, from the
-        record and one stat() — the file itself isn't read. ``rec``: its dataset
-        (App.library_records); ``poster``: Plex's poster for it (MediaFile.poster).
+    @classmethod
+    def images_mode(cls, choice: str, poster: str, matched: bool | None, ours: dict) -> str:
+        """What the optimizer is asked to do with a file's cover art when it first optimizes it.
+        Cover art is set then, once: a later change of choice doesn't touch optimized files
+        (Sync Cover Art does that, on request). A Plex poster already in the file (our
+        PLEXCACHE_COVER tag) is kept, unless the choice is to strip every image."""
+        want = cls.cover_for(choice, poster, matched)
+        has_plex = bool((ours or {}).get("PLEXCACHE_COVER"))
+        if want == "plex":
+            return "keep" if has_plex else ("plex" if poster else "compress")
+        if want == "remove":
+            return "keep" if has_plex and choice != "remove" else "remove"
+        return "keep" if has_plex else "compress"
 
-        With Optimize MKV files, for MKV files: "new" (never laid out by the optimizer),
-        "changed" (replaced since), "version" (by an older optimizer), "images" (for another
-        cover art choice), "cover" (Plex's poster changed). With TrueNAS compression &
-        record size, for any file: "compression" (not known to be written with the dataset's
-        current compression — that can't be read from a file, so only a file the optimizer
-        wrote, with the compression the dataset had then, counts), "blocks" (not in blocks of
-        the dataset's record size)."""
+    def _mkv_info(self, path: str, st: os.stat_result) -> dict:
+        """What the file's layout and our tags say ({"problems", "ours", "images"}), read once per
+        file (a few small reads) and then kept with its identity: after that, a stat() is enough."""
+        ident = (st.st_size, st.st_mtime_ns, st.st_ino)
+        with self.lock:
+            cached = self.record.get(path)
+        if cached and (cached.get("size"), cached.get("mtime_ns"), cached.get("ino")) == ident and "ours" in cached:
+            return cached
+        c = mkv.check(path, True)
+        info = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "ino": st.st_ino, "ours": c.get("ours") or {},
+                "problems": [p for p in c.get("problems") or [] if p != "images"], "images": c.get("images") or 0}
+        with self.lock:
+            self.record[path] = dict(cached or {}, **info)
+        return info
+
+    def file_status(self, path: str, library_key: str, rec: dict, poster: str = "", matched: bool | None = None) -> dict:
+        """{"applies", "mkv", "problems", "compression"} for one file under its library's choices.
+
+        Optimize MKV files: "new" (not tagged by the optimizer), "version" (by an older
+        optimizer: 0.1 → 0.2), "layout" (tagged, but no longer laid out right — remuxed since by
+        something else). A file tagged by a newer optimizer is left alone. TrueNAS compression &
+        record size: "compression" (the ZFS record says Unknown or NotOptimal), "blocks" (not in
+        blocks of the dataset's record size)."""
         opts = self.options(library_key)
         is_mkv = path.lower().endswith(mkv.MKV_EXT)
-        if not (opts["sync"] or (opts["mkv"] and is_mkv)):
+        if not (opts["sync"] or (opts["mkv"] and is_mkv)) or conflict_original(path):
             return {"applies": False, "mkv": is_mkv}
         try:
             st = os.stat(path)
         except OSError:
             return {"applies": False, "missing": True, "mkv": is_mkv}
-        with self.lock:
-            done = self.record.get(path)
-        same = bool(done) and (done.get("size"), done.get("mtime_ns"), done.get("ino")) == (st.st_size, st.st_mtime_ns, st.st_ino)
-        problems = []
+        problems, comp = [], None
         if opts["mkv"] and is_mkv:
-            lay = (done or {}).get("layout") if same else None
-            if not done or (same and not lay):
+            info = self._mkv_info(path, st)
+            v = version_of((info.get("ours") or {}).get("PLEXCACHE_OPTIMIZER"))
+            if v == "none":
                 problems.append("new")
-            elif not same:
-                problems.append("changed")
-            else:
-                if (lay.get("version") or 0) < VERSION:
-                    problems.append("version")
-                cover = self.cover_for(opts["images"], poster, matched)
-                if cover == "plex" and poster:
-                    if lay.get("cover") != poster:
-                        problems.append("cover")
-                elif lay.get("images") != cover and not (cover == "compress" and lay.get("images") == "plex"):
-                    problems.append("images")
+            elif v == "older":
+                problems.append("version")
+            elif v == "same" and info.get("problems"):
+                problems.append("layout")
         if opts["sync"]:
-            if not (same and done.get("written") and (not rec.get("compression") or done.get("compression") == rec.get("compression"))):
+            comp = self.zfs.status(path, st.st_ino, rec.get("dataset"))
+            if comp in zfslog.NEEDS_WORK:
                 problems.append("compression")
             rs = rec.get("rs")
             if rs and st.st_size > st.st_blksize and st.st_blksize != rs:
                 problems.append("blocks")
-        return {"applies": True, "mkv": is_mkv, "problems": problems}
+        return {"applies": True, "mkv": is_mkv, "problems": problems, "compression": comp}
+
+    def zfs_config(self, library_key: str, rec: dict) -> dict:
+        """Whether the library's dataset is set up for the best result, before files are written
+        with it: {"status": "ideal" | "pass" | "warn" | "info", "issues": [what to change]}. Ideal:
+        the recommended record size and ZSTD-3; Pass: the second-best record size, or ZSTD 4–19;
+        Warn: either is off (writing files now would mean writing them again after the change)."""
+        from . import checks
+        r = checks.library_record(self.app, library_key)
+        comp = rec.get("compression")
+        g = zfslog.grade(comp)
+        comp_status = (None if g is None else "ideal" if g == zfslog.GOOD and comp in ("zstd", "zstd-3")
+                       else "pass" if g == zfslog.GOOD else "warn")
+        issues = []
+        if r["status"] == "warn":
+            issues.append(M("Record size {size}: {best} suits it best", size=checks._fmt_rs(r["rs"]), best=checks._fmt_rs(r["best"])))
+        if comp_status == "warn":
+            issues.append(M("Compression {value}: use ZSTD-3", value=comp))
+        statuses = [r["status"] if r["status"] != "info" else None, comp_status]
+        if "warn" in statuses:
+            status = "warn"
+        elif None in statuses:
+            status = "info"  # not known yet (no TrueNAS API, or the library's files not read yet)
+        else:
+            status = "ideal" if statuses == ["ideal", "ideal"] else "pass"
+        return {"status": status, "issues": issues, "rs": r.get("rs"), "best": r.get("best"), "compression": comp}
+
+    def survey_soon(self) -> None:
+        """survey() in the background: the first time, every MKV file's tags are read (a few small
+        reads each), which can take minutes on a large library."""
+        threading.Thread(target=self.survey, daemon=True).start()
 
     def survey(self) -> None:
-        """How far each library is, under its choices: one stat() per file, nothing read."""
+        """How far each library is, under its choices; the ZFS record brought up to date; Syncthing
+        conflict copies found."""
         with self.lock:
             if self.surveying:
                 return
             self.surveying = True
         try:
             records = self.app.library_records()
+            self.zfs.observe_datasets({r["dataset"]: {"rs": r.get("rs"), "compression": r.get("compression")}
+                                       for r in records.values() if r.get("dataset")})
             out: dict[str, dict] = {}
+            seen, dirs = set(), {}
             # Every library that isn't unticked in Media mappings: optimizing doesn't depend on caching
             off = {str(lib["key"]) for lib in getattr(self.app, "libraries", []) or [] if lib.get("excluded")}
             for f in list(self.app.files):
@@ -427,12 +494,17 @@ class Optimizing:
                 if key in off:
                     continue
                 rec = records.get(key) or {}
-                s = self.file_status(self.app.map_path(f.path), key, rec, getattr(f, "poster", ""), getattr(f, "matched", None))
-                lib = out.setdefault(key, {"files": 0, "mkv": 0, "mkv_done": 0, "sync_todo": 0, "todo": 0,
-                                           "compression_setting": rec.get("compression"), "dataset": rec.get("dataset"),
-                                           "why": {}})
-                if s.get("missing"):
-                    continue  # can't be read here (Health's Libraries says why)
+                path = self.app.map_path(f.path)
+                seen.add(path)
+                dirs.setdefault(key, set()).add(os.path.dirname(path))
+                s = self.file_status(path, key, rec, getattr(f, "poster", ""), getattr(f, "matched", None))
+                lib = out.get(key)
+                if lib is None:
+                    lib = out[key] = {"files": 0, "mkv": 0, "mkv_done": 0, "sync_todo": 0, "todo": 0,
+                                      "compression_setting": rec.get("compression"), "dataset": rec.get("dataset"),
+                                      "why": {}, "compression": {}, "conflicts": [], "zfs": self.zfs_config(key, rec)}
+                if s.get("missing") or conflict_original(path):
+                    continue
                 lib["files"] += 1
                 lib["mkv"] += bool(s.get("mkv"))
                 probs = s.get("problems") or []
@@ -442,103 +514,394 @@ class Optimizing:
                 lib["todo"] += bool(probs)
                 for p in probs:
                     lib["why"][p] = lib["why"].get(p, 0) + 1
+                if s.get("compression"):
+                    lib["compression"][s["compression"]] = lib["compression"].get(s["compression"], 0) + 1
+            # Syncthing conflict copies next to the library's files (two systems wrote a file at once)
+            # …and work folders left by an optimizer stopped mid-way (a restart): swept up when a job starts
+            for key, ds in dirs.items():
+                found, left = [], []
+                for d in ds:
+                    try:
+                        names = os.listdir(d)
+                    except OSError:
+                        continue
+                    for n in names:
+                        if WORK.match(n):
+                            left.append(os.path.join(d, n))
+                            continue
+                        orig = conflict_original(os.path.join(d, n))
+                        if orig and os.path.exists(orig):
+                            found.append({"copy": os.path.join(d, n), "original": orig})
+                if key in out:
+                    out[key]["conflicts"] = sorted(found, key=lambda c: c["copy"])
+                    out[key]["leftovers"] = sorted(left)
             with self.lock:
+                for path in [p for p in self.record if p not in seen]:
+                    del self.record[path]  # gone from the libraries (it's a cache: read again if it comes back)
                 self.summary = out
+            self.zfs.collect()
+            self.zfs.save()
+            self.save()
         finally:
             with self.lock:
                 self.surveying = False
 
-    def note(self, path: str, key: str, r: dict, rec: dict, images: str, poster: str, before: dict | None) -> None:
-        """Put a finished file in the record. ``before``: its record entry when the job started,
-        if that was still the same file — what the optimizer didn't redo is carried over."""
+    def note(self, path: str, key: str, r: dict, rec: dict) -> None:
+        """A file the optimizer finished: its tags and identity in the record (so it isn't read
+        again), and in the ZFS record the compression it was written with."""
         ident = r.get("file") or {}
         if not ident.get("ino"):
             return
         result = r.get("result")
-        wrote = result in ("optimized", "rewritten")
-        entry = {"at": r.get("finished") or time.time(), "result": result, "sha256": r.get("sha256"),
-                 "version": r.get("version"), "library": key, **{k: ident.get(k) for k in ("size", "mtime_ns", "ino")},
-                 # what it was written with — only known when the optimizer wrote it
-                 "written": wrote or bool((before or {}).get("written")),
-                 "compression": rec.get("compression") if wrote else (before or {}).get("compression"),
-                 "rs": rec.get("rs") if wrote else (before or {}).get("rs")}
-        if result in ("optimized", "already"):
-            # laid out for caching, for this cover art choice (none when an image couldn't be compressed)
-            entry["layout"] = {"version": r.get("version"), "images": None if r.get("images_left") else images,
-                               "cover": poster if r.get("cover") else None}
-        else:
-            entry["layout"] = (before or {}).get("layout")  # written again byte for byte: the layout is as it was
         with self.lock:
+            entry = dict(self.record.get(path) or {})
+            entry.update({k: ident.get(k) for k in ("size", "mtime_ns", "ino")}, at=r.get("finished") or time.time(),
+                         result=result, sha256=r.get("sha256") or entry.get("sha256"))
+            if result in ("optimized", "already"):
+                entry.update(ours=r.get("tags") or {}, problems=[], images=r.get("images_after", entry.get("images", 0)))
             self.record[path] = entry
+        if result in ("optimized", "rewritten"):
+            self.zfs.written(path, ident["ino"], rec.get("dataset"), rec.get("compression"))
+        self.zfs.save()
         self.save()
 
     def save(self) -> None:
         with self.lock:
-            data = {"version": 1, "files": dict(self.record)}
+            data = {"version": 2, "files": dict(self.record)}
         self.app._save_json(RECORD, data)
 
     # ------------------------------------------------------------ the job
-    def start_library(self, library_key: str) -> bool:
-        """Do every file of a library that needs it under its choices, one at a time, in the background."""
+    def busy(self) -> bool:
+        return self.app.jobs.busy()
+
+    def start_library(self, library_key: str, mode: str = "optimize", resumed: dict | None = None) -> bool:
+        """Do every file of a library that needs it under its choices, one at a time, in the
+        background, as a file job (jobs.py: progress, pause, resume after a restart, one at a time).
+        ``mode`` "covers": Sync Cover Art — bring optimized files' cover art in line with the
+        library's choice and Plex's posters now. False when another job runs (queue() waits for it)."""
         if not self.client.ready():
             return False
-        with self.lock:
-            if self.job and self.job.get("running"):
-                return False
-            self.job = {"library": str(library_key), "running": True, "started": time.time(), "done": 0, "total": 0,
-                        "optimized": 0, "rewritten": 0, "skipped": 0, "failed": 0, "current": None, "step": None, "errors": []}
-        self._stop.clear()
-        threading.Thread(target=self._run, args=(str(library_key),), daemon=True).start()
-        return True
+        return self.app.jobs.start(OptimizeJob(self, str(library_key), mode, resumed))
+
+    def queue(self, library_key: str, mode: str = "optimize") -> str | None:
+        """Start the job now, or queue it after the ones before it: "started", "queued", or None
+        (not set up, or the same work is queued or running already)."""
+        if not self.client.ready():
+            return None
+        title = (self.app.library_info(str(library_key)) or {}).get("title")
+        item = self.app.jobs.enqueue("optimize", {"library": str(library_key), "mode": mode},
+                                     library=str(library_key), mode=mode, title=title)
+        if item is None:
+            return None
+        return "started" if all(q["id"] != item["id"] for q in self.app.jobs.queued()) else "queued"
 
     def stop(self) -> None:
-        self._stop.set()
+        self.app.jobs.cancel()
 
-    def _run(self, key: str) -> None:
+    def set_paused(self, paused: bool) -> bool:
+        return self.app.jobs.pause(paused)
+
+    def resume_job(self, wait: float = 600) -> None:
+        """After a restart: the file job that was running, started again where it was."""
+        self.app.jobs.resume_saved(ready=self.client.ready, wait=wait)
+
+    def library_root(self, plex_path: str) -> str | None:
+        """The library folder (as this app sees it) a file is in: where its claims go."""
+        best = None
+        for lib in getattr(self.app, "libraries", []) or []:
+            for loc in lib.get("locations") or []:
+                loc = loc.rstrip("/") or "/"
+                if plex_path.startswith(loc + "/") and (best is None or len(loc) > len(best)):
+                    best = loc
+        return self.app.map_path(best) if best else None
+
+    def _run(self, job: "OptimizeJob") -> None:
+        key, mode = job.state["library"], job.state["mode"]
         app = self.app
         name = (app.library_info(key) or {}).get("title") or key
+        self._posters = {}  # Plex's posters as they are now: fetched again for every run
         try:
             rec = app.library_records().get(key) or {}
+            if rec.get("dataset") and rec["dataset"] not in self.zfs.datasets:  # not seen by a check yet
+                self.zfs.observe_datasets({rec["dataset"]: {"rs": rec.get("rs"), "compression": rec.get("compression")}})
+            # Work folders left by an optimizer stopped mid-way (a restart): nobody's now
+            for w in list((self.summary.get(key) or {}).get("leftovers") or []):
+                try:
+                    self.client._call("/api/folder", {"action": "cleanup", "path": w})
+                except (OSError, ValueError, urllib.error.URLError):
+                    pass
+            # Our own Syncthing conflict copies first: deleted when they're the same as the file
+            for c in list((self.summary.get(key) or {}).get("conflicts") or []):
+                if job.stopped:
+                    break
+                r = self._send(c["copy"], lambda c=c: self.client.conflict(c["copy"], c["original"]), os.path.getsize(c["copy"]))
+                if r.get("result") == "deleted":
+                    job.update(conflicts=job.state["conflicts"] + 1)
+                    app.activity.event("optimizer", M("deleted a Syncthing conflict copy: {file} ({why})",
+                                                      file=os.path.basename(c["copy"]), why=r.get("reason") or ""))
             todo = []
-            for f in list(app.files):
-                if str(f.library_key) != key:
-                    continue
+            # carried on after a restart: files that failed earlier in this job count as done (they're
+            # listed with why), not tried again — the next job tries them
+            failed = {e.get("file") for e in job.state.get("errors") or []}
+            mine = [f for f in list(app.files) if str(f.library_key) == key]
+            job.update(files=len(mine))
+            for f in mine:
+                if job.stopped:
+                    break
+                self.run_retries(job)  # a failed file to try again: before the next
+                job.update(checked=job.state["checked"] + 1)
                 path = app.map_path(f.path)
                 poster, matched = getattr(f, "poster", ""), getattr(f, "matched", None)
+                if mode == "covers":
+                    item = self._cover_todo(path, key, poster, matched)
+                    if item:
+                        todo.append((path, f.path, dict(item, size=f.size), poster))
+                    continue
+                if path in failed or f.path in failed:
+                    continue
                 s = self.file_status(path, key, rec, poster, matched)
                 if s.get("applies") and s.get("problems"):
-                    todo.append((path, s["problems"], poster, matched))
-            with self.lock:
-                self.job["total"] = len(todo)
+                    todo.append((path, f.path, {"problems": s["problems"], "matched": matched, "size": f.size}, poster))
+            # resumed: what was done before counts, so the progress carries on where it was
+            job.update(total=job.state["done"] + len(todo), phase="working",
+                       todo_bytes=job.state["done_bytes"] + sum(int(it.get("size") or 0) for _, _, it, _ in todo))
             app.activity.event("optimizer", M("optimizing {n} files in {library}", n=len(todo), library=name))
-            for path, problems, poster, matched in todo:
-                if self._stop.is_set():
+            job.log(type="plan", files=[p for p, _, _, _ in todo])  # its list shows the ones not tried yet too
+            claims = Claims(self, [(p, plex) for p, plex, item, _ in todo if self._needs_claim(item)])
+            for i, (path, plex_path, item, poster) in enumerate(todo):
+                if not job.wait_while_paused():
                     break
-                with self.lock:
-                    self.job.update(current=os.path.basename(path), step=None)
-                result = self._one(path, key, problems, rec, poster, matched)
-                with self.lock:
-                    self.job["done"] += 1
-                    kind = {"optimized": "optimized", "already": "optimized", "rewritten": "rewritten",
-                            "skipped": "skipped"}.get(result["result"], "failed")
-                    self.job[kind] += 1
-                    if kind == "failed" and len(self.job["errors"]) < 20:
-                        self.job["errors"].append(f"{os.path.basename(path)}: {result.get('reason')}")
-            with self.lock:
-                j = dict(self.job)
+                self.run_retries(job)  # a failed file to try again: after the file in hand, before the next
+                job.update(current=os.path.basename(path), current_file=path, step=None, file_pct=None, poster=poster or None, current_title=app.title_of(path) or None)
+                t0 = time.time()
+                before = self._before(path)
+                if self._needs_claim(item):
+                    ok, why = claims.take(path)
+                    if not ok:
+                        result = {"result": "skipped", "reason": why}
+                    else:
+                        result = self._one(path, key, item, rec, poster)
+                        claims.release(path)
+                else:
+                    result = self._one(path, key, item, rec, poster)
+                self._log_file(job.log, job.state["id"], path, rec, item, result, time.time() - t0, before, poster)
+                if result["result"] == "cancelled":
+                    break  # not tried: listed as cancelled, counted as not done
+                size = int(item.get("size") or 0)
+                kind = {"optimized": "optimized", "already": "optimized", "rewritten": "rewritten",
+                        "skipped": "skipped"}.get(result["result"], "failed")
+                job.file_done(size, kind, time.time() - t0 if result["result"] in ("optimized", "rewritten") else None,
+                              (path, str(result.get("reason") or "failed")) if kind == "failed" else None)
+                if result["result"] in ("optimized", "rewritten", "already"):
+                    with self.lock:
+                        lib = self.summary.get(key)
+                        if lib and lib.get("todo"):
+                            lib["todo"] -= 1  # the Status column follows as files are done
+            claims.release_all()
+            if not job.stopped:
+                self.run_retries(job)
+            j = dict(job.state)
             app.activity.event("optimizer", M("{library}: {optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed",
                                               library=name, optimized=j["optimized"], rewritten=j["rewritten"],
                                               skipped=j["skipped"], failed=j["failed"]),
                                "warn" if j["failed"] else "info")
-        except Exception as e:  # never leave the job "running"
-            app.activity.event("optimizer", M("unexpected error: {why}", why=str(e)), "warn")
         finally:
+            self.survey()  # before the job ends, so the counts shown then are already the new ones
+
+    # ------------------------------------------------------------ retries
+    def retry(self, job_id: str, path: str) -> str | None:
+        """Try a file that failed in a job again, after the file in hand (an optimizing job's, or right
+        away when none runs) — not queued. Its result replaces the failure in that job's log.
+        "next", or None (not a failed file of an optimizing job, or waiting already)."""
+        entry = next((e for e in reversed(self.app.jobs.log.files(job_id, 0, 10 ** 6)["files"]) if e.get("file") == path), None)
+        if not entry or entry.get("result") != "failed" or entry.get("kind") != "optimize":
+            return None
+        with self.lock:
+            if any(r["file"] == path for r in self.retries):
+                return None
+            self.retries.append({"job": job_id, "file": path, "library": str(entry.get("library") or ""),
+                                 "mode": entry.get("mode") or "optimize", "title": entry.get("title"), "added": time.time()})
+            start = not self._retrying
+            self._retrying = True
+        if start:
+            threading.Thread(target=self._retry_worker, name="retries", daemon=True).start()
+        return "next"
+
+    def retrying(self) -> list[dict]:
+        """The files waiting to be tried again (and the one being tried: "active")."""
+        with self.lock:
+            return [dict(r) for r in self.retries]
+
+    def _retry_worker(self) -> None:
+        """Retries when no optimizing job runs (one does them between its own files): once a folder
+        copy is done, and the optimizer is ready."""
+        try:
+            while True:
+                with self.lock:
+                    if not any(not r.get("active") for r in self.retries):
+                        self._retrying = False
+                        return
+                job = self.app.jobs.job
+                if (job and job.state.get("running")) or not self.client.ready():
+                    time.sleep(RETRY_POLL)  # an optimizing job takes them between files; a copy, after
+                    continue
+                self.run_retries(None)
+        except Exception:  # noqa: BLE001 — never leave the flag set
+            with self.lock:
+                self._retrying = False
+            raise
+
+    def run_retries(self, job: "OptimizeJob | None") -> None:
+        """Try the waiting retries now, one by one."""
+        while True:
+            with self.lock:
+                it = next((r for r in self.retries if not r.get("active")), None)
+                if it is None:
+                    return
+                it["active"] = True
             try:
-                self.survey()  # before "finished", so the counts shown then are already the new ones
+                self._retry_one(it, job)
             finally:
                 with self.lock:
-                    if self.job:
-                        self.job.update(running=False, current=None, step=None, finished=time.time())
+                    self.retries = [r for r in self.retries if r is not it]
+
+    def _retry_one(self, it: dict, job: "OptimizeJob | None") -> None:
+        app, path, key, mode = self.app, it["file"], it["library"], it["mode"]
+        f = next((x for x in list(app.files) if app.map_path(x.path) == path), None)
+        rec = app.library_records().get(key) or {}
+        poster, matched = (getattr(f, "poster", ""), getattr(f, "matched", None)) if f else ("", None)
+        if job:
+            job.update(current=os.path.basename(path), current_file=path, step=None, file_pct=None, poster=poster or None, current_title=app.title_of(path) or None)
+        t0, before = time.time(), self._before(path)
+        item = None
+        if f is None or not os.path.exists(path):
+            result = {"result": "failed", "reason": "no longer in the library"}
+        else:
+            if mode == "covers":
+                item = self._cover_todo(path, key, poster, matched)
+            else:
+                s = self.file_status(path, key, rec, poster, matched)
+                item = {"problems": s["problems"], "matched": matched, "size": f.size} if s.get("applies") and s.get("problems") else None
+            if item is None:
+                result = {"result": "already"}  # nothing to do any more
+            elif self._needs_claim(item):
+                claims = Claims(self, [(path, f.path)])
+                ok, why = claims.take(path)
+                result = self._one(path, key, item, rec, poster) if ok else {"result": "skipped", "reason": why}
+                claims.release_all()
+            else:
+                result = self._one(path, key, item, rec, poster)
+        # logged as the failed job's: its result replaces the failure there
+        log = lambda **e: app.jobs.log.add(dict(e, job=it["job"], kind="optimize", mode=mode, library=key,
+                                                title=it.get("title"), retried=True))
+        self._log_file(log, it["job"], path, rec, item or {}, result, time.time() - t0, before, poster)
+        app.jobs.retried(it["job"], path, result)
+        if result.get("result") in ("optimized", "rewritten", "already"):
+            with self.lock:
+                lib = self.summary.get(key)
+                if lib and lib.get("todo"):
+                    lib["todo"] -= 1
+
+    def describe(self, rows: list[dict], job_id: str) -> None:
+        """The Processes list's rows, filled in: each file's title and poster (logged, or from the last
+        scan), and for the files not tried yet how they are now — waiting (its job runs) or not done."""
+        snap = self.app.jobs.snapshot() or {}
+        live = snap.get("id") == job_id and (snap.get("running") or snap.get("waiting"))
+        for f in rows:
+            path = f.get("file") or ""
+            f["poster"] = f.get("poster") or self.app.poster_of(path)
+            f["label"] = self.app.title_of(path) or f.get("label")  # as Plex names it now (with its edition)
+            if f.get("result") == "pending":
+                b = self._before(path)
+                f.update(result="waiting" if live else "not done", size_before=b.get("size"), rs_before=b.get("rs"),
+                         compression_before=b.get("compression") or "unknown", disk_before=b.get("disk"),
+                         version_before=b.get("version"), images_before=b.get("images"))
+
+    def _before(self, path: str) -> dict:
+        """What the log notes about a file before the optimizer writes it."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return {}
+        z = self.zfs.files.get(path) or {}
+        with self.lock:
+            known = self.record.get(path) or {}
+        same = (known.get("size"), known.get("mtime_ns"), known.get("ino")) == (st.st_size, st.st_mtime_ns, st.st_ino)
+        return {"size": st.st_size, "rs": st.st_blksize if st.st_size > st.st_blksize else None,
+                "compression": z.get("compression") if z.get("ino") == st.st_ino else None,
+                "disk": st.st_blocks * 512,  # its space on the pool, after compression
+                "version": (known.get("ours") or {}).get("PLEXCACHE_OPTIMIZER") if same else None,
+                "images": known.get("images") if same else None}
+
+    def _log_file(self, log, job_id: str, path: str, rec: dict, item: dict, r: dict, seconds: float, before: dict,
+                  poster: str = "") -> None:
+        """One file in the job log: how long, its size, the verification, its record size and
+        compression before and after, whether it was laid out again, and its cover art."""
+        res = r.get("result")
+        wrote = res in ("optimized", "rewritten")
+        try:
+            st = os.stat(path)
+            after = {"size": st.st_size, "rs": st.st_blksize if st.st_size > st.st_blksize else None}
+        except OSError:
+            after = {}
+        cover, b, a = None, None, None
+        if res == "optimized":
+            b, a = r.get("images_before") or 0, r.get("images_after") or 0
+            cover = ("Plex poster added" if r.get("cover") and not b else "replaced by Plex's poster" if r.get("cover")
+                     else f"{b - a} removed" if a < b else "compressed" if r.get("images_saved") else "kept" if a else None)
+        log(type="file", file=path, result=res, seconds=round(seconds, 1), reason=r.get("reason"),
+                size_before=before.get("size"), size_after=after.get("size") if wrote else before.get("size"),
+                verified=r.get("verified") or ("not needed" if res == "already" else None),
+                rs_before=before.get("rs"), rs_after=after.get("rs") if wrote else before.get("rs"),
+                compression_before=before.get("compression") or "unknown",
+                compression_after=rec.get("compression") if wrote else before.get("compression") or "unknown",
+                layout=res == "optimized", cover=cover, poster=poster or None, label=self.app.title_of(path) or None,
+                version=r.get("version") if res == "optimized" else None, version_before=before.get("version"),
+                images_before=b, images_after=a, images_saved=r.get("images_saved") or None,
+                poster_added=bool(r.get("cover") and not b) if res == "optimized" else None, disk_before=before.get("disk"))
+        if wrote:
+            # its space on the pool once ZFS has written it out (compressed): known a little later
+            def disk_after():
+                got = settled_blocks(path)
+                if got is not None:
+                    self.app.jobs.log.add({"type": "disk", "job": job_id, "file": path, "disk_after": got})
+            threading.Thread(target=disk_after, name="disk-after", daemon=True).start()
+
+    @staticmethod
+    def _needs_claim(item: dict) -> bool:
+        """Only remuxes are claimed: a byte-for-byte rewrite (record size, compression) is about
+        this NAS only, keeps the modification time, and Syncthing doesn't even see it."""
+        return item.get("cover") is not None or any(p not in SYNC_PROBLEMS for p in item.get("problems") or [])
+
+    def _cover_todo(self, path: str, key: str, poster: str, matched: bool | None) -> dict | None:
+        """Sync Cover Art: what an optimized MKV's cover art should change to now, or None."""
+        opts = self.options(key)
+        if not (opts["mkv"] and path.lower().endswith(mkv.MKV_EXT)) or conflict_original(path):
+            return None
+        try:
+            info = self._mkv_info(path, os.stat(path))
+        except OSError:
+            return None
+        ours = info.get("ours") or {}
+        if version_of(ours.get("PLEXCACHE_OPTIMIZER")) not in ("same", "older"):
+            return None  # not optimized yet (Optimize Now does it), or by a newer optimizer
+        want = self.cover_for(opts["images"], poster, matched)
+        if want == "plex" and poster:
+            try:
+                data = self._poster(poster)
+            except PlexError:
+                return None
+            if ours.get("PLEXCACHE_COVER") == COVER_PREFIX + hashlib.sha256(data).hexdigest():
+                return None  # Plex's poster, as it is now
+            return {"cover": "plex", "problems": []}
+        if want == "remove" and opts["images"] == "remove" and info.get("images"):
+            return {"cover": "remove", "problems": []}
+        return None
+
+    def _stop_event(self) -> threading.Event:
+        """The running job's cancel (a never-set one when none runs)."""
+        job = self.app.jobs.job
+        return job.stop_event if job and job.state.get("running") else threading.Event()
 
     def _poster(self, path: str) -> bytes:
         """Plex's poster, kept for the run: a season's episodes share one."""
@@ -549,7 +912,7 @@ class Optimizing:
             cache[path] = self.app.plex(timeout=60).image(path)
         return cache[path]
 
-    def _one(self, path: str, key: str, problems: list, rec: dict, poster: str = "", matched: bool | None = None) -> dict:
+    def _one(self, path: str, key: str, item: dict, rec: dict, poster: str = "") -> dict:
         """Send one file to the optimizer — laid out (MKV), or written again — and wait for its result."""
         if path in self.app.monitor.playing_paths():
             return {"result": "skipped", "reason": "playing"}
@@ -560,49 +923,203 @@ class Optimizing:
         if time.time() - st.st_mtime < RECENT_SECONDS:
             return {"result": "skipped", "reason": "just written"}
         opts = self.options(key)
-        with self.lock:
-            done = self.record.get(path)
-        before = done if done and (done.get("size"), done.get("mtime_ns"), done.get("ino")) == (st.st_size, st.st_mtime_ns, st.st_ino) else None
-        layout = any(p not in SYNC_PROBLEMS for p in problems)
+        problems = item.get("problems") or []
         try:
-            images = self.cover_for(opts["images"], poster, matched)
-            if layout:
+            if item.get("cover"):  # Sync Cover Art: written again with the new cover art
+                cover = self._poster(poster) if item["cover"] == "plex" else None
+                send = lambda: self.client.optimize(path, item["cover"], True, cover)
+            elif any(p not in SYNC_PROBLEMS for p in problems):
+                info = self._mkv_info(path, st)
+                images = self.images_mode(opts["images"], poster, item.get("matched"), info.get("ours"))
                 cover = None
-                if images == "plex" and poster:
+                if images == "plex":
                     try:
                         cover = self._poster(poster)
                     except PlexError as e:
                         return {"result": "failed", "reason": msg(e)}
-                # written again even if laid out right, when the dataset's settings call for it
-                force = any(p in SYNC_PROBLEMS + ("version",) for p in problems)
-                started = self.client.optimize(path, images, force, cover)
+                send = lambda: self.client.optimize(path, images, False, cover)
             else:
-                cover = None
-                started = self.client.rewrite(path)
+                send = lambda: self.client.rewrite(path)
+        except PlexError as e:
+            return {"result": "failed", "reason": msg(e)}
+        r = self._send(path, send, st.st_size)
+        if r.get("result") in ("optimized", "already", "rewritten"):
+            self.note(path, key, r, rec)
+        return r
+
+    def _send(self, path: str, start, size: int) -> dict:
+        """Start one thing on the optimizer and wait for its result (polling its status). A cancel
+        while it waits its turn: "cancelled" (not tried). Once it's started, its result is waited
+        for even then — the optimizer finishes the file in hand whatever happens here."""
+        try:
+            started = start()
+            # still finishing a file from before this app restarted: wait for it, then send this one
+            waited = time.time()
+            while not started.get("started") and started.get("error") == "busy" and time.time() - waited < 3600:
+                if self._stop_event().wait(5):
+                    return {"result": "cancelled", "reason": "cancelled before it started"}
+                started = start()
         except (OSError, ValueError, urllib.error.URLError) as e:
             return {"result": "failed", "reason": str(getattr(e, "reason", e))}
         if not started.get("started"):
             return {"result": "failed", "reason": started.get("error") or "not started"}
         sent = time.time()
-        deadline = sent + 600 + st.st_size / (20 * 1024 * 1024)  # 20 MB/s at the slowest, plus 10 minutes
-        while time.time() < deadline and not self._stop.wait(2):
+        idle_since = None
+        deadline = sent + 600 + size / (20 * 1024 * 1024)  # 20 MB/s at the slowest, plus 10 minutes
+        stop = self._stop_event()
+        while time.time() < deadline:
+            stop.wait(2) if not stop.is_set() else time.sleep(2)
             status = self.client.status(fresh=True)
             cur = status.get("current") or {}
-            with self.lock:
-                if self.job:
-                    self.job["step"] = cur.get("step") if cur.get("path") == path else None
+            job = self.app.jobs.job
+            if job and job.state.get("running"):
+                mine = cur.get("path") == path
+                job.update(step=cur.get("step") if mine else None, file_pct=cur.get("pct") if mine else None)
+                if mine:
+                    job.first_estimate(size, time.time() - sent, cur.get("pct"))
             for r in reversed(status.get("results") or []):
                 if r.get("path") == path and r.get("finished", 0) >= sent - 1:
-                    if r.get("result") in ("optimized", "already", "rewritten"):
-                        self.note(path, key, r, rec, images, poster if cover else "", before)
                     return r
-            if self._stop.is_set():
-                break
-        return {"result": "failed", "reason": "stopped" if self._stop.is_set() else "timed out"}
+            # nothing running there and no result: the optimizer restarted mid-way (the file is
+            # untouched: a new file only ever replaces it whole)
+            if not status.get("error") and not status.get("current"):
+                idle_since = idle_since or time.time()
+                if time.time() - idle_since > self.IDLE_LIMIT:
+                    return {"result": "failed", "reason": "the optimizer restarted while working on it"}
+            else:
+                idle_since = None
+        return {"result": "failed", "reason": "timed out"}
+
+    def instance(self) -> str:
+        """This system's ID in claims, made once and kept in the config folder."""
+        path = os.path.join(self.app.config_dir, "instance-id")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                got = fh.read().strip()
+            if 8 <= len(got) <= 64:
+                return got
+        except OSError:
+            pass
+        got = secrets.token_hex(8)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(got)
+        except OSError:
+            pass
+        return got
 
     def snapshot(self) -> dict:
         ready = self.client.ready()  # may ask the service: not while holding the lock
+        job = self.app.jobs.snapshot()
         with self.lock:
             return {"configured": ready, "setup": dict(self.setup), "libraries": dict(self.summary), "version": VERSION,
-                    "recorded": len(self.record), "job": dict(self.job) if self.job else None,
-                    "surveying": self.surveying}
+                    "recorded": len(self.record), "zfs_started": self.zfs.started,
+                    "job": job if job and job.get("kind") == "optimize" else None, "surveying": self.surveying}
+
+
+RETRY_POLL = 3  # seconds: how often waiting retries look for their turn
+# A written file's space on the pool is known once ZFS has committed it (compressing it as it does,
+# every few seconds — later on a busy pool): watched until two looks in a row agree.
+DISK_SETTLE = 10  # seconds before the first look
+DISK_EVERY = 5  # seconds between looks
+DISK_GIVE_UP = 600  # seconds: then the last look counts
+
+
+def settled_blocks(path: str, sleep=time.sleep, clock=time.monotonic) -> int | None:
+    """The file's space on the pool (bytes) once it stops changing; None if it's gone."""
+    sleep(DISK_SETTLE)
+    until, last = clock() + DISK_GIVE_UP, None
+    while True:
+        try:
+            now = os.stat(path).st_blocks * 512
+        except OSError:
+            return None
+        if now == last or clock() >= until:
+            return now
+        last = now
+        sleep(DISK_EVERY)
+
+
+class OptimizeJob(Job):
+    """Optimizing a library (or, mode "covers", syncing its cover art) as a file job."""
+
+    kind = "optimize"
+
+    def __init__(self, op: "Optimizing", library: str, mode: str = "optimize", resumed: dict | None = None):
+        self.op = op
+        title = (op.app.library_info(str(library)) or {}).get("title") or (resumed or {}).get("title")
+        super().__init__(op.app.jobs, resumed, library=str(library), mode=mode, title=title)
+
+    def args(self) -> dict:
+        return {"library": self.state["library"], "mode": self.state["mode"]}
+
+    def dataset(self) -> str | None:
+        return (self.app.library_records().get(self.state["library"]) or {}).get("dataset")
+
+    def run(self) -> None:
+        self.op._run(self)
+
+
+class Claims:
+    """A job's claims on the files it remuxes, for systems sharing a library: each file is
+    claimed a few files ahead, so by the time its turn comes another system's claim would have
+    synced; the earliest claim wins. With no other system ever seen in the folder, nothing waits."""
+
+    AHEAD = 10   # files claimed ahead of the one being done
+    WAIT = 120   # seconds a claim must be old before it's acted on, when other systems share the folder
+
+    def __init__(self, op: Optimizing, items: list):
+        self.op, self.items = op, items  # [(path, plex path)]
+        self.at: dict[str, float] = {}
+        self.peers: dict[str, bool] = {}
+        self.me = op.instance()
+
+    def _key(self, plex_path: str, root_plex: str) -> str:
+        rel = os.path.relpath(plex_path, root_plex)
+        return hashlib.sha1(rel.encode()).hexdigest()[:24]
+
+    def _call(self, path: str, release: bool = False) -> dict | None:
+        plex = dict(self.items).get(path)
+        root = self.op.library_root(plex) if plex else None
+        if not root:
+            return None
+        root_plex = next((loc.rstrip("/") for lib in getattr(self.op.app, "libraries", []) or [] for loc in lib.get("locations") or []
+                          if plex.startswith(loc.rstrip("/") + "/")), None)
+        try:
+            return self.op.client.claim(root, self._key(plex, root_plex), self.me, release)
+        except (OSError, ValueError, urllib.error.URLError):
+            return None
+
+    def _ahead(self, path: str) -> None:
+        paths = [p for p, _ in self.items]
+        i = paths.index(path) if path in paths else 0
+        for p in paths[i:i + self.AHEAD]:
+            if p not in self.at:
+                r = self._call(p)
+                self.at[p] = time.time()
+                self.peers[p] = bool(r and r.get("peers"))
+
+    def take(self, path: str) -> tuple[bool, str]:
+        """Whether this system may remux the file now (waiting for its claim to settle if other
+        systems share the folder), and if not, why."""
+        self._ahead(path)
+        if not self.peers.get(path):
+            return True, ""
+        left = self.WAIT - (time.time() - self.at[path])
+        if left > 0 and self.op._stop_event().wait(left):
+            return False, "stopped"
+        r = self._call(path)
+        first = ((r or {}).get("claims") or [{}])[0]
+        if first.get("instance") not in (None, self.me):
+            self.release(path)
+            return False, "another system is optimizing it"
+        return True, ""
+
+    def release(self, path: str) -> None:
+        if path in self.at:
+            self._call(path, release=True)
+            del self.at[path]
+
+    def release_all(self) -> None:
+        for path in list(self.at):
+            self.release(path)

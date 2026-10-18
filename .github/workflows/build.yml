@@ -41,10 +41,25 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
+      # Built first without pushing, so the optimizer's tests can run inside it: with the image's own
+      # MKVToolNix, ffmpeg, oxipng and jpegtran (the runner has none of them, so there they're skipped).
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          load: true
+          tags: plex-cache:test
           labels: ${{ steps.meta.outputs.labels }}
+      - name: Optimizer tests inside the image
+        run: >
+          docker run --rm -v "$PWD:/src:ro" -w /src --entrypoint python plex-cache:test
+          -W ignore -m unittest -v tests.test_plexcache.FixtureTests tests.test_plexcache.OptimizerTests
+          tests.test_plexcache.CoverArtTests
+      - name: Push
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          for tag in $TAGS; do
+            docker tag plex-cache:test "$tag"
+            docker push "$tag"
+          done

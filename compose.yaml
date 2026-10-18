@@ -67,7 +67,11 @@ services:
     user: "568:568"
     volumes:
       - /mnt/tank/apps/plex-cache:/config:ro     # CHANGE ME: the same settings folder as above, read-only
-      - /mnt/tank/plexfiles:/data                # CHANGE ME: media it may rewrite, same path as above, writable
+      - type: bind                               # media it may rewrite, writable:
+        source: /mnt/tank/plexfiles              # CHANGE ME: the same media as above
+        target: /data                            # CHANGE ME: the same path as above
+        bind:
+          propagation: rslave                    # a dataset made inside it shows up here without a restart
     security_opt:
       - no-new-privileges:true
     cap_drop:

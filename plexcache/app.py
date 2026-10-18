@@ -20,7 +20,10 @@ from .i18n import Fixed, M, join, msg, size_text
 from .updates import UpdateChecker
 from .config import PLEX_DEFAULT_PORT, Settings
 from .coverage import Coverage
+from .filemap import FileMaps, SurveyJob
 from .pauses import L2arcPauses
+from .jobs import Jobs
+from .migrating import Migration
 from .optimizing import Optimizing
 from .playback import PlaybackMonitor
 from .plex import PlexClient, PlexError
@@ -116,6 +119,8 @@ class App:
         self.version = __version__
         # Library scan
         self.files: list = []
+        self._posters: tuple | None = None  # (files, {path: (poster, title)}) for poster_of() and title_of()
+        self._thumbs: dict[str, bytes] = {}  # poster thumbnails, oldest first
         self.libraries: list = []
         self.stats = LibraryStats()
         self.scan_error: str | None = None
@@ -153,7 +158,12 @@ class App:
         self.cachelog.boot_time = zfs.boot_time() or 0.0
         # Playback
         self.monitor = PlaybackMonitor(self)
-        self.optimizing = Optimizing(self)  # the optimizer service (second container): which files need it
+        self.jobs = Jobs(self)  # the one file job at a time: optimizing, syncing cover art, copying a folder
+        self.optimizing = Optimizing(self)
+        self.migration = Migration(self)
+        # what's where in each media file (the Library Health page), and the job that reads it
+        self.file_maps = FileMaps(self.config_dir)
+        self.jobs.register("survey", lambda args, saved: SurveyJob(self, args.get("library"), saved, args.get("force")))  # turning a library folder into a dataset (Optimizer page)  # the optimizer service (second container): which files need it
         # Home Assistant over MQTT (does nothing until it's switched on in System)
         self.ha = HomeAssistantBridge(self)
         self.updates = UpdateChecker(self)
@@ -205,6 +215,7 @@ class App:
     def _startup(self):
         self.scan_library()
         self.run_checks()
+        self.optimizing.resume_job()   # a file job that was running before a restart, started again where it was
         # Every schedule but "none" warms up at boot (at boot only is the default with an L2ARC)
         boot = {k for k, v in self.warmup_schedules().items() if v != "none"}
         if boot:
@@ -417,6 +428,34 @@ class App:
         if changed:
             self.activity.event("settings", M("found {list}", list=join(changed)))
         self.test_connections_async(then_checks=bool(changed), rescan=bool(changed))
+
+    def _media(self, path: str) -> tuple:
+        files = self.files
+        if not self._posters or self._posters[0] is not files:
+            self._posters = (files, {self.map_path(f.path): (getattr(f, "poster", ""), getattr(f, "title", "")) for f in files})
+        return self._posters[1].get(path) or ("", "")
+
+    def poster_of(self, path: str) -> str:
+        """The Plex poster of a file (as this app sees its path), from the last scan, or ""."""
+        return self._media(path)[0]
+
+    def title_of(self, path: str) -> str:
+        """How Plex names a file's item ("Title (year)", "Show · S01E05"), from the last scan, or ""."""
+        return self._media(path)[1]
+
+    def poster_thumb(self, path: str) -> bytes:
+        """A small poster for lists (the Processes page), kept in memory: the last few hundred."""
+        with self.lock:
+            hit = self._thumbs.pop(path, None)
+            if hit is not None:
+                self._thumbs[path] = hit
+                return hit
+        data = self.plex(timeout=15).thumb(path)
+        with self.lock:
+            self._thumbs[path] = data
+            while len(self._thumbs) > 400:
+                self._thumbs.pop(next(iter(self._thumbs)))
+        return data
 
     def library_info(self, key: str) -> dict | None:
         """A library from the last scan ({key, title, kind, ...}), or None."""
@@ -675,7 +714,7 @@ class App:
                 self.locations = locations
                 self.mapping_choices = mapping.choices(locations)
             self.probe_zfs()  # needs the locations: it checks the dataset under each library
-            self.optimizing.survey()  # which files are optimized: Health's Libraries section reports it
+            self.optimizing.survey_soon()  # the Optimizer page's counts, in the background (reads new files' tags)
             result = checks.run_all(self)
             with self.lock:
                 self.health = result
@@ -975,14 +1014,87 @@ class App:
             idx = run.get("index")
             if idx:
                 kinds = run.get("by_kind") or {}
-                return {k: {"share": v["files"] / kinds[k]["files"], "avg": v["bytes"] / v["files"] if v["files"] else 0}
-                        for k, v in idx.items() if kinds.get(k, {}).get("files")}
+                out = {k: {"share": v["files"] / kinds[k]["files"], "avg": v["bytes"] / v["files"] if v["files"] else 0}
+                       for k, v in idx.items() if kinds.get(k, {}).get("files")}
+                for k, v in idx.items():  # metadata in front of the video (runs from before this didn't measure it)
+                    if k in out and v.get("front_files"):
+                        out[k]["front"] = v["front"] / v["front_files"]
+                return out
         return None
 
     def lead_in_plan(self, w: dict | None = None, libs: set | None = None, records: dict | None = None) -> dict:
         """The Lead-in Cache's plan (warmup.plan), sized at each library's dataset record size."""
         return plan(self.stats, w or self.settings.get()["warmup"], self.l2_total(), self.index_avg(), libs,
                     records=self.library_records() if records is None else records, index_layout=self.index_layout())
+
+    # ---------------------------------------------------------------- Library Health
+    def _health_files(self, key: str) -> list:
+        return sorted((f for f in list(self.files) if str(f.library_key) == str(key)),
+                      key=lambda f: ((getattr(f, "title", "") or os.path.basename(f.path)).lower(), f.path))
+
+    def library_view(self, key: str, offset: int = 0, limit: int = 100, q: str = "") -> dict:
+        """A library's files for the Library Health page, by title: each with its layout (as last read;
+        None until the library is surveyed) and what caching takes from it."""
+        from .filemap import block_map, cache_plan
+        from .warmup import library_seconds
+        files = self._health_files(key)
+        if q:
+            ql = q.lower()
+            files = [f for f in files if ql in (getattr(f, "title", "") or "").lower() or ql in os.path.basename(f.path).lower()]
+        paths = [self.map_path(f.path) for f in files]
+        w = self.settings.get()["warmup"]
+        record = self.record_for(key)
+        rows = []
+        for f, path in list(zip(files, paths))[offset:offset + limit]:
+            try:
+                st = os.stat(path)
+                m = self.file_maps.get(path, st)
+            except OSError:
+                st, m = None, None
+            kind = getattr(f, "kind", "movie")
+            secs = library_seconds(w, key, kind if kind in ("movie", "tv", "audio") else "movie")
+            rec = (m or {}).get("blksize") or record  # the blocks the file is really stored in
+            plan = cache_plan(m, f.size, f.kbps, secs, rec, kind)
+            rows.append({"file": path, "label": getattr(f, "title", "") or os.path.basename(path), "poster": getattr(f, "poster", ""),
+                         "size": f.size, "kbps": f.kbps, "kind": kind, "missing": st is None, "read": bool(m),
+                         "saved": max(0, f.size - m["disk"]) if m and m.get("disk") is not None else None,
+                         "plan": plan, "blocks": block_map(m, f.size, plan, rec)})
+        return {"library": key, "total": len(files), "surveyed": self.file_maps.current(paths), "record": record,
+                "offset": offset, "files": rows}
+
+    def file_view(self, path: str) -> dict | None:
+        """One file in full for the Library Health page: its layout (read now if it changed), tracks,
+        attachments, and what caching takes from it. None if it isn't a library file."""
+        from .filemap import block_map, cache_plan
+        from .warmup import library_seconds
+        f = self._library_file(path)
+        if f is None:
+            return None
+        m = self.file_maps.read(path)
+        self.file_maps.save()
+        key, kind = str(f.library_key), getattr(f, "kind", "movie")
+        record = self.record_for(key)
+        rec = m.get("blksize") or record  # the blocks the file is really stored in
+        secs = library_seconds(self.settings.get()["warmup"], key, kind if kind in ("movie", "tv", "audio") else "movie")
+        plan = cache_plan(m, f.size, f.kbps, secs, rec, kind)
+        return {"file": path, "label": getattr(f, "title", "") or os.path.basename(path), "poster": getattr(f, "poster", ""),
+                "library": key, "size": f.size, "kbps": f.kbps, "kind": kind, "tracks": m.get("tracks") or [],
+                "format": m.get("format"), "disk": m.get("disk"), "saved": max(0, f.size - m["disk"]) if m.get("disk") is not None else None,
+                "video_start": m.get("video_start"), "video_end": m.get("video_end"), "record": rec, "dataset_record": record,
+                "plan": plan, "blocks": block_map(m, f.size, plan, rec), "error": m.get("error")}
+
+    def _library_file(self, path: str):
+        return next((x for x in list(self.files) if self.map_path(x.path) == path), None)
+
+    def block_estimates(self, path: str, numbers: list[int]) -> list[dict] | None:
+        """How ZFS might store some of a file's blocks (filemap.estimate_blocks), or None if it isn't a library file."""
+        from .filemap import estimate_blocks
+        f = self._library_file(path)
+        if f is None:
+            return None
+        st = os.stat(path)
+        rec = (st.st_blksize if st.st_size > st.st_blksize else None) or self.record_for(str(f.library_key)) or 1024 * 1024
+        return estimate_blocks(path, numbers, rec, st.st_size)
 
     def record_for(self, library_key: str) -> int | None:
         """The record size of a library's dataset, as checked (None if it couldn't be)."""
@@ -1148,6 +1260,10 @@ class App:
             "benchmark": {"running": self.benchmarking, "last": self.benchmark, "progress": self.benchmark_progress},
             # The optimizer: per library how many files are optimized, the job, and the service itself
             "optimizer": dict(self._optimizer_state(), service=self.optimizing.client.status()),
+            "migration": dict(self.migration.snapshot(), candidates=self.migration.candidates()),
+            "job": self.jobs.snapshot(),  # the file job running now (or the last one): one card for every kind
+            "queue": self.jobs.queued(),  # file work waiting its turn
+            "retries": self.optimizing.retrying(),  # failed files to try again, after the file in hand
             "playback": {"sessions": self.monitor.snapshot(), "error": self.monitor.last_error, "last_poll": self.monitor.last_poll},
             "activity": self.activity.snapshot(),
             "reports": self.reports(),

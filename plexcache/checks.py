@@ -8,7 +8,8 @@ import time
 from . import zfs
 from .i18n import Fixed, M, join
 from .plex import PlexError
-from .optimizing import HEALTHCHECK_YAML, ZSTD3, not_set_up
+from .optimizing import HEALTHCHECK_YAML, not_set_up
+from .zfslog import grade as compression_grade
 from .warmup import recommend_recordsize
 
 GB = 1e9
@@ -231,6 +232,7 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
         if shared:
             # one record size per dataset, and these libraries need different ones
             row["recordsize"] = cell("warn", _fmt_rs(rs), badge=M("Split Dataset"))
+            row["recordsize"]["split"] = True  # the page links to the Optimizer page's folder-to-dataset steps
             row["recordsize"]["lines"] = [M("Move {libraries} to a dataset of its own; {keep} suits the rest.",
                                             libraries=join(shared["move"]), keep=_fmt_rs(shared["keep"]))]
         else:
@@ -248,8 +250,7 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
 
     # --- compression: always the same advice (ZSTD-3), whatever is on the dataset
     comp = (props or {}).get("compression") if tn_ok else None
-    row["compression"] = (cell("info", M("Not checked")) if not comp else
-                          cell("pass", "", badge=comp) if comp in ZSTD3 else cell("warn", M("Use ZSTD-3"), badge=comp))
+    row["compression"] = compression_cell(comp)
 
     # --- L2ARC on this dataset's pool
     if not cached:
@@ -385,6 +386,21 @@ MiB = 1024 * 1024
 def rewrite_cmd(ds: str) -> str:
     # {APP} becomes this app's address in the browser, so the command fetches the matching script.
     return f"curl -fsSO {{APP}}/tools/rewrite_blocks.py && sudo python3 rewrite_blocks.py {ds}"
+
+
+def compression_cell(comp: str | None) -> dict | None:
+    """The dataset's compression: ZSTD 3 to 19 pass (3 recommended), anything else is a warning
+    with what to use instead. The badge is the setting itself."""
+    g = compression_grade(comp)
+    if g is None:
+        return cell("info", M("Not checked"))
+    if g == "good":
+        level = int(comp.split("-")[1]) if "-" in comp else 3
+        return cell("pass", M("Recommended") if level == 3 else
+                    M("Marginally smaller files than ZSTD-3, more CPU when writing"), badge=comp)
+    if g == "low":
+        return cell("warn", M("Use ZSTD-3: compresses more, and no slower in practice"), badge=comp)
+    return cell("warn", M("Use ZSTD-3"), badge=comp)
 
 
 def _blocks_check(ds: str, recordsize: int | None, blocks: dict | None, libs: str = "") -> str:
@@ -556,6 +572,8 @@ def check_cache_mode(app) -> dict:
                           M("Every warm-up schedule and Prefetch choice is running as you set it: none needed an L2ARC that "
                             "wasn't there in the last 24 hours."), help=fallback_help))
     items.append(_optimizer_check(app))
+    items.extend(_conflict_items(app))
+    items.extend(_job_failures(app))
     return {"id": "mode", "title": M("Plex Cache"),
             "hint": M("How caching runs here — with an SSD cache (L2ARC) or RAM only — and the optimizer service."), "items": items}
 
@@ -567,6 +585,44 @@ OPTIMIZER_HELP = M("The optimizer is the part of Plex Cache that rewrites your m
                    "media. It does nothing on its own: it rewrites one file at a time when you press Optimize Now, checks each "
                    "new file before swapping it in, and skips anything playing or just added. It has no web page and no port of "
                    "its own; only this app talks to it, with a token both services share.")
+
+
+def _job_failures(app) -> list[dict]:
+    """The last file job's failures (the Optimizer page lists them all, with why): a failed file is
+    left exactly as it was — the new one only replaces it once every check has passed."""
+    jobs = getattr(app, "jobs", None)
+    last = jobs.snapshot() if jobs else None
+    if not last or last.get("running") or not last.get("errors"):
+        return []
+    errs = last["errors"]
+    return [dict(item("warn", M("{n} files weren't optimized", one="{n} file wasn't optimized", n=len(errs)),
+                 M("For example: {files}.", files=[f"{os.path.basename(e.get('file') or '')}: {e.get('reason')}" for e in errs[:3]]),
+                 M("They're as they were: a file is only replaced once every check has passed."),
+                 help=M("Each file the optimizer writes is checked before it replaces the original: every video, audio and subtitle "
+                        "stream must be the same as the original's (ffmpeg), the attachments byte for byte, the layout and tags as "
+                        "written. When a check fails — or a tool does, or the file is in use — the new file is thrown away and the "
+                        "original kept. Optimize Now tries the failed files again.")),
+                 link={"job": last.get("id"), "text": M("See them all, with why, on the Processes page")})]
+
+
+def _conflict_items(app) -> list[dict]:
+    """Syncthing conflict copies next to library files: two systems wrote a file at once. The
+    optimizer deletes its own (Optimize Now); the rest are listed here for a person to look at."""
+    op = getattr(app, "optimizing", None)
+    if op is None:
+        return []
+    found = [c for lib in (op.snapshot().get("libraries") or {}).values() for c in lib.get("conflicts") or []]
+    if not found:
+        return []
+    return [item("warn", M("{n} Syncthing conflict copies", one="{n} Syncthing conflict copy", n=len(found)),
+                 M("Next to your media: {files}.", files=[os.path.basename(c["copy"]) for c in found[:3]]),
+                 M("Optimize Now on the Optimizer page deletes the ones the optimizer made (the same as the file). "
+                   "Others are kept for you to compare and delete."),
+                 help=M("When two systems sharing a library (Syncthing, both ways) change the same file at once, Syncthing "
+                        "keeps both, the second as name.sync-conflict-<date>-<device>.mkv. The optimizer avoids it — it "
+                        "claims a file before changing it, and writes the very same bytes for the same file on every "
+                        "system — but if it happens, it deletes the copy only when both are optimized by it and every "
+                        "stream is the same."))]
 
 
 def optimizer_code_mount() -> str | None:
@@ -589,7 +645,9 @@ def optimizer_yaml(app) -> str:
                      if d.get("mountpoint") and (d.get("keys") or d.get("off_keys"))})
     # a dataset mounted inside another one comes with it (bind mounts include what's below them)
     mounts = [mp for mp in mounts if not any(mp != o and mp.startswith(o.rstrip("/") + "/") for o in mounts)] or ["/data"]
-    media = "\n".join(f"      - {zfs.host_path(mp, ml) or '/mnt/tank/plexfiles'}:{mp}" for mp in mounts)
+    # long form, with propagation: a dataset made inside a media folder shows up without a restart
+    media = "\n".join(f"      - type: bind\n        source: {zfs.host_path(mp, ml) or '/mnt/tank/plexfiles'}\n"
+                      f"        target: {mp}\n        bind:\n          propagation: rslave" for mp in mounts)
     code = optimizer_code_mount()
     code_line = f"\n      - {code}:/app/plexcache:ro" if code else ""
     return ("  plex-cache-optimizer:\n"

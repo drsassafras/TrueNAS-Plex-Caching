@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from . import cachemode
 from .i18n import M
-from .layout import tail_ranges
+from .layout import VIDEO_SHARE, min_head, tail_ranges
 from .reader import MiB, Pacer, Stopped, is_cache_hit, is_probe_hit, read_range
 
 NEXT_DAY = 24 * 3600  # how long after a run its sample is checked
@@ -108,8 +108,10 @@ class LibraryStats:
         return {"count": self.count, "avg_kbps": self.avg_kbps, "scanned_at": self.scanned_at, "libraries": self.libraries}
 
 
-# Index (and other end-of-file parts) per file, until a run has measured your library.
+# Metadata at the end of a file (index, tags, fonts…) per file, until a run has measured your library.
 DEFAULT_INDEX = {"movie": 512 * 1024, "tv": 256 * 1024, "audio": 0}
+# Metadata in front of the video (headers, attachments kept there), until a run has measured it.
+DEFAULT_FRONT = {"movie": 64 * 1024, "tv": 64 * 1024, "audio": 0}
 
 # ---- Record size: ZFS reads, caches and copies to the SSD in whole records, so a lead-in costs
 # its bytes rounded up to records, and an index at the end of a file costs the records it touches
@@ -149,14 +151,15 @@ def whole_records(n: float, record: int) -> float:
 
 
 def cached_bytes(lead: float, index: float, index_share: float, record: int, avg_size: float,
-                 index_first: bool) -> float:
-    """What one file's lead-in (and index) takes in the cache at a record size, on average.
+                 index_first: bool, front: float = 0) -> float:
+    """What one file's lead-in (and metadata) takes in the cache at a record size, on average.
 
-    A file no bigger than a record is one block of its own size. Otherwise the lead-in rounds
-    up to whole records (half a record more on average, at least one record), and an index at
-    the end adds the whole records it takes, for the share of files keeping it there — ZFS reads
-    and caches nothing smaller; at the front it's part of the lead-in."""
-    head = lead + (index * index_share if index_first else 0)
+    A file no bigger than a record is one block of its own size. Otherwise its start is the
+    lead-in, never less than the metadata in front of the video (``front``) and 60% of a record of
+    video (layout.min_head), rounded up to whole records (half a record more on average, at least
+    one record); and metadata at the end adds the whole records it takes, for the share of files
+    keeping it there — ZFS reads and caches nothing smaller; at the front it's part of the start."""
+    head = max(lead, front + VIDEO_SHARE * record) + (index * index_share if index_first else 0)
     if avg_size and (avg_size <= record or head >= avg_size):
         return avg_size  # the whole file, index and all
     tail = 0.0 if index_first or not index else index_share * whole_records(index, record)
@@ -200,24 +203,25 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | N
 
     ``keys``: the libraries warmed (None: all). Each library uses its own seconds. Sizes are
     what the cache really holds: lead-ins in whole records of the library's dataset, as its
-    files are written, plus the index for files keeping it at the end. If the L2ARC (minus the
-    system buffer) can't hold them all, every library's seconds are cut by the same share,
-    as little as fits, down to 0 — one record: the first record of each file, and its index
-    if that's at the end.
+    files are written, plus the metadata for files keeping some at the end. If the L2ARC (minus
+    the system buffer) can't hold them all, every library's seconds are cut by the same share,
+    as little as fits, down to 0 — each file's metadata: its start through 60% of a record of
+    video, and its end.
 
     ``records``: library key -> its dataset's record size, as checked (never guessed: a
     library whose dataset couldn't be checked has none, and is sized from its bitrate alone),
     or a dict with the files' block sizes and the dataset too. ``index_layout``: kind ->
-    {"share" of files with their index at the end, "avg" bytes there}. Each library also gets
-    four sizes for the sizing table: ``target_min`` (one record per file at the recommended
-    record size, the index assumed at the front), ``your_min`` (one record of yours, and the
-    index for files with it at the end), ``target`` (the recommended record size and the index
-    at the front, at the library's seconds) and ``your`` (as the files are written now).
+    {"share" of files with metadata at the end, "avg" bytes there, "front" bytes before the
+    video}. Each library also gets four sizes for the sizing table: ``target_min`` (optimized
+    files at the recommended record size: the least start, and the metadata at the end),
+    ``your_min`` (the same for the files as they are, at your record size), ``target`` (optimized,
+    the recommended record size, at the library's seconds) and ``your`` (as the files are written now).
     """
     pad = {"movie": w["padding_video"], "tv": w["padding_video"], "audio": w["padding_audio"]}
     idx_avg = dict(DEFAULT_INDEX, **(index_avg or {}))
-    layout = {k: {"share": 1.0 if idx_avg[k] else 0.0, "avg": idx_avg[k]} for k in KINDS}
-    layout.update(index_layout or {})
+    layout = {k: {"share": 1.0 if idx_avg[k] else 0.0, "avg": idx_avg[k], "front": DEFAULT_FRONT[k]} for k in KINDS}
+    for k, v in (index_layout or {}).items():
+        layout[k] = dict(layout.get(k) or {}, **v)
     libs = [lib for lib in stats.libraries if keys is None or lib["key"] in keys]
     rows = []
     for lib in libs:
@@ -229,28 +233,30 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | N
         rs, ix = info.get("rs"), layout[k]
         hi = library_seconds(w, lib["key"], k)
         idx = ix["share"] * ix["avg"]  # index bytes at the end, per file on average
-        idx_rec = ix["share"] * whole_records(ix["avg"], rs) if rs else idx  # ... in the whole records it takes
         mix = block_mix(rs, info.get("blocks"))
         rec = recommend_recordsize(lib["avg_kbps"], size)
-        one = lambda bytes_, size=size: min(bytes_, size) if size else bytes_  # never more than the file
 
-        def cost(sec, n=n, bps=bps, ix=ix, mix=mix, size=size, per_sec=per_sec, idx=idx):
+        front = ix.get("front") or 0  # metadata in front of the video, per file on average
+
+        def cost(sec, n=n, bps=bps, ix=ix, mix=mix, size=size, per_sec=per_sec, idx=idx, front=front):
             """What the library's lead-ins take at ``sec`` seconds each."""
             if mix:
-                return n * sum(share * cached_bytes(bps * sec, ix["avg"], ix["share"], bs, size, False) for bs, share in mix)
+                return n * sum(share * cached_bytes(bps * sec, ix["avg"], ix["share"], bs, size, False, front) for bs, share in mix)
             return max(per_sec * sec, n * MiB) + n * idx  # record size unknown: whole MiB, as warm-up reads then
 
         row = {"key": lib["key"], "name": lib["name"], "kind": k, "count": n, "kbps": lib["avg_kbps"],
                "per_sec": per_sec, "set_sec": hi, "min_sec": 0.0, "max": cost(hi), "min": cost(0),
                "index": n * idx, "cost": cost,
-               "avg_size": size, "bps": bps, "index_share": ix["share"], "index_avg": ix["avg"],
+               "avg_size": size, "bps": bps, "index_share": ix["share"], "index_avg": ix["avg"], "front": front,
                "rs": rs, "dataset": info.get("dataset"), "blocks": mix,
                "rs_best": rec["best"], "rs_alt": rec["alt"],
                # either of the two is fine, so a library on the line between them doesn't flip
                "rs_ok": bool(rs) and rs in (rec["best"], rec["alt"]),
-               "target_min": n * one(rec["best"]),
-               "your_min": n * (one(rs) + idx_rec) if rs else None,
-               "target": n * cached_bytes(bps * hi, ix["avg"], ix["share"], rec["best"], size, True),
+               # Target: the files as the optimizer lays them out (its metadata at the end, next to nothing
+               # in front of the video) at the recommended record size; Your: the files as they are
+               "target_min": n * cached_bytes(0, ix["avg"], 1.0, rec["best"], size, False),
+               "your_min": n * cached_bytes(0, ix["avg"], ix["share"], rs, size, False, front) if rs else None,
+               "target": n * cached_bytes(bps * hi, ix["avg"], 1.0, rec["best"], size, False),
                "your": cost(hi) if mix else None}
         rows.append(row)
     reserve = w["reserve_gb"] * GB
@@ -278,7 +284,7 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | N
             status, note = "reduced", M("Too big for your L2ARC — seconds are reduced automatically to fit.")
         else:
             cut = 1.0
-            status, note = "insufficient", M("Even the first record of each file doesn't fit. Lower the system buffer or add L2ARC.")
+            status, note = "insufficient", M("Even each file's metadata doesn't fit. Lower the system buffer or add L2ARC.")
     seconds, by_kind = {}, {k: {"need": 0.0, "used": 0.0, "index": 0.0} for k in KINDS}
     for r in rows:
         sec = _cut_sec(r["set_sec"], cut)
@@ -306,7 +312,7 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | N
 
 
 def _cut_sec(sec: float, cut: float) -> float:
-    """``sec`` cut by the share ``cut``, rounded down to a tenth of a second (0: one record)."""
+    """``sec`` cut by the share ``cut``, rounded down to a tenth of a second (0: metadata only)."""
     if cut <= 0:
         return float(sec)
     return max(0.0, math.floor(sec * (1 - cut) * 10) / 10)
@@ -348,7 +354,7 @@ class WarmupRun:
         self.cache_index = cache_index
         self.record = record or (lambda f: None)
         # What was found at the ends of files, per kind
-        self.index = {k: {"files": 0, "bytes": 0, "largest": 0, "mp4_at_end": 0} for k in KINDS}
+        self.index = {k: {"files": 0, "bytes": 0, "largest": 0, "mp4_at_end": 0, "front_files": 0, "front": 0} for k in KINDS}
 
     @property
     def total(self) -> int:
@@ -358,12 +364,14 @@ class WarmupRun:
         return {"done": self.done, "total": self.total, "bytes": self.bytes, "started": self.started,
                 "paused": self.paused, "skipped": self.skipped}
 
-    def _read_tail(self, f, head: int) -> float:
-        """Read the index and anything else a player reads at the end of ``f``. Returns seconds taken."""
-        ranges, info = tail_ranges(f.path, f.size, head)
+    def _read_tail(self, f, head: int, ranges: list, info: dict) -> float:
+        """Read the metadata at the end of ``f`` (the index, tags, fonts…: ``ranges`` from
+        tail_ranges()), all but what the start (``head``) holds. Returns seconds taken."""
+        start = info.get("video_start")
+        ranges = [(o, n) for o, n in ranges if o + n > head and (start is None or o >= start)]
         if not ranges:
             return 0.0
-        # The index's own size is what's measured, so the sizing table can work out the whole
+        # The metadata's own size is what's measured, so the sizing table can work out the whole
         # records it takes at any record size...
         size = sum(n for _, n in ranges)
         # ... but it's read in whole records, the way ZFS reads them — minus what the lead-in already read
@@ -401,9 +409,17 @@ class WarmupRun:
                     self.skipped += 1
                     continue
                 secs = self.seconds.get(getattr(f, "library_key", ""), self.seconds.get(f.kind, 0))
-                n = preload_bytes(f.kbps, secs, f.size, self.record(f))
+                rec = self.record(f)
+                # the file's metadata: at the end (read first), and where its video starts
+                meta, info = tail_ranges(f.path, f.size, 0) if f.size else ([], {})
+                if info.get("video_start") is not None:  # what's in front of the video, measured for the sizing
+                    self.index[f.kind]["front_files"] += 1
+                    self.index[f.kind]["front"] += info["video_start"]
+                # its start: the lead-in, never less than the metadata in front of the video and 60% of a record of video
+                n = max(preload_bytes(f.kbps, secs, f.size, rec), min_head(info.get("video_start"), rec, f.size))
                 self.pacer.disk_mb_s = self.hdd(f)
                 file_start = self.bytes
+                took = self._read_tail(f, n, meta, info) if self.cache_index else 0.0
                 res = read_range(f.path, 0, n)
                 self.done += 1
                 k["files"] += 1
@@ -418,9 +434,7 @@ class WarmupRun:
                     k["hits"] += 1
                 else:
                     k["reads"] += 1
-                took = res.seconds
-                if self.cache_index:
-                    took += self._read_tail(f, n)
+                took += res.seconds
                 if self.note:
                     self.note(f, is_cache_hit(res, self.hdd(f)))
                 self._read_files += 1
