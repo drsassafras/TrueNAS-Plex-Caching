@@ -30,6 +30,22 @@ DEFAULTS: dict = {
     # account's servers); "token": the chosen server's own; "libraries": this server's library key ->
     # the other's ("" for none; a library not set is paired with the one of the same name and kind).
     "plex2": {"url": "", "token": "", "account_token": "", "name": "", "machine_id": "", "libraries": {}},
+    # Library Sync (sync.py): whether this server has a mirror ("mirrors": "unknown" until chosen —
+    # "none", or "plex2", the server watched), and what a sync would do. Nothing acts without a review:
+    # "approved" holds the settings as last reviewed; changed since, applying stays paused.
+    "sync": {
+        "mirrors": "unknown",
+        "discover": True,        # look for mirrors among the account's servers, weekly
+        "source": "this",        # whose edits win: "this" server, or the "mirror"
+        "mode": "compare",       # "off" | "compare" (read-only) | "apply" (a later part)
+        "what": {"grouping": True, "matches": True, "edits": True, "art": True, "collections": True, "editions": True},
+        "watched": "plex",       # watched state and ratings: "plex" (Plex's own sync carries them) | "off" | "both"
+        "users": "home",         # whose: "me" | "home" (every user of the Plex Home)
+        "compare_hours": 6,
+        "ask_over": 25,          # a run changing more items than this asks first (applying)
+        "approved": "",
+        "libraries": {},         # library key -> false: left out of the sync
+    },
     "truenas": {"url": "", "api_key": "", "verify_tls": False},
     "general": {
         "poll_seconds": 5,
@@ -175,6 +191,8 @@ LIMITS = {
     ("mqtt", "port"): (1, 65535),
     ("mqtt", "interval"): (5, 600),
     ("optimizer", "convert_hold_days"): (0, 90),
+    ("sync", "compare_hours"): (1, 168),
+    ("sync", "ask_over"): (1, 1000),
 }
 AUTO = -1  # a cooldown worked out from what's been measured (cachelog.CacheLog.auto_cooldown)
 COOLDOWN_RAM = (AUTO, 0, 10, 30, 60, 120, 180, 240, 360, 720)                    # minutes
@@ -190,6 +208,11 @@ CHOICES = {
     ("nowplaying", "delay_sec"): (0, 15, 30, 60),
     ("mqtt", "report_period"): ("today", "week", "month"),
     ("mqtt", "language"): tuple(CODES),
+    ("sync", "mirrors"): ("unknown", "none", "plex2"),
+    ("sync", "source"): ("this", "mirror"),
+    ("sync", "mode"): ("off", "compare", "apply"),
+    ("sync", "watched"): ("plex", "off", "both"),
+    ("sync", "users"): ("me", "home"),
 }
 def public_defaults() -> dict:
     """Every setting's default that's a plain value (no lists or maps), but secrets: for the
@@ -313,6 +336,16 @@ def _coerce(section: str, key: str, value, current):
         return _text(section, key, value, 255, spaces=False)
     if (section, key) in (("plex2", "name"), ("plex2", "machine_id")):
         return _text(section, key, value, 200)
+    if (section, key) == ("sync", "what"):
+        if not isinstance(value, dict) or any(k not in DEFAULTS["sync"]["what"] or not isinstance(v, bool) for k, v in value.items()):
+            raise SettingsError(M("sync.what must set each of {keys} to true or false", keys=", ".join(DEFAULTS["sync"]["what"])))
+        return dict(DEFAULTS["sync"]["what"], **value)
+    if (section, key) == ("sync", "libraries"):
+        if not isinstance(value, dict) or len(value) > MAX_ITEMS or any(not _LIB_KEY.fullmatch(str(k)) or not isinstance(v, bool) for k, v in value.items()):
+            raise SettingsError(M("sync.libraries must be {library key: true/false}"))
+        return {str(k): v for k, v in value.items()}
+    if (section, key) == ("sync", "approved"):
+        return _text(section, key, value, 4000)
     if (section, key) == ("plex2", "libraries"):
         if not isinstance(value, dict) or len(value) > MAX_ITEMS or any(
                 not _LIB_KEY.fullmatch(str(k)) or not (v == "" or (isinstance(v, str) and _LIB_KEY.fullmatch(v))) for k, v in value.items()):

@@ -117,6 +117,14 @@ class Conversions:
         now, state = time.time(), e["state"]
         if state in ("deleted",):
             return False
+        # whether this server has a mirror is a choice to make (the Sync page): until it's made, the
+        # original stays — a mirror not watched could lose its item
+        sync = getattr(self.app, "sync", None)
+        if sync is not None and not sync.decided():
+            if e.get("note") != str(M("Waiting: whether there’s a mirrored server isn’t chosen yet (Sync page).")):
+                e["note"] = str(M("Waiting: whether there’s a mirrored server isn’t chosen yet (Sync page)."))
+                return True
+            return False
         if not os.path.exists(e["new"]):
             if state != "missing":
                 e["state"] = "missing"

@@ -250,6 +250,9 @@ def make_handler(app):
                     except (ValueError, OSError) as e:
                         return self._error(str(e), 400)
                     return self._json({"blocks": got}) if got is not None else self._error("not found", 404)
+                if path == "/api/library/differences":  # Library Sync: one library's differences, as last compared
+                    got = app.sync.differences(arg("key"))
+                    return self._json(jsonable(got)) if got else self._error("not found", 404)
                 if path == "/api/library/file":
                     try:
                         got = app.file_view(arg("path"))
@@ -403,6 +406,22 @@ def make_handler(app):
                         raise SettingsError(M("mode must be optimize or covers"))
                     got = app.optimizing.queue(key, mode)  # now, or after the jobs before it
                     return self._json({"started": got == "started", "queued": got == "queued"})
+                if path.startswith("/api/sync/"):
+                    # Library Sync (sync.py): compare now, look for mirrors, approve the settings as reviewed
+                    try:
+                        if path == "/api/sync/compare":
+                            if app.sync.decided() != "plex2":
+                                raise ValueError(M("No mirror to compare with: choose one on the Sync page."))
+                            return self._json({"started": app.sync.compare_async()})
+                        if path == "/api/sync/discover":
+                            app.sync.discover_async()
+                            return self._json({"started": True})
+                        if path == "/api/sync/approve":
+                            app.sync.approve()
+                            return self._json(jsonable(app.sync.snapshot()))
+                    except ValueError as e:
+                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+                    raise SettingsError(M("unknown action"))
                 if path == "/api/conversions":
                     # A converted file's original (converting.py): {"original", "action": "delete" | "keep" | "check"}
                     try:

@@ -25,6 +25,7 @@ from .pauses import L2arcPauses
 from .jobs import Jobs
 from .converting import Conversions
 from .plex2 import OtherServer
+from .sync import Sync
 from .migrating import Migration
 from .optimizing import DEFAULTS as OPT_DEFAULTS, Optimizing
 from .optimize.convert import DEFAULT_TYPES as CONVERT_TYPES
@@ -177,6 +178,7 @@ class App:
         self.migration = Migration(self)
         self.conversions = Conversions(self)  # converted files waiting for Plex before their originals go
         self.other = OtherServer(self)  # a second Plex server with the same files (plex2.py)
+        self.sync = Sync(self)  # Library Sync: this server and its mirror compared (sync.py)
         # what's where in each media file (the Library Health page), and the job that reads it
         self.file_maps = FileMaps(self.config_dir)
         self.inspector = Inspector(self)  # Library Health: each library's files read, one library at a time
@@ -262,6 +264,11 @@ class App:
             mst = (self.migration.state or {}).get("step")
             if mst in ("create", "switch", "verify"):
                 threading.Thread(target=self._refresh_migration, daemon=True).start()
+            # Library Sync: the paired libraries compared every few hours; mirrors looked for weekly
+            if self.sync.due():
+                self.sync.compare_async()
+            if self.sync.settings().get("discover") and time.time() - self.sync.discovered_at > 7 * 86400 and self.sync.settings().get("mirrors") == "unknown":
+                self.sync.discover_async()
             # converted files: Plex asked whether it has the MKVs, originals deleted once it has (and the hold is over)
             if any(e["state"] != "deleted" for e in self.conversions.items):
                 threading.Thread(target=self.conversions.tick, name="conversions", daemon=True).start()
@@ -1409,13 +1416,15 @@ class App:
             "migration": dict(self.migration.snapshot(), candidates=self.migration.candidates()),
             "conversions": self.conversions.snapshot(),
             "plex2": self.other.snapshot(),
+            "sync": self.sync.snapshot(),
             "job": self.jobs.snapshot(),
             "inspect": self.inspector.snapshot(),  # the file job running now (or the last one): one card for every kind
             "queue": self.jobs.queued(),  # file work waiting its turn
             "queue_hold": self.jobs.hold_reason(),
             "settings_rev": self.settings.rev,
             # each library's optimizer choices and the converted kinds, by default: for their ↺ buttons
-            "optimizer_defaults": {"library": dict(OPT_DEFAULTS), "convert_types": dict(CONVERT_TYPES)},  # (the page works out again what depends on the settings)  # why it waits beyond its turn (a folder mid-switch)
+            "optimizer_defaults": {"library": dict(OPT_DEFAULTS), "convert_types": dict(CONVERT_TYPES)},
+            "sync_defaults": {"what": dict(config.DEFAULTS["sync"]["what"])},  # (the page works out again what depends on the settings)  # why it waits beyond its turn (a folder mid-switch)
             "retries": self.optimizing.retrying(),  # failed files to try again, after the file in hand
             "playback": {"sessions": self.monitor.snapshot(), "error": self.monitor.last_error, "last_poll": self.monitor.last_poll},
             "activity": self.activity.snapshot(),

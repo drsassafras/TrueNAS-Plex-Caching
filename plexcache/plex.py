@@ -518,16 +518,35 @@ def servers(client_id: str, token: str) -> list[dict]:
             continue
         out.append({"id": r.get("clientIdentifier") or "", "name": r.get("name") or "", "owned": bool(r.get("owned")),
                     "token": r.get("accessToken") or token,
-                    "connections": [{"uri": c.get("uri") or "", "local": bool(c.get("local")), "relay": bool(c.get("relay"))}
+                    "connections": [{"uri": c.get("uri") or "", "local": bool(c.get("local")), "relay": bool(c.get("relay")),
+                                     "address": c.get("address") or "", "protocol": c.get("protocol") or "", "ipv6": bool(c.get("IPv6"))}
                                     for c in r.get("connections") or [] if c.get("uri")]})
     return out
 
 
+def rank_connections(connections: list[dict]) -> list[dict]:
+    """A server's addresses in the order to try them: the ones that last — addresses on a local network
+    (private IPs: this NAS's, or over a VPN) first, then names (plex.direct's and your own: they follow
+    the server when its public address changes), then other IPs (a public address that may change),
+    Plex's relay last (slow, and limited); within each, https before http, IPv4 before IPv6."""
+    import ipaddress
+    import urllib.parse as up
+
+    def key(c):
+        host = up.urlsplit(c["uri"]).hostname or c.get("address") or ""
+        try:
+            ip = ipaddress.ip_address(host)
+            kind = 0 if ip.is_private or ip.is_loopback or ip.is_link_local else 2
+            v6 = ip.version == 6
+        except ValueError:
+            kind, v6 = 1, False  # a name
+        return (bool(c.get("relay")), kind, not c["uri"].lower().startswith("https://"), v6)
+    return sorted(connections, key=key)
+
+
 def reachable(server: dict, timeout: float = 6) -> str | None:
-    """The first of a server's addresses that answers as that server: direct ones before Plex's relay
-    (slow, and limited), addresses on the network it's on (another site's, unreachable from here)
-    tried too — a VPN may reach them."""
-    order = sorted(server.get("connections") or [], key=lambda c: (c["relay"], c["local"]))
+    """The first of a server's addresses, in rank_connections' order, that answers as that server."""
+    order = rank_connections(server.get("connections") or [])
     for c in order:
         try:
             got = PlexClient(c["uri"], server.get("token") or "", timeout=timeout).identity()

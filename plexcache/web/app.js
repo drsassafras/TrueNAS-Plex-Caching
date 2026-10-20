@@ -624,6 +624,10 @@ PCI18N.ready.then(function () {
         '<input id="' + id + '" type="range" min="' + lim[0] + '" max="' + lim[1] + '" step="1" value="' + estSec(r) + '" data-est="' + esc(r.key) + '"></div>';
     }).join("") + "</div>";
   }
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest && e.target.closest("[data-synclib]");
+    if (a) { LIB.key = a.dataset.synclib; LIB.view = "sync"; LIB.diff = {}; }
+  }, true);
   document.addEventListener("input", function (e) {
     var el = e.target;
     if (!el.dataset || el.dataset.est === undefined) return;
@@ -1615,7 +1619,7 @@ PCI18N.ready.then(function () {
   // video and 60% of a block of video; at its end, every block holding metadata. Every block the
   // same size, filled in proportion with what's in it. Layouts come from Read the Files (filemap.py);
   // a file opened shows its blocks larger: click one for what's in it and how ZFS might store it.
-  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, auto: {}, rev: null };
+  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, auto: {}, rev: null, view: "caching", diff: {} };
   var PART_NAMES = { header: N("Matroska header"), segment: N("Segment start"), seekhead: N("Table of contents"), info: N("File info"), tracks: N("Track list"), chapters: N("Chapters"),
     attachments: N("Attachments list"), tags: N("Tags"), index: N("Index"), padding: N("Padding"), checksum: N("Checksum"), video: N("Video"),
     other: N("Other"), image: N("Cover art"), font: N("Font"), attachment: N("Attachment"), empty: N("Unused"), head: N("File header"),
@@ -1956,10 +1960,31 @@ PCI18N.ready.then(function () {
     }
     return out + "</div>";
   }
+  // The Library page's Sync view: one library's differences from the mirror, as last compared
+  function libSyncView() {
+    var key = LIB.key, d = LIB.diff[key], sy = ST.sync || {};
+    if (d === undefined) {
+      LIB.diff[key] = null;
+      api("/api/library/differences?key=" + encodeURIComponent(key)).then(function (got) { LIB.diff[key] = got; if (page === "library") render(); })
+        .catch(function () { LIB.diff[key] = { none: true }; if (page === "library") render(); });
+      return '<p class="muted">' + H("Loading…") + "</p>";
+    }
+    if (!d || d.none) return '<p class="muted">' + H("Not compared yet: <a href=\"/sync\" data-nav>Compare Now</a> on the Sync page.") + "</p>";
+    var n = Object.keys(d.counts || {}).reduce(function (a, k) { return a + (d.counts[k] || 0); }, 0);
+    var out = '<div class="det" style="margin:8px 0">' + esc(T("{matched} of {total} items matched on the mirror", { matched: fmtNum(d.matched || 0), total: fmtNum(d.total || 0) })) +
+      (sy.report && sy.report.at ? " · " + esc(T("compared {when}", { when: ago(sy.report.at) })) : "") + "</div>";
+    if (!n) return out + '<p class="muted">' + H("No differences.") + "</p>";
+    out += '<div class="det">' + Object.keys(d.counts).filter(function (k) { return d.counts[k]; }).map(function (k) { return esc((sy.names || {})[k] || k) + " " + esc(fmtNum(d.counts[k])); }).join(" · ") + "</div>";
+    out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Item") + '</th><th scope="col">' + H("Difference") + '</th><th scope="col"></th></tr></thead><tbody>' +
+      (d.items || []).map(function (it) { return "<tr><td>" + esc(it.title) + '</td><td class="nw">' + esc((sy.names || {})[it.kind] || it.kind) + "</td><td>" + esc(msg(it.detail)) + "</td></tr>"; }).join("") + "</tbody></table></div>";
+    if ((d.items || []).length < n) out += '<p class="muted">' + H("The first {n} shown.", { n: fmtNum((d.items || []).length) }) + "</p>";
+    return out;
+  }
   function pageLibrary() {
     var libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
     // the settings changed (an optimizer choice, say): the checks and estimates are fetched again —
     // they're worked out from the settings, never kept past a change
+    if (LIB.cmpAt !== ((ST.sync || {}).report || {}).at) { LIB.cmpAt = ((ST.sync || {}).report || {}).at; LIB.diff = {}; }
     if (LIB.rev !== ST.settings_rev) {
       if (LIB.rev !== null) {
         LIB.at = 0;
@@ -1977,8 +2002,11 @@ PCI18N.ready.then(function () {
     var btn = !LIB.key ? "" : lj.running ? '<button class="btn" type="button" data-act="lib-survey" data-how="pause">' + H("Pause") + "</button>"
       : lj.paused ? '<button class="btn" type="button" data-act="lib-survey" data-how="resume">' + H("Resume") + "</button>"
       : '<button class="btn" type="button" data-act="lib-survey" data-how="again">' + H("Inspect Files Again") + "</button>";
-    var out = top(T("Library Health"), H("What’s where in each file — its start, the video, and the metadata at its end — the blocks they land on, and what caching keeps of it.") +
-      " " + H("Files are inspected when the page opens: only ones new or changed since."), btn);
+    var syncOn = (ST.sync || {}).decided === "plex2";
+    if (LIB.view === "sync" && !syncOn) LIB.view = "caching";
+    var out = top(T("Library"), LIB.view === "sync" ? H("How this library differs from the mirrored server’s, as last compared. Nothing is changed by itself.")
+      : H("What’s where in each file — its start, the video, and the metadata at its end — the blocks they land on, and what caching keeps of it.") +
+      " " + H("Files are inspected when the page opens: only ones new or changed since."), LIB.view === "sync" ? "" : btn);
     out += '<div class="stack"><section class="card">';
     if (!LIB.key) {  // (until the first scan: Plex's libraries are still being read)
       var plexSet = S.plex && S.plex.url && S.plex.token_set;
@@ -1987,7 +2015,12 @@ PCI18N.ready.then(function () {
     }
     out += '<div class="lctl"><div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + libs.map(function (l) {
       return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(LIB.key)) + '" data-act="lib-tab" data-key="' + esc(l.key) + '">' + libIcon(l.key) + esc(l.title) + "</button>";
-    }).join("") + "</div></div>";
+    }).join("") + "</div>" +
+      // the views: caching health (the files' blocks), and, with a mirror watched, how the library differs from it
+      (syncOn ? '<div class="seg small" role="tablist" aria-label="' + H("View") + '">' + [["caching", T("Caching")], ["sync", T("Sync")]].map(function (v) {
+        return '<button role="tab" type="button" aria-selected="' + (LIB.view === v[0]) + '" data-act="lib-view" data-view="' + v[0] + '">' + esc(v[1]) + "</button>";
+      }).join("") + "</div>" : "") + "</div>";
+    if (LIB.view === "sync") return out + libSyncView() + "</section></div>";
     var d = LIB.data && LIB.data.library === LIB.key ? LIB.data : null;
     // while inspecting (or waiting to): a progress bar
     if (job) {
@@ -2914,15 +2947,89 @@ PCI18N.ready.then(function () {
     return out + "</section>";
   }
   // Sync: the servers kept in step with this one, and what uses them
+  // Library Sync (sync.py): the mirror choice, the settings (nothing acts without a review), the
+  // differences as last compared, and what uses the mirror
+  var SYNC_REVIEW = H("<strong>Nothing changes on either server without your review.</strong> Comparing only reads. Applying (a later part) never starts by itself: you look the differences over first and approve them. And whenever a setting here is changed — the source, what’s synced, a library pair — applying pauses until you’ve seen how the differences change and approved again. Comparing carries on meanwhile.");
   function pageSync() {
-    var out = top(T("Sync"), H("Other Plex servers with the same files — at another site, kept in step by syncing the folders — and what Plex Cache does with them."), "");
-    out += '<div class="stack" style="max-width:980px">' + plex2Card();
-    var p2 = ST.plex2 || {};
+    var sy = ST.sync || {}, p2 = ST.plex2 || {}, rep = sy.report;
+    var out = top(T("Sync"), H("Another Plex server with the same files — at another site, kept in step by syncing the folders — and what Plex Cache keeps in step with it."), "");
+    out += '<div class="stack" style="max-width:980px">';
+    // ---- the mirror: a choice to make
+    out += '<section class="card"><h2>' + H("Mirrored Server") + "</h2>" +
+      '<p class="hint">' + H("Whether another Plex server has these files. Nothing is assumed: until this is chosen, Health asks, and converted files’ originals aren’t deleted.") + "</p>" +
+      '<div class="grid">' + select("sync", "mirrors", T("Mirrored server"), [["unknown", T("Not chosen yet")], ["none", T("None: this is the only server with these files")],
+        ["plex2", p2.configured ? T("Yes: {name}", { name: p2.name || p2.url }) : T("Yes: the server watched below")]]) + "</div>" +
+      '<div style="margin-top:10px">' + checkbox("sync", "discover", T("Look for mirrors among my Plex account’s servers"),
+        { s: H("Weekly, and when this page opens while the choice isn’t made: a sample of each server’s files is looked up here by path.") }) + "</div>";
+    if (sy.running) out += '<div class="det muted">' + H("Working…") + "</div>";
+    if (sy.error) out += '<div class="det bad">' + esc(sy.error) + "</div>";
+    var cands = (sy.candidates || []).filter(function (c) { return c.id !== (S.plex2 || {}).machine_id; });
+    if (cands.length) {
+      out += '<div class="what" style="margin-top:12px">' + H("Found") + ' <span class="muted">' + esc(T("looked {when}", { when: ago(sy.discovered_at) })) + "</span></div>" +
+        '<div class="tbl-wrap"><table class="tbl"><tbody>' + cands.map(function (c) {
+          var rate = c.rate == null ? null : Math.round(100 * c.rate);
+          var verdict = !c.url ? badge("info", T("Can’t be reached")) : rate == null ? badge("info", T("Not read")) : rate >= 90 ? badge("pass", T("Looks like a mirror")) : rate >= 20 ? badge("warn", T("Partly the same")) : badge("info", T("Not a mirror"));
+          return "<tr><td>" + esc(c.name) + '<div class="det">' + (c.libraries || []).map(function (l) { return esc(l.title) + ": " + esc(T("{found} of {of} files here", { found: fmtNum(l.found), of: fmtNum(l.of) })); }).join(" · ") +
+            (c.error ? ' <span class="bad">' + esc(c.error) + "</span>" : "") + "</div></td><td>" + verdict + (rate != null ? ' <span class="muted">' + rate + "%</span>" : "") + "</td><td>" +
+            (c.url ? '<button class="btn sm" type="button" data-act="plex2-use-found" data-id="' + esc(c.id) + '">' + H("Watch It") + "</button>" : "") + "</td></tr>";
+        }).join("") + "</tbody></table></div>";
+    }
+    out += '<div class="acts" style="margin-top:10px"><button class="btn" type="button" data-act="sync-discover"' + (sy.running ? " disabled" : "") + ">" + H("Look Now") + "</button></div>";
+    if ((sy.peers || []).length) out += '<div class="note">' + H("Another Plex Cache shares these folders (it marked itself in them): {n} system(s). Each optimizes its own side; claims keep them off the same file.", { n: sy.peers.length }) + "</div>";
+    out += "</section>";
+    if ((S.sync || {}).mirrors === "plex2") out += plex2Card();
+    // ---- the settings
+    out += '<section class="card"><h2>' + H("Sync Settings") + "</h2>" + '<div class="note">' + SYNC_REVIEW + "</div>" +
+      '<div class="grid">' +
+      select("sync", "source", T("Whose edits win"), [["this", T("This server")], ["mirror", T("The mirror")]],
+        { s: H("The source: its matches, versions, edits, posters and collections are what the other is brought in line with.") }) +
+      select("sync", "mode", T("Sync"), [["off", T("Off")], ["compare", T("Compare only")]],
+        { s: H("Compare only reads both servers and lists the differences. Applying them is a later part — and will only ever run after your review.") }) +
+      select("sync", "watched", T("Watched state and ratings"), [["plex", T("Plex’s own sync carries them")], ["off", T("Not synced")]],
+        { s: H("Plex syncs watched state and ratings between your own servers when “Sync my watch state and ratings” is on in your Plex account. Leave it to Plex rather than doing it twice.") }) +
+      select("sync", "users", T("Whose"), [["home", T("Everyone in my Plex Home")], ["me", T("Just me")]],
+        { s: H("For what’s synced per user (a later part): every user of the Plex Home, or only you.") }) +
+      select("sync", "compare_hours", T("Compare every"), [[1, P(1, "{n} hour", "{n} hours")], [6, P(6, "{n} hour", "{n} hours")], [12, P(12, "{n} hour", "{n} hours")], [24, P(24, "{n} hour", "{n} hours")], [168, P(7, "{n} day", "{n} days")]]) +
+      "</div>";
+    var what = (S.sync || {}).what || {}, dw = ((ST.sync_defaults || {}).what) || {};
+    var WHAT = [["grouping", T("Versions: files grouped into the same items"), T("Which files make one item — a movie’s two versions, say — and files one server doesn’t list.")],
+      ["matches", T("Matches"), T("Which online entry each item is matched to; unmatched items too.")],
+      ["edits", T("Edited fields"), T("Titles, summaries, years and the like you edited (Plex locks a field you edit).")],
+      ["art", T("Posters and backgrounds chosen by hand"), ""], ["collections", T("Collections and labels"), ""],
+      ["editions", T("Editions"), T("A movie’s edition name (Director’s Cut…): Plex doesn’t carry these between servers.")]];
+    out += '<div class="what" style="margin-top:12px">' + H("What’s compared") + "</div>" + WHAT.map(function (w) {
+      var rv = dw[w[0]] === undefined || !!what[w[0]] === dw[w[0]] ? "" : ' <button type="button" class="revert" data-syncwhat-revert="' + w[0] + '" title="' + H("Back to the default ({value})", { value: dw[w[0]] ? T("on") : T("off") }) + '">↺</button>';
+      return '<div class="chk"><label><input type="checkbox" data-syncwhat="' + w[0] + '"' + (what[w[0]] ? " checked" : "") + ">" + esc(w[1]) + "</label>" + (w[2] ? info(esc(w[2]), w[1]) : "") + rv + "</div>";
+    }).join("") + "</section>";
+    // ---- the differences
+    out += '<section class="card"><h2>' + H("Differences") + "</h2>";
+    if (sy.decided !== "plex2") out += '<p class="muted">' + H("Once a mirrored server is watched, its libraries are compared with this server’s here.") + "</p>";
+    else {
+      out += '<p class="hint">' + (rep ? H("Last compared {when}: {source}’s libraries against the other’s. Nothing was changed.", { when: ago(rep.at), source: rep.source === "mirror" ? (p2.name || T("the mirror")) : T("this server") })
+        : H("Not compared yet.")) + "</p>";
+      if (sy.review_needed) out += '<div class="note">' + H("The sync settings changed since they were last reviewed. Look the differences over, then <strong>Review &amp; Approve</strong>: until then, applying (when it comes) stays paused.") + "</div>";
+      if (rep) {
+        var kinds = Object.keys(sy.names || {});
+        out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library") + '</th><th scope="col">' + H("Items") + "</th>" +
+          kinds.map(function (k) { return '<th scope="col">' + esc(sy.names[k]) + "</th>"; }).join("") + "</tr></thead><tbody>" +
+          Object.keys(rep.libraries || {}).map(function (key) {
+            var l = rep.libraries[key], n = Object.keys(l.counts || {}).reduce(function (a, k) { return a + (l.counts[k] || 0); }, 0);
+            return "<tr><td>" + libIcon(key) + esc(l.title || key) + (l.there && l.there !== l.title ? ' <span class="muted">→ ' + esc(l.there) + "</span>" : "") +
+              '<div class="det"><a href="/library" data-nav data-synclib="' + esc(key) + '">' + (n ? H("See them on the Library page") : H("No differences")) + "</a></div></td>" +
+              "<td>" + esc(T("{matched} of {total} matched", { matched: fmtNum(l.matched || 0), total: fmtNum(l.total || 0) })) + "</td>" +
+              kinds.map(function (k) { var c = (l.counts || {})[k] || 0; return '<td class="nw">' + (c ? esc(fmtNum(c)) : '<span class="muted">0</span>') + "</td>"; }).join("") + "</tr>";
+          }).join("") + "</tbody></table></div>";
+      }
+      out += '<div class="acts" style="margin-top:10px"><button class="btn pri" type="button" data-act="sync-compare"' + (sy.running ? " disabled" : "") + ">" + (sy.running ? H("Comparing…") : H("Compare Now")) + "</button> " +
+        (sy.review_needed && rep ? '<button class="btn" type="button" data-act="sync-approve">' + H("Review &amp; Approve") + "</button>" : "") + "</div>";
+    }
+    out += "</section>";
+    // ---- what uses it
     out += '<section class="card">' + heading(esc(T("What Uses It")), "") + '<div class="row">' + badge(p2.configured ? "pass" : "info", p2.configured ? T("On") : T("Waiting")) +
       '<div class="grow"><div class="what">' + H("Converting to MKV") + '</div><div class="det">' +
       H("A converted file’s original is deleted only once every server watched here has the MKV as a version of the same item. <a href=\"/optimizer#convert\" data-nav>Optimizer → Convert to MKV</a>") + "</div></div></div>" +
-      '<div class="row">' + badge("info", T("Planned")) + '<div class="grow"><div class="what">' + H("Library sync") + '</div><div class="det">' +
-      H("Bringing the other server’s matches, versions, edits, posters, collections and watched state in line with this one’s.") + "</div></div></div>" +
+      '<div class="row">' + badge((S.sync || {}).mode === "compare" && sy.decided === "plex2" ? "pass" : "info", (S.sync || {}).mode === "compare" && sy.decided === "plex2" ? T("Comparing") : T("Waiting")) + '<div class="grow"><div class="what">' + H("Library sync") + '</div><div class="det">' +
+      H("Comparing both servers’ libraries (above, and on the Library page). Applying the differences is a later part.") + "</div></div></div>" +
       '<div class="row">' + badge("info", T("Planned")) + '<div class="grow"><div class="what">' + H("Converting a folder to a child dataset, on synced folders") + '</div><div class="det">' +
       H("Keeping the new dataset and the old folder out of the sync while the folder is converted, so nothing is sent to the other site.") + "</div></div></div></section>";
     return out + "</div>";
@@ -3341,7 +3448,7 @@ PCI18N.ready.then(function () {
     if (page === "ssd") EST = {};  // the what-if sliders start from your settings every time
     if (push) history.pushState({}, "", "/" + page);
     else if (location.pathname !== "/" + page && location.pathname !== "/") history.replaceState({}, "", "/" + page + location.hash);
-    document.title = "Plex Cache – " + { health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), library: T("Library Health"), optimizer: T("Optimizer"), processes: T("Processes"), sync: T("Sync"), activity: T("Metrics"), system: T("System") }[page];
+    document.title = "Plex Cache – " + { health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), library: T("Library"), optimizer: T("Optimizer"), processes: T("Processes"), sync: T("Sync"), activity: T("Metrics"), system: T("System") }[page];
     render();
     window.scrollTo(0, 0);
     main.focus({ preventScroll: true });
@@ -3424,7 +3531,7 @@ PCI18N.ready.then(function () {
 
   document.addEventListener("click", function (e) {
     // ↺ on the Optimizer page and the second server's pairs: back to the default
-    var orv = e.target.closest("[data-optlib-revert], [data-convtype-revert], [data-p2lib-revert]");
+    var orv = e.target.closest("[data-optlib-revert], [data-convtype-revert], [data-p2lib-revert], [data-syncwhat-revert]");
     if (orv) {
       e.preventDefault();
       if (orv.dataset.optlibRevert !== undefined) {
@@ -3432,6 +3539,10 @@ PCI18N.ready.then(function () {
         var lib = libs[orv.dataset.optlibRevert] = optChoices(orv.dataset.optlibRevert);
         lib[orv.dataset.field] = ((ST.optimizer_defaults || {}).library || {})[orv.dataset.field];
         queueSave("optimizer", "libraries", libs, true);
+      } else if (orv.dataset.syncwhatRevert !== undefined) {
+        var sw = JSON.parse(JSON.stringify((S.sync || {}).what || {}));
+        sw[orv.dataset.syncwhatRevert] = ((ST.sync_defaults || {}).what || {})[orv.dataset.syncwhatRevert];
+        queueSave("sync", "what", sw, true);
       } else if (orv.dataset.convtypeRevert !== undefined) {
         var types = JSON.parse(JSON.stringify((S.optimizer || {}).convert_types || {}));
         types[orv.dataset.convtypeRevert] = ((ST.optimizer_defaults || {}).convert_types || {})[orv.dataset.convtypeRevert];
@@ -3608,6 +3719,16 @@ PCI18N.ready.then(function () {
       }).catch(function (e) { toast(e.message); el.disabled = false; });
     }
     else if (act === "file-toggle") { SHOWFILE[el.dataset.file] = !SHOWFILE[el.dataset.file]; render(); }
+    else if (act === "lib-view") { LIB.view = el.dataset.view; render(); }
+    else if (act === "sync-compare" || act === "sync-discover" || act === "sync-approve") {
+      el.disabled = true;
+      api("/api/" + act.replace("-", "/"), {}).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+    }
+    else if (act === "plex2-use-found") {  // a server found by discovery: watched (its addresses tried again), and chosen as the mirror
+      el.disabled = true;
+      api("/api/plex2/servers", {}).then(function () { return api("/api/plex2/use", { id: el.dataset.id }); })
+        .then(function () { queueSave("sync", "mirrors", "plex2", true); load(); }).catch(function (e) { toast(e.message); load(); });
+    }
     else if (act === "lib-tab") {
       // the library opened inspects its files (pausing the one before, which carries on when it's opened again)
       LIB.key = el.dataset.key; LIB.offset = 0; LIB.open = null; LIB.data = null; LIB.auto[LIB.key] = false;
@@ -3855,6 +3976,14 @@ PCI18N.ready.then(function () {
     pairs[el.dataset.p2lib] = el.value;
     queueSave("plex2", "libraries", pairs, true);
     setTimeout(function () { api("/api/plex2/refresh", {}).then(function () { load(); }); }, 1500);
+  });
+  // Sync: what's compared
+  document.addEventListener("change", function (e) {
+    var el = e.target;
+    if (!el.dataset || el.dataset.syncwhat === undefined) return;
+    var what = JSON.parse(JSON.stringify((S.sync || {}).what || {}));
+    what[el.dataset.syncwhat] = el.checked;
+    queueSave("sync", "what", what, true);
   });
   // The Optimizer page: which kinds of file are converted, and how long originals are kept
   document.addEventListener("change", function (e) {

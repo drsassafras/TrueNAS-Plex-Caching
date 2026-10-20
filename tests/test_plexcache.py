@@ -4827,7 +4827,7 @@ class OptimizerTests(unittest.TestCase):
         plex = types.SimpleNamespace(scan=lambda key, folder: scans.append(folder), item_files=lambda rk: items.get(rk))
         app.plex = lambda timeout=30: plex
         self.assertNotIn("convert", op.file_status(avi, "1", {}).get("problems") or [])          # off by default
-        app.settings.update({"optimizer": {"libraries": {"1": {"convert": True, "sync": False}}}})
+        app.settings.update({"optimizer": {"libraries": {"1": {"convert": True, "sync": False}}}, "sync": {"mirrors": "none"}})  # (no mirror: originals needn't wait)
         self.assertEqual(op.file_status(avi, "1", {})["problems"], ["convert"])
         self.assertFalse(op.file_status(mp4, "1", {})["applies"])                                  # MP4 isn't converted by default
         warn = lambda path: next(c for c in filechecks.check_file(app, None, path, {"format": "stream", "size": 10, "tracks": [{"type": "video"}]},
@@ -4916,8 +4916,11 @@ class OptimizerTests(unittest.TestCase):
 
             def scan(self, key, folder):
                 scans.append(folder)
+
+            def identity(self):
+                return {"machine_id": "abc"}
         app.other.client = lambda timeout=30: Other()
-        app.settings.update({"plex2": {"url": "http://10.9.0.2:32400", "token": "tok", "name": "Cabin"}})
+        app.settings.update({"plex2": {"url": "http://10.9.0.2:32400", "token": "tok", "name": "Cabin"}, "sync": {"mirrors": "plex2"}})
         self.assertEqual({k: (v.key if v else None) for k, v in app.other.pairs().items()}, {"1": "7"})     # by name and kind
         self.assertEqual(app.other.paths_there("1", avi, app.other.pairs()["1"]), [there_dir + "/old.avi"])
         app.other.refresh()
@@ -4948,7 +4951,7 @@ class OptimizerTests(unittest.TestCase):
         # plex.tv's list of servers, and the first address that answers as that server
         got = [{"provides": "server", "clientIdentifier": "abc", "name": "Cabin", "owned": True, "accessToken": "srv",
                 "connections": [{"uri": "https://relay", "relay": True, "local": False}, {"uri": "http://192.168.9.2:32400", "relay": False, "local": True},
-                                {"uri": "https://203.0.113.5:32400", "relay": False, "local": False}]},
+                                {"uri": "https://93.184.216.34:32400", "relay": False, "local": False}]},
                {"provides": "player", "clientIdentifier": "tv"}]
         with mock.patch.object(plexmod, "_plextv", lambda *a, **kw: got):
             (sv,) = plexmod.servers("cid", "acct")
@@ -4957,12 +4960,36 @@ class OptimizerTests(unittest.TestCase):
 
         def ident(self):
             tried.append(self.url)
-            if "203.0.113.5" in self.url:
+            if "93.184.216.34" in self.url:
                 return {"machine_id": "abc"}
             raise plexmod.PlexError("no")
         with mock.patch.object(plexmod.PlexClient, "identity", ident):
-            self.assertEqual(plexmod.reachable(sv), "https://203.0.113.5:32400")
-        self.assertEqual(tried, ["https://203.0.113.5:32400"])                                   # direct, not on its own network, first
+            self.assertEqual(plexmod.reachable(sv), "https://93.184.216.34:32400")
+        self.assertEqual(tried, ["http://192.168.9.2:32400", "https://93.184.216.34:32400"])      # the local address first, then the public one; the relay last
+        # the order addresses are tried in: local IPs, then names, then other IPs — https before http,
+        # IPv4 before IPv6 — the relay last: the ones that last, first
+        conns = [{"uri": "https://relay.plex", "relay": True}, {"uri": "http://93.184.216.34:32400", "relay": False}, {"uri": "https://93.184.216.34:32400", "relay": False},
+                 {"uri": "https://104-195-227-86.abc.plex.direct:32400", "relay": False}, {"uri": "http://10.0.0.5:32400", "relay": False},
+                 {"uri": "https://10.0.0.5:32400", "relay": False}, {"uri": "https://[fd00::5]:32400", "relay": False}, {"uri": "https://plex.example.org", "relay": False}]
+        self.assertEqual([c["uri"] for c in plexmod.rank_connections(conns)],
+                         ["https://10.0.0.5:32400", "https://[fd00::5]:32400", "http://10.0.0.5:32400", "https://104-195-227-86.abc.plex.direct:32400",
+                          "https://plex.example.org", "https://93.184.216.34:32400", "http://93.184.216.34:32400", "https://relay.plex"])
+        # the saved address stops answering (a public address changed): the server is reached at another
+        app.settings.update({"plex2": {"url": "https://93.184.216.34:32400", "token": "srv", "machine_id": "abc", "account_token": "acct"}})
+        calls = {"n": 0}
+
+        def flaky(self):
+            calls["n"] += 1
+            if "93.184.216.34" in self.url:
+                raise plexmod.PlexError("gone")
+            return {"machine_id": "abc"}
+        got[0]["connections"] = [{"uri": "https://93.184.216.34:32400", "relay": False, "local": False}, {"uri": "https://104-195-227-86.abc.plex.direct:32400", "relay": False, "local": False}]
+        app.other._reconnected = 0
+        del app.other.client                                                                     # (the real client again, at the saved address)
+        with mock.patch.object(plexmod, "_plextv", lambda *a, **kw: got), mock.patch.object(plexmod.PlexClient, "identity", flaky):
+            self.assertEqual(app.other.run(lambda c: c.identity()), {"machine_id": "abc"})
+        self.assertEqual(app.settings.section("plex2")["url"], "https://104-195-227-86.abc.plex.direct:32400")
+        self.assertFalse(app.other.reconnect())                                                 # not again within RECONNECT_EVERY
         # the account's servers are listed with this server's own sign-in: no second sign-in needed
         from plexcache import plex2 as plex2mod
         seen = []
@@ -4973,6 +5000,112 @@ class OptimizerTests(unittest.TestCase):
         self.assertTrue(app.other.snapshot()["signed_in"])
         app.other.forget()
         self.assertFalse(app.other.configured())
+
+    def test_library_sync_compare(self):
+        """Library Sync, read-only: items matched across the two servers by their files' place in the
+        library folder (shows through their episodes), the differences listed source → mirror — a file
+        not listed there, versions grouped differently, another match, edited fields, posters chosen by
+        hand, collections, labels, editions — and the direction follows the "source" setting. The mirror
+        choice gates converting; the settings must be reviewed again once changed."""
+        from plexcache import checks, sync
+        from plexcache.plex import Library
+        app, op, client, d, state = self._app(names=("film.mkv",))
+        app.libraries = [{"key": "1", "title": "Movies", "type": "movie", "kind": "movie", "locations": ["/data/Movies"]},
+                         {"key": "2", "title": "TV", "type": "show", "kind": "tv", "locations": ["/data/TV"]}]
+        app.map_path = lambda p: p
+        app.files = [types.SimpleNamespace(path="/data/Movies/A/a.mkv", library_key="1"), types.SimpleNamespace(path="/data/TV/S/e1.mkv", library_key="2")]
+        item = lambda key, title, files=(), guid="plex://x", fields=None, parent="", grandparent="", edition="", colls=(), labels=(), art=(), typ="movie": dict(
+            key=key, parent=parent, grandparent=grandparent, type=typ, title=title, label=title, index=0, guid=guid, matched=not guid.startswith("local://"),
+            files=[(f, 1) for f in files], edition=edition, fields=fields or {}, collections=sorted(colls), labels=sorted(labels), art_locked=sorted(art))
+        here = {("1", 1): [item("10", "A", ["/data/Movies/A/a.mkv", "/data/Movies/A/a2.mkv"], fields={"title": "A!"}, colls=["Best"], art=["thumb"], edition="Extended"),
+                           item("11", "B", ["/data/Movies/B/b.mkv"], guid="plex://b"),
+                           item("12", "C", ["/data/Movies/C/c.mkv"], guid="local://12")],
+                ("2", 2): [item("20", "Show", typ="show", colls=["Kids"])], ("2", 3): [item("21", "S1", typ="season", parent="20")],
+                ("2", 4): [item("22", "Show · S01E01", ["/data/TV/S/e1.mkv"], typ="episode", parent="21", grandparent="20")]}
+        there = {("7", 1): [item("70", "A", ["/srv/Movies/A/a.mkv"], fields={"title": "A"}, colls=[], art=[], edition=""),
+                            item("71", "B", ["/srv/Movies/B/b.mkv"], guid="plex://other"),
+                            item("72", "C", ["/srv/Movies/C/c.mkv"], guid="plex://c")],
+                 ("8", 2): [item("80", "Show", typ="show", colls=["Kids"], labels=["Seen"])], ("8", 3): [item("81", "S1", typ="season", parent="80")],
+                 ("8", 4): [item("82", "Show · S01E01", ["/srv/TV/S/e1.mkv"], typ="episode", parent="81", grandparent="80")]}
+        mk = lambda data: types.SimpleNamespace(library_items=lambda key, leaf: list(data.get((str(key), leaf), [])),
+                                                libraries=lambda: [Library("7", "Movies", "movie", "movie", ["/srv/Movies"]), Library("8", "TV", "show", "tv", ["/srv/TV"])],
+                                                item_files=lambda rk: None, scan=lambda k, f: None, library_files=lambda lib, limit=None: [],
+                                                identity=lambda: {"machine_id": "abc"})
+        app.plex = lambda timeout=30: mk(here)
+        app.other.client = lambda timeout=30: mk(there)
+        app.run_checks_async = lambda **kw: None
+        # nothing chosen yet: Health asks, comparing refuses, converted originals wait
+        (h,) = [x for x in checks._sync_items(app) if "mirrored Plex server" in en(x["title"])]
+        self.assertEqual(h["status"], "warn")
+        with self.assertRaises(ValueError):
+            app.sync.compare()
+        app.conversions.items = [{"original": "/x.avi", "new": "/x.mkv", "state": "waiting", "library": "1", "plex_original": "/x.avi", "plex_new": "/x.mkv", "title": "x", "rating_key": "r", "checked": 0, "scanned": 0, "converted": 0}]
+        app.conversions.tick()
+        self.assertIn("isn’t chosen yet", app.conversions.items[0]["note"])
+        app.settings.update({"plex2": {"url": "http://10.9.0.2:32400", "token": "tok", "name": "Cabin", "machine_id": "abc"}, "sync": {"mirrors": "plex2"}})
+        self.assertEqual(app.sync.decided(), "plex2")
+        rep = app.sync.compare()
+        m = rep["libraries"]["1"]
+        self.assertEqual((m["matched"], m["total"]), (3, 3))
+        by = {}
+        for it in m["items"]:
+            by.setdefault(it["kind"], []).append(it["title"])
+        self.assertEqual(by["missing"], ["A"])                                                  # a2.mkv isn't listed there
+        self.assertEqual(sorted(by["match"]), ["B", "C"])                                       # another entry; unmatched here, matched there
+        self.assertEqual((by["edits"], by["art"], by["collections"], by["editions"]), (["A"], ["A"], ["A"], ["A"]))
+        self.assertIn("title", en(next(it["detail"] for it in m["items"] if it["kind"] == "edits")))
+        t = rep["libraries"]["2"]
+        self.assertEqual((t["matched"], {it["kind"] for it in t["items"]}), (3, {"labels"}))    # the show matched through its episode; its labels differ
+        self.assertEqual(rep["totals"]["labels"], 1)
+        self.assertEqual(app.sync.snapshot()["report"]["libraries"]["1"]["counts"]["edits"], 1)
+        self.assertEqual(app.sync.differences("2")["title"], "TV")
+        # the mirror as the source: the same pairs, the other way round
+        app.settings.update({"sync": {"source": "mirror"}})
+        rep2 = app.sync.compare()
+        self.assertEqual(rep2["source"], "mirror")
+        by2 = {}
+        for it in rep2["libraries"]["1"]["items"]:
+            by2.setdefault(it["kind"], []).append(it["title"])
+        self.assertEqual((by2.get("grouping"), by2.get("missing")), (["A"], None))               # seen from the mirror: this server's A has a file more
+        self.assertEqual(rep2["libraries"]["2"]["counts"]["labels"], 1)
+        # what's compared can be narrowed
+        app.settings.update({"sync": {"what": {"edits": False, "collections": False, "editions": False, "art": False}}})
+        rep3 = app.sync.compare()
+        self.assertEqual({k for k, n in rep3["totals"].items() if n}, {"grouping", "match"})         # (still from the mirror's side)
+        with self.assertRaises(config.SettingsError):
+            app.settings.update({"sync": {"what": {"posters": True}}})
+        # review: the settings changed since they were approved → said; approved → quiet, until the next change
+        self.assertTrue(app.sync.review_needed())
+        app.sync.approve()
+        self.assertFalse(app.sync.review_needed())
+        app.settings.update({"sync": {"source": "this"}})
+        self.assertTrue(app.sync.review_needed())
+        self.assertTrue(any("changed since" in en(x["title"]) for x in checks._sync_items(app)))
+        self.assertTrue(any("differences between" in en(x["title"]) for x in checks._sync_items(app)))
+        # due every compare_hours, unless off
+        self.assertFalse(app.sync.due())
+        self.assertTrue(app.sync.due(now=time.time() + 7 * 3600))
+        app.settings.update({"sync": {"mode": "off"}})
+        self.assertFalse(app.sync.due(now=time.time() + 7 * 3600))
+        # another Plex Cache, seen by its marker in a library folder
+        sdir = os.path.join(d, ".plexcache", "systems")
+        os.makedirs(sdir)
+        with open(os.path.join(sdir, "otherbox1.json"), "w") as fh:
+            fh.write("{}")
+        app.libraries[0]["locations"] = [d]
+        self.assertEqual(app.sync.peers(), ["otherbox1"])
+        # discovery: a sample of each account server's files looked up here by path
+        from plexcache import plex as plexmod
+        found = [{"id": "zzz", "name": "Cabin", "owned": True, "token": "t", "connections": [{"uri": "http://c", "local": False, "relay": False}]}]
+        sample = [types.SimpleNamespace(path="/srv/Movies/A/a.mkv"), types.SimpleNamespace(path="/srv/Movies/Z/z.mkv")]
+        app.libraries[0]["locations"] = ["/data/Movies"]
+        with mock.patch.object(sync, "servers", lambda cid, tok: found), mock.patch.object(sync, "reachable", lambda sv: "http://c"), \
+                mock.patch.object(sync, "PlexClient", lambda url, tok, timeout=30: types.SimpleNamespace(
+                    libraries=lambda: [Library("7", "Movies", "movie", "movie", ["/srv/Movies"])], library_files=lambda lib, limit=None: sample)), \
+                mock.patch.object(app.other, "_main_id", lambda: "me"):
+            (c,) = app.sync.discover()
+        self.assertEqual((c["name"], c["rate"], c["libraries"][0]["found"], c["libraries"][0]["of"]), ("Cabin", 0.5, 1, 2))
+        self.assertEqual(app.sync.snapshot()["candidates"][0]["id"], "zzz")
 
     def test_convert_with_the_real_tools(self):
         """The optimizer's converting, with MKVToolNix and ffmpeg: an AVI becomes an optimized MKV next to

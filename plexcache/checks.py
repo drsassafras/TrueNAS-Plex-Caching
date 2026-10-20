@@ -574,6 +574,7 @@ def check_cache_mode(app) -> dict:
     items.append(_optimizer_check(app))
     items.extend(_conflict_items(app))
     items.extend(_migration_items(app))
+    items.extend(_sync_items(app))
     items.extend(_job_failures(app))
     return {"id": "mode", "title": M("Plex Cache"),
             "hint": M("How caching runs here — with an SSD cache (L2ARC) or RAM only — who can use the app, and the optimizer service."), "items": items}
@@ -604,6 +605,44 @@ def _job_failures(app) -> list[dict]:
                         "written. When a check fails — or a tool does, or the file is in use — the new file is thrown away and the "
                         "original kept. Optimize Now tries the failed files again.")),
                  link={"job": last.get("id"), "text": M("See them all, and why, on the Processes page")})]
+
+
+def _sync_items(app) -> list[dict]:
+    """Library Sync (sync.py): the mirror choice still to make, a server found that may be a mirror,
+    another Plex Cache seen in the folders, differences waiting, settings changed since reviewed."""
+    sync = getattr(app, "sync", None)
+    if sync is None:
+        return []
+    out = []
+    s = sync.settings()
+    link = {"href": "/sync", "text": M("Open the Sync page")}
+    if s.get("mirrors") == "unknown":
+        out.append(dict(item("warn", M("Is there a mirrored Plex server?"),
+                             M("Whether another Plex server has the same files (another site, kept in step by syncing the folders) hasn’t been chosen. "
+                               "Until it is, converted files’ originals aren’t deleted: a mirror that isn’t watched could lose its item."),
+                             M("On the Sync page, choose None, or the server to watch.")), link=link))
+    elif s.get("mirrors") == "plex2" and not app.other.configured():
+        out.append(dict(item("warn", M("The mirrored Plex server isn’t set up"), M("A mirror was chosen, but no server is watched yet."),
+                             M("On the Sync page, choose the server.")), link=link))
+    likely = [c for c in sync.candidates if (c.get("rate") or 0) >= 0.9 and c.get("id") != app.settings.section("plex2").get("machine_id")]
+    if likely and s.get("mirrors") != "none":
+        out.append(dict(item("info", M("A server that looks like a mirror: {names}", names=[c["name"] for c in likely]),
+                             M("Its files are here too, at the same places (a sample of them)."), M("Watch it on the Sync page, or say it isn’t a mirror.")), link=link))
+    peers = sync.peers()
+    if peers:
+        out.append(dict(item("info", M("Another Plex Cache shares these folders"),
+                             M("It marked itself in the library folders (the optimizer’s claims): {n} system(s), seen within the last {days} days.", n=len(peers), days=30),
+                             M("Each optimizes files on its own side; claims keep them off the same file.")), link=link))
+    rep = sync.report
+    if rep and sum((rep.get("totals") or {}).values()):
+        n = sum(rep["totals"].values())
+        out.append(dict(item("info", M("{n} differences between this server and its mirror", one="{n} difference between this server and its mirror", n=n),
+                             M("As last compared, {when}. Nothing is changed by itself: look them over on the Sync page.", when=time.strftime("%Y-%m-%d %H:%M", time.localtime(rep.get("at") or 0)))), link=link))
+    if sync.review_needed() and s.get("mode") != "off" and sync.decided() == "plex2":
+        out.append(dict(item("info", M("Sync settings changed since they were reviewed"),
+                             M("Applying stays paused until the differences are looked at again and approved. Comparing goes on."),
+                             M("Review & Approve on the Sync page.")), link=link))
+    return out
 
 
 def _migration_items(app) -> list[dict]:

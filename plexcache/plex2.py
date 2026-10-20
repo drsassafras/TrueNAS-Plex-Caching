@@ -22,6 +22,8 @@ import time
 from .i18n import M
 from .plex import Library, PlexClient, PlexError, reachable, servers
 
+RECONNECT_EVERY = 300  # seconds between tries at reaching the server by another of its addresses
+
 INDEX_TTL = 300  # seconds the other server's file list is kept
 LIBS_TTL = 600
 MATCHED = 0.9  # the share of a library's files found there for its paths to count as lining up
@@ -48,6 +50,39 @@ class OtherServer:
     def client(self, timeout: float = 30) -> PlexClient:
         s = self.settings()
         return PlexClient(s["url"], s["token"], timeout=timeout)
+
+    def run(self, fn, timeout: float = 30):
+        """``fn(client)`` — and, when the server doesn't answer at its address, once more at another of
+        its addresses (reconnect: a public address changes; the one that lasts is preferred)."""
+        try:
+            return fn(self.client(timeout))
+        except PlexError:
+            if not self.reconnect():
+                raise
+            return fn(self.client(timeout))
+
+    def reconnect(self) -> bool:
+        """The server's addresses listed again from plex.tv and tried in rank order (plex.rank_connections);
+        the first that answers is kept. True when one does. At most every RECONNECT_EVERY seconds."""
+        s = self.settings()
+        token = s.get("account_token") or self.app.settings.section("plex").get("token")
+        now = time.time()
+        if not s.get("machine_id") or not token or now - getattr(self, "_reconnected", 0) < RECONNECT_EVERY:
+            return False
+        self._reconnected = now
+        try:
+            found = next((x for x in servers(self.app.settings.section("general")["client_id"], token) if x["id"] == s["machine_id"]), None)
+        except PlexError:
+            return False
+        if not found:
+            return False
+        url = reachable(found)
+        if not url:
+            return False
+        if url != s.get("url") or found["token"] != s.get("token"):
+            self.app.settings.update({"plex2": {"url": url, "token": found["token"]}})
+            self.app.activity.event("sync", M("{name} is reached at {url} now", name=s.get("name") or found["name"], url=url))
+        return True
 
     # ------------------------------------------------------------ choosing the server
     def list_servers(self) -> list[dict]:
@@ -100,7 +135,7 @@ class OtherServer:
             if self.libs is not None and not fresh and time.time() - self.libs_at < LIBS_TTL:
                 return list(self.libs)
         try:
-            libs = [lib for lib in self.client().libraries() if lib.kind]
+            libs = [lib for lib in self.run(lambda c: c.libraries()) if lib.kind]
             err = None
         except PlexError as e:
             libs, err = (self.libs or []), str(e)
@@ -137,7 +172,7 @@ class OtherServer:
             got = self.indexes.get(there.key)
         if got and not fresh and time.time() - got[0] < INDEX_TTL:
             return got[1]
-        files = self.client(timeout=120).library_files(there)
+        files = self.run(lambda c: c.library_files(there), timeout=120)
         idx = {f.path: f.rating_key for f in files}
         with self.lock:
             self.indexes[there.key] = (time.time(), idx)
@@ -209,7 +244,7 @@ class OtherServer:
                 if rate < MATCHED:
                     return "unpaired"
                 return "absent"  # (its paths line up, and it doesn't have this file: no item there to lose)
-        files = self.client().item_files(ox["rating_key"])
+        files = self.run(lambda c: c.item_files(ox["rating_key"]))
         if files and ox["new"] in files:
             return "same"
         idx = self.index(there)
@@ -219,5 +254,5 @@ class OtherServer:
             ox.pop("rating_key", None)  # (merged into another item there, say: looked up again)
         if now - ox.get("scanned", 0) >= 15 * 60:
             ox["scanned"] = now
-            self.client().scan(there.key, os.path.dirname(ox["path"]))
+            self.run(lambda c: c.scan(there.key, os.path.dirname(ox["path"])))
         return ""
