@@ -7,8 +7,7 @@ import time
 
 from . import zfs
 from .i18n import Fixed, M, join
-from .plex import PlexError
-from .optimizing import HEALTHCHECK_YAML, not_set_up
+from .optimizing import HEALTHCHECK_YAML
 from .zfslog import grade as compression_grade
 from .warmup import recommend_recordsize
 
@@ -46,7 +45,7 @@ def check_plex(app) -> dict:
                               "" if r["status"] == "ok" else M("Open System → Plex.")))
     if c.get("plex_token", {}).get("status") == "ok":
         if app.scan_error:
-            items.append(item("fail", M("Couldn't list libraries"), app.scan_error))
+            items.append(item("fail", M("Couldn’t list libraries"), app.scan_error))
         elif app.libraries:
             n = sum(1 for lib in app.libraries if lib["kind"] and not lib["excluded"])
             items.append(item("pass", M("Libraries found"), M("{n} libraries, {files} media files", one="{n} library, {files} media files",
@@ -57,8 +56,8 @@ def check_plex(app) -> dict:
         elif mon.last_poll:
             poll = app.settings.section("general")["poll_seconds"]
             items.append(item("pass", M("Now-playing feed"),
-                              M("Checking what's playing every {n} s", n=poll)))
-    return {"id": "plex", "title": "Plex", "hint": M("Where the app finds your libraries and sees what is playing."),
+                              M("Checking what’s playing every {n} s", n=poll)))
+    return {"id": "plex", "title": "Plex", "hint": M("Where the app finds your libraries and sees what’s playing."),
             "items": items}
 
 
@@ -85,7 +84,7 @@ def check_media(app) -> dict:
             continue
         if lib["excluded"]:
             rows.append({"library": lib["title"], "key": lib["key"], "count": 0, "status": "info",
-                         "folders": [], "detail": M("Not cached — unticked in System → Media mappings"),
+                         "folders": [], "detail": M("Not cached — unticked in System → Media Mappings"),
                          "badge": M("Disabled")})
             continue
         row = by_lib.get(lib["key"], {"library": lib["title"], "key": lib["key"], "folders": [], "status": "pass"})
@@ -95,22 +94,22 @@ def check_media(app) -> dict:
             found = [f for f in bad if f["found_at"]]
             row["detail"] = bad[0]["detail"]
             if found:
-                row["fix"] = M("Found “{library}” files at {path} — choose that folder in System → Media mappings.",
+                row["fix"] = M("Found “{library}” files at {path} — choose that folder in System → Media Mappings.",
                                library=lib["title"], path=found[0]["found_at"][0])
             else:
-                row["fix"] = M("Fix its folder in System → Media mappings, or untick it there to stop caching it.")
+                row["fix"] = M("Fix its folder in System → Media Mappings, or untick it there to stop caching it.")
         else:
             row["detail"] = M("Files readable")
         rows.append(row)
     items = []
     # Record size is a column of the table: its info box says what to do about a warning, so it
-    # isn't repeated as an item below it. (Compression is per dataset: Media datasets.)
+    # isn't repeated as an item below it. (Compression is per dataset: Media Datasets.)
     for row in rows:
         row["record"] = library_record(app, row["key"])
     if not rows:
         items.append(item("info", M("No libraries checked yet"), M("Connect Plex first.")))
     return {"id": "media", "title": M("Libraries"),
-            "hint": M("For each library folder, a real file is opened through this app's mounts."),
+            "hint": M("For each library folder, a real file is opened through this app’s mounts."),
             "items": items, "table": rows}
 
 
@@ -127,7 +126,7 @@ def cell(status: str, text: str, badge: str | None = None) -> dict:
 
 
 def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
-    """One row of the Media datasets table. Problems carry their fix in ``fixes``."""
+    """One row of the Media Datasets table. Problems carry their fix in ``fixes``."""
     s = app.settings.get()
     any_on = s["nowplaying"]["enabled"] or app.prefetch_active() or app.warmup_active()
     l2_wanted = not s["general"]["no_l2arc"]  # caching is planned around an L2ARC unless switched off
@@ -148,11 +147,11 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
         row["in_use"] = cell("info", M("{list} · caching off", list=d["off"]))
     else:
         row["in_use"] = cell("warn", M("No Plex library"))
-        fixes.append(item("warn", M("{name} isn't used by any Plex library", name=name),
-                          M("It's mounted in this app at {path}, but none of Plex's library folders are in it, "
+        fixes.append(item("warn", M("{name} isn’t used by any Plex library", name=name),
+                          M("It’s mounted in this app at {path}, but none of Plex’s library folders are in it, "
                             "so nothing there is ever cached.", path=d["mountpoint"]),
-                          M("If a library should be using it, check where that library's folder is in System → Media "
-                            "mappings. Otherwise remove the mount from this app (Apps → this app → Edit → Storage).")))
+                          M("If a library should be using it, check where that library’s folder is in System → Media "
+                            "mappings. Otherwise remove the mount from this app’s volumes (Apps → plex-cache → Edit).")))
         return row
     libs = _libs(d) if d["libraries"] else M("{list}", list=d["off"])
     cached = bool(d["libraries"])
@@ -162,7 +161,7 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
             return row
         row["cache"] = cell("warn", M("Not ZFS ({fstype})", fstype=d["fstype"]))
         fixes.append(item("warn", M("{libraries}: not on ZFS here", libraries=libs),
-                          M("{path} is a {fstype} mount, so ZFS caching can't be checked or used for {libraries}.",
+                          M("{path} is a {fstype} mount, so ZFS caching can’t be checked or used for {libraries}.",
                             path=d["mountpoint"], fstype=d["fstype"], libraries=libs),
                           M("Mount the dataset directly as a host path (not via SMB/NFS).")))
         return row
@@ -184,11 +183,11 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
         if prim is None or sec is None:
             missing = join([n for n, v in (("primarycache", prim), ("secondarycache", sec)) if v is None])
             said = "; ".join(d.get("props_debug") or [])
-            row["cache"] = cell("info", M("Couldn't read"))
-            fixes.append(item("info", M("Cache settings for {dataset}: couldn't read", dataset=ds),
-                              M("TrueNAS didn't return {what} for {dataset} ({libraries}), so this wasn't checked. (TrueNAS answered — {said})",
+            row["cache"] = cell("info", M("Couldn’t read"))
+            fixes.append(item("info", M("Cache settings for {dataset}: couldn’t read", dataset=ds),
+                              M("TrueNAS didn’t return {what} for {dataset} ({libraries}), so this wasn’t checked. (TrueNAS answered — {said})",
                                 what=missing, dataset=ds, libraries=libs, said=said) if said else
-                              M("TrueNAS didn't return {what} for {dataset} ({libraries}), so this wasn't checked.",
+                              M("TrueNAS didn’t return {what} for {dataset} ({libraries}), so this wasn’t checked.",
                                 what=missing, dataset=ds, libraries=libs),
                               M("You can check by hand in the TrueNAS shell:"),
                               f"sudo zfs get primarycache,secondarycache,recordsize {ds}"))
@@ -200,11 +199,11 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
             row["cache"] = cell(st, f"primarycache={prim}")
             fixes.append(item(st, M("Cache settings for {dataset}", dataset=ds),
                               (M("primarycache={prim}, secondarycache={sec}. With primarycache set to {prim}, file data "
-                                 "never enters RAM — and ZFS only fills L2ARC from RAM, so nothing read from {libraries} gets "
-                                 "cached. The app skips it until this is all.", prim=prim, sec=sec, libraries=libs) if one else
+                                 "never enters RAM — and ZFS only fills the L2ARC from RAM, so nothing read from {libraries} gets "
+                                 "cached. The app skips it until primarycache is all.", prim=prim, sec=sec, libraries=libs) if one else
                                M("primarycache={prim}, secondarycache={sec}. With primarycache set to {prim}, file data "
-                                 "never enters RAM — and ZFS only fills L2ARC from RAM, so nothing read from {libraries} gets "
-                                 "cached. The app skips them until this is all.", prim=prim, sec=sec, libraries=libs)),
+                                 "never enters RAM — and ZFS only fills the L2ARC from RAM, so nothing read from {libraries} gets "
+                                 "cached. The app skips them until primarycache is all.", prim=prim, sec=sec, libraries=libs)),
                               M("Run in the TrueNAS shell (ZFS still frees RAM for other things when it needs to):"),
                               f"sudo zfs set primarycache=all {ds}"))
         # secondarycache only matters with an SSD cache (L2ARC) on the pool: without one there's
@@ -226,15 +225,16 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
     if rs:
         titles = {str(lib["key"]): lib.get("title") or str(lib["key"]) for lib in getattr(app, "libraries", []) or []}
         unsuited = [(titles.get(str(k), str(k)), r) for k in keys for r in [library_record(app, k, rs)] if r["status"] == "warn"]
-        lines = [M("Doesn't suit {library} ({best} or {alt})", library=t, best=_fmt_rs(r["best"]), alt=_fmt_rs(r["alt"]))
+        lines = [M("Doesn’t suit {library} ({best} or {alt})", library=t, best=_fmt_rs(r["best"]), alt=_fmt_rs(r["alt"]))
                  for t, r in unsuited]
         shared = _shared_record_check(app, ds, keys)
         if shared:
             # one record size per dataset, and these libraries need different ones
-            row["recordsize"] = cell("warn", _fmt_rs(rs), badge=M("Split Dataset"))
+            row["recordsize"] = cell("warn", _fmt_rs(rs), badge=M("Split dataset"))
             row["recordsize"]["split"] = True  # the page links to the Optimizer page's folder-to-dataset steps
-            row["recordsize"]["lines"] = [M("Move {libraries} to a dataset of its own; {keep} suits the rest.",
-                                            libraries=join(shared["move"]), keep=_fmt_rs(shared["keep"]))]
+            row["recordsize"]["lines"] = [M("Move {libraries} to datasets of their own; {keep} suits the rest.",
+                                            one="Move {libraries} to a dataset of its own; {keep} suits the rest.",
+                                            n=len(shared["move"]), libraries=join(shared["move"]), keep=_fmt_rs(shared["keep"]))]
         else:
             row["recordsize"] = cell("warn" if lines else "pass", _fmt_rs(rs))
             row["recordsize"]["lines"] = lines
@@ -246,7 +246,7 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
     note = _files_note(d.get("blocks"), rs) if rs else ""
     row["file_rs"] = (cell("info", M("Not checked")) if st == "info" or not note else
                       cell("pass", note, badge=M("All files match")) if st == "pass" else
-                      cell("warn", note, badge=M("Some don't match")))
+                      cell("warn", note, badge=M("None match") if _none_match(d.get("blocks"), rs) else M("Some don’t match")))
 
     # --- compression: always the same advice (ZSTD-3), whatever is on the dataset
     comp = (props or {}).get("compression") if tn_ok else None
@@ -283,16 +283,16 @@ def check_datasets(app) -> dict:
     rows = [_dataset_row(app, d, pools, tn_ok) for d in datasets]
     items = []
     if not any(d["keys"] for d in datasets):
-        why = (M("Can't check — no library folder is readable yet, so there's nothing to check.")
-               if app.libraries else M("Can't check — Plex isn't connected yet."))
-        items.append(item("info", M("Media datasets: not checked yet"), why,
-                          M("Fix the problems under Libraries first (System → Media mappings).") if app.libraries else M("Open System → Plex.")))
+        why = (M("Can’t check — no library folder is readable yet, so there’s nothing to check.")
+               if app.libraries else M("Can’t check — Plex isn’t connected yet."))
+        items.append(item("info", M("Media Datasets: not checked yet"), why,
+                          M("Fix the problems under Libraries first (System → Media Mappings).") if app.libraries else M("Open System → Plex.")))
     elif not tn_ok:
         items.append(item("info", M("Dataset settings: not checked"),
                           M("Cache settings, record size and L2ARC devices need the TrueNAS API (see TrueNAS & ZFS).") if tn_set
                           else M("Cache settings, record size and L2ARC devices need the TrueNAS API."),
                           M("Check System → TrueNAS.")))
-    return {"id": "datasets", "title": M("Media datasets"),
+    return {"id": "datasets", "title": M("Media Datasets"),
             "hint": M("Each dataset your libraries are on, checked on its own."),
             "datasets": rows, "items": items}
 
@@ -304,7 +304,7 @@ def check_zfs(app) -> dict:
     t = s["truenas"]
     if not (t["url"] and t["api_key"]):
         items.append(item("info", M("TrueNAS API not connected"),
-                          M("Add an API key to check each dataset's settings and cache devices, and to size the L2ARC."),
+                          M("Add an API key to check each dataset’s settings and cache devices, and to size the L2ARC."),
                           M("Open System → TrueNAS.")))
     elif z.get("truenas_error"):
         items.append(item("fail", M("TrueNAS API"), z["truenas_error"], M("Check the address and API key in System.")))
@@ -317,8 +317,8 @@ def check_zfs(app) -> dict:
                           M("{used} in use of {max} max. Whether caching is helping playback is on the Metrics page.",
                             used=_fmt_bytes(arc["arc_size"]), max=_fmt_bytes(arc["arc_max"]))))
     else:
-        items.append(item("warn", M("Can't read ZFS statistics"),
-                          M("/proc/spl/kstat/zfs/arcstats isn't readable here, so cache hit and L2ARC growth figures are unavailable.")))
+        items.append(item("warn", M("Can’t read ZFS statistics"),
+                          M("/proc/spl/kstat/zfs/arcstats isn’t readable here, so cache hit and L2ARC growth figures are unavailable.")))
 
     items.extend(_ram_check(app))
     if app.l2arc_status() == "present":
@@ -336,24 +336,24 @@ def _ram_check(app) -> list[dict]:
     s = app.settings.get()
     b = app.ram_budget()
     if not b["cache_max"]:
-        return [item("info", M("RAM for Now Playing Cache and Prefetch"), M("Couldn't read the ZFS RAM cache size, so Now Playing Cache and "
-                                                        "Prefetch limits can't be worked out."))]
+        return [item("info", M("RAM for Now Playing Cache and Prefetch"), M("Couldn’t read the ZFS RAM cache size, so Now Playing Cache and "
+                                                        "Prefetch limits can’t be worked out."))]
     on = s["nowplaying"]["enabled"] or app.prefetch_active()
     base = (M("{available} of RAM is available to the ZFS cache (what it holds now plus free RAM; its maximum is {max})",
               available=_fmt_bytes(b["available"]), max=_fmt_bytes(b["cache_max"])) if b["source"] == "arc"
-            else M("ZFS statistics aren't readable, so half of RAM ({size}) is assumed", size=_fmt_bytes(b["cache_max"])))
+            else M("ZFS statistics aren’t readable, so half of RAM ({size}) is assumed", size=_fmt_bytes(b["cache_max"])))
     reserve = M("{size} of it left for the rest of the NAS", size=_fmt_bytes(b["reserve"]))
     if b["usable"] <= 0:
         return [item("fail" if on else "warn", M("Not enough RAM for Now Playing Cache and Prefetch"),
                      M("{base}, and {reserve} leaves nothing for Now Playing Cache or Prefetch.", base=base, reserve=reserve),
-                     M("Lower “Reserve ZFS Cache” in Caching → Cache Settings, or add RAM."))]
+                     M("Lower “Reserve ZFS cache” in Caching → Cache Settings, or add RAM."))]
     limits = M("Now Playing Cache may use up to {nowplaying} and Prefetch {nextepisode}.",
                nowplaying=_fmt_bytes(b["nowplaying"]), nextepisode=_fmt_bytes(b["nextepisode"]))
     if b["nowplaying"] < TIGHT_RAM:
         return [item("warn", M("RAM is tight for Now Playing Cache and Prefetch"),
-                     M("{base}; with {reserve}, {limits} That's only a few minutes of a 4K film, so skipping far "
+                     M("{base}; with {reserve}, {limits} That’s only a few minutes of a 4K film, so skipping far "
                        "ahead will still read from disk.", base=base, reserve=reserve, limits=limits),
-                     M("Add RAM, an L2ARC (SSD cache), or lower “Reserve ZFS Cache” in Caching → Cache Settings."))]
+                     M("Add RAM, an L2ARC (SSD cache), or lower “Reserve ZFS cache” in Caching → Cache Settings."))]
     return [item("pass", M("RAM for Now Playing Cache and Prefetch"), M("{base}; with {reserve}, {limits}", base=base, reserve=reserve, limits=limits))]
 
 
@@ -376,16 +376,17 @@ def _files_note(blocks: dict | None, rs: int):
     return M("{old} of {n} files in {size}", old=sum(other.values()), n=multi, size=_fmt_rs(common))
 
 
+def _none_match(blocks: dict | None, rs: int) -> bool:
+    """Whether every file bigger than a record is written in another block size."""
+    multi = blocks["checked"] - blocks.get("single", 0)
+    return multi > 0 and sum(n for bs, n in (blocks.get("sizes") or {}).items() if int(bs) != rs) >= multi
+
+
 def _fmt_rs(n: int) -> str:
     return f"{n // (1024 * 1024)}M" if n >= 1024 * 1024 else f"{n // 1024}K"
 
 
 MiB = 1024 * 1024
-
-
-def rewrite_cmd(ds: str) -> str:
-    # {APP} becomes this app's address in the browser, so the command fetches the matching script.
-    return f"curl -fsSO {{APP}}/tools/rewrite_blocks.py && sudo python3 rewrite_blocks.py {ds}"
 
 
 def compression_cell(comp: str | None) -> dict | None:
@@ -414,10 +415,6 @@ def _blocks_check(ds: str, recordsize: int | None, blocks: dict | None, libs: st
         if any(int(bs) != recordsize and n for bs, n in (blocks.get("sizes") or {}).items()):
             return "warn"
     return "pass"
-
-
-def _kbps_text(kbps: float):
-    return M("{n} Mbps", n=f"{kbps / 1000:.1f}") if kbps >= 1000 else M("{n} kbps", n=round(kbps))
 
 
 def library_record(app, key: str, rs: int | None = None) -> dict:
@@ -465,7 +462,7 @@ def _shared_record_check(app, ds: str, keys: list) -> dict | None:
 def _l2arc_tuning_checks(app, params: dict) -> list[dict]:
     """ZFS module settings that decide whether warm-up reads actually land in L2ARC."""
     if not any(v is not None for v in params.values()):
-        return [item("info", M("L2ARC settings"), M("Couldn't read ZFS module settings from this app, so they weren't checked."))]
+        return [item("info", M("L2ARC settings"), M("Couldn’t read ZFS module settings from this app, so they weren’t checked."))]
     items = []
     ok_bits = []
     sysp = "/sys/module/zfs/parameters"
@@ -473,7 +470,7 @@ def _l2arc_tuning_checks(app, params: dict) -> list[dict]:
     mfu = params.get("l2arc_mfuonly")
     if mfu not in (None, "0"):
         items.append(item("warn", M("L2ARC only keeps frequently used data"),
-                          M("l2arc_mfuonly={value}: only data read more than once is copied to L2ARC. Warm-up reads "
+                          M("l2arc_mfuonly={value}: only data read more than once is copied to the L2ARC. Warm-up reads "
                             "each file once, so it would never reach the SSD.", value=mfu),
                           M("Run in the TrueNAS shell. {persist}", persist=PERSIST_HINT), f"echo 0 | sudo tee {sysp}/l2arc_mfuonly"))
     elif mfu == "0":
@@ -481,7 +478,7 @@ def _l2arc_tuning_checks(app, params: dict) -> list[dict]:
 
     rebuild = params.get("l2arc_rebuild_enabled")
     if rebuild == "0":
-        items.append(item("warn", M("L2ARC is emptied on every reboot"),
+        items.append(item("warn", M("The L2ARC is emptied on every reboot"),
                           M("l2arc_rebuild_enabled=0, so the SSD cache starts empty after each restart and warm-up "
                             "has to begin again."),
                           M("Run in the TrueNAS shell. {persist}", persist=PERSIST_HINT), f"echo 1 | sudo tee {sysp}/l2arc_rebuild_enabled"))
@@ -503,16 +500,16 @@ def _l2arc_tuning_checks(app, params: dict) -> list[dict]:
             if app.warmup_active() and fill < 64 and hours >= 2:
                 items.append(item("info", M("Warm-up is held to {rate} MB/s by the L2ARC", rate=round(rate / 1e6)),
                                   M("ZFS copies at most {fill} MiB/s to the SSD (l2arc_write_max), and automatic L2ARC pacing reads just "
-                                    "under that, so nothing is read only to be lost. Warming up every library's lead-ins from scratch "
-                                    "takes about {hours} hours at that speed (repeat runs are quicker: what's already on the SSD isn't held back).",
+                                    "under that, so nothing is read only to be lost. Warming up every library’s lead-ins from scratch "
+                                    "takes about {hours} hours at that speed (repeat runs are quicker: what’s already on the SSD isn’t held back).",
                                     fill=round(fill), hours=round(hours)),
                                   M("To go faster, raise the limit to 128 MiB/s in the TrueNAS shell; pacing follows it. {persist}",
                                     persist=PERSIST_HINT),
                                   f"echo 134217728 | sudo tee {sysp}/l2arc_write_max"))
             else:
-                ok_bits.append(M("fills at up to {fill} MiB/s, and L2ARC pacing reads just under that", fill=round(fill)))
+                ok_bits.append(M("fills at up to {fill} MiB/s with L2ARC pacing just under that", fill=round(fill)))
         elif app.warmup_active() and reading > fill * 1.1:
-            items.append(item("warn", M("L2ARC fills slower than warm-up reads"),
+            items.append(item("warn", M("The L2ARC fills slower than warm-up reads"),
                               M("ZFS copies at most {fill} MiB/s to the SSD (l2arc_write_max), but warm-up reads "
                                 "about {reading} MB/s ({pct}% of {disk} MB/s). "
                                 "Data can leave RAM before it reaches the SSD, so some reads are wasted.",
@@ -525,10 +522,12 @@ def _l2arc_tuning_checks(app, params: dict) -> list[dict]:
             ok_bits.append(M("fills at up to {fill} MiB/s", fill=round(fill)))
 
     npf = params.get("l2arc_noprefetch")
-    if npf is not None:
-        ok_bits.append(M("l2arc_noprefetch={value}", value=npf))
+    if npf == "1":
+        ok_bits.append(M("only what’s actually read is copied (l2arc_noprefetch=1)"))
+    elif npf is not None:
+        ok_bits.append(M("ZFS’s own read-ahead is copied too (l2arc_noprefetch={value})", value=npf))
     if ok_bits:
-        items.append(item("pass", M("L2ARC settings"), M("L2ARC: {list}.", list=ok_bits)))
+        items.append(item("pass", M("L2ARC settings"), M("Suited to warm-up: {list}.", list=ok_bits)))
     return items
 
 
@@ -540,18 +539,18 @@ def check_cache_mode(app) -> dict:
     if no_l2:
         items.append(item("info", M("RAM-only caching"),
                           M("You chose not to use an L2ARC (SSD Cache page), so settings use their RAM-only defaults "
-                            "and SSD-only choices aren't used.")))
+                            "and SSD-only choices aren’t used.")))
     elif status == "present":
         items.append(item("pass", M("L2ARC caching"), M("The media pool has an L2ARC, so settings use their L2ARC defaults.")))
     elif status == "absent":
         items.append(item("warn", M("No L2ARC on the media pool"),
                           M("Caching is planned around an SSD cache (L2ARC). Without one, settings use their RAM-only "
-                            "defaults, SSD-only choices fall back, and warm-up can't run."),
+                            "defaults, SSD-only choices fall back, and warm-up can’t run."),
                           M("Add an SSD to the pool as a Cache (L2ARC) vdev in TrueNAS → Storage — or, to run on RAM only, "
                             "tick “I won’t use an L2ARC” on the SSD Cache page.")))
     else:
         items.append(item("info", M("L2ARC not checked yet"),
-                          M("Couldn't tell whether the media pool has an L2ARC, so settings use their RAM-only defaults for now."),
+                          M("Couldn’t tell whether the media pool has an L2ARC, so settings use their RAM-only defaults for now."),
                           M("Connect TrueNAS in System to check.")))
     fell = app.fallbacks.recent()
     fallback_help = M("Some choices only work with an SSD cache (L2ARC), because they read more than RAM can hold: every warm-up "
@@ -563,23 +562,25 @@ def check_cache_mode(app) -> dict:
                       "without the SSD icon.")
     if fell:
         items.append(item("warn", M("Choices that need an SSD cache"),
-                          M("These need an L2ARC, which the media pool doesn't have, so their RAM-only default was used instead: {list}.",
+                          M("These need an L2ARC, which the media pool doesn’t have, so their RAM-only default was used instead: {list}.",
                             list=[M("{setting} ({chosen} → {used})", setting=f["label"], chosen=f["chosen"], used=f["used"])
                                   for f in fell]),
                           M("Add an L2ARC, or pick a choice without the SSD icon."), help=fallback_help))
     else:
         items.append(item("pass", M("Choices that need an SSD cache"),
                           M("Every warm-up schedule and Prefetch choice is running as you set it: none needed an L2ARC that "
-                            "wasn't there in the last 24 hours."), help=fallback_help))
+                            "wasn’t there in the last 24 hours."), help=fallback_help))
+    items.append(_access_check(app))
     items.append(_optimizer_check(app))
     items.extend(_conflict_items(app))
+    items.extend(_migration_items(app))
     items.extend(_job_failures(app))
     return {"id": "mode", "title": M("Plex Cache"),
-            "hint": M("How caching runs here — with an SSD cache (L2ARC) or RAM only — and the optimizer service."), "items": items}
+            "hint": M("How caching runs here — with an SSD cache (L2ARC) or RAM only — who can use the app, and the optimizer service."), "items": items}
 
 
 OPTIMIZER_HELP = M("The optimizer is the part of Plex Cache that rewrites your media files so they suit caching: in their "
-                   "dataset’s record size and compression and, for MKV files, with the attachments, index and tags after the "
+                   "dataset’s record size and compression and, for MKV files, with the attachments, chapters, index and tags after the "
                    "video. The Optimizer page has the choices for each library and an <strong>Optimize Now</strong> button.<br><br>"
                    "It’s optional, and runs as a second service in this app — the only part of Plex Cache that can write to your "
                    "media. It does nothing on its own: it rewrites one file at a time when you press Optimize Now, checks each "
@@ -595,14 +596,35 @@ def _job_failures(app) -> list[dict]:
     if not last or last.get("running") or not last.get("errors"):
         return []
     errs = last["errors"]
-    return [dict(item("warn", M("{n} files weren't optimized", one="{n} file wasn't optimized", n=len(errs)),
+    return [dict(item("warn", M("{n} files weren’t optimized", one="{n} file wasn’t optimized", n=len(errs)),
                  M("For example: {files}.", files=[f"{os.path.basename(e.get('file') or '')}: {e.get('reason')}" for e in errs[:3]]),
-                 M("They're as they were: a file is only replaced once every check has passed."),
+                 M("They’re as they were: a file is only replaced once every check has passed."),
                  help=M("Each file the optimizer writes is checked before it replaces the original: every video, audio and subtitle "
-                        "stream must be the same as the original's (ffmpeg), the attachments byte for byte, the layout and tags as "
+                        "stream must be the same as the original’s (ffmpeg), the attachments byte for byte, the layout and tags as "
                         "written. When a check fails — or a tool does, or the file is in use — the new file is thrown away and the "
                         "original kept. Optimize Now tries the failed files again.")),
-                 link={"job": last.get("id"), "text": M("See them all, with why, on the Processes page")})]
+                 link={"job": last.get("id"), "text": M("See them all, and why, on the Processes page")})]
+
+
+def _migration_items(app) -> list[dict]:
+    """A folder being converted to a child dataset that waits on you: said here, not only on the
+    Optimizer page."""
+    mig = getattr(app, "migration", None)
+    st = (mig.state or {}) if mig else {}
+    if st.get("step") not in ("create", "switch", "verify") or st.get("copying") or st.get("queued"):
+        return []
+    todo = next((c for c in mig.checks if not c.get("ok")), None)
+    if todo:
+        what, more = todo["title"], todo.get("detail") or ""
+    elif st["step"] == "switch":
+        what, more = M("rename the dataset to the folder’s name"), ""
+    else:
+        return []
+    return [dict(item("warn", M("Action needed to finish converting {title} to a child dataset", title=st.get("title") or st.get("folder")),
+                      M("Next: {what}. {more}", what=what, more=more),
+                      help=M("Turning a library folder into a dataset of its own goes step by step, and some steps are yours — in "
+                             "TrueNAS, or a button on the Optimizer page. Until then nothing moves on; the folder and Plex are as they were.")),
+                 link={"href": "/optimizer#child-dataset", "text": M("Carry on, on the Optimizer page")})]
 
 
 def _conflict_items(app) -> list[dict]:
@@ -616,7 +638,7 @@ def _conflict_items(app) -> list[dict]:
         return []
     return [item("warn", M("{n} Syncthing conflict copies", one="{n} Syncthing conflict copy", n=len(found)),
                  M("Next to your media: {files}.", files=[os.path.basename(c["copy"]) for c in found[:3]]),
-                 M("Optimize Now on the Optimizer page deletes the ones the optimizer made (the same as the file). "
+                 M("Optimize Now on the Optimizer page deletes the ones the optimizer made that are the same as the file. "
                    "Others are kept for you to compare and delete."),
                  help=M("When two systems sharing a library (Syncthing, both ways) change the same file at once, Syncthing "
                         "keeps both, the second as name.sync-conflict-<date>-<device>.mkv. The optimizer avoids it — it "
@@ -668,6 +690,22 @@ def optimizer_yaml(app) -> str:
             f"{HEALTHCHECK_YAML}")
 
 
+def _access_check(app) -> dict:
+    """Who can use the web UI: a sign-in, and devices on the local network only (System → Access).
+    No sign-in is a note when only the local network gets in, and a warning when anything that can
+    reach it does."""
+    auth = getattr(app, "auth", None)
+    lan = app.settings.get()["general"].get("lan_only", True)
+    if auth is not None and auth.enabled:
+        return item("pass", M("Sign-in required"),
+                    M("Devices on your local network can use it after signing in.") if lan
+                    else M("Any device that can reach it can use it after signing in."))
+    return item("info" if lan else "warn", M("No sign-in"),
+                M("Any device on your local network can change settings and run the optimizer.") if lan
+                else M("Any device that can reach it can change settings and run the optimizer."),
+                M("To require a sign-in, set PLEXCACHE_USERNAME and PLEXCACHE_PASSWORD in the app’s YAML (Apps → plex-cache → Edit)."))
+
+
 def _optimizer_check(app) -> dict:
     """The optimizer, in one line: ready, or what's left (the Optimizer page has the steps)."""
     op = getattr(app, "optimizing", None)
@@ -696,16 +734,16 @@ def check_effectiveness(app) -> dict | None:
     if hr is not None and hr < 0.2:
         found = (M("The last run found only {pct}% of files already cached. Data read on the previous run should have been there.",
                    pct=round(hr * 100)) if growth is None else
-                 M("The last run found only {pct}% of files already cached and L2ARC grew {size}. Data read on the "
+                 M("The last run found only {pct}% of files already cached and the L2ARC grew {size}. Data read on the "
                    "previous run should have been there.", pct=round(hr * 100), size=_fmt_bytes(max(0, growth))))
-        items.append(item("warn", M("Warm-up reads aren't staying cached"), found,
-                          M("Check Media datasets above (secondarycache=all), and that L2ARC is large enough "
-                            "that other data isn't pushing the warm-up out between runs.")))
+        items.append(item("warn", M("Warm-up reads aren’t staying cached"), found,
+                          M("Check Media Datasets above (secondarycache=all), and that the L2ARC is large enough "
+                            "that other data isn’t pushing the warm-up out between runs.")))
     elif hr is not None:
         items.append(item("pass", M("Warm-up is landing in cache"), M("{pct}% of files were already cached on the last run.", pct=round(hr * 100))))
     if not items:
         return None
-    return {"id": "effect", "title": M("Is it working?"), "hint": M("Compares consecutive warm-up runs."), "items": items}
+    return {"id": "effect", "title": M("Is It Working?"), "hint": M("Compares consecutive warm-up runs."), "items": items}
 
 
 def recommendations(app) -> list[dict]:
@@ -739,7 +777,7 @@ def recommendations(app) -> list[dict]:
         no_l2 = [d for d in zds if d["pool"] in pools and not pools[d["pool"]]["l2_online"] and d not in bad]
         total = app.l2_total()
         reason = (M("You have {size} of L2ARC for the lead-in of every title.", size=_fmt_bytes(total)) if total
-                  else M("L2ARC is in use; add the TrueNAS API key to size it."))
+                  else M("An L2ARC is in use; add a TrueNAS API key to size it."))
         if no_l2:
             skip_l2 = M(" Skips {list}.", list=[M("{libraries} (no L2ARC on pool {pool})", libraries=_libs(d), pool=d["pool"])
                                                 for d in no_l2])
@@ -752,7 +790,7 @@ def recommendations(app) -> list[dict]:
         recs.append({"feature": "warmup", "verdict": "maybe",
                      "reason": M("Needs an L2ARC on the media pool; connect TrueNAS in System to check.")})
     if no_ram:
-        why = M("No ZFS cache left after the reserve — lower “Reserve ZFS Cache” in Caching → Cache Settings.")
+        why = M("No ZFS cache left after the reserve — lower “Reserve ZFS cache” in Caching → Cache Settings.")
         recs.append({"feature": "nextepisode", "verdict": "avoid", "reason": why})
         recs.append({"feature": "nowplaying", "verdict": "avoid", "reason": why})
         return recs
@@ -764,7 +802,7 @@ def recommendations(app) -> list[dict]:
                                 else M("Your media dataset keeps file data in RAM.{skip}", skip=skip))})
     else:
         recs.append({"feature": "nowplaying", "verdict": "maybe",
-                     "reason": M("Needs primarycache=all on the media datasets; couldn't check it yet (see TrueNAS & ZFS).{skip}", skip=skip)})
+                     "reason": M("Needs primarycache=all on the media datasets; couldn’t check it yet (see TrueNAS & ZFS).{skip}", skip=skip)})
     return recs
 
 
@@ -786,14 +824,12 @@ def run_all(app) -> dict:
             for key in ("in_use", "cache", "recordsize", "file_rs", "compression", "l2arc"):
                 if row[key]:
                     counts[row[key]["status"]] = counts.get(row[key]["status"], 0) + 1
+    # (the counts are in the tiles right under it: the summary doesn't repeat them)
     if counts["fail"]:
-        problems = M("{n} problems to fix", one="{n} problem to fix", n=counts["fail"])
-        if counts["warn"]:
-            problems = M("{problems} and {n} warnings", one="{problems} and {n} warning", problems=problems, n=counts["warn"])
-        summary = {"status": "fail", "text": M("{problems} — see the red and orange items below.", problems=problems)}
+        summary = {"status": "fail", "text": M("Something needs fixing — see the red and orange items below.") if counts["warn"]
+                   else M("Something needs fixing — see the red items below.")}
     elif counts["warn"]:
-        summary = {"status": "warn", "text": M("Working, with {n} warnings worth a look below.",
-                                               one="Working, with {n} warning worth a look below.", n=counts["warn"])}
+        summary = {"status": "warn", "text": M("Working — the orange items below could be better.")}
     else:
         summary = {"status": "ok", "text": M("Everything is OK.")}
     return {"groups": groups, "counts": counts, "summary": summary, "recommendations": recommendations(app),

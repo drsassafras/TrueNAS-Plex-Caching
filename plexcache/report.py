@@ -18,7 +18,7 @@ import collections
 import datetime as dt
 import time
 
-from .i18n import M, join
+from .i18n import M
 
 RETENTION_LOW = 70  # % still cached below which preloads are being pushed out too soon
 DISK_BUSY_HIGH = 85  # % busy (peak during a stream) worth a look
@@ -228,9 +228,9 @@ def build(app, period: str = "week", now: float | None = None) -> dict:
     for reason, n in sorted(s["miss"].items(), key=lambda kv: -kv[1]):
         if reason == "only part of the file fits in the RAM limit":
             attention.append({"status": "warn", "title": M("{n} skips went to disk: RAM limit full", one="{n} skip went to disk: RAM limit full", n=n),
-                              "detail": M("Only part of those files fit in Now Playing Cache's RAM limit, and the viewer skipped "
+                              "detail": M("Only part of those files fit in Now Playing Cache’s RAM limit, and the viewer skipped "
                                           "past the part that was loaded."),
-                              "fix": M("Raise Now Playing Cache's RAM limit, or lower “Reserve ZFS Cache” "
+                              "fix": M("Raise Now Playing Cache’s RAM limit, or lower “Reserve ZFS cache” "
                                        "(both in Caching → Cache Settings)."), "link": "/caching#arc"})
         elif reason == "the preload hadn't started yet":
             attention.append({"status": "warn", "title": M("{n} skips before Now Playing Cache started", one="{n} skip before Now Playing Cache started", n=n),
@@ -240,41 +240,37 @@ def build(app, period: str = "week", now: float | None = None) -> dict:
         elif reason == "the preload hadn't reached that part yet":
             attention.append({"status": "info", "title": M("{n} skips ahead of Now Playing Cache", one="{n} skip ahead of Now Playing Cache", n=n),
                               "detail": M("The viewer skipped further than Now Playing Cache had read so far. Normal in the first "
-                                          "minute or two; if it's common, the disks may be busy with other work."),
+                                          "minute or two; if it’s common, the disks may be busy with other work."),
                               "fix": "", "link": None})
         elif reason == "Now-playing preload is off":
             attention.append({"status": "info", "title": M("{n} skips without Now Playing Cache", one="{n} skip without Now Playing Cache", n=n),
                               "detail": M("Now Playing Cache is off, so skips read from the disks."),
                               "fix": M("Turn it on in Caching."), "link": "/caching"})
     if ret_avg is not None and ret_avg < RETENTION_LOW:
-        attention.append({"status": "warn", "title": M("Cached data isn't staying in RAM ({pct}% still cached)", pct=ret_avg),
+        attention.append({"status": "warn", "title": M("Cached data isn’t staying in RAM ({pct}% still cached)", pct=ret_avg),
                           "detail": M("About 30 minutes after loading, much of the data had already been pushed out of "
                                       "the ZFS cache by other work."),
-                          "fix": M("Lower Now Playing Cache's and Prefetch's RAM limits so they don't push each other out, "
+                          "fix": M("Lower Now Playing Cache’s and Prefetch’s RAM limits so they don’t push each other out, "
                                    "leave more for the rest of the NAS (Caching → Cache Settings), or add an L2ARC (SSD cache)."), "link": "/caching#arc"})
     if busy_peak is not None and busy_peak >= DISK_BUSY_HIGH:
         attention.append({"status": "info", "title": M("Disks reached {pct}% busy while people watched", pct=busy_peak),
                           "detail": M("On average they were {pct}% busy during streams.", pct=busy_avg),
-                          "fix": M("There's little headroom left for skips that go to disk. Check what else uses the pool; "
+                          "fix": M("There’s little headroom left for skips that go to disk. Check what else uses the pool; "
                                    "L2ARC-only caching pauses for busy disks (SSD Cache → L2ARC Cache Settings)."),
                           "link": "/ssd#l2arc-settings"})
 
     has_data = any(s[k] for k in ("streams", "skips", "next", "ret_n", "read_cached", "read_disk", "read_ssd"))
     if not has_data:
-        verdict = {"status": "info", "text": M("{period}: nothing has played yet, so there's nothing to report.", period=span)}
+        verdict = {"status": "info", "text": M("{period}: nothing has played yet, so there’s nothing to report.", period=span)}
     else:
-        bits = []
-        if s["skips"]:
-            bits.append(M("{cached} of {n} skips", one="{cached} of {n} skip", cached=s["skips_cached"], n=s["skips"]))
+        # (the figures are in the tiles right under it: the verdict doesn't repeat them)
         warns = sum(a["status"] == "warn" for a in attention)
-        streams = M("{n} streams", one="{n} stream", n=s["streams"])
         if warns:
             verdict = {"status": "warn", "text": M("{period}: {n} things could be better — see below.",
                                                    one="{period}: {n} thing could be better — see below.", period=span, n=warns)}
-        elif bits:
-            verdict = {"status": "ok", "text": M("{period}, {streams}: {list} came from cache.", period=span, streams=streams, list=join(bits))}
         else:
-            verdict = {"status": "ok", "text": M("{period}, {streams}, and caching had nothing to fix.", period=span, streams=streams)}
+            verdict = {"status": "ok", "text": M("{period}, {streams}: nothing to fix.", period=span,
+                                                 streams=M("{n} streams", one="{n} stream", n=s["streams"]))}
 
     ram = app.ram_budget()
     return {

@@ -106,7 +106,7 @@ class L2arcPauses:
                 return what
         busy = self._disk_busy()
         if w["pause_disk_busy"] and not self.manual and busy is not None and busy >= w["pause_disk_busy"]:
-            return M("the pool's disks are {pct}% busy with other work", pct=round(busy))
+            return M("the pool’s disks are {pct}% busy with other work", pct=round(busy))
         return None
 
 

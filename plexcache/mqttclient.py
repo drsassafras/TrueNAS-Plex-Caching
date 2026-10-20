@@ -31,7 +31,7 @@ class MQTTError(Exception):
 
 
 CONNACK_ERRORS = {
-    1: ("broker", M("the broker doesn't support MQTT 3.1.1")),
+    1: ("broker", M("the broker doesn’t support MQTT 3.1.1")),
     2: ("login", M("the broker rejected the client ID")),
     3: ("broker", M("the broker is running but not accepting connections right now")),
     4: ("login", M("wrong username or password")),
@@ -122,7 +122,7 @@ class MQTTClient:
         try:
             self.sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         except socket.gaierror:
-            raise MQTTError(M("can't find {host} — check the address", host=self.host), "broker") from None
+            raise MQTTError(M("can’t find {host} — check the address", host=self.host), "broker") from None
         except socket.timeout:
             raise MQTTError(M("no answer from {host}:{port} — check the address, port and firewall{hint}",
                               host=self.host, port=str(self.port), hint=self._other_ports()), "broker") from None
@@ -130,7 +130,7 @@ class MQTTClient:
             raise MQTTError(M("{host} is up, but nothing is listening on port {port}{hint}", host=self.host, port=str(self.port),
                               hint=self._other_ports()), "broker") from None
         except OSError as e:
-            raise MQTTError(M("can't reach {host}:{port}: {why}", host=self.host, port=str(self.port), why=str(e.strerror or e)),
+            raise MQTTError(M("can’t reach {host}:{port}: {why}", host=self.host, port=str(self.port), why=str(e.strerror or e)),
                             "broker") from None
 
     def _other_ports(self):
@@ -146,10 +146,10 @@ class MQTTClient:
                 pass
         if 1883 in open_ports and self.port == 8883:
             return M(". Port 1883 is open, so the broker is running without TLS. Turn on its TLS listener "
-                     "(Home Assistant's Mosquitto add-on only opens 8883 when its certificate files exist), "
+                     "(Home Assistant’s Mosquitto add-on only opens 8883 when its certificate files exist), "
                      "or use 1883 without TLS")
         if open_ports:
-            return M(". Port {port} answers on that host — is that the broker's port?", port=str(open_ports[0]))
+            return M(". Port {port} answers on that host — is that the broker’s port?", port=str(open_ports[0]))
         return ""
 
     def start_tls(self) -> None:
@@ -162,7 +162,7 @@ class MQTTClient:
             self.sock = ctx.wrap_socket(self.sock, server_hostname=self.host)
         except ssl.SSLCertVerificationError as e:
             self._drop()
-            raise MQTTError(M("the broker's certificate wasn't accepted ({why}) — untick “Verify”, "
+            raise MQTTError(M("the broker’s certificate wasn’t accepted ({why}) — untick “Verify”, "
                               "or give the broker a trusted certificate", why=str(e.verify_message)), "tls") from None
         except (ssl.SSLError, OSError) as e:
             self._drop()
@@ -171,7 +171,7 @@ class MQTTClient:
             if ("wrong_version_number" in text or "wrong version" in text or isinstance(e, (ssl.SSLEOFError, ConnectionResetError))
                     or "eof" in text or "reset" in text):
                 # A plain-MQTT port either answers a TLS greeting with non-TLS bytes or just hangs up.
-                reason = M("port {port} doesn't use TLS — untick TLS, or use the broker's TLS port (usually 8883)", port=str(self.port))
+                reason = M("port {port} doesn’t use TLS — untick TLS, or use the broker’s TLS port (usually 8883)", port=str(self.port))
             elif isinstance(e, socket.timeout):
                 reason = M("no TLS answer on port {port} — is TLS turned on in the broker?", port=str(self.port))
             raise MQTTError(M("TLS failed: {why}", why=reason), "tls") from None
@@ -197,7 +197,7 @@ class MQTTClient:
         except socket.timeout:
             self.close()
             hint = M(" — does the broker expect TLS on this port?") if not self.tls else ""
-            raise MQTTError(M("connected, but the broker didn't answer the MQTT login{hint}", hint=hint), "login") from None
+            raise MQTTError(M("connected, but the broker didn’t answer the MQTT login{hint}", hint=hint), "login") from None
         except MQTTError as e:
             self.close()
             hint = M(" — does the broker expect TLS on this port?") if not self.tls else ""
@@ -206,7 +206,7 @@ class MQTTClient:
             self.close()
             hint = (M(" — this port may expect TLS (tick “Use TLS”)") if not self.tls and kind == 0x15
                     else M(" — check the port"))
-            raise MQTTError(M("the answer wasn't from an MQTT broker{hint}", hint=hint), "login")
+            raise MQTTError(M("the answer wasn’t from an MQTT broker{hint}", hint=hint), "login")
         if data[1]:
             self.close()
             step, msg = CONNACK_ERRORS.get(data[1], ("login", M("the broker refused the connection ({code})", code=str(data[1]))))

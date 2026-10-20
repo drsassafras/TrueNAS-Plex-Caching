@@ -20,11 +20,14 @@ from .i18n import Fixed, M, join, msg, size_text
 from .updates import UpdateChecker
 from .config import PLEX_DEFAULT_PORT, Settings
 from .coverage import Coverage
-from .filemap import FileMaps, SurveyJob
+from .filemap import FileMaps, Inspector
 from .pauses import L2arcPauses
 from .jobs import Jobs
+from .converting import Conversions
+from .plex2 import OtherServer
 from .migrating import Migration
-from .optimizing import Optimizing
+from .optimizing import DEFAULTS as OPT_DEFAULTS, Optimizing
+from .optimize.convert import DEFAULT_TYPES as CONVERT_TYPES
 from .playback import PlaybackMonitor
 from .plex import PlexClient, PlexError
 from .reader import MiB, benchmark_file
@@ -78,11 +81,12 @@ def _is_local_name(host: str) -> bool:
     return "." not in h or h.endswith(LOCAL_SUFFIXES)
 
 
-KIND_LABEL = {"movie": M("movies"), "tv": M("TV episodes"), "audio": M("audio files")}
+KIND_LABEL = {"movie": M("movies"), "tv": M("TV episodes"), "audio": M("audio files")}  # (the warm-up event's)
 
 
 def index_summary(result: dict) -> M:
-    """e.g. "end-of-file indexes — movies: 3 of 3 had one at the end, 0.2 GB (largest 2.0 MB)"."""
+    """e.g. "metadata at the end of files — movies: 3 of 3 had some, 0.2 GB (largest 2.0 MB)": what warm-up
+    read there, apart from the lead-ins (a file a lead-in covers whole doesn't count)."""
     def size(n):
         if n >= 1e8:
             return M("{n} GB", n=Fixed(n / 1e9, 1))
@@ -94,18 +98,28 @@ def index_summary(result: dict) -> M:
             continue
         mp4 += st["mp4_at_end"]
         if st["files"]:
-            bits.append(M("{kind}: {n} of {files} had one at the end, {size} (largest {largest})", kind=KIND_LABEL[kind],
+            bits.append(M("{kind}: {n} of {files} had some, {size} (largest {largest})", kind=KIND_LABEL[kind],
                           n=st["files"], files=files, size=size(st["bytes"]), largest=size(st["largest"])))
         else:
-            bits.append(M("{kind}: none at the end", kind=KIND_LABEL[kind]))
+            bits.append(M("{kind}: none outside the lead-ins", kind=KIND_LABEL[kind]))
     joined = bits[0]
     for b in bits[1:]:
         joined = M("{a}; {b}", a=joined, b=b)
-    text = M("end-of-file indexes — {list}", list=joined)
+    text = M("metadata at the end of files — {list}", list=joined)
     if mp4:
         text = M("{text}. {n} MP4 files keep their index at the end (no “fast start”)",
                  one="{text}. {n} MP4 file keeps its index at the end (no “fast start”)", text=text, n=mp4)
     return text
+
+
+def file_block(m: dict | None, size: int, record: int | None) -> int | None:
+    """The size of the blocks a file is stored in: as read from it, or the dataset's record size —
+    except a file no larger than that, which ZFS keeps in one block of its own size (in 4K sectors)."""
+    if m and m.get("blksize"):
+        return m["blksize"]
+    if record and 0 < size <= record:
+        return -(-size // 4096) * 4096
+    return record
 
 
 class App:
@@ -161,9 +175,11 @@ class App:
         self.jobs = Jobs(self)  # the one file job at a time: optimizing, syncing cover art, copying a folder
         self.optimizing = Optimizing(self)
         self.migration = Migration(self)
+        self.conversions = Conversions(self)  # converted files waiting for Plex before their originals go
+        self.other = OtherServer(self)  # a second Plex server with the same files (plex2.py)
         # what's where in each media file (the Library Health page), and the job that reads it
         self.file_maps = FileMaps(self.config_dir)
-        self.jobs.register("survey", lambda args, saved: SurveyJob(self, args.get("library"), saved, args.get("force")))  # turning a library folder into a dataset (Optimizer page)  # the optimizer service (second container): which files need it
+        self.inspector = Inspector(self)  # Library Health: each library's files read, one library at a time
         # Home Assistant over MQTT (does nothing until it's switched on in System)
         self.ha = HomeAssistantBridge(self)
         self.updates = UpdateChecker(self)
@@ -221,6 +237,12 @@ class App:
         if boot:
             self.start_warmup(manual=False, libs=boot, why=M("at boot"))
 
+    def _refresh_migration(self):
+        try:
+            self.migration.refresh()
+        except Exception:  # noqa: BLE001 — checked again next time
+            log.debug("migration re-check failed", exc_info=True)
+
     def _scheduler_loop(self):
         last_check = dt.datetime.now()
         last_health = time.time()
@@ -236,6 +258,13 @@ class App:
                     self.start_warmup(manual=False, libs=libs)
             last_check = now
             self.check_next_day()
+            # a folder being converted to a child dataset: its step's conditions checked again by themselves
+            mst = (self.migration.state or {}).get("step")
+            if mst in ("create", "switch", "verify"):
+                threading.Thread(target=self._refresh_migration, daemon=True).start()
+            # converted files: Plex asked whether it has the MKVs, originals deleted once it has (and the hold is over)
+            if any(e["state"] != "deleted" for e in self.conversions.items):
+                threading.Thread(target=self.conversions.tick, name="conversions", daemon=True).start()
             self.cachelog.prune()
             self.cachelog.save()
             self.record_coverage()
@@ -289,7 +318,7 @@ class App:
         p = s["plex"]
         if not p["url"]:
             res["plex_server"] = {"status": "warn", "text": M("Plex server address needed"),
-                                  "detail": M("Enter your Plex server's address, e.g. your NAS's IP. "
+                                  "detail": M("Enter your Plex server’s address, e.g. your NAS’s IP. "
                                               "Port {port} is used if you leave it off.", port=str(PLEX_DEFAULT_PORT))}
         else:
             try:
@@ -299,7 +328,7 @@ class App:
                                                   version=ident["version"], url=p["url"], ms=ident["ms"])}
             except PlexError as e:
                 if "127.0.0.1" in p["url"] or "localhost" in p["url"]:
-                    detail = M("{why}. Use your NAS's IP, not 127.0.0.1 — inside this app that means the app itself.", why=msg(e))
+                    detail = M("{why}. Use your NAS’s IP, not 127.0.0.1 — inside this app that means the app itself.", why=msg(e))
                 else:
                     detail = M("{why}.", why=msg(e))
                 res["plex_server"] = {"status": "fail", "text": M("No Plex server found"), "detail": detail}
@@ -310,7 +339,7 @@ class App:
             # Without a token Plex shares nothing, so no feature can work: a failure, not a warning.
             res["plex_token"] = {"status": "fail", "text": M("Plex sign-in needed"),
                                  "detail": M("Nothing works until you sign in: Plex only shares your libraries and "
-                                             "what's playing with apps that have a token for your account.")}
+                                             "what’s playing with apps that have a token for your account.")}
         else:
             try:
                 info = self.plex(timeout=10).ping()
@@ -320,15 +349,15 @@ class App:
                                                  one="Token accepted by “{name}” · {n} library visible", name=info["name"], n=n)}
             except PlexError as e:
                 bad = "token" in str(e).lower()
-                res["plex_token"] = {"status": "fail", "text": M("Plex token rejected") if bad else M("Couldn't check Plex sign-in"),
+                res["plex_token"] = {"status": "fail", "text": M("Plex token rejected") if bad else M("Couldn’t check Plex sign-in"),
                                      "detail": (M("Plex no longer accepts the saved token. Sign in again.")
                                                 if bad else msg(e))}
         # TrueNAS: optional. Is the API there, then is the key accepted?
         t = s["truenas"]
         if not t["url"]:
             res["truenas_server"] = {"status": "warn", "text": M("TrueNAS not set up (optional)"),
-                                     "detail": M("Without it, cache devices and dataset settings can't be checked, "
-                                                 "and the L2ARC can't be sized.")}
+                                     "detail": M("Without it, cache devices and dataset settings can’t be checked, "
+                                                 "and the L2ARC can’t be sized.")}
             res["truenas_key"] = {"status": "off", "text": M("TrueNAS API key"), "detail": ""}
         elif not probe_truenas(t["url"]):
             res["truenas_server"] = {"status": "fail", "text": M("TrueNAS not found"),
@@ -351,7 +380,7 @@ class App:
         optional = [k for k in ("truenas_server", "truenas_key") if res[k]["status"] in ("warn", "fail")]
         if problems:
             res["summary"] = {"status": "fail" if any(res[k]["status"] == "fail" for k in problems) else "warn",
-                              "text": M("Plex needs attention — the app can't do anything until Plex is connected.")}
+                              "text": M("Plex needs attention — the app can’t do anything until Plex is connected.")}
         elif optional:
             res["summary"] = {"status": "warn", "text": M("Plex is connected. TrueNAS is optional but recommended.")}
         else:
@@ -374,6 +403,7 @@ class App:
                 if rescan:
                     self.scan_library()
                 self.run_checks()
+            self.other.refresh_async()  # (the second Plex server's libraries, and how their paths line up)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -475,17 +505,17 @@ class App:
                 raise config.SettingsError(M("Plex has no library {key}", key=key))
             kind = prefetch.library_kind(lib)
             if lib is not None and kind is None:
-                raise config.SettingsError(M("Prefetch doesn't cover that library"))
+                raise config.SettingsError(M("Prefetch doesn’t cover that library"))
             start = choice.get("start") if isinstance(choice, dict) else None
             if kind and start not in (None, "default") and start not in prefetch.levels_for(kind):
-                raise config.SettingsError(M("“{mode}” isn't a prefetch choice for that library", mode=str(start)))
+                raise config.SettingsError(M("“{mode}” isn’t a prefetch choice for that library", mode=str(start)))
 
     def library_datasets(self, key: str) -> list[dict]:
         """The datasets holding a library's folders (from the last check)."""
         return [d for d in (self.zfs or {}).get("datasets", []) if key in d["keys"]]
 
     def library_cacheable(self, key: str, feature: str | None = None) -> bool:
-        """Ticked in Media mappings, its folders can be read here, and the
+        """Ticked in Media Mappings, its folders can be read here, and the
         dataset under it can actually cache (primarycache=all; for warm-up
         also an L2ARC on its pool).
 
@@ -540,10 +570,6 @@ class App:
     def cache_mode(self) -> str:
         """'l2arc' or 'ram' (see cachemode)."""
         return cachemode.mode(self.settings.get(), self.l2arc_status())
-
-    def resolve_setting(self, sid: str, value: str) -> str:
-        """The value a mode-dependent setting really uses right now (Default, or a fallback)."""
-        return cachemode.resolve(sid, value, self.cache_mode(), self.fallbacks)
 
     # ------------------------------------------------------------------- RAM
     def ram_budget(self) -> dict:
@@ -913,7 +939,7 @@ class App:
                                 else M("started ({why})", why=why) if why else M("started"))
             self.scan_library()
             if self.scan_error:
-                self.activity.event("warm-up", M("stopped: couldn't read libraries: {why}", why=self.scan_error), "warn")
+                self.activity.event("warm-up", M("stopped: couldn’t read libraries: {why}", why=self.scan_error), "warn")
                 return
             self.probe_zfs()
             s = self.settings.get()
@@ -1035,9 +1061,11 @@ class App:
     def library_view(self, key: str, offset: int = 0, limit: int = 100, q: str = "") -> dict:
         """A library's files for the Library Health page, by title: each with its layout (as last read;
         None until the library is surveyed) and what caching takes from it."""
+        from . import filechecks
         from .filemap import block_map, cache_plan
         from .warmup import library_seconds
         files = self._health_files(key)
+        lrec = checks.library_record(self, key)
         if q:
             ql = q.lower()
             files = [f for f in files if ql in (getattr(f, "title", "") or "").lower() or ql in os.path.basename(f.path).lower()]
@@ -1053,35 +1081,152 @@ class App:
                 st, m = None, None
             kind = getattr(f, "kind", "movie")
             secs = library_seconds(w, key, kind if kind in ("movie", "tv", "audio") else "movie")
-            rec = (m or {}).get("blksize") or record  # the blocks the file is really stored in
+            rec = file_block(m, f.size, record)  # the blocks the file is really stored in
             plan = cache_plan(m, f.size, f.kbps, secs, rec, kind)
+            fc = filechecks.for_file(self, f, path, m, key, lrec)
             rows.append({"file": path, "label": getattr(f, "title", "") or os.path.basename(path), "poster": getattr(f, "poster", ""),
+                         "checks": fc, "health": filechecks.worst(fc),
                          "size": f.size, "kbps": f.kbps, "kind": kind, "missing": st is None, "read": bool(m),
-                         "saved": max(0, f.size - m["disk"]) if m and m.get("disk") is not None else None,
+                         "saved": f.size - m["disk"] if m and m.get("disk") is not None else None,
                          "plan": plan, "blocks": block_map(m, f.size, plan, rec)})
         return {"library": key, "total": len(files), "surveyed": self.file_maps.current(paths), "record": record,
-                "offset": offset, "files": rows}
+                "offset": offset, "files": rows, "summary": self._health_summary(key, lrec)}
+
+    def _health_summary(self, key: str, lrec: dict) -> dict:
+        """Every inspected file of the library through its checks (filechecks.summarize), kept a little
+        while: the page asks every few seconds."""
+        from . import filechecks, projection
+        memo = self.__dict__.setdefault("_summaries", {})
+        files = self._health_files(key)
+        sig = (len(files), len(self.file_maps.files), self.settings.rev)  # (a change of settings: worked out again)
+        got = memo.get(key)
+        if got and got[0] == sig and time.time() - got[1] < 30:
+            return got[2]
+        from .filemap import MIX_KEYS
+        results = []
+        mix = dict.fromkeys(MIX_KEYS, 0)
+        mix["files"] = 0
+        # the optimized files inspected before they were: what caching kept of them then, and now
+        was = {"files": 0, "before": dict.fromkeys(MIX_KEYS, 0), "now": dict.fromkeys(MIX_KEYS, 0)}
+        posters: list = []  # Plex's posters whose sizes aren't known yet
+        sv = dict.fromkeys(("all", "proj_now", "proj_after", "was_before", "was_now"))
+        # the files the optimizer would rewrite: what caching keeps of them now, and would after (projection.py)
+        proj = {"files": 0, "now": dict.fromkeys(MIX_KEYS + ("blocks",), 0), "after": dict.fromkeys(MIX_KEYS + ("blocks",), 0),
+                "removed": {}, "removed_disk": 0}
+        for f in files:
+            path = self.map_path(f.path)
+            try:
+                m = self.file_maps.get(path, os.stat(path))
+            except OSError:
+                continue
+            ctx = filechecks.context(self, path, m, key, lrec)
+            results.append(filechecks.check_file(self, f, path, m, lrec, *ctx))
+            got = (m or {}).get("mix")
+            if not got:
+                continue
+            pr = self._projection(f, m, lrec, ctx, missing=posters)
+            # the charts' rows (projection.view): every file now; the ones still to optimize, now and
+            # optimized; the optimized ones, before and now
+            t = projection.tail_video(m)
+            kinds = {k: v[0] for k, v in (got.get("kinds") or {}).items()}
+            sv["all"] = projection.add_view(sv["all"], projection.view(got, kinds, t))
+            if pr:
+                sv["proj_now"] = projection.add_view(sv["proj_now"], projection.view(got, kinds, t, pr["removed"], pr["removed_disk"]))
+                sv["proj_after"] = projection.add_view(sv["proj_after"], projection.view(pr["mix"], pr["kinds"], pr["mix"]["video_tail"],
+                                                                                        pr["removed"], pr["removed_disk"], gone=True))
+            if pr:
+                proj["files"] += 1
+                for k in MIX_KEYS + ("blocks",):
+                    proj["now"][k] += got.get(k, 0)
+                    proj["after"][k] += pr["mix"][k]
+                for k, n in pr["removed"].items():
+                    proj["removed"][k] = proj["removed"].get(k, 0) + n
+                proj["removed_disk"] += pr["removed_disk"]
+            mix["files"] += 1
+            for k in MIX_KEYS:
+                mix[k] += got[k]
+            before = self.file_maps.before(path)
+            if before:
+                sv["was_before"] = projection.add_view(sv["was_before"], projection.view(
+                    before, {k: v[0] for k, v in (before.get("kinds") or {}).items()}, None))
+                sv["was_now"] = projection.add_view(sv["was_now"], projection.view(got, kinds, t))
+                was["files"] += 1
+                for k in MIX_KEYS:
+                    was["before"][k] += before.get(k, 0)
+                    was["now"][k] += got[k]
+        if posters:
+            self.optimizing.poster_sizes_soon(posters)  # (learnt in the background: the estimate then has them)
+        out = filechecks.summarize(results)
+        out["mix"] = mix if mix["files"] else None
+        out["optimized"] = was if was["files"] else None
+        out["projected"] = proj if proj["files"] else None
+        out["views"] = {"all": sv["all"], "projected": {"now": sv["proj_now"], "after": sv["proj_after"]} if sv["proj_now"] else None,
+                        "optimized": {"before": sv["was_before"], "now": sv["was_now"]} if sv["was_now"] else None}
+        memo[key] = (sig, time.time(), out)
+        return out
+
+    def _projection(self, f, m: dict | None, lrec: dict, ctx: tuple, fetch: bool = False, missing: list | None = None) -> dict | None:
+        """What optimizing would make of the file (projection.project), if the optimizer would
+        rewrite it: an MKV, its library set to optimize them, not optimized by this version yet."""
+        from . import projection
+        from .optimize import compare as version_of
+        from .optimize.optimizer import strips_tags
+        opts, info, _ = ctx
+        if not m or m.get("format") != "mkv" or not opts.get("mkv") or info is None:
+            return None
+        ours = info.get("ours") or {}
+        if version_of(ours.get("PLEXCACHE_OPTIMIZER")) == "same" and not info.get("problems") and not strips_tags(opts["tags"], info):
+            return None  # done already: nothing to gain
+        poster = getattr(f, "poster", "")
+        images = self.optimizing.images_mode(opts["images"], poster, getattr(f, "matched", None), ours)
+        record = (lrec.get("rs") if opts.get("sync") else None) or (m.get("mix") or {}).get("record")
+        cover = None
+        if images == "plex":  # (Plex's poster in place of its cover art: its size, as Plex has it)
+            cover = self.optimizing.poster_size(poster, fetch=fetch)
+            if cover is None and missing is not None:
+                missing.append(poster)
+        return projection.project(m, record, images, strips_tags(opts["tags"], info), cover)
 
     def file_view(self, path: str) -> dict | None:
         """One file in full for the Library Health page: its layout (read now if it changed), tracks,
         attachments, and what caching takes from it. None if it isn't a library file."""
+        from . import filemap
         from .filemap import block_map, cache_plan
         from .warmup import library_seconds
         f = self._library_file(path)
         if f is None:
             return None
+        from . import filechecks
         m = self.file_maps.read(path)
         self.file_maps.save()
         key, kind = str(f.library_key), getattr(f, "kind", "movie")
         record = self.record_for(key)
-        rec = m.get("blksize") or record  # the blocks the file is really stored in
+        lrec = checks.library_record(self, key)
+        ctx = filechecks.context(self, path, m, key, lrec)
+        from . import projection
+        pr = self._projection(f, m, lrec, ctx, fetch=True)
+        rec = file_block(m, f.size, record)  # the blocks the file is really stored in
         secs = library_seconds(self.settings.get()["warmup"], key, kind if kind in ("movie", "tv", "audio") else "movie")
         plan = cache_plan(m, f.size, f.kbps, secs, rec, kind)
         return {"file": path, "label": getattr(f, "title", "") or os.path.basename(path), "poster": getattr(f, "poster", ""),
-                "library": key, "size": f.size, "kbps": f.kbps, "kind": kind, "tracks": m.get("tracks") or [],
-                "format": m.get("format"), "disk": m.get("disk"), "saved": max(0, f.size - m["disk"]) if m.get("disk") is not None else None,
+                "library": key, "size": f.size, "kbps": f.kbps, "kind": kind,
+                "tracks": [dict(t, codec_name=filemap.codec_name(t.get("codec"))) for t in m.get("tracks") or []],
+                "format": m.get("format"), "disk": m.get("disk"), "saved": f.size - m["disk"] if m.get("disk") is not None else None,
                 "video_start": m.get("video_start"), "video_end": m.get("video_end"), "record": rec, "dataset_record": record,
-                "plan": plan, "blocks": block_map(m, f.size, plan, rec), "error": m.get("error")}
+                "plan": plan, "blocks": block_map(m, f.size, plan, rec), "error": m.get("error"),
+                "checks": filechecks.check_file(self, f, path, m, lrec, *ctx),
+                "attachments": m.get("attachments") or [], "optimized": self._optimized_version(path),
+                "mix": m.get("mix"), "before": self.file_maps.before(path), "projected": pr,
+                "views": projection.views(m, pr, self.file_maps.before(path)) if m.get("mix") else None}
+
+    def _optimized_version(self, path: str) -> str | None:
+        """The optimizer version that wrote this MKV (its tag), or None."""
+        if not path.lower().endswith((".mkv", ".mk3d", ".mka", ".mks")):
+            return None
+        try:
+            return (self.optimizing._mkv_info(path, os.stat(path)).get("ours") or {}).get("PLEXCACHE_OPTIMIZER")
+        except Exception:  # noqa: BLE001 — unreadable tags: shown as not optimized
+            return None
 
     def _library_file(self, path: str):
         return next((x for x in list(self.files) if self.map_path(x.path) == path), None)
@@ -1127,10 +1272,11 @@ class App:
 
     def _save_json(self, name: str, data) -> None:
         path = os.path.join(self.config_dir, name)
+        tmp = f"{path}.{threading.get_ident()}.tmp"  # each thread its own: two saves at once can't mix
         try:
-            with open(path + ".tmp", "w", encoding="utf-8") as fh:
+            with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh)
-            os.replace(path + ".tmp", path)
+            os.replace(tmp, path)
         except OSError as e:
             log.warning("couldn't save %s: %s", name, e)
 
@@ -1261,8 +1407,15 @@ class App:
             # The optimizer: per library how many files are optimized, the job, and the service itself
             "optimizer": dict(self._optimizer_state(), service=self.optimizing.client.status()),
             "migration": dict(self.migration.snapshot(), candidates=self.migration.candidates()),
-            "job": self.jobs.snapshot(),  # the file job running now (or the last one): one card for every kind
+            "conversions": self.conversions.snapshot(),
+            "plex2": self.other.snapshot(),
+            "job": self.jobs.snapshot(),
+            "inspect": self.inspector.snapshot(),  # the file job running now (or the last one): one card for every kind
             "queue": self.jobs.queued(),  # file work waiting its turn
+            "queue_hold": self.jobs.hold_reason(),
+            "settings_rev": self.settings.rev,
+            # each library's optimizer choices and the converted kinds, by default: for their ↺ buttons
+            "optimizer_defaults": {"library": dict(OPT_DEFAULTS), "convert_types": dict(CONVERT_TYPES)},  # (the page works out again what depends on the settings)  # why it waits beyond its turn (a folder mid-switch)
             "retries": self.optimizing.retrying(),  # failed files to try again, after the file in hand
             "playback": {"sessions": self.monitor.snapshot(), "error": self.monitor.last_error, "last_poll": self.monitor.last_poll},
             "activity": self.activity.snapshot(),

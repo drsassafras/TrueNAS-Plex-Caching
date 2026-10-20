@@ -83,12 +83,25 @@ def run(name: str, *args: str, timeout: float | None = None, binary: bool = Fals
 
 def _watched(cmd: list[str], on_stdout: bool, lines, timeout: float | None) -> tuple:
     """Run ``cmd``, passing each line of its progress stream to ``lines`` as it comes; (exit code or
-    None when it took too long, stdout, stderr). The other stream is read alongside (no deadlock)."""
+    None when it took too long, stdout, stderr). The other stream is read alongside (no deadlock).
+    The time limit counts from the start, so a tool that hangs without a word is stopped too."""
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
     watched, other = (p.stdout, p.stderr) if on_stdout else (p.stderr, p.stdout)
     got: dict[str, bytes] = {}
     reader = threading.Thread(target=lambda: got.update(other=other.read()), daemon=True)
     reader.start()
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
+        try:
+            p.kill()  # (its output then ends, and so does the reading below)
+        except OSError:
+            pass
+    timer = threading.Timer(timeout, expire) if timeout else None
+    if timer:
+        timer.daemon = True
+        timer.start()
     seen = []
     for raw in iter(watched.readline, b""):
         seen.append(raw)
@@ -96,12 +109,12 @@ def _watched(cmd: list[str], on_stdout: bool, lines, timeout: float | None) -> t
             lines(raw.decode("utf-8", "replace").strip())
         except Exception:  # noqa: BLE001 — progress is only shown: never let it stop the tool
             pass
-    try:
-        code = p.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        p.kill()
-        p.wait()
-        code = None
+    p.wait()
+    if timer:
+        timer.cancel()
+    code = None if expired.is_set() else p.returncode
     reader.join()
+    p.stdout.close()
+    p.stderr.close()
     mine = b"".join(seen)
     return (code, mine, got.get("other", b"")) if on_stdout else (code, got.get("other", b""), mine)

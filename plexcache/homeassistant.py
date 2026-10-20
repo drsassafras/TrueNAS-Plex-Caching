@@ -244,8 +244,6 @@ def build_state(app, period: str = "week", lang: str = "en") -> dict:
         "nextepisode_ram_percent": s["nextepisode"]["ram_percent"],
         "warmup_pacing_percent": s["warmup"]["pacing_percent"],
         "warmup_pacing_auto": "ON" if s["warmup"]["pacing_auto"] else "OFF",
-        # The page shows the share-of-disk-time slider only when automatic pacing is off (or can't work)
-        "warmup_pacing_manual": not s["warmup"]["pacing_auto"] or not app.l2arc_rate(),
         "ram_reserve_gb": s["general"]["ram_reserve_gb"],
         "poll_seconds": POLL.get(str(s["general"]["poll_seconds"]),
                                  M("{n} seconds", one="{n} second", n=s["general"]["poll_seconds"])),
@@ -253,6 +251,7 @@ def build_state(app, period: str = "week", lang: str = "en") -> dict:
         "libraries": {},
         "update": update_info(app, lang),
     }
+    out["available"] = control_availability(app, s, wu)
     for lib in st["library"]["libraries"]:
         kind = prefetch.library_kind(lib)
         if kind and not lib.get("excluded"):
@@ -286,15 +285,15 @@ DESCRIPTIONS = {
     "plex_connected": M("On when Plex Cache can reach your Plex server with a working sign-in."),
     "truenas_connected": M("On when Plex Cache can reach the TrueNAS API with its (read-only) API key."),
     "checking": M("On while the health checks are running."),
-    "benchmarking": M("On while the disk benchmark is measuring each dataset's uncached read speed."),
-    "version": M("The version of Plex Cache that's running."),
+    "benchmarking": M("On while the disk benchmark is measuring each dataset’s uncached read speed."),
+    "version": M("The version of Plex Cache that’s running."),
     "update": M("Whether a newer Plex Cache is on GitHub (checked every 6 hours, if switched on in System). Update the app in TrueNAS."),
     # Activity
-    "report_verdict": M("The Metrics page's verdict for the chosen period (System → MQTT): what could be better, or that all went well."),
+    "report_verdict": M("The Metrics page’s verdict for the chosen period (System → MQTT): what could be better, or that all went well."),
     "report_streams": M("Streams played in the report period."),
     "skips": M("Times someone jumped more than 30 seconds within a title, in the report period."),
     "skips_cached": M("Skips that landed on a part Now Playing Cache had already loaded, so they played from cache."),
-    "warmup_pacing_auto": M("L2ARC pacing: on, warm-up and Prefetch's L2ARC-only reads go just under how fast ZFS copies to the SSD "
+    "warmup_pacing_auto": M("L2ARC pacing: on, warm-up and Prefetch’s L2ARC-only reads go just under how fast ZFS copies to the SSD "
                             "(l2arc_write_max). Off, they use the share of disk time in L2ARC pacing."),
     "skips_cached_pct": M("Share of skips expected to have played from cache: each counted by how likely that part was still "
                           "cached, from how long ago it was cached and how long data lasts in its library. Higher is better."),
@@ -304,26 +303,26 @@ DESCRIPTIONS = {
                           "before the first one that had to come from the disks."),
     "suggested_cooldown": M("The fully cached age over the last 7 days, every library: reading cached data again sooner "
                             "would be for nothing. Automatic cooldowns use it, per library."),
-    "cooldown_in_use": M("The lead-in cooldown in use now: Automatic's, or the one set in the web UI."),
-    "library_cached_24h": M("Share of the library's files this app cached within the last 24 hours (in RAM or on the SSD), "
+    "cooldown_in_use": M("The lead-in cooldown in use now: Automatic’s, or the one set in the web UI."),
+    "library_cached_24h": M("Share of the library’s files this app cached within the last 24 hours (in RAM or on the SSD), "
                             "every library together."),
-    "library_cached_7d": M("Share of the library's files this app cached within the last 7 days (in RAM or on the SSD), "
+    "library_cached_7d": M("Share of the library’s files this app cached within the last 7 days (in RAM or on the SSD), "
                            "every library together."),
-    "library_cached_30d": M("Share of the library's files this app cached within the last 30 days (in RAM or on the SSD), "
+    "library_cached_30d": M("Share of the library’s files this app cached within the last 30 days (in RAM or on the SSD), "
                             "every library together."),
     "still_cached_pct": M("About 30 minutes after a read, how much of it was still in RAM. Low means other work pushes it out too soon."),
     "preloaded": M("How much data Now Playing Cache and Prefetch read into RAM for viewers in the report period (not counting reads on their way to the SSD)."),
     "preloaded_already_cached_pct": M("Share of what they read that was already cached (it read much faster than the disks can)."),
-    "disk_busy_avg": M("How busy the media pool's disks were, on average, while people watched."),
-    "disk_busy_peak": M("The busiest the media pool's disks got while people watched. Near 100% leaves little room for skips that miss the cache."),
-    "attention": M("How many items the Metrics page's Needs attention list has for the report period."),
+    "disk_busy_avg": M("How busy the media pool’s disks were, on average, while people watched."),
+    "disk_busy_peak": M("The busiest the media pool’s disks got while people watched. Near 100% leaves little room for skips that miss the cache."),
+    "attention": M("How many items the Metrics page’s Needs Attention list has for the report period."),
     "total_streams": M("Streams played since Plex Cache started counting. Only goes up, for long-term statistics."),
     "total_skips": M("Skips since Plex Cache started counting. Only goes up."),
     "total_skips_cached": M("Skips that played from cache, since Plex Cache started counting. Only goes up."),
     "total_preloaded": M("Data read by Now Playing Cache and Prefetch, since Plex Cache started counting. Only goes up."),
     # Warm-up
     "warmup_state": M("Warm-up (fills the Lead-in Cache on a schedule): off, idle (waiting for its next run), preparing, running or paused."),
-    "warmup_running": M("On while a warm-up run is going (including while it's paused)."),
+    "warmup_running": M("On while a warm-up run is going (including while it’s paused)."),
     "warmup_progress": M("How far through its files the current warm-up run is."),
     "warmup_pause_reason": M("Why warm-up is paused (a player buffering, Now Playing Cache or Prefetch reading, a scrub or busy disks — SSD Cache → L2ARC Cache Settings). It carries on afterwards."),
     "warmup_next_run": M("When the next scheduled warm-up starts."),
@@ -340,22 +339,22 @@ DESCRIPTIONS = {
     "nextepisode_ram_used": M("RAM Prefetch is using for the streams playing now."),
     "arc_size": M("How much RAM the ZFS cache (ARC) holds right now, for everything on the NAS."),
     "l2arc_cached": M("How much data the SSD cache (L2ARC) holds right now."),
-    "nowplaying_ram_limit": M("The most RAM Now Playing Cache may use, shared by all streams: its share of the ZFS cache that's available, after the reserve."),
+    "nowplaying_ram_limit": M("The most RAM Now Playing Cache may use, shared by all streams: its share of the ZFS cache that’s available, after the reserve."),
     "nextepisode_ram_limit": M("The most RAM Prefetch may use, shared by all streams."),
     "zfs_cache_available": M("How much RAM the ZFS cache can use right now (up to its maximum). The two RAM limits are shares of this, after the reserve."),
     "l2arc_size": M("Total size of the SSD cache (L2ARC) devices on the media pools."),
-    "arc_hit_ratio": M("Share of all reads on the NAS answered from RAM since it started (ZFS's own count, not just Plex)."),
+    "arc_hit_ratio": M("Share of all reads on the NAS answered from RAM since it started (ZFS’s own count, not just Plex)."),
     # Controls
     "nowplaying_enabled": M("Now Playing Cache: once a stream is playing, read the file into RAM ahead of the viewer, so skips play from cache."),
     "run_warmup": M("Start a warm-up now, at full speed (it ignores the busy-disks pause and the cooldown)."),
     "stop_warmup": M("Stop the current warm-up. The next scheduled run starts as usual."),
     "recheck": M("Run all the health checks again."),
-    "benchmark": M("Measure each dataset's uncached read speed. Used to tell cache hits from disk reads, and to time Now Playing Cache."),
-    "nowplaying_ram_percent": M("Now Playing Cache's RAM limit, as a share of the ZFS cache available after the reserve. Shared by all streams."),
-    "nextepisode_ram_percent": M("Prefetch's RAM limit, as a share of the ZFS cache available after the reserve. The two limits together can't pass 100%."),
-    "warmup_pacing_percent": M("Share of disk time L2ARC-only caching (warm-up, and Prefetch's L2ARC-only steps) may use, when automatic L2ARC pacing is off in the web UI. Lower is gentler on other work; Run now ignores it."),
-    "ram_reserve_gb": M("ZFS cache kept for the rest of the NAS (TrueNAS, other apps, ZFS itself). The RAM limits are shares of what's left."),
-    "poll_seconds": M("How often Plex Cache asks Plex what's playing. 5 seconds suits most people; 3 reacts sooner to skips and short tracks."),
+    "benchmark": M("Measure each dataset’s uncached read speed. Used to tell cache hits from disk reads, and to time Now Playing Cache."),
+    "nowplaying_ram_percent": M("Now Playing Cache’s RAM limit, as a share of the ZFS cache available after the reserve. Shared by all streams."),
+    "nextepisode_ram_percent": M("Prefetch’s RAM limit, as a share of the ZFS cache available after the reserve. The two limits together can’t pass 100%."),
+    "warmup_pacing_percent": M("Share of disk time L2ARC-only caching (warm-up, and Prefetch’s L2ARC-only steps) may use, when automatic L2ARC pacing is off in the web UI. Lower is gentler on other work; “Run warm-up now” ignores it."),
+    "ram_reserve_gb": M("ZFS cache kept for the rest of the NAS (TrueNAS, other apps, ZFS itself). The RAM limits are shares of what’s left."),
+    "poll_seconds": M("How often Plex Cache asks Plex what’s playing. 5 seconds suits most people; 3 reacts sooner to skips and short tracks."),
 }
 
 
@@ -364,9 +363,9 @@ def describe(oid: str):
     if oid in DESCRIPTIONS:
         return DESCRIPTIONS[oid]
     if oid.startswith("dataset_") and oid.endswith("_record_size"):
-        return M("This dataset's ZFS record size, and whether its files match it. 1M suits movies and TV; 512K or 1M suits audio.")
+        return M("This dataset’s ZFS record size, and whether its files match it. The size that suits a library depends on its bitrate: Health → Libraries shows the one recommended for each.")
     if oid.startswith("dataset_") and oid.endswith("_cache"):
-        return M("This dataset's cache settings. primarycache=all is needed for any caching; secondarycache=all lets data go on to "
+        return M("This dataset’s cache settings. primarycache=all is needed for any caching; secondarycache=all lets data go on to "
                  "the SSD cache, which warm-up needs.")
     if oid.startswith("library_") and oid.endswith("_prefetch_start"):
         return M("What Prefetch puts in the Lead-in Cache once Now Playing Cache finishes: from the next episode, track or chapter "
@@ -375,6 +374,53 @@ def describe(oid: str):
         return M("What Prefetch puts in the Whole File Cache near the end (80% or 90%, set in the web UI): nothing, the next "
                  "episode, track or chapter, the rest of the season, album or book, or all of it. Default follows the caching mode.")
     return ""
+
+
+def control_availability(app, s: dict, wu: dict) -> dict:
+    """For each control in AVAILABLE_WHEN: does it apply right now? A control that doesn't shows as
+    unavailable in Home Assistant (greyed out, can't be changed) and its commands are refused."""
+    mode = app.cache_mode()  # "l2arc": an L2ARC in use; "ram": RAM only
+    nowplaying_ok = app.feature_available("nowplaying")[0]
+    # Prefetch puts something in RAM: whole files near the end, and without an L2ARC its lead-ins too
+    prefetch_ram = False
+    for lib in getattr(app, "libraries", []) or []:
+        kind = prefetch.library_kind(lib)
+        if not kind or lib.get("excluded"):
+            continue
+        mine = prefetch.library_settings(s["nextepisode"], lib["key"])
+        end = prefetch.resolve(mode, lib["key"], "end", mine["end"], kind)
+        start = prefetch.resolve(mode, lib["key"], "start", mine["start"], kind)
+        if end != "none" or (mode == "ram" and start not in ("off", "none")):
+            prefetch_ram = True
+            break
+    l2arc = mode == "l2arc"
+    manual = not s["warmup"]["pacing_auto"] or not app.l2arc_rate()
+    out = {
+        "nowplaying_enabled": nowplaying_ok,
+        "nowplaying_ram_percent": nowplaying_ok and s["nowplaying"]["enabled"],
+        "nextepisode_ram_percent": prefetch_ram,
+        "warmup_pacing_auto": l2arc,
+        "warmup_pacing_percent": l2arc and manual,
+        "run_warmup": l2arc and not wu.get("running"),
+        "stop_warmup": bool(wu.get("running")),
+    }
+    assert set(out) == set(AVAILABLE_WHEN)
+    return out
+
+
+# Controls that only apply in some conditions, and when — as the web UI shows them (dimmed, hidden
+# or marked "not in use"). Every other control applies always (ALWAYS_AVAILABLE); a test makes sure
+# each control is in one or the other, so a new one can't be left out.
+AVAILABLE_WHEN = {
+    "nowplaying_enabled": M("only when Now Playing Cache can run on this NAS"),
+    "nowplaying_ram_percent": M("only while Now Playing Cache is on"),
+    "nextepisode_ram_percent": M("only while Prefetch keeps something in RAM: whole files, or lead-ins without an L2ARC"),
+    "warmup_pacing_auto": M("only with an L2ARC"),
+    "warmup_pacing_percent": M("only with an L2ARC, while automatic pacing is off"),
+    "run_warmup": M("only with an L2ARC, while warm-up isn’t running"),
+    "stop_warmup": M("only while warm-up is running"),
+}
+ALWAYS_AVAILABLE = {"ram_reserve_gb", "poll_seconds", "recheck", "benchmark"}  # and each library's Prefetch choices
 
 
 # Each control, and the setting it changes — the same settings the web UI offers, shown under
@@ -475,7 +521,7 @@ def entities(state: dict, allow_control: bool, lang: str = "en") -> list[tuple[s
     sensor("activity", "skips", M("Skips ({period})", period=period), "skips", sc="measurement", icon="mdi:skip-forward-outline")
     sensor("activity", "skips_cached", M("Skips from cache ({period})", period=period), "skips_cached", sc="measurement", icon="mdi:skip-forward")
     sensor("activity", "skips_cached_pct", M("Skips served from cache ({period})", period=period), "skips_cached_pct", unit="%", sc="measurement", icon="mdi:percent")
-    sensor("activity", "lead_in_served_pct", M("Media served lead-in cached ({period})", period=period), "lead_in_served_pct", unit="%", sc="measurement", icon="mdi:play-circle-outline")
+    sensor("activity", "lead_in_served_pct", M("Plays started from cache ({period})", period=period), "lead_in_served_pct", unit="%", sc="measurement", icon="mdi:play-circle-outline")
     sensor("activity", "fully_cached_age", M("Fully cached age ({period})", period=period), "fully_cached_age", unit="min", dc="duration", sc="measurement", icon="mdi:timer-check-outline")
     sensor("activity", "suggested_cooldown", M("Suggested cooldown"), "suggested_cooldown", unit="min", dc="duration", sc="measurement", icon="mdi:timer-cog-outline")
     sensor("activity", "cooldown_in_use", M("Cooldown in use"), "cooldown_in_use", unit="min", dc="duration", sc="measurement", icon="mdi:timer-outline", cat=D)
@@ -537,14 +583,13 @@ def entities(state: dict, allow_control: bool, lang: str = "en") -> list[tuple[s
         # Boxes, not sliders: Home Assistant's device page shows a slider without its value or unit.
         numbers = [("nowplaying_ram_percent", M("Now Playing Cache RAM"), 5, 90, 5, "%"),
                    ("nextepisode_ram_percent", M("Prefetch RAM"), 5, 90, 5, "%"),
-                   ("ram_reserve_gb", M("Reserve ZFS Cache"), 0, 4096, 1, "GB")]
-        if state.get("warmup_pacing_manual", True):  # (as on the page: only while automatic pacing is off)
-            numbers.insert(2, ("warmup_pacing_percent", M("L2ARC pacing"), 5, 100, 5, "%"))
+                   ("ram_reserve_gb", M("Reserve ZFS cache"), 0, 4096, 1, "GB")]
+        numbers.insert(2, ("warmup_pacing_percent", M("L2ARC pacing"), 5, 100, 5, "%"))  # (unavailable while automatic)
         for oid, name, lo, hi, step, unit in numbers:
             E.append(("number", oid, {"_device": "main", "name": name, "value_template": "{{ value_json.%s }}" % oid,
                                       "min": lo, "max": hi, "step": step, "unit_of_measurement": unit,
                                       "mode": "box", "entity_category": "config", "icon": "mdi:tune-variant"}))
-        E.append(("select", "poll_seconds", {"_device": "main", "name": M("Check what's playing every"),
+        E.append(("select", "poll_seconds", {"_device": "main", "name": M("Check what’s playing every"),
                                              "value_template": "{{ value_json.poll_seconds }}",
                                              "options": list(POLL.values()), "entity_category": "config"}))
         for key, lib in (state.get("libraries") or {}).items():
@@ -669,7 +714,7 @@ class HomeAssistantBridge:
                        tls=cfg["tls"], verify_tls=cfg["verify_tls"], will=(avail, "offline", True))
         self.status.update(state="connecting", error=None, steps=self._steps("testing"))
         if not cfg["tls"]:
-            self._step("tls", "off", M("Not used — the connection isn't encrypted."))
+            self._step("tls", "off", M("Not used — the connection isn’t encrypted."))
         c.open()
         self._step("broker", "ok", f"{cfg['host']}:{cfg['port']}")
         if cfg["tls"]:
@@ -700,8 +745,7 @@ class HomeAssistantBridge:
             if time.monotonic() >= next_pub or self.wake.is_set():
                 self.wake.clear()
                 state = build_state(self.app, cfg["report_period"], cfg.get("language", "en"))
-                sig = json.dumps([sorted(state["datasets"]), sorted(state["libraries"]), state["report_period"],
-                                  self._web_url(), state["warmup_pacing_manual"]])
+                sig = json.dumps([sorted(state["datasets"]), sorted(state["libraries"]), state["report_period"], self._web_url()])
                 if cfg["discovery"] and sig != discovery_sig:
                     self._publish_discovery(c, cfg, node, state)
                     discovery_sig = sig
@@ -764,8 +808,14 @@ class HomeAssistantBridge:
             if self.stop.is_set() or self.retry_now.is_set():
                 return  # shutting down or reconnecting: the rest is sent next time
             conf = dict(conf)
-            conf = dict(conf, unique_id=f"{node}_{oid}", availability_topic=avail, device=devices[conf.pop("_device")],
-                        origin=origin)
+            conf = dict(conf, unique_id=f"{node}_{oid}", device=devices[conf.pop("_device")], origin=origin)
+            if oid in AVAILABLE_WHEN:
+                # available while Plex Cache is online AND the control applies now (from the state message)
+                conf["availability"] = [{"topic": avail},
+                                        {"topic": state_topic, "value_template": "{{ 'online' if value_json.available.%s else 'offline' }}" % oid}]
+                conf["availability_mode"] = "all"
+            else:
+                conf["availability_topic"] = avail
             # The entity ID Home Assistant suggests (object_id no longer sets it: default_entity_id does)
             conf["default_entity_id"] = f"{component}.plex_cache_{oid}"
             if component == "update":
@@ -814,6 +864,10 @@ class HomeAssistantBridge:
         app = self.app
         lang = app.settings.section("mqtt").get("language", "en")
         try:
+            if name in AVAILABLE_WHEN:
+                state = build_state(app, "week", lang)
+                if not state["available"].get(name):
+                    raise SettingsError(M("it applies {when}", when=AVAILABLE_WHEN[name]))
             if name == "warmup_pacing_auto":
                 if value.upper() not in ("ON", "OFF", "TRUE", "FALSE", "1", "0"):
                     raise SettingsError(M("send ON or OFF"))
@@ -857,4 +911,4 @@ class HomeAssistantBridge:
             app.activity.event("mqtt", M("MQTT command: {name} → {value}", name=name, value=value))
         except (SettingsError, ValueError, StopIteration) as e:
             why = msg(e) if str(e) else M("not a valid choice")
-            app.activity.event("mqtt", M("MQTT command: couldn't do {name} ({value}): {why}", name=name, value=value, why=why), "warn")
+            app.activity.event("mqtt", M("MQTT command: couldn’t do {name} ({value}): {why}", name=name, value=value, why=why), "warn")

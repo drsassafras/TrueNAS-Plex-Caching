@@ -18,12 +18,18 @@ import threading
 import uuid
 
 from .i18n import CODES, M
+from .optimize.convert import DEFAULT_TYPES as CONVERT_DEFAULTS
 
 SECRET_MASK = "__unchanged__"
 SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"), ("mqtt", "password"))
 
 DEFAULTS: dict = {
     "plex": {"url": "", "token": ""},
+    # A second Plex server with the same files (another site, synced): watched so a converted file's
+    # original goes only once both have its MKV. "account_token": from signing in (lists the
+    # account's servers); "token": the chosen server's own; "libraries": this server's library key ->
+    # the other's ("" for none; a library not set is paired with the one of the same name and kind).
+    "plex2": {"url": "", "token": "", "account_token": "", "name": "", "machine_id": "", "libraries": {}},
     "truenas": {"url": "", "api_key": "", "verify_tls": False},
     "general": {
         "poll_seconds": 5,
@@ -46,6 +52,9 @@ DEFAULTS: dict = {
         "l2arc_cooldown_whole_minutes": 360,
         # "I won't use an L2ARC" (SSD Cache page): RAM-only mode, and no Health warning about a missing L2ARC.
         "no_l2arc": False,
+        # Only answer devices on the local network (and VPNs into it): nothing from the internet, signed
+        # in or not (server.py, local_address()). Behind a reverse proxy, the proxy's address is what counts.
+        "lan_only": True,
         "debug": False,  # unused: logging detail comes from PLEXCACHE_DEBUG (kept so older exports still import)
         "excluded_libraries": [],
         # Optional rewrites when Plex sees media at a different path than
@@ -103,9 +112,14 @@ DEFAULTS: dict = {
     # Per library (Plex library key -> choices; see optimizing.py): {"sync": true — write files again
     # so they take the dataset's record size and compression, "mkv": false — lay MKV files out for
     # caching, "images": "unmatched" | "remove" | "compress" | "plex" — what an optimized MKV's cover
-    # art becomes; "unmatched": Plex's poster only for items Plex hasn't matched}.
+    # art becomes; "unmatched": Plex's poster only for items Plex hasn't matched, "tags": "keep" |
+    # "excessive" | "strip", "convert": false — convert other containers to MKV}.
+    # "convert_types": which containers are converted (optimize/convert.py TYPES), in every library
+    # that converts; "convert_hold_days": how long an original is kept once Plex has its MKV.
     "optimizer": {
         "libraries": {},
+        "convert_types": dict(CONVERT_DEFAULTS),
+        "convert_hold_days": 7,
     },
     # MQTT (off until switched on): status on <base_topic>/state, commands on <base_topic>/set/<name>.
     # With "discovery", Home Assistant (and openHAB, Domoticz...) create the entities themselves.
@@ -160,13 +174,14 @@ LIMITS = {
     ("nextepisode", "pacing_percent"): (5, 100),
     ("mqtt", "port"): (1, 65535),
     ("mqtt", "interval"): (5, 600),
+    ("optimizer", "convert_hold_days"): (0, 90),
 }
 AUTO = -1  # a cooldown worked out from what's been measured (cachelog.CacheLog.auto_cooldown)
 COOLDOWN_RAM = (AUTO, 0, 10, 30, 60, 120, 180, 240, 360, 720)                    # minutes
 COOLDOWN_L2ARC = (AUTO, 0, 10, 60, 180, 360, 720, 1440, 2880, 4320, 10080)
 CHOICES = {
     ("general", "poll_seconds"): (3, 5, 10, 30),
-    # 0 and 10 minutes: next to no cooldown, to collect re-reads for "How long cached data lasts"
+    # 0 and 10 minutes: next to no cooldown, to collect re-reads for "How Long Cached Data Lasts"
     ("general", "ram_cooldown_lead_in_minutes"): COOLDOWN_RAM,
     ("general", "ram_cooldown_whole_minutes"): COOLDOWN_RAM,
     ("general", "l2arc_cooldown_lead_in_minutes"): COOLDOWN_L2ARC,
@@ -222,7 +237,7 @@ def normalize_url(section: str, value: str) -> str:
         return ""
     if not re.match(r"^https?://", value, re.I):
         value = ("https://" if section == "truenas" else "http://") + value
-    if section == "plex" and value.lower().startswith("http://"):
+    if section in ("plex", "plex2") and value.lower().startswith("http://"):
         # (an https:// address is usually a reverse proxy on 443, so leave it alone)
         scheme, rest = value.split("://", 1)
         hostport = rest.split("/", 1)[0]
@@ -237,7 +252,7 @@ def _text(section: str, key: str, value, max_len: int = 255, spaces: bool = True
     if not isinstance(value, str):
         raise SettingsError(M("{setting} must be text", setting=f"{section}.{key}"))
     if len(value) > max_len or _CONTROL.search(value) or (not spaces and any(c.isspace() for c in value)):
-        raise SettingsError(M("{setting} isn't valid", setting=f"{section}.{key}"))
+        raise SettingsError(M("{setting} isn’t valid", setting=f"{section}.{key}"))
     return value
 
 
@@ -245,7 +260,7 @@ def _path(section: str, key: str, value) -> str:
     """A folder path: absolute, no '..' parts."""
     value = _text(section, key, value, 1024).rstrip("/") or "/"
     if not value.startswith("/") or ".." in value.split("/"):
-        raise SettingsError(M("{setting}: folder paths must start with / (and can't use ..)", setting=f"{section}.{key}"))
+        raise SettingsError(M("{setting}: folder paths must start with / (and can’t use ..)", setting=f"{section}.{key}"))
     return value
 
 
@@ -294,8 +309,15 @@ def _coerce(section: str, key: str, value, current):
         return value
     if key == "url":
         return _url(section, value)
-    if (section, key) in (("plex", "token"), ("truenas", "api_key")):
+    if (section, key) in (("plex", "token"), ("truenas", "api_key"), ("plex2", "token"), ("plex2", "account_token")):
         return _text(section, key, value, 255, spaces=False)
+    if (section, key) in (("plex2", "name"), ("plex2", "machine_id")):
+        return _text(section, key, value, 200)
+    if (section, key) == ("plex2", "libraries"):
+        if not isinstance(value, dict) or len(value) > MAX_ITEMS or any(
+                not _LIB_KEY.fullmatch(str(k)) or not (v == "" or (isinstance(v, str) and _LIB_KEY.fullmatch(v))) for k, v in value.items()):
+            raise SettingsError(M("plex2.libraries must pair this server’s library keys with the other server’s (or \"\")"))
+        return {str(k): v for k, v in value.items()}
     if (section, key) == ("mqtt", "host"):
         value = _text(section, key, value, 253).strip()
         if value and not _HOST.fullmatch(value):
@@ -328,7 +350,7 @@ def _coerce(section: str, key: str, value, current):
             if choice is None:
                 continue
             if not isinstance(choice, dict) or any(k not in ("schedule", "seconds") for k in choice):
-                raise SettingsError(M("each library's warm-up choices must be an object"))
+                raise SettingsError(M("each library’s warm-up choices must be an object"))
             if "schedule" in choice and choice["schedule"] not in WARMUP_SCHEDULES:
                 raise SettingsError(M("unknown warm-up schedule: {mode}", mode=str(choice["schedule"])))
             secs = choice.get("seconds")
@@ -352,14 +374,21 @@ def _coerce(section: str, key: str, value, current):
                 continue
             if isinstance(choice, dict) and choice.get("images") == "keep":
                 choice = dict(choice, images="compress")  # the name before the three choices
-            if (not isinstance(choice, dict) or any(k not in ("sync", "mkv", "images") for k in choice)
+            if (not isinstance(choice, dict) or any(k not in ("sync", "mkv", "images", "tags", "convert") for k in choice)
                     or choice.get("images", "unmatched") not in ("unmatched", "compress", "remove", "plex")
-                    or any(not isinstance(choice[k], bool) for k in ("sync", "mkv") if k in choice)):
-                raise SettingsError(M("each library's optimizer choices must be {\"sync\": true/false, \"mkv\": true/false, "
-                                      "\"images\": \"unmatched\", \"remove\", \"compress\" or \"plex\"}"))
+                    or choice.get("tags", "keep") not in ("keep", "excessive", "strip")
+                    or any(not isinstance(choice[k], bool) for k in ("sync", "mkv", "convert") if k in choice)):
+                raise SettingsError(M("each library’s optimizer choices must be {\"sync\": true/false, \"mkv\": true/false, "
+                                      "\"images\": \"unmatched\", \"remove\", \"compress\" or \"plex\", \"tags\": \"keep\", \"excessive\" or \"strip\", "
+                                      "\"convert\": true/false}"))
             if choice:
                 out[str(lib)] = dict(choice)
         return out
+    if (section, key) == ("optimizer", "convert_types"):
+        if not isinstance(value, dict) or any(k not in CONVERT_DEFAULTS or not isinstance(v, bool) for k, v in value.items()):
+            raise SettingsError(M("optimizer.convert_types must set each type to true or false; the types are {types}",
+                                  types=", ".join(CONVERT_DEFAULTS)))
+        return dict(CONVERT_DEFAULTS, **value)
     if key == "libraries":
         if not isinstance(value, dict) or len(value) > MAX_ITEMS:
             raise SettingsError(M("nextepisode.libraries must be an object"))
@@ -370,7 +399,7 @@ def _coerce(section: str, key: str, value, current):
             if choice is None:
                 continue  # null puts a library back to its defaults
             if not isinstance(choice, dict) or any(k not in PREFETCH_FIELDS for k in choice):
-                raise SettingsError(M("each library's prefetch choices must be an object"))
+                raise SettingsError(M("each library’s prefetch choices must be an object"))
             for k, v in choice.items():
                 if v not in PREFETCH_FIELDS[k]:
                     raise SettingsError(M("unknown prefetch choice: {mode}", mode=str(v)))
@@ -405,7 +434,7 @@ def _coerce(section: str, key: str, value, current):
                 # Plex's side is only matched as text (Plex may even run on Windows); ours must be a real path here
                 rows.append({"plex": _text(section, key, plex, 1024).rstrip("/") or "/", "local": _path(section, key, local)})
         return rows
-    raise SettingsError(M("{setting} can't be changed", setting=where))  # anything not covered above
+    raise SettingsError(M("{setting} can’t be changed", setting=where))  # anything not covered above
 
 
 class Settings:
@@ -415,6 +444,9 @@ class Settings:
         self.dir = config_dir
         self.path = os.path.join(config_dir, "settings.json")
         self._lock = threading.RLock()
+        # bumped by every change: what's worked out from the settings (Library Health's checks and
+        # estimates, kept a little while) is worked out again, never kept past a change
+        self.rev = 0
         os.makedirs(config_dir, exist_ok=True)
         self._data = self._load()
         changed = False
@@ -551,7 +583,9 @@ class Settings:
                         continue
                     new[sec][key] = _coerce(sec, key, value, DEFAULTS[sec][key])
             if new["nowplaying"]["ram_percent"] + new["nextepisode"]["ram_percent"] > 100:
-                raise SettingsError(M("Now Playing Cache and Prefetch limits together can't be more than 100%"))
+                raise SettingsError(M("Now Playing Cache and Prefetch limits together can’t be more than 100%"))
+            if new != self._data:
+                self.rev += 1
             self._data = new
             self._save()
             return copy.deepcopy(self._data)

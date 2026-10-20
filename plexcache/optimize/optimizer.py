@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import threading
 import time
 import zlib
@@ -187,7 +188,19 @@ def fingerprint_seed(path: str) -> int:
     return int.from_bytes(h.digest()[:4], "big") % 2_000_000_000 + 1
 
 
-def _global_tags(path: str, work: str, ours: dict) -> str:
+TAG_MODES = ("keep", "excessive", "strip")
+EXCESSIVE_TAGS = 256 * 1024  # tags larger than this are "excessive" (Library Health warns too)
+
+
+def strips_tags(mode: str, check: dict) -> bool:
+    """Whether a file's tags (all but ours) go, under the library's tag choice: "keep" never,
+    "strip" whenever it has any, "excessive" when they're larger than EXCESSIVE_TAGS."""
+    if not check.get("foreign_tags"):
+        return False
+    return mode == "strip" or (mode == "excessive" and (check.get("tags_size") or 0) > EXCESSIVE_TAGS)
+
+
+def _global_tags(path: str, work: str, ours: dict, strip: bool = False) -> str:
     """The file's global tags without our old ones, with ``ours`` added, as an XML file for
     mkvmerge --global-tags (with --no-global-tags, so ours are never there twice). Track,
     chapter and edition tags aren't in it: mkvmerge copies those itself."""
@@ -195,6 +208,8 @@ def _global_tags(path: str, work: str, ours: dict) -> str:
     src = os.path.join(work, "tags-in.xml")
     root = None
     try:
+        if strip:
+            raise OSError("stripped")  # (only ours, below)
         run("mkvextract", path, "tags", src)
         if os.path.getsize(src):
             root = ET.parse(src).getroot()
@@ -228,14 +243,15 @@ COVER_PREFIX = "plex sha256:"  # PLEXCACHE_COVER: the poster as downloaded from 
 
 def optimize_file(path: str, images: str = "compress", cover: bytes | None = None, verify: bool = True,
                   allow_owner_change: bool = False, force: bool = False, log=lambda text: None,
-                  progress=lambda pct: None) -> dict:
+                  progress=lambda pct: None, tags_mode: str = "keep") -> dict:
     """Optimize ``path`` in place. Returns {"result": "optimized" | "already", ...}; raises
     Skipped for files left alone on purpose, ToolError/OSError when something failed (the
     original is untouched then).
 
     ``images``: "remove" (strip every image), "compress" (keep them, losslessly compressed),
     "plex" (``cover``, Plex's poster, in their place, compressed; without one, as "keep"), or
-    "keep" (as they are). ``force``: write it again even if it's laid out right and tagged by this
+    "keep" (as they are). ``tags_mode``: "keep" the file's tags, strip them when "excessive", or
+    "strip" them (strips_tags()) — the optimizer's own are always written. ``force``: write it again even if it's laid out right and tagged by this
     optimizer version (for the dataset's record size and compression, or new cover art).
 
     The output is deterministic (mkvmerge --deterministic, seeded from the file's content): the same
@@ -253,7 +269,10 @@ def optimize_file(path: str, images: str = "compress", cover: bytes | None = Non
     tagged = (before.get("ours") or {}).get("PLEXCACHE_OPTIMIZER")
     if version_of(tagged) == "newer":
         raise Skipped(f"optimized by a newer optimizer ({tagged})")  # never downgrade
-    if before.get("optimized") and version_of(tagged) == "same" and not force:
+    if tags_mode not in TAG_MODES:
+        raise ValueError(f"tags_mode must be one of {', '.join(TAG_MODES)}")
+    strip = strips_tags(tags_mode, before)
+    if before.get("optimized") and version_of(tagged) == "same" and not force and not strip:
         return {"result": "already", "path": path, "version": tagged, "file": _identity(path),
                 "tags": before.get("ours") or {}}
     st, folder, work = _prepare(path)
@@ -293,7 +312,8 @@ def optimize_file(path: str, images: str = "compress", cover: bytes | None = Non
         zlib = [a for t in info.get("tracks") or [] if (t.get("properties") or {}).get("codec_id") in IMAGE_SUBS
                 for a in ("--compression", f"{t['id']}:zlib")]
         run("mkvmerge", "--gui-mode", "--deterministic", str(fingerprint_seed(path)), "--engage", AS_THEY_ARE, *zlib, "-o", out, "--no-attachments",
-            "--no-global-tags", "--global-tags", _global_tags(path, work, tags), path, lines=remux_line)
+            "--no-global-tags", "--global-tags", _global_tags(path, work, tags, strip), *(["--no-track-tags", "--disable-track-statistics-tags"] if strip else []),
+            path, lines=remux_line)
         remuxed(1)
         had = sum(a["image"] for a in atts)
         atts, saved, left = _images(atts, files, images, cover, work, log)
@@ -335,7 +355,7 @@ def optimize_file(path: str, images: str = "compress", cover: bytes | None = Non
                 "sha256": digest, "version": VERSION, "file": ident, "tags": tags, "verified": "passed" if verify else "skipped",
                 "fixed": before.get("problems", []), "images": images, "images_before": had,
                 "images_after": sum(a["image"] for a in order), "images_saved": saved, "images_left": left,
-                "cover": cover_hash is not None, "cover_hash": cover_hash,
+                "cover": cover_hash is not None, "cover_hash": cover_hash, "tags_stripped": strip,
                 "seconds": round(time.time() - started, 1)}
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -377,7 +397,11 @@ def resolve_conflict(copy: str, original: str, log=lambda text: None) -> dict:
 def _prepare(path: str) -> tuple[os.stat_result, str, str]:
     """Checks before writing a new copy of ``path``, and the hidden work folder next to it (so the
     swap is a rename on the same dataset). (stat, folder, work folder); raises Skipped."""
-    st = os.stat(path)
+    # The file itself, never a link to it: swapped in after the service checked the path, a link would make
+    # the optimizer copy some other file (outside the media folders) into a media folder.
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise Skipped("a link or something else, not a plain file")
     if st.st_nlink > 1:
         raise Skipped("hard-linked (a rename would split the link)")
     folder = os.path.dirname(os.path.abspath(path))

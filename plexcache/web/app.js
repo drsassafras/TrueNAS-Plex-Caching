@@ -213,8 +213,9 @@ PCI18N.ready.then(function () {
   function badge(status, text) { return '<span class="badge b-' + esc(status) + '">' + esc(text) + "</span>"; }
   // Event log categories (the server sends the English key).
   var EVENT_KINDS = { settings: N("settings"), "warm-up": N("warm-up"), "record size": N("record size"), benchmark: N("benchmark"), mqtt: N("mqtt"),
-    playback: N("playback"), "now-playing": N("now-playing"), "next-episode": N("prefetch"), nowplaying: N("now-playing"), nextepisode: N("prefetch"), update: N("update") };
-  var STATUS_TEXT = { pass: T("Pass"), warn: T("Warn"), fail: T("Fail"), info: T("Info") };
+    playback: N("playback"), "now-playing": N("now-playing"), "next-episode": N("prefetch"), nowplaying: N("now-playing"), nextepisode: N("prefetch"), update: N("update"),
+    optimizer: N("optimizer"), "library health": N("library health") };
+  var STATUS_TEXT = { pass: T("Pass"), warn: T("Warning"), fail: T("Fail"), info: T("Info") };
   var VERDICT_TEXT = { use: T("Use"), maybe: T("Maybe"), avoid: T("Unavailable") };
 
   // --------------------------------------------------------------- saving
@@ -249,7 +250,7 @@ PCI18N.ready.then(function () {
     var c = h.counts;
     var out = top(T("Health"),
       H("Checks run on startup, every 6 hours, and whenever settings change. Last run {when}.", { when: ago(h.at) }),
-      '<button class="btn pri" data-act="recheck"' + (ST.checking ? " disabled" : "") + ">" + (ST.checking ? H("Checking…") : H("Re-run all checks")) + "</button>");
+      '<button class="btn pri" data-act="recheck"' + (ST.checking ? " disabled" : "") + ">" + (ST.checking ? H("Checking…") : H("Re-run All Checks")) + "</button>");
     out += banner(h.summary, false);
     var hj = ST.job;
     if (hj && hj.running) {
@@ -276,7 +277,7 @@ PCI18N.ready.then(function () {
         });
         out += "</tbody></table></div>";
         g.table.forEach(function (r) {
-          if (r.fix) out += '<div class="fix">' + H("<strong>{library}:</strong> {fix}", { library: r.library, fix: r.fix }) + ' <a href="/system#mappings" data-nav>' + H("Open Media mappings") + "</a></div>";
+          if (r.fix) out += '<div class="fix">' + H("<strong>{library}:</strong> {fix}", { library: r.library, fix: r.fix }) + ' <a href="/system#mappings" data-nav>' + H("Open Media Mappings") + "</a></div>";
         });
       }
       if (g.datasets && g.datasets.length) {
@@ -303,46 +304,46 @@ PCI18N.ready.then(function () {
     "the neighbour on the side the bitrate leans to. <strong>Ideal</strong>: the dataset uses the recommended size. <strong>Pass</strong>: it uses the second best — " +
     "fine too, so a library near the line between two doesn’t flip back and forth. <strong>Warning</strong>: neither.<br><br>" +
     "<strong>To fix a warning</strong>: in TrueNAS, Datasets → the library’s dataset → Edit → Advanced Options → <strong>Record Size</strong>: the recommended size. " +
-    "It only applies to files written afterwards; on the Optimizer page, <strong>TrueNAS Compression &amp; Recordsize</strong> writes the existing ones again. " +
-    "If other libraries on the same dataset need a different size, see Media datasets below.");
+    "It only applies to files written afterwards; on the Optimizer page, <strong>TrueNAS compression &amp; record size</strong> writes the existing ones again. " +
+    "If other libraries on the same dataset need a different size, see Media Datasets below.");
   var DS_RS_HELP = H("<strong>What it checks</strong>: that the dataset’s record size — the largest block ZFS writes a file in — suits every library on it. " +
     "Each library’s recommended size and second best come from its average bitrate (see Libraries above); one of them is <strong>Pass</strong>.<br><br>" +
     "<strong>Why it matters</strong>: ZFS reads, caches and compresses whole records. Too small, and big video files take many more reads and use more RAM to track in the cache; " +
     "too large, and small files (music, audiobooks) waste cache space on data nobody asked for.<br><br>" +
     "<strong>To fix a warning</strong>: in TrueNAS, Datasets → the dataset → Edit → Advanced Options → <strong>Record Size</strong>. " +
     "If no one size suits every library, give the library named a dataset of its own (TrueNAS → Datasets → Add Dataset), move its files there, " +
-    "then point its folder in Plex and in System → Media mappings at the new place.");
+    "then point its folder in Plex and in System → Media Mappings at the new place.");
   var FILE_RS_HELP = H("<strong>What it checks</strong>: that every file on the dataset is written in blocks of the dataset’s record size. Each health check looks at every file " +
     "(their details, not their contents — a fraction of a second). Files smaller than one record don’t count: they’re a single block of their own size.<br><br>" +
     "<strong>Why it matters</strong>: ZFS uses a record size only for files written after it’s set. Files written before keep their old block size — and with it the slower reads " +
     "and cache use the dataset’s setting was chosen to avoid — until they’re written again.<br><br>" +
-    "<strong>To fix a warning</strong>: on the Optimizer page, <strong>TrueNAS Compression &amp; Recordsize</strong> writes those files again, one at a time.");
+    "<strong>To fix a warning</strong>: on the Optimizer page, <strong>TrueNAS compression &amp; record size</strong> writes those files again, one at a time.");
   var COMP_HELP = H("<strong>What it checks</strong>: the dataset’s compression. Video barely compresses, but fonts, the index, tags and the padding at the end of each file do — and the index is cached with the start of every file, so the smaller it is, the more fits in the cache.<br><br>" +
     "<strong>Pass</strong>: ZSTD at levels 3 to 19. <strong>ZSTD-3</strong> (plain “ZSTD” in TrueNAS) is recommended. From level 3, ZFS gives up early on what won’t compress, so video costs almost nothing to try. " +
     "Higher levels make marginally smaller files but use more CPU when writing (imports, the optimizer); reading is no slower at any level. On a mostly idle NAS, a higher level is fine — your choice.<br><br>" +
     "<strong>Warning</strong>: ZSTD-1 and 2 (slightly less compression, and no faster in practice), LZ4 and ZSTD-FAST (less compression), and anything else (off, GZIP — also slower to read —, ZLE, LZJB).<br><br>" +
     "<strong>To fix a warning</strong>: in TrueNAS, Datasets → the dataset → Edit → Advanced Options → <strong>Compression Level</strong>: ZSTD. " +
-    "Files keep the compression they were written with; on the Optimizer page, <strong>TrueNAS Compression &amp; Recordsize</strong> writes them again. Files already written with ZSTD 3 to 19 are never written again just because the level changed.");
+    "Files keep the compression they were written with; on the Optimizer page, <strong>TrueNAS compression &amp; record size</strong> writes them again. Files already written with ZSTD 3 to 19 are never written again just because the level changed.");
   function recordCell(rec) {
     if (!rec || !rec.best) return '<span class="muted">—</span>';
     var badges = { ideal: badge("pass", T("Ideal")), pass: badge("pass", T("Pass")), warn: badge("warn", T("Warning")), info: badge("info", T("Not checked")) };
     var line = function (label, v) { return '<div class="det">' + esc(label) + ' <span class="mono">' + (v ? esc(fmtRs(v)) : "—") + "</span></div>"; };
     return badges[rec.status] + line(T("Dataset"), rec.rs) + line(T("Recommended"), rec.best) + line(T("Second best"), rec.alt);
   }
-  // Media datasets → Record size: the size, how the files compare, and whether it suits every library on it
+  // Media Datasets → Record size: the size, how the files compare, and whether it suits every library on it
   function dsRecordCell(r) {
     var x = r.recordsize;
     if (!x) return '<span class="muted">—</span>';
     return badge(x.status, x.badge || STATUS_TEXT[x.status] || x.status) + (x.text ? '<div class="det mono">' + esc(x.text) + "</div>" : "") +
       (x.lines || []).map(function (l) { return '<div class="det">' + esc(l) + "</div>"; }).join("") +
-      (x.split ? '<div class="det"><a href="/optimizer" data-nav>' + H("Move a folder to its own dataset") + "</a></div>" : "");
+      (x.split ? '<div class="det"><a href="/optimizer#child-dataset" data-nav>' + H("Convert the folder to a child dataset") + "</a></div>" : "");
   }
 
 
-  // Media datasets table: each column's explanation sits behind an ⓘ in its header.
+  // Media Datasets table: each column's explanation sits behind an ⓘ in its header.
   var DS_COLUMNS = [
     [H("In use"), H("Which libraries are on the dataset. A dataset mounted in this app with no Plex library on it is flagged, " +
-      "in case a mount is pointing at the wrong place. Libraries unticked in System → Media mappings show as “caching off”: " +
+      "in case a mount is pointing at the wrong place. Libraries unticked in System → Media Mappings show as “caching off”: " +
       "only their record size is checked.")],
     [H("Cache settings"), H("<strong>primarycache=all</strong> is needed for any caching: ZFS only keeps in RAM, and only copies to the SSD, " +
       "data that passed through RAM. With <strong>metadata</strong>, nothing is cached and no feature can help.<br><br>" +
@@ -350,7 +351,7 @@ PCI18N.ready.then(function () {
     [H("Dataset record size"), DS_RS_HELP],
     [H("File record size"), FILE_RS_HELP],
     [H("Compression"), COMP_HELP],
-    ["L2ARC", H("The SSD cache devices on the dataset's pool, and how much they hold. Only warm-up and Prefetch’s L2ARC-only choices need an L2ARC; " +
+    ["L2ARC", H("The SSD cache devices on the dataset’s pool, and how much they hold. Only warm-up and Prefetch’s L2ARC-only choices need an L2ARC; " +
       "Now Playing Cache and Prefetch work from RAM.")]
   ];
 
@@ -380,7 +381,7 @@ PCI18N.ready.then(function () {
     if (!r) return "";
     var text = { use: T("Recommended"), maybe: T("Check first"), avoid: T("Unavailable") }[r.verdict];
     // Warm-up blocked by a missing SSD cache says so; anything else needs a setting changed.
-    if (r.verdict === "avoid") text = feature === "warmup" && ST.l2arc === "absent" ? T("L2ARC Required") : T("Configuration required");
+    if (r.verdict === "avoid") text = feature === "warmup" && ST.l2arc === "absent" ? T("L2ARC required") : T("Configuration required");
     return badge(r.verdict, text);
   }
   function unavailable(feature) {
@@ -475,7 +476,7 @@ PCI18N.ready.then(function () {
     else {
       head = T("Needs {size} of your {l2} L2ARC", { size: fmtBytes(need), l2: fmtBytes(l2) });
       cls = { fits: ["pass", T("Fits")], tight: ["warn", T("Tight fit")], reduced: ["warn", T("Too big — seconds reduced automatically")],
-        insufficient: ["fail", T("Doesn't fit even at minimum seconds")], none: ["fail", T("No L2ARC found")] }[p.status];
+        insufficient: ["fail", T("Doesn’t fit even at minimum seconds")], none: ["fail", T("No L2ARC found")] }[p.status];
     }
     var out = '<div class="est"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:baseline"><div style="font-weight:600">' + esc(head) + "</div>" + badge(cls[0], cls[1]) + "</div>";
     out += '<div class="bar" role="img" aria-label="' + H("L2ARC space estimate") + '">' +
@@ -556,6 +557,11 @@ PCI18N.ready.then(function () {
       [H("Your minimum"), H("Each file as it is, at your dataset’s record size: whole records through the metadata in front of the video and 60% of a record of video, plus the whole records its metadata at the end takes. The least warm-up caches: when the L2ARC is too small, it shortens lead-ins toward this.")],
       [H("Target"), H("Each file optimized, at the recommended record size, at the lead-in lengths on the sliders above. All the way down is the Target minimum.")],
       [H("Your library"), H("As your files are written now — the block sizes found on the dataset, their metadata where it is — at your lead-in lengths.")]];
+    var why = H("Each title’s lead-in (its length is set per library on the Caching page) × its library’s average bitrate ({video}% extra for video, {audio}% for audio, for bitrate spikes), " +
+      "and its metadata ({how}): what’s in front of the video, and at the end the index, tags, fonts and cover art. ZFS caches whole records, so a lead-in rounds up to the record size — never less than 60% of a record of video — and metadata at the end of a file costs the records it touches there as well. " +
+      "Optimizing the files (the Optimizer page) and using the recommended record size give the Target columns; Health → Libraries shows each library’s record size and the one recommended for it. " +
+      "Sizes are for your libraries as they are today: leave room on top for how much they’ll grow.",
+      { video: w.padding_video, audio: w.padding_audio, how: ST.index_avg ? T("measured by warm-up") : T("estimated until warm-up has measured yours") });
     var table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">' + H("Titles") + '</th><th scope="col">' + H("Avg bitrate") + "</th>" +
       '<th scope="col">' + H("Avg file") + "</th>" + head4.map(function (h, i) { return '<th scope="col"' + (i === 2 ? ' class="estc"' : "") + ">" + h[0] + info(h[1], h[0]) + "</th>"; }).join("") + "</tr></thead><tbody>";
     rows.forEach(function (r) {
@@ -574,28 +580,20 @@ PCI18N.ready.then(function () {
     table += '<tr class="sum"><th scope="row">' + H("Lead-ins") + info(H("What the lead-ins take: in RAM without an L2ARC, or on the SSD with one."), T("Lead-ins")) + "</th>" + blank + four(function (x) { return x.bytes; }, "lead") + "</tr>" +
       "<tr><td>" + H("System buffer") + info(H("Room on the SSD for everything else ZFS caches. This size decides how quickly the L2ARC is emptied: it reuses its space oldest first, so the larger the buffer, the longer cached files stay cached. Set it with the slider above."), T("System buffer")) + "</td>" + blank +
       four(function () { return buffer; }) + "</tr>" +
-      '<tr class="sum"><th scope="row">' + H("L2ARC size") + "</th>" + blank + four(function (x) { return x.bytes + buffer; }, "l2") + "</tr>" +
+      '<tr class="sum"><th scope="row">' + H("L2ARC size") + info(why, T("L2ARC sizing")) + "</th>" + blank + four(function (x) { return x.bytes + buffer; }, "l2") + "</tr>" +
       '<tr><td>' + H("RAM used by the L2ARC") + info(H("The L2ARC keeps about {n} bytes of RAM for every record it holds, so larger records need less. Counted for the lead-ins; what the system buffer holds depends on what else is cached.", { n: L2_HEADER }), T("RAM used by the L2ARC")) + "</td>" + blank +
       four(function (x) { return x.recs * L2_HEADER; }, "ram") + "</tr></tbody></table></div>";
-    var l2 = ST.zfs.l2_total, need = tot.your.bytes + buffer, least = tot.ymin.bytes + buffer, head;
+    // With an L2ARC, the bar above says whether it fits; without one, this says what to add
+    var l2 = ST.zfs.l2_total, need = tot.your.bytes + buffer, head = "";
     if (ST.l2arc === "absent" || !l2) {
       var ssd = SSD_SIZES.filter(function (g) { return g * GB >= need; })[0];
       var drive = ssd >= 1000 ? T("{n} TB", { n: ssd / 1000 }) : T("{n} GB", { n: ssd });
       head = ssd ? T("For the Lead-in Cache as it is, add an L2ARC of at least {size}: a {drive} SSD.", { size: fmtBytes(need), drive: drive })
         : T("For the Lead-in Cache, add an L2ARC of at least {size}.", { size: fmtBytes(need) });
-    } else {
-      var lv = { size: fmtBytes(l2), min: fmtBytes(least) };
-      head = l2 >= need ? T("Your {size} L2ARC holds your settings.", lv) :
-        l2 >= least ? T("Your {size} L2ARC holds the minimum; seconds are reduced to fit.", lv) :
-        T("Your {size} L2ARC is smaller than the minimum ({min}).", lv);
     }
-    var why = H("Each title’s lead-in (its length is set per library on the Caching page) × its library’s average bitrate ({video}% extra for video, {audio}% for audio, for bitrate spikes), " +
-      "and its metadata ({how}): what's in front of the video, and at the end the index, tags, fonts and cover art. ZFS caches whole records, so a lead-in rounds up to the record size — never less than 60% of a record of video — and metadata at the end of a file costs the records it touches there as well. " +
-      "Optimizing the files (the Optimizer page) and using the recommended record size give the Target columns; Health → Libraries shows each library’s record size and the one recommended for it. " +
-      "Sizes are for your libraries as they are today: leave room on top for how much they’ll grow.",
-      { video: w.padding_video, audio: w.padding_audio, how: ST.index_avg ? T("measured by warm-up") : T("estimated until warm-up has measured yours") });
-    var body = '<p style="font-weight:600;margin:12px 0 8px">' + esc(head) + info(why, T("L2ARC sizing")) + "</p>" + table +
-      '<p class="muted" style="font-size:13px;margin:8px 0 0">' + H("From {n} titles: every library’s lead-ins. Libraries without a warm-up need less.", { n: rows.reduce(function (a, r) { return a + r.count; }, 0) }) +
+    var titles = rows.reduce(function (a, r) { return a + r.count; }, 0);
+    var body = (head ? '<p style="font-weight:600;margin:12px 0 8px">' + esc(head) + "</p>" : "") + table +
+      '<p class="muted" style="font-size:13px;margin:8px 0 0">' + PH(titles, "From {n} title.", "From {n} titles.") +
       (tot.missing ? " " + H("Libraries whose dataset’s record size couldn’t be checked aren’t counted in Your minimum or Your library.") : "") + "</p>" +
       '<p style="margin:8px 0 0;font-weight:600" data-esthead>' + estHead() + "</p>";
     if (standalone) return '<div class="sizing">' + body + "</div>";
@@ -613,9 +611,9 @@ PCI18N.ready.then(function () {
   function estTotal() { return ST.plan ? sizeTotals().target.bytes + ST.plan.reserve : 0; }
   function estHead() {
     var t = estTotal(), l2 = ST.zfs.l2_total;
-    if (!l2) return esc(T("Estimate: {size}", { size: fmtBytes(t) }));
-    return esc(t <= l2 ? T("Estimate: {size} — fits your {l2} L2ARC", { size: fmtBytes(t), l2: fmtBytes(l2) })
-      : T("Estimate: {size} — {over} more than your {l2} L2ARC", { size: fmtBytes(t), over: fmtBytes(t - l2), l2: fmtBytes(l2) }));
+    if (!l2) return esc(T("Target: {size}", { size: fmtBytes(t) }));
+    return esc(t <= l2 ? T("Target: {size} — fits your {l2} L2ARC", { size: fmtBytes(t), l2: fmtBytes(l2) })
+      : T("Target: {size} — {over} more than your {l2} L2ARC", { size: fmtBytes(t), over: fmtBytes(t - l2), l2: fmtBytes(l2) }));
   }
   function estimatorSliders() {
     var p = ST.plan;
@@ -675,11 +673,11 @@ PCI18N.ready.then(function () {
       more: H("ZFS doesn’t write to the L2ARC directly: everything is read into RAM first, and about once a second ZFS copies a little of what’s about to leave RAM to the SSD — at most <span class=\"mono\">l2arc_write_max</span> a second. " +
         "Anything read from the disks faster than that leaves RAM before it’s copied, so the read was wasted. Automatic pacing reads just under that speed. " +
         "Reads that come from the SSD or RAM already aren’t held back: there’s nothing to copy.<br><br>" +
-        "To warm up faster, raise <span class=\"mono\">l2arc_write_max</span> (Health shows how); automatic pacing follows it. Warm-up’s “Run now” runs at full speed.") };
+        "To warm up faster, raise <span class=\"mono\">l2arc_write_max</span> (Health shows how); automatic pacing follows it. Warm-up’s “Run Now” runs at full speed.") };
     var manual = !w.pacing_auto || !rate;
     return '<div style="margin-top:12px">' + checkbox("warmup", "pacing_auto", T("L2ARC pacing: match how fast ZFS fills the L2ARC (automatic)"), autoHelp) + "</div>" +
       (manual ? '<div class="grid" style="max-width:520px;margin-top:4px">' +
-        range("warmup", "pacing_percent", T("L2ARC pacing"), 5, 100, 5, T("% of disk time"), H("A share of disk time instead. Lower is gentler on other workloads; too high, and reads outrun what ZFS can copy to the SSD (Health warns). Warm-up’s “Run now” runs at full speed.")) + "</div>" : "");
+        range("warmup", "pacing_percent", T("L2ARC pacing"), 5, 100, 5, T("% of disk time"), H("A share of disk time instead. Lower is gentler on other workloads; too high, and reads outrun what ZFS can copy to the SSD (Health warns). Warm-up’s “Run Now” runs at full speed.")) + "</div>" : "");
   }
   function l2arcSettingsCard() {
     var q = ST.l2arc_queue || {};
@@ -704,7 +702,7 @@ PCI18N.ready.then(function () {
       checkbox("warmup", "pause_scrub", T("A scrub or resilver is running"), H("They already keep every disk in the pool busy; caching would only slow them down. Needs the TrueNAS API.")) +
       '<div class="grid" style="margin-top:8px;max-width:520px">' +
       select("warmup", "pause_disk_busy", T("The pool’s disks are busy with other work"), [[40, T("{n}% busy or more", { n: 40 })], [50, T("{n}% busy or more", { n: 50 })], [60, T("{n}% busy or more", { n: 60 })], [0, T("Don’t pause for this")]],
-        H("File copies, backups or other apps. Measured while L2ARC-only caching is idle, so its own reads don’t count. Warm-up’s “Run now” ignores this.")) +
+        H("File copies, backups or other apps. Measured while L2ARC-only caching is idle, so its own reads don’t count. Warm-up’s “Run Now” ignores this.")) +
       "</div>" + cooldownFields("l2arc") + "</section>";
   }
 
@@ -734,8 +732,8 @@ PCI18N.ready.then(function () {
   function ramHelp(feature, how) {
     var r = ST.ram;
     if (!r || !r.usable) return { s: r && r.cache_max ? H("No ZFS cache is left after the reserve (Caching → Cache Settings).") : H("Share of the usable ZFS cache."), more: how };
-    return { s: H("Available now: {size}, shared by all streams", { size: fmtBytes(r[feature]) }),
-      more: how + " " + H("{pct}% of the {usable} available now: total memory available {avail} minus {reserve} left for the rest of the NAS (see “Reserve ZFS Cache”).",
+    return { s: H("Up to {size} now, shared by all streams", { size: fmtBytes(r[feature]) }),
+      more: how + " " + H("{pct}% of the {usable} available now: total memory available {avail} minus {reserve} left for the rest of the NAS (see “Reserve ZFS cache”).",
         { pct: r_pct(feature), usable: fmtBytes(r.usable), avail: fmtBytes(r.available), reserve: fmtBytes(r.reserve) }) };
   }
   function r_pct(feature) { return S[feature].ram_percent; }
@@ -785,11 +783,11 @@ PCI18N.ready.then(function () {
         "</div>";
       if (!n.delay_sec) {
         out += details("np-timing", H("Automatic start timing"),
-          '<p class="help" style="margin:8px 0 12px">' + H("The wait is Plex’s buffer read at the disks’ speed.") + info(H("Plex keeps filling its buffer after playback starts. The wait is that buffer — some seconds of playback at the file’s bitrate — read at the measured speed of its dataset (System → Disk speed). " +
+          '<p class="help" style="margin:8px 0 12px">' + H("The wait is Plex’s buffer read at the disks’ speed.") + info(H("Plex keeps filling its buffer after playback starts. The wait is that buffer — some seconds of playback at the file’s bitrate — read at the measured speed of its dataset (System → Disk Speed). " +
           "For example, 60 s of an 80 Mbps remux is 600 MB: about {s} s at {speed} MB/s.", { s: Math.max(n.min_delay_sec, Math.round(600 / speedGuess())), speed: speedGuess() }), T("automatic timing")) + "</p>" +
           '<div class="grid" style="margin-top:0">' +
-          number("nowplaying", "buffer_direct_sec", T("Direct Play – Seconds of Playback Buffer"), 0, 600, "") +
-          number("nowplaying", "buffer_transcode_sec", T("Transcoding – Seconds of Playback Buffer"), 0, 600, "") +
+          number("nowplaying", "buffer_direct_sec", T("Direct Play: seconds of playback buffer"), 0, 600, "") +
+          number("nowplaying", "buffer_transcode_sec", T("Transcoding: seconds of playback buffer"), 0, 600, "") +
           number("nowplaying", "min_delay_sec", T("Never start sooner than (seconds)"), 0, 600, H("Gives the player time to open the file.")) + "</div>");
       }
     }
@@ -803,7 +801,7 @@ PCI18N.ready.then(function () {
   var AUTO = -1;  // the cooldown worked out from what's been measured (config.AUTO)
   var COOLDOWNS = { ram: [AUTO, 0, 10, 30, 60, 120, 180, 240, 360, 720], l2arc: [AUTO, 0, 10, 60, 180, 360, 720, 1440, 2880, 4320, 10080] };  // minutes
   function minutesText(m) {
-    if (m === AUTO) return T("Automatic — ideal number calculated from metrics");
+    if (m === AUTO) return T("Automatic — measured on this NAS");
     if (!m) return T("No cooldown");
     if (m < 60) return P(m, "{n} minute", "{n} minutes");
     var h = m / 60;
@@ -817,17 +815,24 @@ PCI18N.ready.then(function () {
     return info(H("Everything cached is logged — lead-ins in one log, whole files in another — and isn’t read again until its cooldown has passed, whichever feature asks. " +
         "A whole file counts as a lead-in too.") + "<br><br>" + how + "<br><br>" +
         H("Too long, and something pushed out of the cache isn’t read again in time; too short, and it’s read again needlessly — cheap, since it comes from the cache. When unsure, shorter is safer.") + "<br><br>" +
-        H("Every read again is timed, so the app learns how long cached data really lasts on your NAS (<a href=\"/activity#lasts\" data-nav>Metrics → How long cached data lasts</a>) and suggests a cooldown from it. A short cooldown, even none, collects that data fastest. “Automatic” uses that suggestion, per library, and keeps adjusting it as new reads are measured.") +
-        (kind === "l2arc" ? "<br><br>" + H("Timed warm-ups only skip lead-ins Prefetch cached since the last warm-up, so they always re-check their own: what’s still on the SSD is a quick hit, and what the L2ARC has since overwritten (it reuses its space oldest first) is read again. “Run now” reads everything.") : ""),
+        H("Every re-read is timed, so the app learns how long cached data really lasts on your NAS (<a href=\"/activity#lasts\" data-nav>Metrics → How Long Cached Data Lasts</a>) and suggests a cooldown from it. A short cooldown, even none, collects that data fastest. “Automatic” uses that suggestion, per library, and keeps adjusting it as new reads are measured.") +
+        (kind === "l2arc" ? "<br><br>" + H("Timed warm-ups only skip lead-ins Prefetch cached since the last warm-up, so they always re-check their own: what’s still on the SSD is a quick hit, and what the L2ARC has since overwritten (it reuses its space oldest first) is read again. “Run Now” reads everything.") : ""),
         T("cooldown"));
   }
   // "Measured here: ..." under a pair of cooldowns, from the survival table (see pageActivity).
   function suggestLine(route) {
     var r = ((ST.survival || {}).routes || {})[route];
     if (!r) return "";
-    var n = r.rows.reduce(function (a, x) { return a + x.kept + x.gone; }, 0);
-    if (r.suggest) return '<p class="help" style="margin-top:4px">' + H("Measured on this NAS: cached data was nearly always still there up to {age} — a cooldown up to that saves reading it again for nothing. <a href=\"/activity#lasts\" data-nav>Details</a>", { age: ageShort(r.suggest) }) + "</p>";
-    return '<p class="help" style="margin-top:4px">' + H("Not enough re-reads measured yet to suggest a cooldown ({n} so far). <a href=\"/activity#lasts\" data-nav>Details</a>", { n: fmtNum(n) }) + "</p>";
+    return '<p class="help" style="margin-top:4px">' + (r.suggest ? H("Measured on this NAS over the last 7 days: everything read again up to {age} after it was cached was still there, so a cooldown up to that saves reading it again for nothing.", { age: ageShort(r.suggest) })
+      : noSuggestion(r)) + ' <a href="/activity#lasts" data-nav>' + H("Details") + "</a></p>";
+  }
+  // Why a route has no suggested cooldown: too few re-reads in the last 7 days, or even the soonest
+  // had to come from the disks (then Automatic uses its shortest, to measure shorter ages)
+  var SUGGEST_MIN = 3;  // re-reads needed (plexcache/cachelog.py SUGGEST_MIN)
+  function noSuggestion(r) {
+    var fc = r.fully || { n: 0 };
+    if (fc.n >= SUGGEST_MIN && !fc.age) return H("No cooldown to suggest: in the last 7 days, even the soonest re-read ({age} after it was cached) had to come from the disks.", { age: ageShort(fc.miss) });
+    return H("Not enough re-reads in the last 7 days to suggest a cooldown ({n} so far).", { n: fmtNum(fc.n) });
   }
   function ageText(sec) { return minutesText(Math.round(sec / 60)); }
   function cooldownFields(kind) {
@@ -868,7 +873,7 @@ PCI18N.ready.then(function () {
     }
     var pct = S[sec][key];
     return '<div class="help">' + H("{pct}% of what’s available", { pct: pct }) + "</div>" +
-      '<div class="help">' + H("Available now: {size}, shared by all streams", { size: fmtBytes(usable * pct / 100) }) + "</div>";
+      '<div class="help">' + H("Up to {size} now, shared by all streams", { size: fmtBytes(usable * pct / 100) }) + "</div>";
   }
   function ramSlider(sec, key, label, min, max, step, unit, help) {
     var id = "f-" + sec + "-" + key, h = splitHelp(help);
@@ -881,15 +886,14 @@ PCI18N.ready.then(function () {
   }
   function arcCard() {
     return '<section class="card" id="arc"><h2>' + H("Cache Settings") + "</h2>" +
-      '<p class="help" style="margin:4px 0 0">' + H("These apply whether or not there’s an L2ARC. They share out the RAM cache (the ZFS ARC) for what’s meant to stay in RAM: Now Playing Cache and the Whole File Cache, and without an L2ARC the Lead-in Cache too. " +
-        "With an L2ARC, lead-ins pass through RAM on their way to the SSD and don’t count; the L2ARC Cache Settings pace them.") + "</p>" +
+      '<p class="help" style="margin:4px 0 0">' + H("These apply whether or not there’s an L2ARC: how much of the RAM cache (the ZFS ARC) Now Playing Cache and Prefetch may use.") + "</p>" +
       '<div class="grid">' +
-      ramSlider("general", "ram_reserve_gb", T("Reserve ZFS Cache"), 0, Math.min(4096, Math.max(16, Math.ceil(((ST.ram || {}).cache_max || 0) / 1e9))), 1, "GB", { more: reserveHelp().more }) +
+      ramSlider("general", "ram_reserve_gb", T("Reserve ZFS cache"), 0, Math.min(4096, Math.max(16, Math.ceil(((ST.ram || {}).cache_max || 0) / 1e9))), 1, "GB", { more: reserveHelp().more }) +
       ramSlider("nowplaying", "ram_percent", T("Now Playing Cache RAM limit"), 5, 90, 5, "%", { more: ramHelp("nowplaying", H("Reads the whole file if it fits, otherwise as much as fits ahead of the viewer.")).more }) +
       ramSlider("nextepisode", "ram_percent", T("Prefetch RAM limit"), 5, 90, 5, "%", { more: ramHelp("nextepisode", H("The Whole File Cache, and without an L2ARC the Lead-in Cache too. With an L2ARC, lead-ins only pass through RAM on their way to the SSD, so they don’t count.")).more }) +
       "</div></section>" +
       '<section class="card" id="ram-only"><h2>' + H("RAM Only Settings") + "</h2>" +
-      '<p class="help" style="margin:4px 0 0">' + H("These apply only when there’s no L2ARC. With an L2ARC they’re ignored, and the L2ARC Cache Settings on the SSD Cache page are used instead.") + "</p>" +
+      '<p class="help" style="margin:4px 0 0">' + H("These apply only when there’s no L2ARC.") + "</p>" +
       inUseNote("ram") + cooldownFields("ram") + "</section>";
   }
 
@@ -897,24 +901,49 @@ PCI18N.ready.then(function () {
   // ------------------------------------------------------------ optimizer
   // Each library's choices, as optimizing.py reads them (DEFAULTS there: sync on, MKV off, Plex's
   // cover art only for unmatched items).
+  // ↺ back to the default for one of a library's optimizer choices (when it isn't the default)
+  var OPT_NAMES = { images: { unmatched: N("Plex poster, unmatched items only"), remove: N("Strip it"), compress: N("Keep it, compressed"), plex: N("Plex poster, every item") },
+    tags: { keep: N("Keep tags"), excessive: N("Strip excessive tags"), strip: N("Strip tags") } };
+  function optRevert(key, field) {
+    var d = ((ST.optimizer_defaults || {}).library || {})[field];
+    if (d === undefined || String(optChoices(key)[field]) === String(d)) return "";
+    var shown = OPT_NAMES[field] ? T(OPT_NAMES[field][d]) : d ? T("on") : T("off");
+    return ' <button type="button" class="revert" data-optlib-revert="' + esc(key) + '" data-field="' + field + '" title="' + H("Back to the default ({value})", { value: shown }) +
+      '" aria-label="' + H("Reset to the default, {value}", { value: shown }) + '">↺</button>';
+  }
   function optChoices(key) {
     var lib = ((S.optimizer || {}).libraries || {})[key] || {};
-    return { sync: lib.sync !== false, mkv: lib.mkv === true, images: { remove: 1, compress: 1, plex: 1 }[lib.images] ? lib.images : "unmatched" };
+    return { sync: lib.sync !== false, mkv: lib.mkv === true, images: { remove: 1, compress: 1, plex: 1 }[lib.images] ? lib.images : "unmatched",
+      tags: { excessive: 1, strip: 1 }[lib.tags] ? lib.tags : "keep", convert: lib.convert === true };
   }
+  var AUDIO_COVER_HELP = H("In music and audiobooks, cover art belongs in the file: it’s what music players, phones, car stereos and other libraries (iTunes among them) show, and Plex’s own artwork lookups for music are limited. So for an audio library the optimizer always keeps it, compressed losslessly where that makes it smaller — every pixel the same. Plex’s posters aren’t put into audio files.");
+  // The tag choice (optimizer.strips_tags): what tags are, who reads them, and what each choice gives up
+  var TAGS_HELP = H("Tags are notes stored inside an MKV file: titles, credits, encoder settings, and the statistics MKVToolNix writes for each track (its duration, bitrate and size). " +
+    "<strong>Plex doesn’t read them</strong>: it takes its titles and details from its own agents. They’re cached with the rest of the metadata at the end of the file, so they cost cache room on every file.") +
+    "<br><br><strong>" + H("Keep tags") + "</strong> " + H("(the default): nothing is lost.") + "<ul>" +
+    "<li>" + H("Up: other players and tools keep what they read from them — ffprobe, Jellyfin and MediaInfo show track durations and bitrates from the statistics tags; home videos Plex can’t match keep their titles and notes; anything you noted in a file stays.") + "</li>" +
+    "<li>" + H("Down: usually a few KB, but some tools write very large tags (hundreds of KB or more), cached with every file.") + "</li></ul>" +
+    "<strong>" + H("Strip excessive tags") + "</strong><ul>" +
+    "<li>" + H("Up: only the files whose tags are over 256 KB — the ones Library Health warns of — lose them; the rest keep theirs.") + "</li>" +
+    "<li>" + H("Down: those files lose everything their tags held, statistics and notes alike.") + "</li></ul>" +
+    "<strong>" + H("Strip tags") + "</strong><ul>" +
+    "<li>" + H("Up: the least metadata to cache, on every file.") + "</li>" +
+    "<li>" + H("Down: other players show less (durations and bitrates from the statistics tags go; MKVToolNix can add them again); titles and notes in home videos go. Plex is unaffected.") + "</li></ul>" +
+    H("Whichever you choose, the optimizer’s own tag (its mark, and the cover art’s source) is always written back: it’s how a file is known to be done. Tags on tracks go with the rest when they’re stripped.");
   var COVER_HELP = H("What happens to the cover art in MKV files — the images some DLNA players and TVs show — when they’re first optimized. Fonts and other attachments are always kept. " +
-    "A Plex poster already in a file is kept (unless you choose Strip Cover Art); <strong>Sync Cover Art</strong> updates optimized files later.<br><br>" +
-    "<strong>Only Embed Plex Cover Art for Unmatched Items</strong> (the default): when Plex can’t match something to an online entry — home videos, concerts, rare releases — " +
+    "A Plex poster already in a file is kept (unless you choose “Strip it”); <strong>Sync Cover Art</strong> updates optimized files later.<br><br>" +
+    "<strong>Plex poster, unmatched items only</strong> (the default): when Plex can’t match something to an online entry — home videos, concerts, rare releases — " +
     "it has nowhere to fetch artwork from again, and the most reliable place to keep it is in the file itself. So those get Plex’s poster (whatever you set in Plex), losslessly compressed; " +
     "matched items have their cover art taken out, since Plex fetches it anyway.<br><br>" +
-    "<strong>Strip Cover Art</strong> takes it out of every file. <strong>Compress Existing Cover Art</strong> keeps what’s there, losslessly compressed " +
-    "(PNG with oxipng, JPEG with jpegtran: every pixel stays the same). <strong>Compress and Embed Plex Cover Art</strong> puts Plex’s poster in every file — the movie’s, " +
+    "<strong>Strip it</strong> takes it out of every file. <strong>Keep it, compressed</strong> keeps what’s there, losslessly compressed " +
+    "(PNG with oxipng, JPEG with jpegtran: every pixel stays the same). <strong>Plex poster, every item</strong> puts Plex’s poster in every file — the movie’s, " +
     "or for an episode its season’s — and writes the file again whenever the poster in Plex changes.");
   var SYNC_COVER_HELP = H("Cover art is set once, when a file is first optimized: a later change of choice, or a new poster in Plex, doesn’t touch optimized files. " +
-    "<strong>Sync Cover Art</strong> does, when you ask: files whose Plex poster has changed get the new one, and with <strong>Strip Cover Art</strong> chosen, cover art is taken out. " +
+    "<strong>Sync Cover Art</strong> does, when you ask: files whose Plex poster has changed get the new one, and with <strong>Strip it</strong> chosen, cover art is taken out. " +
     "Each Plex poster in a file is marked with a checksum of the poster as Plex has it, so only the ones that changed are written again.");
   var SORT_HELP = H("The last record of a file is usually only partly filled: with a 1M record size, the end of a file might hold only 500K. " +
     "ZFS keeps a record compressed only when compression saves at least 12.5%, so a record that mixes a little compressible data with a lot that isn’t (video, images) is often stored as it is.<br><br>" +
-    "So the optimizer puts the cover art straight after the video — it barely compresses, but it’s large enough to fill out a record — and the fonts, index and tags after it. " +
+    "So the optimizer puts the cover art straight after the video — it barely compresses, but it’s large enough to fill out a record — and the fonts, chapters, index and tags after it. " +
     "Those compress very well, and sitting together at the very end of the file, the record that holds them is very likely to be compressed: ZSTD-3 often halves them.<br><br>" +
     "The index is needed before a file can start playing, so it’s cached along with the start of every file. ZFS caches it as it’s stored on disk, compressed — " +
     "so the smaller it is, the more files fit in the same cache and the longer they stay there.");
@@ -923,7 +952,7 @@ PCI18N.ready.then(function () {
   function optimizerSetup(op) {
     var su = op.setup || {}, steps = su.steps || [];
     if (su.ready) return "";
-    var out = '<section class="card">' + heading(esc(T("Set up the optimizer")),
+    var out = '<section class="card">' + heading(esc(T("Set Up the Optimizer")),
       H("Optional: a second service in this app, and the only part of Plex Cache that can change your media. Until it’s running, the choices below wait."));
     if (!su.at) return out + '<p class="muted">' + H("Checking…") + "</p></section>";
     var done = steps.filter(function (x) { return x.ok; }), next = steps.filter(function (x) { return !x.ok; })[0];
@@ -935,7 +964,7 @@ PCI18N.ready.then(function () {
         (next.fix || cmd ? '<div class="fix">' + esc(next.fix || "") + (cmd ? '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) +
           '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button></div>" : "") + "</div>" : "") + "</div></div>";
     }
-    out += '<div style="margin-top:10px"><button class="btn" type="button" data-act="optimizer-check">' + H("Check again") + "</button> " +
+    out += '<div style="margin-top:10px"><button class="btn" type="button" data-act="optimizer-check">' + H("Check Again") + "</button> " +
       '<span class="muted">' + H("checked {when}", { when: ago(su.at) }) + "</span></div>";
     return out + "</section>";
   }
@@ -969,7 +998,7 @@ PCI18N.ready.then(function () {
     var poster = !checking && job.current && job.kind === "optimize";
     return '<div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>' +
       (poster ? '<div class="withposter tall">' + '<div class="posterbig">' + (job.poster ? '<img alt="" src="/api/poster?path=' + encodeURIComponent(job.poster) +
-        '" onerror="this.style.visibility=\'hidden\'">' : "") + '</div><div class="grow">' + lines + "</div></div>" : lines);
+        '" data-hide-broken>' : "") + '</div><div class="grow">' + lines + "</div></div>" : lines);
   }
   // How long is left, from how fast files are really written here (the estimate firms up as it goes)
   function jobEta(job) {
@@ -988,8 +1017,7 @@ PCI18N.ready.then(function () {
   }
   function jobTitle(job) {
     var lib = jobLibrary(job), t;
-    if (job.kind === "copy") t = T("Copying {library} to Its Own Dataset", { library: lib });
-    else if (job.kind === "survey") t = T("Inspecting the Files in {library} Library", { library: lib });
+    if (job.kind === "copy") t = T("Converting {library} Folder to a Child Dataset", { library: lib });
     else if (job.mode === "covers") t = T("Syncing Cover Art in {library} Library", { library: lib });
     else t = T("Optimizing {library} Library", { library: lib });
     var n = job.resumes || 0;  // restarts it carried on after
@@ -1005,7 +1033,7 @@ PCI18N.ready.then(function () {
   }
   // Plex's poster for a file or what plays, small (through this app: /api/poster); all the same size
   function posterImg(path) {
-    return path ? '<img class="poster" loading="lazy" alt="" src="/api/poster?path=' + encodeURIComponent(path) + '" onerror="this.style.visibility=\'hidden\'">'
+    return path ? '<img class="poster" loading="lazy" alt="" src="/api/poster?path=' + encodeURIComponent(path) + '" data-hide-broken>'
       : '<span class="poster" aria-hidden="true"></span>';
   }
   // The files a job couldn't do: how many, and a link to them (and why) in its file history, failed first
@@ -1016,8 +1044,17 @@ PCI18N.ready.then(function () {
       H("The originals are unchanged.") + ' <button class="link" type="button" data-act="proc-failed" data-job="' + esc(job.id || "") + '">' +
       H("See why") + "</button></div>";
   }
-  function jobCard() {
+  // The file job's card. ``inlineCopy``: a folder copy isn't drawn here — the Convert Folder card shows
+  // it where its steps are (the Optimizer page), so nothing appears above and pushes the page down
+  function jobButtons(job) {
+    var pauseBtn = job.paused ? '<button class="btn pri" type="button" data-act="job" data-job="resume"' + (job.paused_by === "resilver" ? " disabled" : "") + ">" + H("Resume") + "</button> "
+      : '<button class="btn" type="button" data-act="job" data-job="pause">' + H("Pause") + "</button> ";
+    if (job.paused_by === "resilver" && !job.paused) pauseBtn = "";  // a resilver pause can't be overridden
+    return pauseBtn + '<button class="btn" type="button" data-act="job" data-job="cancel">' + H("Cancel") + "</button> ";
+  }
+  function jobCard(inlineCopy) {
     var job = ST.job;
+    if (inlineCopy && job && job.kind === "copy") return "";
     if (job && job.waiting) {
       // after a restart, before it carries on (once the optimizer is ready)
       return '<section class="card">' + heading(esc(jobTitle(Object.assign({}, job, { resumes: (job.resumes || 0) + 1 }))), "") +
@@ -1027,7 +1064,7 @@ PCI18N.ready.then(function () {
     if (job && !job.running) {
       // the last job that ended: its counts and failures, until dismissed
       return '<section class="card">' + heading(esc(jobTitle(job)), job.cancelled ? H("Cancelled") : H("Finished")) +
-        '<div class="det">' + (job.kind === "survey" ? H("{done} of {total} files inspected", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) })
+        '<div class="det">' + (job.kind === "copy" && job.mirror ? H("The last pass: {total} files checked, {copied} copied (changed since the copy)", { total: fmtNum(job.total || 0), copied: fmtNum(job.copied || 0) })
           : job.kind === "copy" ? H("{done} of {total} files copied", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) })
           : H("{optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed", job)) + "</div>" + jobFailures(job) +
         '<div style="margin-top:10px"><button class="btn" type="button" data-act="job" data-job="dismiss">' + H("Dismiss") + "</button></div></section>";
@@ -1052,6 +1089,7 @@ PCI18N.ready.then(function () {
     var q = ST.queue || [];
     if (!q.length) return "";
     return '<section class="card">' + heading(esc(T("Queue")), H("Each starts when the ones before it are done.")) +
+      (ST.queue_hold ? '<div class="note">' + esc(ST.queue_hold) + "</div>" : "") +
       q.map(function (item, i) {
         var sub = item.kind === "copy" ? H("{folder} → {dataset}", { folder: item.folder || "", dataset: item.child || "" }) : "";
         return '<div class="row">' + badge("info", String(i + 1)) + '<div class="grow"><div class="what">' + esc(jobTitle(item)) + "</div>" +
@@ -1068,15 +1106,16 @@ PCI18N.ready.then(function () {
     var out = top(T("Optimizer"), H("Rewrites your media files so they suit caching — one library at a time, only when you press Optimize Now.") +
       (ver ? '<br><span class="muted">' + ver + "</span>" : ""), "");
     out += '<div class="stack">' + optimizerSetup(op);
-    out += '<section class="card">' + heading(esc(T("What it does")), "") + '<ul class="help">' +
-      "<li>" + H("<strong>TrueNAS Compression &amp; Recordsize</strong>: writes each file again, byte for byte, so it takes its dataset’s current record size and compression — ZFS applies them only to files as they’re written. Any kind of file. A file’s compression can’t be read back, so every file counts until the optimizer has written it once.") + "</li>" +
-      "<li>" + H("<strong>Optimize MKV Files</strong>:") + "<ul>" +
-        "<li>" + H("moves the fonts, cover art, index and tags to the end of the file, sorted so the parts not needed to play the file can be skipped") + "</li>" +
-        "<li>" + H("sorts that metadata so the most compressible parts sit nearest the end. This maximizes how much TrueNAS can cache, sometimes significantly.") + info(SORT_HELP, T("Sorting the metadata")) + "</li>" +
+    out += '<section class="card">' + heading(esc(T("What It Does")), "") + '<ul class="help">' +
+      "<li>" + H("<strong>TrueNAS compression &amp; record size</strong>: writes each file again, byte for byte, so it takes its dataset’s current record size and compression — ZFS applies them only to files as they’re written. Any kind of file. A file’s compression can’t be read back, so every file counts until the optimizer has written it once.") + "</li>" +
+      "<li>" + H("<strong>Optimize MKV files</strong>:") + "<ul>" +
+        "<li>" + H("moves the cover art, fonts, chapters, index and tags to the end of the file") + "</li>" +
+        "<li>" + H("sorts them so the parts not needed to play the file can be skipped, and the most compressible sit nearest the end — which maximizes how much TrueNAS can cache, sometimes significantly") + info(SORT_HELP, T("Sorting the metadata")) + "</li>" +
         "<li>" + H("compresses image subtitles (PGS, VobSub) with zlib, as MKVToolNix does by default; video, audio and text subtitles are copied as they are") + "</li>" +
         "<li>" + H("handles cover art as you choose: by default, embeds Plex’s poster only in items Plex hasn’t matched, where the file is the most reliable place to keep it — compressed losslessly") + "</li>" +
+        "<li>" + H("handles the file’s own tags as you choose: by default, keeps them (Plex doesn’t read them; other players do)") + info(TAGS_HELP, T("Tags")) + "</li>" +
         "<li>" + H("marks each file it optimizes with a tag inside the file (the optimizer’s version), so a file copied or synced to another system isn’t done again there") + "</li></ul></li>" +
-      "</ul></section>" + jobCard() + queueCard();
+      "</ul></section>" + jobCard(true) + queueCard();
     var libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind && !l.excluded; });
     out += '<section class="card">' + heading(esc(T("Optimize Files")), H("Choose what to do for each library, then press Optimize Now."));
     if (!libs.length) {
@@ -1086,24 +1125,38 @@ PCI18N.ready.then(function () {
         (lib0.scanning || plexSet) ? H("Reading your libraries from Plex…") : H("No libraries yet. Connect Plex in <a href=\"/system\" data-nav>System</a>.");
       return out + '<p class="muted">' + why + "</p></section></div>";
     }
-    out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library") + '</th><th scope="col">' + H("Options") +
-      '</th><th scope="col">' + H("ZFS Settings") + info(ZFS_CFG_HELP, T("ZFS Settings")) + '</th><th scope="col">' + H("Status") + '</th><th scope="col"></th></tr></thead><tbody>';
+    // Library · what to do · its cover art · whether its dataset is set up · the files still to do · the buttons
+    out += '<div class="tbl-wrap"><table class="tbl optlibs"><thead><tr><th scope="col">' + H("Library") + '</th><th scope="col">' + H("Optimize") +
+      '</th><th scope="col">' + H("MKV metadata") + '</th><th scope="col">' + H("Dataset") + info(ZFS_CFG_HELP, T("Dataset")) +
+      '</th><th scope="col">' + H("To optimize") + '</th><th scope="col"></th></tr></thead><tbody>';
     libs.forEach(function (l) {
       var key = String(l.key), c = optChoices(key), sm = sums[key];
-      // the choices on one line: two checkboxes, and with MKV the cover art choice
-      var opts = '<div class="optline"><label class="nw"><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="sync"' + (c.sync ? " checked" : "") + "> " + H("TrueNAS Compression &amp; Recordsize") + "</label>" +
-        '<label class="nw"><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="mkv"' + (c.mkv ? " checked" : "") + "> " + H("Optimize MKV Files") + "</label>";
-      if (c.mkv) opts += '<label class="nw"><select data-optlib="' + esc(key) + '" data-optkey="images" aria-label="' + esc(T("Cover art")) + '">' +
-        [["unmatched", H("Only Embed Plex Cover Art for Unmatched Items")], ["remove", H("Strip Cover Art")], ["compress", H("Compress Existing Cover Art")],
-         ["plex", H("Compress and Embed Plex Cover Art")]].map(function (o) {
+      // what to do: two checkboxes; the cover art choice in its own column (it applies to MKV files)
+      var opts = '<div class="optline"><label><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="sync"' + (c.sync ? " checked" : "") + "> " + H("TrueNAS compression &amp; record size") + optRevert(key, "sync") + "</label>" +
+        '<label><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="mkv"' + (c.mkv ? " checked" : "") + "> " + H("Optimize MKV files") + optRevert(key, "mkv") + "</label>" +
+        (l.kind === "audio" ? "" : '<label><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="convert"' + (c.convert ? " checked" : "") + "> " +
+          H("Convert to MKV") + optRevert(key, "convert") + "</label>" + '<a href="/optimizer#convert" class="det optkinds" data-nav>' + H("Which kinds") + "</a>") + "</div>";
+      var cover = '<span class="muted">—</span>';
+      var audioLib = l.kind === "audio";
+      if (audioLib) c.images = "compress";  // (optimizing.options: an audio library's cover art stays in the file)
+      if (c.mkv && audioLib) cover = '<div class="optsel"><div><span class="muted">' + H("Cover art") + "</span>" + info(AUDIO_COVER_HELP, T("Cover art")) + "</div>" +
+        '<span class="det">' + H("Kept in the file, compressed") + "</span></div>";
+      else if (c.mkv) cover = '<div class="optsel"><div><span class="muted">' + H("Cover art") + "</span>" + info(COVER_HELP, T("Cover art")) + "</div>" +
+        '<select data-optlib="' + esc(key) + '" data-optkey="images" aria-label="' + esc(T("Cover art")) + '">' +
+        [["unmatched", H("Plex poster, unmatched items only")], ["remove", H("Strip it")], ["compress", H("Keep it, compressed")],
+         ["plex", H("Plex poster, every item")]].map(function (o) {
           return '<option value="' + o[0] + '"' + (c.images === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
-        }).join("") + "</select>" + info(COVER_HELP, T("Cover art")) + "</label>";
-      opts += "</div>";
+        }).join("") + "</select>" + optRevert(key, "images") + "</div>" +
+        '<div class="optsel"><div><span class="muted">' + H("Tags") + "</span>" + info(TAGS_HELP, T("Tags")) + "</div>" +
+        '<select data-optlib="' + esc(key) + '" data-optkey="tags" aria-label="' + esc(T("Tags")) + '">' +
+        [["keep", H("Keep tags")], ["excessive", H("Strip excessive tags")], ["strip", H("Strip tags")]].map(function (o) {
+          return '<option value="' + o[0] + '"' + (c.tags === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
+        }).join("") + "</select>" + optRevert(key, "tags") + "</div>";
       // one status for everything chosen: the files still to do, or Complete
       var st;
       if (!sm) st = '<span class="muted">—</span>';
       else if (!c.sync && !c.mkv) st = '<span class="muted">' + H("Nothing chosen") + "</span>";
-      else st = sm.todo ? badge("warn", P(sm.todo, "{n} file", "{n} files", { n: fmtNum(sm.todo) })) : badge("pass", T("Complete"));
+      else st = sm.todo ? '<span class="nw">' + esc(P(sm.todo, "{n} file", "{n} files", { n: fmtNum(sm.todo) })) + "</span>" : badge("pass", T("Complete"));
       if (sm && (sm.conflicts || []).length) st += '<div class="det">' + PH((sm.conflicts || []).length, "{n} Syncthing conflict copy", "{n} Syncthing conflict copies") + "</div>";
       // the dataset set up for the best result before files are written with it
       var z = (sm || {}).zfs, zcell = '<span class="muted">—</span>';
@@ -1117,6 +1170,7 @@ PCI18N.ready.then(function () {
         act = '<div class="det" style="max-width:320px">' + H("Optimizing before changing the ZFS settings means each file is written now and again after the change. Change the settings first to write each file only once.") + "</div>" +
           '<div class="det"><button class="btn" type="button" data-act="optimize-lib" data-key="' + esc(key) + '" data-confirmed="1">' + H("Optimize Anyway") + "</button> " +
           '<button class="link" type="button" data-act="optimize-cancel">' + H("Cancel") + "</button></div>";
+        act = '<div class="optacts">' + act + "</div>";
       } else {
         // one file job at a time: while one runs, these add to the queue (shown at the top)
         var later = fileBusy(), off = !op.configured;
@@ -1128,43 +1182,152 @@ PCI18N.ready.then(function () {
           : '<button class="btn" type="button" data-act="optimize-covers" data-key="' + esc(key) + '"' +
           (off || !sm || !sm.mkv_done ? " disabled" : "") + ">" + (later ? H("Queue Cover Art Sync") : H("Sync Cover Art")) + "</button>") + info(SYNC_COVER_HELP, T("Sync Cover Art"));
         var lj = ST.job;
+        act = '<div class="optacts">' + act + "</div>";
         if (lj && lj.kind === "optimize" && !lj.running && lj.library === key && lj.finished)
           act += '<div class="det muted">' + H("Last run: {optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed", lj) + "</div>";
       }
-      out += "<tr><td>" + libIcon(l.key) + esc(l.title) + "</td><td>" + opts + "</td><td>" + zcell + "</td><td>" + st + '</td><td class="nw">' + act + "</td></tr>";
+      out += '<tr><td class="nw">' + libIcon(l.key) + esc(l.title) + "</td><td>" + opts + "</td><td>" + cover + "</td><td>" + zcell + "</td><td>" + st + "</td><td>" + act + "</td></tr>";
     });
-    return out + "</tbody></table></div></section>" + migrationCard() + "</div>";
+    return out + "</tbody></table></div></section>" + convertCard() + migrationCard() + "</div>";
   }
 
   // ------------------------------------------------------------ a folder into its own dataset
   // The steps (migrating.py): Create → Copy → Switch → Verify. Each step's checks come from the
   // server; this shows them, what to do (shell and TrueNAS web UI), and the buttons.
   var MIG_CONFIRM_DELETE = false;
+  // A word for the shell, quoted so nothing in it (a folder named with $ or quotes) can run as a command
+  function shq(v) { return "'" + String(v).replace(/'/g, "'\\''") + "'"; }
   function cmdBox(cmd) {
     return '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) + '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button></div>";
   }
   function migChecks(checks) {
     return (checks || []).map(function (c) {
       return '<div class="row">' + badge(c.ok ? "pass" : "warn", c.ok ? T("Done") : T("To do")) + '<div class="grow"><div class="what">' + esc(c.title) + "</div>" +
-        (c.detail ? '<div class="det">' + esc(c.detail) + "</div>" : "") + "</div></div>";
+        (c.detail ? '<div class="det">' + esc(c.detail) + "</div>" : "") + (c.cmd ? cmdBox(c.cmd) : "") + "</div></div>";
     }).join("");
   }
+  // What to do now: the first thing still to do (the list below it says the rest). Checked again by itself.
+  function migNext(checks) {
+    var first = (checks || []).filter(function (c) { return !c.ok; })[0];
+    if (!first) return checks && checks.length ? '<div class="note">' + H("<strong>Ready.</strong> Everything below is done.") + "</div>" : "";
+    var at = (ST.migration || {}).checked_at;
+    return '<div class="note"><strong>' + H("Next:") + "</strong> " + esc(first.title) + (first.detail ? '<div class="det">' + esc(first.detail) + "</div>" : "") +
+      (first.cmd ? cmdBox(first.cmd) : "") + migAction(first) +
+      '<div class="det muted">' + (at ? H("Looked at {when}: not done yet. Plex Cache looks again by itself every 30 seconds, and this moves on once it is.", { when: ago(at) })
+        : H("Plex Cache looks by itself every 30 seconds, and this moves on once it’s done.")) + "</div></div>";
+  }
+  // a check the app can put right itself: its button
+  function migAction(c) {
+    if (c.action === "restart") return '<div style="margin-top:6px"><button class="btn pri" type="button" data-act="mig" data-mig="restart">' + H("Restart Now") + "</button></div>";
+    return "";
+  }
   function rsOr(n) { return n ? fmtRs(n) : "?"; }
+  // Converting to MKV (optimize/convert.py, converting.py): which kinds, how long originals are kept,
+  // and the converted files on their way into Plex
+  // Each kind: [key, name, what it is, what could be lost, how converting handles it] — for its ⓘ
+  var CONVERT_TYPES = [
+    ["avi", N("AVI"), N("Old DivX and Xvid files. MKV keeps every frame’s timing better and adds a proper index."),
+      [N("DivX subtitles (XSUB): MKVToolNix can’t carry them."), N("The file’s own notes (comments, software) beyond a title.")],
+      N("A file with either is left as it is. Video and audio are checked frame for frame (packet counts) after converting: if a count differs — DivX “packed” frames, say — the original is kept.")],
+    ["ts", N("MPEG-TS / M2TS"), N("TV recordings (Plex DVR’s too) and Blu-ray rips. MKV adds an index (faster seeking) and drops the 2–5% transport overhead."),
+      [N("Teletext subtitles."), N("Data tracks: the programme guide, ad-break markers, timed metadata."), N("Other channels in a recording of a whole multiplex.")],
+      N("A file with any of these is left as it is. Kept and checked: every audio track, DVB and PGS subtitles, and closed captions inside the video.")],
+    ["ps", N("MPEG-PS (VOB, MPG)"), N("DVD video."),
+      [N("DVD subtitles inside a VOB: MKVToolNix doesn’t read them from there."), N("Menus and navigation — they’re in the DVD’s IFO files, not in the video file, and aren’t touched.")],
+      N("A file with DVD subtitles is left as it is.")],
+    ["flv", N("FLV"), N("Flash video, from old downloads."),
+      [N("Its cue points and details (the encoder’s notes): nothing you watch.")],
+      N("Technical details are dropped; anything beyond them (a title is kept) leaves the file as it is.")],
+    ["ogm", N("OGM / OGV"), N("Ogg video."),
+      [N("Its comments beyond a title (artist, description…)."), N("Chapters MKVToolNix doesn’t read.")],
+      N("A file with either is left as it is; chapters it reads become MKV chapters.")],
+    ["rm", N("RealMedia (RM, RMVB)"), N("Old RealPlayer files."),
+      [N("RealText subtitles."), N("Its title, author and copyright details beyond the title.")],
+      N("A file with either is left as it is.")],
+    ["3gp", N("3GP"), N("Old phone video."),
+      [N("The styling of its text subtitles (the text is kept, as SRT)."), N("The phone’s details: where and when it was filmed.")],
+      N("Subtitles become SRT; a file with location or date details is left as it is.")],
+    ["mp4", N("MP4 / M4V"), N("Off by default. Apple’s TV app, iTunes and some TVs play MP4 directly — Plex plays MKV everywhere, repackaging it on the fly where needed, at next to no cost."),
+      [N("iTunes details: show, season, episode, description, rating, HD flag."), N("Cover art in the file."), N("The styling of text subtitles (the text is kept, as SRT)."),
+       N("A separate closed-caption track."), N("Store-bought (DRM) files can’t be read at all."), N("iTunes itself loses track of files in a library it manages.")],
+      N("A file with iTunes details, cover art, a caption track or DRM is left as it is. Kept: its title, chapters (as MKV chapters) and every audio track.")],
+    ["mov", N("MOV (QuickTime)"), N("Off by default. Camera and editing files."),
+      [N("The timecode track: dropped — nothing you watch."), N("Camera details: where and when it was filmed, make and model."), N("Trims made without re-encoding (edit lists) — kept as far as MKV can; worth a look after.")],
+      N("A file with camera details is left as it is; the timecode track is dropped.")]];
+  var CONVERT_HELP = H("Each file is inspected first: what MKVToolNix reads of it against everything in it. If anything wouldn’t be kept — a track, chapters, cover art, details like an iTunes show and episode — or it’s protected by DRM, it’s left as it is, with the reason (in Processes, and on Library Health). Converted, the MKV is checked against the original (every video and audio track with the same number of packets, every subtitle track, captions in the video), then optimized like any MKV.") +
+    "<br><br>" + H("<strong>Plex keeps its metadata.</strong> The MKV is written next to the original, and Plex is asked to scan that folder (needed when libraries are scanned by hand). Plex adds it as a second version of the same item. Once it has, the original waits the time you set — so a second Plex server on a synced copy of the files can pick the MKV up too — then it’s deleted and the folder scanned again: the item keeps its edits, watch history and collections. If Plex makes the MKV an item of its own instead, nothing is deleted: merge the two in Plex, or keep both.");
+  // Where each Plex server is with a converted file: this one, and the second one if it's watched
+  function serversLine(e) {
+    var sv = e.servers || {};
+    if (!sv.there) return "";
+    var words = { same: T("has it"), other: T("an item of its own"), absent: T("doesn’t have this file"), waiting: T("waiting"),
+      unpaired: T("paths don’t line up (Sync → Second Plex Server)") };
+    return '<div class="det">' + esc(T("This server: {here} · {name}: {there}", { here: words[sv.here] || sv.here, name: (ST.plex2 || {}).name || T("the other server"), there: words[sv.there] || sv.there })) + "</div>";
+  }
+  function convertCard() {
+    var o = S.optimizer || {}, types = o.convert_types || {}, cv = ST.conversions || { items: [] };
+    var out = '<section class="card" id="convert">' + heading(esc(T("Convert to MKV")), CONVERT_HELP) +
+      '<p class="help">' + H("Which kinds of file are converted, in the libraries with <strong>Convert to MKV</strong> ticked above.") + "</p>" +
+      '<div class="convtypes">' + CONVERT_TYPES.map(function (t) {
+        var help = H(t[2]) + "<br><br><strong>" + H("What could be lost") + "</strong><ul>" + t[3].map(function (x) { return "<li>" + H(x) + "</li>"; }).join("") + "</ul>" +
+          "<strong>" + H("How converting handles it") + "</strong><br>" + H(t[4]);
+        var d = ((ST.optimizer_defaults || {}).convert_types || {})[t[0]];
+        var rv = d === undefined || !!types[t[0]] === d ? "" : ' <button type="button" class="revert" data-convtype-revert="' + t[0] + '" title="' + H("Back to the default ({value})", { value: d ? T("on") : T("off") }) + '">↺</button>';
+        return '<div class="convtype"><label><input type="checkbox" data-convtype="' + t[0] + '"' + (types[t[0]] ? " checked" : "") + "> " + esc(T(t[1])) + "</label>" + info(help, T(t[1])) + rv + "</div>";
+      }).join("") + "</div>";
+    out += '<div class="row"><div class="grow"><div class="what">' + H("Keep each original after Plex has its MKV") + '</div><div class="det">' +
+      H("Counted from when Plex has it — both servers, with a second one watched (Sync → Second Plex Server). Time lets any other copy of the files catch up first: another server that isn’t watched, or a backup. With every server watched, none is needed.") + "</div></div>" +
+      select("optimizer", "convert_hold_days", T("Keep for"), [0, 1, 3, 7, 14, 30].map(function (d) {
+        return [d, d ? P(d, "{n} day", "{n} days", { n: d }) : T("No time: delete it straight away")];
+      })) + "</div>";
+    var items = cv.items || [];
+    if (!items.length) return out + "</section>";
+    var state = function (e) {
+      if (e.state === "waiting") return badge("info", T("Waiting for Plex")) + '<div class="det">' + H("Its folder was scanned; Plex hasn’t added the MKV yet.") + "</div>" + serversLine(e);
+      if (e.state === "seen") return badge("pass", T("In Plex")) + '<div class="det">' + H("A version of the same item. The original is deleted {when}.", { when: fmtWhen(e.due) }) + "</div>";
+      if (e.state === "separate") return badge("warn", T("A separate item")) + '<div class="det">' + H("Plex added the MKV as an item of its own. Merge the two in Plex (select both → Merge) and this carries on — or keep both files.") + "</div>" + serversLine(e);
+      if (e.state === "missing") return badge("warn", T("MKV missing")) + '<div class="det">' + H("The MKV isn’t there any more: the original stays.") + "</div>";
+      if (e.state === "deleted") return badge("pass", T("Done")) + '<div class="det">' + H("Original deleted {when}.", { when: fmtWhen(e.deleted) }) + "</div>";
+      return esc(e.state);
+    };
+    var act = function (e, a, label, pri) {
+      return '<button class="btn sm' + (pri ? " pri" : "") + '" type="button" data-act="conv" data-conv="' + a + '" data-orig="' + esc(e.original) + '">' + label + "</button> ";
+    };
+    out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Converted") + '</th><th scope="col">' + H("Now") + '</th><th scope="col"></th></tr></thead><tbody>' +
+      items.map(function (e) {
+        return "<tr><td>" + esc(e.title) + '<div class="det mono">' + esc(e.original.split("/").pop()) + " → " + esc(e.new.split("/").pop()) + "</div></td><td>" + state(e) +
+          (e.error ? '<div class="det bad">' + esc(e.error) + "</div>" : "") + (e.note ? '<div class="det muted">' + esc(e.note) + "</div>" : "") + "</td><td>" +
+          (e.state === "seen" ? act(e, "delete", H("Delete Original Now")) : "") +
+          (e.state === "waiting" || e.state === "separate" ? act(e, "check", H("Check Again")) : "") +
+          (e.state !== "deleted" ? act(e, "keep", H("Keep Both")) : "") + "</td></tr>";
+      }).join("") + "</tbody></table></div>";
+    return out + "</section>";
+  }
+  // The folder copy (or the last pass) as it runs, inside the Convert Folder card: its progress, Pause, Cancel
+  function migProgress() {
+    var job = ST.job;
+    if (!job || job.kind !== "copy" || !job.running) return '<p class="help">' + H("Starting…") + "</p>";
+    return '<div class="migprog"><div class="what">' + (job.mirror ? H("The last pass: copying what changed, then comparing") : H("Copying")) + "</div>" +
+      jobProgress(job, jobFailures(job)) + '<div style="margin-top:8px">' + jobButtons(job) + "</div></div>";
+  }
   function migrationCard() {
     var mg = ST.migration || {}, st = mg.state, checks = mg.checks || [];
-    var out = '<section class="card">' + heading(esc(T("Move a Folder to Its Own Dataset")),
-      H("A library that needs a different record size than the rest of its dataset gets a dataset of its own, at the same path — so Plex keeps every file’s metadata. Plex keeps running; it’s restarted once, at the end.") +
-      info(H("A folder can’t become a dataset in place: its files are copied into a new dataset, which then takes the folder’s place. The copy is also what gives the files the new dataset’s record size and compression. " +
-        "You’ll need room for a second copy until the old one is deleted. Snapshots of the dataset keep the old copy’s space until they expire."), T("Moving a folder")));
+    // (one heading, its explanation behind one ⓘ: an ⓘ inside another can't be opened)
+    var out = '<section class="card" id="child-dataset">' + heading(esc(T("Convert Folder to Child Dataset")),
+      H("A record size suits some media better than others, and a dataset has just one. A library folder that needs a different one than the rest of its dataset can become a dataset of its own — a child dataset, at the same path, with the record size that suits it.") +
+      "<br><br>" + H("<strong>Ideal already</strong>: its dataset has the record size recommended for it. <strong>Sufficient</strong>: the second best — fine as it is. <strong>Split dataset</strong>: neither; converting the folder lets it read in the size that suits it.") +
+      "<br><br>" + H("How: a new dataset is made next to the folder, the files are copied into it (which also gives them its record size and compression), and it takes the folder’s place. Plex keeps every file’s metadata, and is restarted once, at the end. You’ll need room for a second copy until the old one is deleted; snapshots keep the old copy’s space until they expire."));
     if (!st || st.step === "done") {
-      if (st && st.step === "done") out += '<div class="note">' + H("{folder} is now the dataset {name}.", { folder: st.folder, name: st.child }) +
+      if (st && st.step === "done") out += '<div class="note">' + H("{folder} is now the dataset {name}.", { folder: st.host_folder || st.folder, name: st.child }) +
         ' <button class="link" type="button" data-act="mig" data-mig="cancel">' + H("Close") + "</button></div>";
       var cands = mg.candidates || [];
       if (!cands.length) return out + '<p class="muted">' + H("No library folders yet.") + "</p></section>";
       out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library folder") + '</th><th scope="col">' + H("Would become") +
         '</th><th scope="col">' + H("Size") + '</th><th scope="col"></th></tr></thead><tbody>';
       cands.forEach(function (c) {
-        out += "<tr><td>" + libIcon(c.library) + esc(c.title) + '<div class="det mono">' + esc(c.folder) + "</div>" + (c.suggested ? '<div class="det">' + badge("warn", T("Split Dataset")) + "</div>" : "") +
+        var advice = { ideal: badge("pass", T("Ideal already")), sufficient: badge("pass", T("Sufficient")), split: badge("warn", T("Split dataset")) }[c.advice];
+        out += "<tr><td>" + libIcon(c.library) + esc(c.title) + '<div class="det mono">' + esc(c.folder) + "</div>" +
+          (advice ? '<div class="det">' + advice + (c.now_rs ? ' <span class="muted">' + H("record size {size} now", { size: rsOr(c.now_rs) }) + "</span>" : "") + "</div>" : "") +
           "</td><td>" + (c.child ? '<span class="mono">' + esc(c.child) + '</span><div class="det">' + H("Record size {size}, ZSTD-3", { size: rsOr(c.rs) }) + "</div>" : '<span class="muted">' + esc(c.why || "") + "</span>") +
           '</td><td class="nw">' + esc(fmtGB(c.size)) + "</td><td>" + (c.child ? '<button class="btn" type="button" data-act="mig" data-mig="plan" data-lib="' + esc(c.library) +
           '" data-folder="' + esc(c.folder) + '">' + H("Start") + "</button>" : "") + "</td></tr>";
@@ -1173,20 +1336,29 @@ PCI18N.ready.then(function () {
     }
     var steps = [["create", T("Create the dataset")], ["copy", T("Copy")], ["switch", T("Switch")], ["verify", T("Verify")]];
     var at = steps.map(function (s) { return s[0]; }).indexOf(st.step);
-    out += '<div class="det"><strong>' + esc(st.title) + "</strong> · " + '<span class="mono">' + esc(st.folder) + "</span> → " + '<span class="mono">' + esc(st.child) + "</span></div>";
+    // what changes: the folder (as TrueNAS sees it) becomes a dataset of its own — nothing moves to another place
+    out += '<div class="det"><strong>' + esc(st.title) + "</strong>: " + H("the folder {folder} becomes the dataset {dataset}. Its path stays the same, so Plex and this app see the same files.",
+      { folder: st.host_folder || st.folder, dataset: st.child }) + "</div>";
     out += '<div class="det" style="margin:8px 0">' + steps.map(function (s, i) {
       return (i < at ? "✓ " : i === at ? "▶ " : "") + (i === at ? "<strong>" + esc(s[1]) + "</strong>" : esc(s[1]));
     }).join(" &nbsp;→&nbsp; ") + "</div>";
+    if (st.step !== "copy") out += migNext(checks);
     var optBusy = !!((ST.job || {}).running);  // one file job at a time
     var btn = function (act, label, pri, disabled) {
-      var blocked = optBusy && ["copy", "catchup", "rename_old", "undo_rename", "delete_old", "ask_delete"].indexOf(act) >= 0;
+      var blocked = optBusy && ["copy", "catchup", "pass_then_move", "rename_old", "undo_rename", "delete_old", "ask_delete"].indexOf(act) >= 0;
       return '<button class="btn' + (pri ? " pri" : "") + '" type="button" data-act="mig" data-mig="' + act + '"' + (disabled || blocked ? " disabled" : "") + ">" + label + "</button> ";
     };
     var temp = st.temp, rs = rsOr(st.rs), owner = st.owner || {};
-    if (st.step === "create") {
+    var made = checks.some(function (c) { return c.id === "dataset" && c.ok; });
+    if (st.step === "create" && made) {  // created: what's left is in Next and the list
+      out += '<p class="help">' + H("✓ The dataset {name} is created.", { name: temp }) + "</p>";
+      out += migChecks(checks);
+      var ready0 = checks.length && checks.every(function (c) { return c.ok; });
+      out += '<div style="margin-top:10px">' + btn("check", H("Check Again")) + btn("copy", H("Start Copying"), true, !ready0) + btn("cancel", H("Cancel")) + "</div>";
+    } else if (st.step === "create") {
       out += '<p class="help">' + H("Create the new dataset next to the folder, with these settings. It’s checked before anything is copied.") + "</p>";
-      out += '<div class="fix"><strong>' + H("In the TrueNAS shell") + "</strong>" + cmdBox("sudo zfs create -o recordsize=" + rs + " -o compression=zstd \"" + temp + "\"\n" +
-        "sudo chown " + (owner.uid != null ? owner.uid + ":" + owner.gid : "568:568") + " \"" + st.temp_host + "\"") + "</div>";
+      out += '<div class="fix"><strong>' + H("In the TrueNAS shell") + "</strong>" + cmdBox("sudo zfs create -o recordsize=" + rs + " -o compression=zstd " + shq(temp) + "\n" +
+        "sudo chown " + (owner.uid != null ? Number(owner.uid) + ":" + Number(owner.gid) : "568:568") + " " + shq(st.temp_host)) + "</div>";
       out += '<div class="fix"><strong>' + H("Or in the TrueNAS web UI") + "</strong><ol style=\"margin:4px 0 0 18px\">" +
         "<li>" + H("Datasets → select {parent} → Add Dataset.", { parent: st.dataset }) + "</li>" +
         "<li>" + H("Name: {name}. Under Advanced Options: Record Size {size}, Compression Level ZSTD. Save.", { name: temp.split("/").pop(), size: rs }) + "</li>" +
@@ -1199,17 +1371,31 @@ PCI18N.ready.then(function () {
       if (st.copying && st.queued) out += '<p class="help">' + H("Waiting in the queue: it starts when the file jobs before it are done.") + "</p>" +
         '<div style="margin-top:10px"><button class="btn" type="button" data-act="queue-remove" data-id="' + esc((queuedFor("copy", { folder: st.folder }) || {}).id || "") + '">' +
         H("Remove from the Queue") + "</button></div>";
-      else if (st.copying) out += '<p class="help">' + H("Copying — the progress, with Pause and Cancel, is shown above.") + "</p>";
+      else if (st.copying) out += migProgress();
       else out += '<div class="det">' + H("Stopped: {why}", { why: (st.copy || {}).reason || (st.copy || {}).result || "" }) + "</div>" +
         '<div style="margin-top:10px">' + btn("copy", H("Carry On Copying"), true) + btn("cancel", H("Cancel")) + "</div>";
     } else if (st.step === "switch") {
-      out += '<ol class="help" style="margin-left:18px">' +
-        "<li>" + H("<strong>The last pass</strong> copies what changed in the folder meanwhile and compares both copies, file by file.") + " " + btn("catchup", H("Run the Last Pass"), !st.compare) + "</li>" +
-        "<li>" + H("In Plex, turn off <strong>Empty trash automatically after every scan</strong> (Settings → Library) until the end, so files briefly out of sight don’t lose their metadata.") + "</li>" +
-        "<li>" + H("Move the old folder out of the way:") + " " + (st.old_path ? '<span class="mono">' + esc(st.old_path.split("/").pop()) + "</span> " + btn("undo_rename", H("Undo"))
-          : btn("rename_old", H("Move It"), !!(st.compare && st.compare.same), !(st.compare && st.compare.same))) + "</li>" +
-        "<li>" + H("Rename the dataset to the folder’s name:") + cmdBox("sudo zfs rename \"" + temp + "\" \"" + st.child + "\"") +
-          '<div class="det">' + H("Or in the TrueNAS web UI, if your version offers it: Datasets → select {name} → Rename.", { name: temp.split("/").pop() }) + "</div></li>" +
+      // the last pass ran by itself after the copy; it runs again, always, just before the old folder is set aside
+      var cmp = st.compare, lp = st.last_pass || {}, cat = st.compare_at || (st.copy || {}).finished;
+      var aside = "." + (st.folder || "").split("/").pop() + ".plexcache-old";
+      var passLine = st.copying ? migProgress()
+        : !cmp ? '<div class="det">' + H("It runs by itself once the copy is done.") + "</div>"
+        : '<div class="det">' + (cmp.same ? badge("pass", T("Both the same")) + " " + H("{files} files, {size}, compared {when}. {copied} copied by the pass (changed since the copy), {removed} removed.",
+            { files: fmtNum(cmp.files || 0), size: fmtGB(cmp.bytes || 0), when: ago(cat), copied: fmtNum(lp.copied || 0), removed: fmtNum(lp.removed || 0) })
+          : badge("warn", T("Different")) + " " + H("Compared {when}: {list}", { when: ago(cat), list: (cmp.missing || []).concat(cmp.different || [], cmp.extra || []).slice(0, 5).join(", ") })) + "</div>";
+      var stepRow = function (btns, text) { return '<li><div class="migstep">' + (btns ? '<div class="migbtns">' + btns + "</div>" : "") + '<div class="migtext">' + text + "</div></div></li>"; };
+      out += '<ol class="migsteps">' +
+        stepRow(st.copying ? "" : btn("catchup", H("Copy Changes &amp; Compare")),
+          H("<strong>The last pass</strong>: copies anything that changed in the folder since the copy, then compares both copies, file by file (names, sizes, modification times). It ran by itself when the copy finished.") + passLine) +
+        stepRow("", H("In Plex, turn off <strong>Empty trash automatically after every scan</strong> (Settings → Library) until the end, so files briefly out of sight don’t lose their metadata.")) +
+        stepRow(st.old_path ? btn("undo_rename", H("Put the Old Folder Back"))
+            : btn("pass_then_move", H("Compare, Then Set the Old Folder Aside"), true, st.copying || !(cmp && cmp.same)),
+          (st.old_path ? badge("pass", T("Set aside")) + " " + H("As {name}, in the same place. Nothing is deleted until the very end (after Verify). Plex Cache’s other file jobs wait until the dataset is renamed.", { name: st.old_path.split("/").pop() })
+            : H("<strong>Set the old folder aside</strong>: the new dataset needs the folder’s name, so the folder is renamed to {name}, in the same place. Nothing is deleted — that’s at the very end, after Verify — and Put Back undoes it.", { name: aside }) +
+              '<div class="det">' + H("The last pass runs first, every time: anything changed since is copied and both copies are compared, and only if they’re the same is the folder set aside. Plex Cache’s other file jobs wait until the dataset is renamed. Pause anything else that writes to this folder first: downloads, Sonarr or Readarr, Syncthing.") + "</div>") +
+          (st.move_error ? '<div class="det bad">' + esc(st.move_error) + "</div>" : "")) +
+        stepRow("", H("<strong>Rename the new dataset</strong> to the folder’s name, in the TrueNAS shell:") + cmdBox("sudo zfs rename " + shq(temp) + " " + shq(st.child)) +
+          '<div class="det">' + H("Or in the TrueNAS web UI, if your version offers it: Datasets → select {name} → Rename.", { name: temp.split("/").pop() }) + "</div>") +
         "</ol>" + migChecks(checks) + '<div style="margin-top:10px">' + btn("check", H("Check Again")) + (st.old_path ? "" : btn("cancel", H("Cancel"))) + "</div>";
     } else if (st.step === "verify") {
       out += '<p class="help">' + H("Now restart Plex (TrueNAS: Apps → Plex → Restart) so it sees the dataset, and let it scan. Then check again.") + "</p>" + migChecks(checks);
@@ -1266,8 +1452,7 @@ PCI18N.ready.then(function () {
   }
   function pageProcesses() {
     procFetch();
-    var out = top(T("Processes"), H("File jobs — optimizing, syncing cover art, copying a folder to its own dataset — one at a time: the one running now, the ones queued after it, and what each did, file by file, for six months."),
-      '<a class="btn" href="/api/processes/export?format=csv" download>' + H("Export CSV") + '</a> <a class="btn" href="/api/processes/export?format=json" download>' + H("Export JSON") + "</a>");
+    var out = top(T("Processes"), H("File jobs — optimizing, syncing cover art, converting a folder to a child dataset — one at a time: the one running now, the ones queued after it, and what each did, file by file."), "");
     out += '<div class="stack">';
     var cur = jobCard();
     out += cur || '<section class="card">' + heading(esc(T("Running Now")), "") + '<p class="muted">' + H("No file job is running. Start one on the Optimizer page.") + "</p></section>";
@@ -1294,7 +1479,8 @@ PCI18N.ready.then(function () {
         '<div class="det"><button class="link" type="button" data-act="proc-open" data-job="' + esc(j.job) + '">' + (procOpen === j.job ? H("Hide files") : H("Show files")) + "</button></div>" +
         "</div></div>" + (procOpen === j.job ? '<div class="procfiles">' + procFilesTable(j.job) + "</div>" : "");
     });
-    return out + "</section></div>";
+    // one export, under the history it's of: every job and file, for a spreadsheet
+    return out + '</section><div><a class="btn" href="/api/processes/export?format=csv" download>' + H("Export CSV") + "</a></div></div>";
   }
   // A job's running tally, as its files are done: what was put right, the space saved, the posters
   function procTally(t) {
@@ -1311,6 +1497,12 @@ PCI18N.ready.then(function () {
     if (t.posters_saved) bits.push(T("posters compressed: {size} saved", { size: fmtBytesShort(t.posters_saved) }));
     return '<div class="det tally">' + esc(bits.join(" · ")) + "</div>";
   }
+  // A poster that can't be fetched (Plex unreachable, no such poster) is hidden, not shown broken. One
+  // listener for the page: the page's security policy forbids inline handlers (onerror="…").
+  document.addEventListener("error", function (e) {
+    var t = e.target;
+    if (t && t.tagName === "IMG" && t.hasAttribute("data-hide-broken")) t.style.visibility = "hidden";
+  }, true);
   // A library's icon, like Plex's own (film, TV, music, photos), by its key or its name; nothing if it's not a library
   var LIB_ICONS = {
     movie: '<path d="M3 2h10v12H3z"/><path d="M5 2v12M11 2v12M3 5h2M3 8h2M3 11h2M11 5h2M11 8h2M11 11h2"/>',
@@ -1345,7 +1537,7 @@ PCI18N.ready.then(function () {
     // the header stays at the top while the list scrolls by, with a button to hide the list
     var out = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"><button class="link hidelist" type="button" data-act="proc-open" data-job="' + esc(id) +
       '" title="' + esc(T("Hide files")) + '">▲ ' + H("Hide") + "</button></th>" + th("file", H("File")) + th("result", H("Result")) + th("time", H("Time")) +
-      th("size", H("Size")) + th("verified", H("Verified")) + th("rs", H("Record size")) + th("compression", H("ZFS Compression")) + th("optimized", H("Optimized")) +
+      th("size", H("Size")) + th("verified", H("Verified")) + th("rs", H("Record size")) + th("compression", H("ZFS compression")) + th("optimized", H("Optimized")) +
       th("cover", H("Cover art")) + "</tr></thead><tbody>";
     // a failed file can be tried again, after the file in hand: waiting for that, or being tried now
     var queuedFiles = {}, nowFiles = {};
@@ -1361,7 +1553,7 @@ PCI18N.ready.then(function () {
       var now = job && job.current_file === f.file;
       var retry = f.result !== "failed" || f.kind !== "optimize" ? "" : (nowFiles[f.file] || queuedFiles[f.file] ? '<button class="btn sm" type="button" disabled>' + H("Retrying") + "</button>"
         : '<button class="btn sm" type="button" data-act="proc-retry" data-job="' + esc(id) + '" data-file="' + esc(f.file) + '">' + H("Retry") + "</button>");
-      var res = { optimized: badge("pass", T("Optimized")), rewritten: badge("pass", T("Written again")), already: badge("info", T("Already done")),
+      var res = { optimized: badge("pass", T("Optimized")), converted: badge("pass", T("Converted to MKV")), rewritten: badge("pass", T("Written again")), already: badge("info", T("Already done")),
         copied: badge("pass", T("Copied")), skipped: badge("info", T("Skipped")), failed: badge("fail", T("Failed")),
         waiting: badge("info", T("Waiting")), "not done": badge("info", T("Not done")), cancelled: badge("warn", T("Cancelled")) }[f.result] || esc(f.result || "");
       var tried = f.result !== "waiting" && f.result !== "not done" && f.result !== "cancelled";  // not tried yet: just the first line (the file as it is)
@@ -1372,7 +1564,7 @@ PCI18N.ready.then(function () {
           Math.round(job.file_pct) + '" aria-label="' + esc(T("This file")) + '"><div style="width:' + Math.min(100, job.file_pct) + '%"></div></div>';
       }
       // each column: the file as it was on the first line, as written on the second (and a third: what changed)
-      var wrote = !now && (f.result === "optimized" || f.result === "rewritten");
+      var wrote = !now && (f.result === "optimized" || f.result === "rewritten" || f.result === "converted");
       var ln = function (x, cls) { return '<div class="ln' + (cls ? " " + cls : "") + '">' + (x == null || x === "" ? "&nbsp;" : x) + "</div>"; };
       var pct = function (b, a) {  // how much smaller (−) or larger (+), to 3 decimals; nothing when that rounds to 0
         if (a == null || !b) return null;
@@ -1423,10 +1615,32 @@ PCI18N.ready.then(function () {
   // video and 60% of a block of video; at its end, every block holding metadata. Every block the
   // same size, filled in proportion with what's in it. Layouts come from Read the Files (filemap.py);
   // a file opened shows its blocks larger: click one for what's in it and how ZFS might store it.
-  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, auto: {} };
+  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, auto: {}, rev: null };
   var PART_NAMES = { header: N("Matroska header"), segment: N("Segment start"), seekhead: N("Table of contents"), info: N("File info"), tracks: N("Track list"), chapters: N("Chapters"),
-    attachments: N("Attachments"), tags: N("Tags"), index: N("Index"), padding: N("Padding"), checksum: N("Checksum"), video: N("Video"),
-    other: N("Other"), image: N("Cover art"), font: N("Font"), attachment: N("Attachment"), empty: N("Unused (zeros)") };
+    attachments: N("Attachments list"), tags: N("Tags"), index: N("Index"), padding: N("Padding"), checksum: N("Checksum"), video: N("Video"),
+    other: N("Other"), image: N("Cover art"), font: N("Font"), attachment: N("Attachment"), empty: N("Unused"), head: N("File header"),
+    id3: N("ID3 tag header"), flac: N("FLAC header"), streams: N("Video & audio") };
+  // The parts every Matroska file starts with, a player reads before anything else: one colour, "File header"
+  var HEAD_PARTS = { header: 1, segment: 1, seekhead: 1, info: 1, tracks: 1, checksum: 1, id3: 1, flac: 1 };
+  // What each part is, and whether a file needs it (behind an ⓘ in a block's list)
+  var PART_HELP = {
+    header: N("Says the file is Matroska, and which version. Required: the first thing in every file."),
+    segment: N("Where the rest of the file begins: every other part is inside it. Required."),
+    seekhead: N("Where each part is in the file, so a player can go straight to it. Optional, but every muxer writes one and players rely on it."),
+    info: N("The file’s duration, timing scale and title, and what wrote it. Required."),
+    tracks: N("Each track’s codec, language, name and the settings its decoder needs. Required: nothing plays without it."),
+    chapters: N("Chapter names and where each starts. Optional."),
+    attachments: N("The attachments’ own list: a few bytes saying where they start and how much room they take. MKVToolNix doesn’t show it, as it isn’t a file. Optional, with the attachments."),
+    image: N("A picture some players and TVs show for the file. Optional: Plex has its own posters."),
+    font: N("A font styled (ASS) subtitles need to look right. Optional, but those subtitles need it."),
+    attachment: N("Some other file carried inside this one. Optional."),
+    index: N("Where each keyframe is, so a player can seek. Optional, but without it seeking is slow or impossible."),
+    tags: N("Extra details — titles, encoder settings, and the optimizer’s own mark. Optional."),
+    padding: N("Space left empty after the part above it, so that part can grow without rewriting the file. Optional: only zeros."),
+    checksum: N("A checksum of the part it’s in. Optional."),
+    video: N("The video, audio and subtitles themselves, in clusters. Required."),
+    other: N("Something this page doesn’t know. Optional."),
+    empty: N("Zeros past the end of the file that fill out its last block. Not part of the file: ZFS adds them and compresses them away.") };
   function libFetch(force) {
     if (!LIB.key) return;
     if (!force && LIB.data && LIB.data.library === LIB.key && Date.now() - LIB.at < 15000) return;
@@ -1434,18 +1648,26 @@ PCI18N.ready.then(function () {
     api("/api/library?key=" + encodeURIComponent(LIB.key) + "&offset=" + LIB.offset + "&limit=100" + (LIB.q ? "&q=" + encodeURIComponent(LIB.q) : ""))
       .then(function (d) {
         LIB.data = d;
-        // files new or changed since they were inspected: inspect them now (once each time the library's opened)
-        if (d.surveyed < d.total && !LIB.auto[d.library] && !libJob(d.library).running && !libJob(d.library).queued) {
+        // files new or changed since they were inspected: inspect them now (each time the library's opened,
+        // unless paused here since; starting it pauses another library's, which carries on when it's opened)
+        var ins = libJob(d.library);
+        if (d.surveyed < d.total && !LIB.auto[d.library] && !ins.running) {
           LIB.auto[d.library] = true;
           api("/api/library/survey", { library: d.library }).then(function () { load(); });
         }
-        if (page === "library" && !editing()) render();
+        var q = document.activeElement && document.activeElement.id === "lib-q" ? document.activeElement : null;
+        if (page === "library" && (q || !editing())) {
+          var at = q ? [q.selectionStart, q.selectionEnd] : null;
+          render();
+          var nq = at && document.getElementById("lib-q");
+          if (nq) { nq.focus(); nq.setSelectionRange(at[0], at[1]); }
+        }
       }).catch(function () { LIB.at = 0; });
   }
-  // The inspection of a library: running (and paused?), or waiting in the queue
+  // The inspection of a library: {running, paused (with files left), done, total}
   function libJob(key) {
-    var j = ST.job && ST.job.running && ST.job.kind === "survey" && ST.job.library === key ? ST.job : null;
-    return { running: j, queued: (ST.queue || []).some(function (q) { return q.kind === "survey" && q.args.library === key; }) };
+    var j = ((ST.inspect || {}).libs || {})[key] || {};
+    return { running: !!j.running, paused: !!j.paused && j.done < j.total, done: j.done || 0, total: j.total || 0 };
   }
   function libDetailFetch(path) {
     api("/api/library/file?path=" + encodeURIComponent(path)).then(function (d) {
@@ -1472,17 +1694,32 @@ PCI18N.ready.then(function () {
     return out;
   }
   // One block: its contents side by side, in proportion; past the end of the file, the unused rest
+  // A part's name; padding is named after the part it belongs to (the one before it): "Tags padding"
+  function partName(p) {
+    if (p.kind === "video" && p.stream === "audio") return T("Audio");
+    return p.kind === "padding" && p.of ? T("{part} padding", { part: T(PART_NAMES[p.of] || p.of) }) : T(PART_NAMES[p.kind] || p.kind);
+  }
+  // Its colour: the file header's parts share one; padding takes its part's
+  function partClass(p) {
+    var k = p.kind === "padding" && p.of ? p.of : p.kind;
+    return "lp-" + (HEAD_PARTS[k] ? "head" : k);
+  }
   function libBlock(b, path, big, sel, count, est) {
     var inner = b.pieces.map(function (p) {
-      return '<span class="lp-' + p.kind + '" style="flex:' + p.bytes + ' 0 0" title="' + esc(T(PART_NAMES[p.kind] || p.kind) + (p.name ? " · " + p.name : "") + " · " + fmtBytesShort(p.bytes)) + '"></span>';
+      return '<span class="' + partClass(p) + '" style="flex:' + p.bytes + ' 0 0" title="' + esc(partName(p) + (p.name ? " · " + p.name : "") + " · " + fmtBytesShort(p.bytes)) + '"></span>';
     }).join("");
     // under a big block: how much ZFS compresses it (estimated), or its number until that's known
     var e = est && est[b.n], rs = b.data + (b.pieces.filter(function (p) { return p.kind === "empty"; })[0] || { bytes: 0 }).bytes;
-    var what = e ? (e.compressed ? T("{pct}% compressed", { pct: Math.round(100 * (1 - e.stored / rs)) }) : T("Not compressed")) : T("Block {n}", { n: fmtNum(b.n) });
+    var what = e ? (e.compressed ? T("≈{pct}% compressed", { pct: Math.round(100 * (1 - e.stored / rs)) }) : T("Not compressed")) : T("Block {n}", { n: fmtNum(b.n) });
     var label = big ? '<span class="lbn">' + esc(what) + "</span>" : "";
     var times = count > 1 ? '<span class="lx">×' + esc(fmtNum(count)) + "</span>" : "";
     return '<button type="button" class="lblk' + (big ? " big" : "") + (sel ? " sel" : "") + '"' + (big ? ' data-act="lib-block" data-file="' + esc(path) + '" data-n="' + b.n + '"' : "") +
       ' aria-label="' + esc(T("Block {n}", { n: fmtNum(b.n) })) + '"><span class="lbin">' + inner + times + "</span>" + label + "</button>";
+  }
+  // What a file's streams are: "Video, Audio, Subs", or just "Audio"
+  function streamNames(bm) {
+    var names = { video: T("Video"), audio: T("Audio"), subtitles: T("Subs") };
+    return (bm.streams || ["video"]).map(function (k) { return names[k]; }).join(", ");
   }
   // A file's blocks: the start's, then the video (its size, not to scale), then the end's
   function libBlocks(row, big, path) {
@@ -1493,35 +1730,191 @@ PCI18N.ready.then(function () {
     var draw = function (list) { return libRuns(list).map(function (r) { return libBlock(r.b, path, big, sel === r.b.n, r.count, est); }).join(""); };
     var start = draw(bm.start), end = draw(bm.end);
     // the video between them, not to scale (clickable when big: its tracks, and how much of it is cached)
-    var vid = '<span class="lvid">' + esc(T("Video")) + " " + esc(fmtBytesShort(bm.video)) + "</span>" +
-      (bm.lead_blocks ? '<span class="muted">' + esc(P(bm.lead_blocks, "+ {n} lead-in block", "+ {n} lead-in blocks", { n: fmtNum(bm.lead_blocks) })) + "</span>" : "");
+    var vid = '<span class="lvid">' + esc(streamNames(bm)) + "</span>" +
+      (bm.lead_blocks ? '<span class="muted">' + esc(P(bm.lead_blocks, "{n} lead-in block", "{n} lead-in blocks", { n: fmtNum(bm.lead_blocks) })) + "</span>" : "") +
+      (big ? '<span class="muted">' + esc(T("Not compressed")) + "</span>" : "");  // (in the list, blocks don't say either: room is short)
     var gap = big ? '<button type="button" class="lgap' + (sel === "video" ? " sel" : "") + '" data-act="lib-block" data-file="' + esc(path) + '" data-n="video">' + vid + "</button>"
       : '<span class="lgap">' + vid + "</span>";
     return '<div class="lblocks' + (big ? " big" : "") + '">' + start + gap + end + "</div>";
   }
-  function libLegend() {
-    return '<div class="llegend">' + ["header", "segment", "seekhead", "info", "tracks", "chapters", "padding", "video", "image", "font", "index", "tags", "empty", "other"].map(function (k) {
-      return '<span><i class="lsw lp-' + k + '"></i>' + esc(T(PART_NAMES[k])) + "</span>";
-    }).join("") + "</div>";
+  function libLegend(after) {
+    // in the order an optimized file has them: its header, the streams, then the metadata at its end
+    return '<div class="llegend">' + ["head", "video", "image", "font", "chapters", "index", "tags", "other", "empty"].map(function (k) {
+      return '<span><i class="lsw lp-' + k + '"></i>' + esc(T(PART_NAMES[k === "video" ? "streams" : k])) + "</span>";
+    }).join("") + (after || "") + "</div>";
+  }
+  // Whether a picture in the file has been compressed losslessly: by the optimizer (its tag is on the
+  // file), or — for a JPEG — whether its Huffman tables are the standard ones (not optimized) or its own
+  function coverState(a, optimized) {
+    if (optimized) return T("{name}: compressed losslessly by Plex Cache (where it helped)", { name: a.name });
+    if (a.jpeg_tables === "standard") return T("{name}: not compressed losslessly (standard JPEG tables)", { name: a.name });
+    if (a.jpeg_tables) return T("{name}: already compressed losslessly (its own JPEG tables)", { name: a.name });
+    return T("{name}: not compressed by Plex Cache", { name: a.name });
+  }
+  // What the always-cached blocks take in the cache — compressed, as ZFS keeps them (each run of like
+  // blocks counted from its first block's estimate)
+  function cachedSize(bm, est) {
+    var total = 0, guess = false, known = true;
+    libRuns(bm.start).concat(libRuns(bm.end)).forEach(function (r) {
+      var e = est[r.b.n];
+      if (!e) known = false;
+      if (e && e.compressed) guess = true;
+      total += r.count * (e ? e.stored : bm.record);
+    });
+    if (!known) return "";
+    return " · " + (guess ? T("≈{size} in the cache", { size: fmtBytesShort(total) }) : T("{size} in the cache", { size: fmtBytesShort(total) }));
+  }
+  var HEALTH_BADGE = { ideal: ["pass", N("Ideal")], pass: ["pass", N("Pass")], warn: ["warn", N("Warning")] };
+  function healthBadge(st) { var b = HEALTH_BADGE[st]; return b ? badge(b[0], T(b[1])) : ""; }
+  // How many of a file's checks are Ideal, Pass and Warning (the checks themselves are under its parts)
+  function checkCounts(list) {
+    if (!list || !list.length) return "";
+    var by = { ideal: [], pass: [], warn: [] };
+    list.forEach(function (c) { by[c.status].push(msg(c.name)); });
+    return '<div class="lcount">' + H("Checks:") + ["ideal", "pass", "warn"].map(function (k) {
+      return ' <span class="lcountn" title="' + esc(by[k].join(" · ")) + '">' + healthBadge(k) + " " + esc(fmtNum(by[k].length)) + "</span>";
+    }).join("") + '<span class="det muted"> ' + H("— each beside what it’s about, in the blocks below") + "</span></div>";
+  }
+  // Each check beside what it's about: a part's (chapters, index, tags, cover art) on that part's line in a
+  // block; the block size and compression on every block; the start of the file and the container — and
+  // any check whose part isn't in the file (no index, say) — on the first block. Its explanation is behind ⓘ.
+  var CHECK_PARTS = { chapters: ["chapters"], index: ["index"], tags: ["tags"], image: ["cover", "cover_setting"] };
+  function checkMarks(checks, ids, named) {
+    return (checks || []).filter(function (c) { return ids.indexOf(c.id) >= 0; }).map(function (c) {
+      return '<span class="lcheck">' + (named ? '<span class="muted">' + esc(msg(c.name)) + "</span> " : "") + healthBadge(c.status) +
+        info("<strong>" + esc(msg(c.name)) + "</strong>: " + esc(msg(c.text)), msg(c.name)) + "</span>";
+    }).join("");
+  }
+  function blockChecks(d, b, shown, isStart) {
+    var ids = ["blocks", "compression"];
+    if (isStart) {
+      ids = ["front", "container"].concat(ids);
+      // a check about a part that isn't in any of the blocks shown (no index, say): here, so it isn't lost
+      var kinds = {};
+      shown.forEach(function (x) { x.pieces.forEach(function (p) { kinds[p.kind] = true; }); });
+      Object.keys(CHECK_PARTS).forEach(function (k) { if (!kinds[k]) ids = ids.concat(CHECK_PARTS[k]); });
+    }
+    return checkMarks(d.checks, ids, true);
+  }
+  // The library's files through their checks: how many are Ideal, Pass or Warning, and what warns most
+  function libSummary(sm) {
+    if (!sm || !sm.checked) return "";
+    var out = '<div class="lsummary"><div>' + H("{n} files checked:", { n: fmtNum(sm.checked) }) + " " + healthBadge("ideal") + " " + esc(fmtNum(sm.ideal)) +
+      " " + healthBadge("pass") + " " + esc(fmtNum(sm.pass)) + " " + healthBadge("warn") + " " + esc(fmtNum(sm.warn)) + "</div>";
+    if ((sm.warnings || []).length) out += '<div class="det">' + H("Warnings:") + "<ul>" + sm.warnings.map(function (w) { return "<li>" + esc(msg(w.text)) + "</li>"; }).join("") + "</ul></div>";
+    if (sm.cover && sm.cover.files) out += '<div class="det">' + esc(T("Cover art compressed losslessly: {pct}% of the {n} files with cover art",
+      { pct: Math.round(100 * sm.cover.compressed / sm.cover.files), n: fmtNum(sm.cover.files) })) + "</div>";
+    var sv = sm.views || {};
+    if (sv.all && sm.mix) out += '<div class="lmixsum"><div class="what">' + H("Always cached, all {n} inspected files, as they are now", { n: fmtNum(sm.mix.files) }) + "</div>" +
+      mixChart([[T("Now"), sv.all]]) + "</div>";
+    if (sv.optimized && sm.optimized) out += '<div class="lmixsum"><div class="what">' + H("The {n} optimized files, before and now", { n: fmtNum(sm.optimized.files) }) + "</div>" +
+      mixChart([[T("Before"), sv.optimized.before], [T("Now"), sv.optimized.now]]) + "</div>";
+    if (sv.projected && sm.projected) out += '<div class="lmixsum"><div class="what">' + H("The {n} files still to optimize: now, and once optimized (est.)", { n: fmtNum(sm.projected.files) }) +
+      info(PROJ_HELP, T("If optimized")) + "</div>" + mixChart([[T("Now"), sv.projected.now], [T("Optimized (est.)"), sv.projected.after]]) +
+      blocksLine(sv.projected.now.blocks, sv.projected.after.blocks) + "</div>";
+    return out + "</div>";
+  }
+  var PROJ_HELP = H("Estimated from what inspecting each file measured — nothing is read or changed. The optimizer takes out the metadata the library’s choices strip (cover art, tags), moves the rest to the end of the file where it compresses, and writes the file in the dataset’s record size. Plex’s poster, where it’s put in, counts at its real size once that’s known — fetched when you open a file, and learnt in the background for a library; until then the file’s own cover art stands in.");
+  function sumValues(o) { return Object.keys(o || {}).reduce(function (a, k) { return a + (o[k] || 0); }, 0); }
+  function blocksLine(now, after) {
+    return '<div class="det lgains">' + esc(T("Blocks always cached: {now} → {after}", { now: fmtNum(now || 0), after: fmtNum(after || 0) })) + "</div>";
+  }
+  // What the always-cached blocks hold (filemap.cache_mix): video, metadata and unused room, as ZFS
+  // stores them — a bar, then the numbers. More video and less metadata is better.
+  var MIX_HELP = H("The blocks caching always keeps of each file — its start, and the metadata at its end; not the lead-in. Every bar is on one scale. Point at a part to see what’s in it.") + "<ul>" +
+    "<li>" + H("<strong>Streamed</strong>: what a play reads of them — the file’s own bytes. The unused room after a file’s end, in its last block, is never read and isn’t counted.") + "</li>" +
+    "<li>" + H("<strong>Meaningful</strong> (the coloured part of the line above each bar): what a play needs of it — the lead-in video, and the metadata players use (header, track list, index, chapters, subtitle fonts). The grey rest is dead weight: unused video, tags, cover art. Cached, it’s estimated: that metadata compressed as well as the rest.") + "</li>" +
+    "<li>" + H("<strong>Cached</strong>: what they take in RAM and on the SSD — as ZFS stores them, compressed where that saves at least an eighth of a block. A block’s unused room counts as metadata here: it takes space when its block isn’t compressed.") + "</li>" +
+    "<li>" + H("<strong>Lead-in video</strong>: the first blocks of the video — what a play starts with, and what the lead-in is for. The more, the better.") + "</li>" +
+    "<li>" + H("<strong>Unused video</strong>: video that shares the last blocks with the metadata there. It’s cached with them, but it’s no use to the lead-in: dead weight.") + "</li>" +
+    "<li>" + H("<strong>Metadata</strong>: needed, but the less the better.") + "</li>" +
+    "<li>" + H("<strong>Taken out</strong>: what optimizing removes, as the library’s choices say (cover art, tags). It’s read and cached now like the rest — players read cover art when they open a file, wherever it is — so it’s part of today’s total; the optimized bar is that much shorter.") + "</li></ul>" +
+    H("The line above each bar ends at its total. Compression is estimated (zlib standing in for ZFS’s ZSTD, which is similar on metadata).");
+  // The always-cached blocks compared (projection.view's rows): the rows' names once, down the side;
+  // Streamed and Cached side by side, on one scale each. Each bar: video at the start, video at the end,
+  // metadata, and what optimizing takes out (now: read and cached like the rest; optimized: gone, so its
+  // bar is that much shorter — one scale per column); above it, a line as long as the bar, with its total.
+  // Each part says what's in it when pointed at.
+  function kindLines(kinds, unit) {
+    return Object.keys(kinds || {}).sort(function (a, b) { return kinds[b] - kinds[a]; }).map(function (k) {
+      return "\n" + T(PART_NAMES[k] || k) + ": " + fmtBytesShort(kinds[k]) + (unit || "");
+    }).join("");
+  }
+  function mixChart(rows) {
+    rows = rows.filter(function (r) { return r[1]; });
+    if (!rows.length) return "";
+    var hasOut = rows.some(function (r) { return r[1].stream.out && !r[1].gone; }), hasTail = rows.some(function (r) { return r[1].stream.tail; });
+    // one scale for every bar: Streamed, Meaningful and Cached stacked, so they compare directly
+    var groups = [["stream", T("Streamed")], ["cache", T("Cached")]];
+    var scale = Math.max.apply(null, [1].concat.apply([1], groups.map(function (g) { return rows.map(function (r) { return r[1][g[0]].total; }); })));
+    var bar = function (key, r) {
+      var v = r[1], x = v[key];
+      var seg = function (cls, n, tip) {
+        if (!n) return "";
+        var pct = 100 * n / scale;
+        return '<span class="' + cls + '" style="width:' + pct.toFixed(2) + '%" title="' + esc(tip) + '">' + (pct >= 9 ? esc(fmtBytesShort(n)) : "") + "</span>";
+      };
+      var inFile = key === "cache" ? T(" in the file") : "";
+      var kinds = key === "meaningful" ? v.useful_kinds : v.kinds;
+      var metaTip = (key === "cache" ? T("Metadata, as stored: {size}", { size: fmtBytesShort(x.meta) }) : T("Metadata: {size}", { size: fmtBytesShort(x.meta) })) +
+        kindLines(kinds, inFile) + (key === "cache" && v.unused_disk ? "\n" + T("Unused room, stored: {size}", { size: fmtBytesShort(v.unused_disk) }) : "");
+      var outTip = T("To be taken out by optimizing: {size}", { size: fmtBytesShort(x.out) }) + kindLines(v.out_kinds, inFile);
+      var left = Object.keys(v.left_out || {}).length ? "\n" + T("Left out:") + Object.keys(v.left_out).sort(function (a, b) { return v.left_out[b] - v.left_out[a]; }).map(function (k) {
+        return "\n" + (k === "unused_video" ? T("Unused video") : T(PART_NAMES[k] || k)) + ": " + fmtBytesShort(v.left_out[k]);
+      }).join("") : "";
+      var totalTip = key === "meaningful" ? T("Meaningful: {size} — what a play needs of what’s streamed", { size: fmtBytesShort(x.total) }) + left
+        : v.gone && x.out ? T("Total: {size} — {out} less, taken out by optimizing:", { size: fmtBytesShort(x.total), out: fmtBytesShort(x.out) }) + kindLines(v.out_kinds, inFile)
+        : T("Total: {size}", { size: fmtBytesShort(x.total) });
+      // the line above: the meaningful part (lead-in video, then the metadata a play uses) in colour, the
+      // rest in grey — "Meaningful" at the end of the colour, "Total" at the end of the line
+      var useful = x.useful != null ? x.useful : x.total, w = function (n) { return (100 * n / scale).toFixed(2) + "%"; };
+      var usefulTip = T("Meaningful: {size} — what a play needs: the lead-in video and the metadata players use", { size: fmtBytesShort(useful) }) + left;
+      var close = (x.total - useful) / scale < 0.2;
+      var line = '<div class="lcline">' +
+        '<span class="lclv" style="width:' + w(x.lead) + '" title="' + esc(usefulTip) + '"></span>' +
+        '<span class="lclm" style="width:' + w(x.useful_meta || 0) + '" title="' + esc(usefulTip) + '"></span>' +
+        '<span class="lclr" style="width:' + w(Math.max(0, x.total - useful)) + '" title="' + esc(totalTip) + '"></span>' +
+        (close ? '<em style="left:' + w(x.total) + '">' + esc(T("Meaningful: {a} · Total: {b}", { a: fmtBytesShort(useful), b: fmtBytesShort(x.total) })) + "</em>"
+          : '<em style="left:' + w(useful) + '">' + esc(T("Meaningful: {size}", { size: fmtBytesShort(useful) })) + '</em><em style="left:' + w(x.total) + '">' + esc(T("Total: {size}", { size: fmtBytesShort(x.total) })) + "</em>") + "</div>";
+      return '<div class="lccell">' + line +
+        '<div class="lcbar">' + seg("lp-video", x.lead, (v.split ? T("Lead-in video: {size}", { size: fmtBytesShort(x.lead) }) + "\n" + T("The first blocks: what a play starts with.") : T("Video: {size}", { size: fmtBytesShort(x.lead) }))) +
+        seg("lcvidend", x.tail, T("Unused video: {size}", { size: fmtBytesShort(x.tail) }) + "\n" + T("In the last blocks, with the metadata: cached with it, but no use to the lead-in.")) +
+        seg("lp-index", x.meta, metaTip) + (v.gone ? "" : seg("lcout", x.out, outTip)) + "</div></div>";
+    };
+    var out = '<div class="lcgrid">' + groups.map(function (g) {
+      return rows.map(function (r, i) {
+        return (i === 0 ? '<div class="lcgroup" style="grid-row:span ' + rows.length + '">' + esc(g[1]) + "</div>" : "") + '<div class="lclbl">' + esc(r[0]) + "</div>" + bar(g[0], r);
+      }).join("");
+    }).join('<div class="lcgap"></div>') + "</div>";
+    var legend = '<div class="llegend lclegend"><span><i class="lsw lp-video"></i>' + (hasTail ? H("Lead-in video") : H("Video &amp; audio")) + "</span>" +
+      (hasTail ? '<span><i class="lsw lcvidend"></i>' + H("Unused video") + "</span>" : "") + '<span><i class="lsw lp-index"></i>' + H("Metadata") + "</span>" +
+      (hasOut ? '<span><i class="lsw lcout"></i>' + H("Taken out by optimizing") + "</span>" : "") + info(MIX_HELP, T("Always cached")) + "</div>";
+    return out + legend;
   }
   function libDetail(path) {
     var d = LIB.detail[path];
     if (!d) return '<p class="muted">' + H("Reading the file…") + "</p>";
     if (d.error && !d.blocks) return '<p class="bad">' + esc(sentence(d.error)) + "</p>";
     var bm = d.blocks, est = LIB.est[path] || {}, rec = d.record;
+    if (LIB.block[path] === undefined && bm && bm.start.length) LIB.block[path] = bm.start[0].n;  // the first block, until another is picked
     var shown = bm ? bm.start.concat(bm.end) : [];
-    var facts = [
-      [T("File size"), fmtBytesShort(d.size)],
-      [T("On disk"), d.disk != null ? fmtBytesShort(d.disk) : "—"],
-      [T("ZFS compression saved"), d.saved != null ? fmtBytesShort(d.saved) + " · " + T("almost all of it in the metadata blocks") : "—"],
-      [T("Always cached"), bm ? P(bm.start.length + bm.end.length, "{n} block", "{n} blocks", { n: bm.start.length + bm.end.length }) +
-        (bm.lead_blocks ? " · " + T("plus {n} for the lead-in", { n: fmtNum(bm.lead_blocks) }) : "") : "—"]];
-    var out = '<div class="ldetail"><div class="lfacts">' + facts.map(function (f) { return "<div><span class=\"muted\">" + esc(f[0]) + "</span> " + esc(f[1]) + "</div>"; }).join("") + "</div>";
-    out += libBlocks(d, true, path) + '<p class="help" style="margin:4px 0 8px">' + H("Click a block, or the video, to see what’s in it.") + "</p>";
+    var imgs = (d.attachments || []).filter(function (a) { return a.image; });
+    var facts = [[T("On disk"), d.disk != null ? fmtBytesShort(d.disk) : "—"]];
+    // measured: the whole file's size against what it takes on disk — said only when ZFS saved something
+    // (its own bookkeeping can outweigh a few hundred KB compressed at the end)
+    if (d.saved > 0) facts.push([T("ZFS compression saved"), fmtBytesShort(d.saved)]);
+    facts.push(
+      [T("Always cached"), bm ? P(bm.start.length + bm.end.length, "{n} block", "{n} blocks", { n: bm.start.length + bm.end.length }) + cachedSize(bm, est) : "—"]);
+    if (imgs.length) facts.push([T("Cover art"), imgs.map(function (a) { return coverState(a, d.optimized); }).join(" · ")]);
+    var out = '<div class="ldetail"><div class="det mono" style="margin-bottom:6px">' + esc(path.split("/").pop()) + "</div>" + checkCounts(d.checks) + '<div class="lfacts">' + facts.map(function (f) { return "<div><span class=\"muted\">" + esc(f[0]) + "</span> " + esc(f[1]) + "</div>"; }).join("") + "</div>";
+    var dv = d.views;
+    if (dv && dv.after) out += mixChart([[T("Now"), dv.now], [T("Optimized (est.)"), dv.after]]) + blocksLine(dv.now.blocks, dv.after.blocks);
+    else if (dv) out += mixChart(dv.before ? [[T("Before optimizing"), dv.before], [T("Now"), dv.now]] : [[T("Now"), dv.now]]);
+    out += libBlocks(d, true, path);
     var sel = LIB.block[path];
     if (sel === "video" && bm) {
       // the video: its tracks, and how much of it is cached with the lead-in
-      out += '<div class="lblkinfo"><div class="what">' + esc(T("Video")) + "</div>" +
+      out += '<div class="lblkinfo"><div class="what">' + esc(streamNames(bm)) + checkMarks(d.checks, ["container"], true) + "</div>" +
         '<div class="det">' + esc(T("{size} in {n} blocks of {rs}", { size: fmtBytesShort(bm.video), n: fmtNum(Math.ceil(bm.video / rec)), rs: fmtRs(rec) })) +
         (bm.lead_blocks ? " · " + esc(P(bm.lead_blocks, "the first {n} cached with the lead-in", "the first {n} cached with the lead-in", { n: fmtNum(bm.lead_blocks + bm.start.length) })) : "") + "</div>";
       if ((d.tracks || []).length) {
@@ -1529,7 +1922,7 @@ PCI18N.ready.then(function () {
           '</th><th scope="col">' + H("Language") + '</th><th scope="col">' + H("Name") + '</th><th scope="col">' + H("Compression") + "</th></tr></thead><tbody>" +
           d.tracks.map(function (t) {
             return "<tr><td>" + esc(t.number) + "</td><td>" + esc(T({ video: "Video", audio: "Audio", subtitles: "Subtitles" }[t.type] || t.type || "")) + (t.width ? ' <span class="muted">' + esc(t.width + "×" + t.height) + "</span>" : "") +
-              '</td><td class="mono">' + esc(t.codec) + "</td><td>" + esc(t.language || "—") + "</td><td>" + esc(t.name || "—") + "</td><td>" + esc(t.compression || "—") + "</td></tr>";
+              '</td><td>' + (t.codec_name ? '<span title="' + esc(t.codec) + '">' + esc(t.codec_name) + "</span>" : '<span class="mono">' + esc(t.codec) + "</span>") + "</td><td>" + esc(t.language || "—") + "</td><td>" + esc(t.name || "—") + "</td><td>" + esc(t.compression || "—") + "</td></tr>";
           }).join("") + "</tbody></table>";
       }
       out += "</div>";
@@ -1539,13 +1932,25 @@ PCI18N.ready.then(function () {
     if (b) {
       var run = libRuns(shown).filter(function (r) { return r.b.n === b.n; })[0] || { count: 1 };
       var e = est[b.n], zeros = (b.pieces.filter(function (p) { return p.kind === "empty"; })[0] || { bytes: 0 }).bytes;
-      var line = T("{data} of the file", { data: fmtBytesShort(b.data) }) + (zeros ? " " + T("+ {z} of zeros", { z: fmtBytesShort(zeros) }) : "") +
-        (e ? " · " + T("{stored} on disk", { stored: fmtBytesShort(e.stored) }) : "");
-      out += '<div class="lblkinfo"><div class="what">' + esc(run.count > 1 ? T("Blocks {a}–{b} ({n}, all like this)", { a: fmtNum(b.n), b: fmtNum(run.last), n: fmtNum(run.count) }) : T("Block {n}", { n: fmtNum(b.n) })) + "</div>" +
+      // Streamed: what Plex reads of it (ZFS hands it back uncompressed; the zeros past the end of the
+      // file are never read). On disk / cached: what it takes on the disks, in RAM and on the SSD — ZFS
+      // keeps it compressed in all three. With zeros, how well the file's own data compressed, apart.
+      var line = T("Streamed as {data}", { data: fmtBytesShort(b.data) }) +
+        (e ? " · " + (e.compressed ? T("On disk and cached: ≈{stored}", { stored: fmtBytesShort(e.stored) })
+          : T("On disk and cached: {stored}", { stored: fmtBytesShort(e.stored) })) : "") +
+        (zeros ? " · " + T("plus {z} of zeros past the end of the file, which compress to nearly nothing", { z: fmtBytesShort(zeros) }) : "") +
+        (zeros && e && e.compressed && e.stored < b.data ? " · " + T("the data alone ≈{pct}% smaller", { pct: Math.round(100 * (1 - e.stored / b.data)) }) : "");
+      var isStart = bm.start.some(function (x) { return x.n === b.n; }) && b.n === bm.start[0].n;
+      out += '<div class="lblkinfo"><div class="what">' + esc(run.count > 1 ? T("Blocks {a}–{b} ({n}, all like this)", { a: fmtNum(b.n), b: fmtNum(run.last), n: fmtNum(run.count) }) : T("Block {n}", { n: fmtNum(b.n) })) +
+        blockChecks(d, b, shown, isStart) + "</div>" +
         '<div class="det">' + esc(line) + "</div>" +
         '<table class="tbl compact"><thead><tr><th scope="col">' + H("In this block") + '</th><th scope="col">' + H("Size") + '</th><th scope="col">' + H("Share") + "</th></tr></thead><tbody>" +
         b.pieces.map(function (p) {
-          return '<tr><td><i class="lsw lp-' + p.kind + '"></i> ' + esc(T(PART_NAMES[p.kind] || p.kind)) + (p.name ? ' <span class="mono muted">' + esc(p.name) + "</span>" : "") +
+          // the part's ⓘ first (a slot where it has none, so the lines stay aligned), its checks after its name
+          var ids = CHECK_PARTS[p.kind] || [];
+          return '<tr><td' + (p.kind === "padding" && p.of ? ' class="lpadrow"' : "") + '>' + (PART_HELP[p.kind] ? info(H(PART_HELP[p.kind]), partName(p)) : '<span class="infoslot"></span>') +
+            '<i class="lsw ' + partClass(p) + '"></i> ' + esc(partName(p)) + (p.name ? ' <span class="mono muted">' + esc(p.name) + "</span>" : "") +
+            checkMarks(d.checks, ids, ids.length > 1) +
             '</td><td class="nw">' + esc(fmtBytesShort(p.bytes)) + '</td><td class="nw">' + esc(dec(100 * p.bytes / rec, 1) + "%") + "</td></tr>";
         }).join("") + "</tbody></table></div>";
     }
@@ -1553,45 +1958,65 @@ PCI18N.ready.then(function () {
   }
   function pageLibrary() {
     var libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
+    // the settings changed (an optimizer choice, say): the checks and estimates are fetched again —
+    // they're worked out from the settings, never kept past a change
+    if (LIB.rev !== ST.settings_rev) {
+      if (LIB.rev !== null) {
+        LIB.at = 0;
+        Object.keys(LIB.detail).forEach(function (p) { if (p !== LIB.open) delete LIB.detail[p]; });
+        if (LIB.open) libDetailFetch(LIB.open);  // (shown as it was until the new one is in: no flicker)
+      }
+      LIB.rev = ST.settings_rev;
+    }
     if (!LIB.key || !libs.some(function (l) { return String(l.key) === String(LIB.key); })) LIB.key = libs.length ? String(libs[0].key) : null;
     libFetch();
-    var lj = LIB.key ? libJob(LIB.key) : {}, job = lj.running;
-    if (job) LIB.inspecting = true;
-    else if (LIB.inspecting) { LIB.inspecting = false; libFetch(true); }  // just finished: the files as they are now
-    // one button: Pause (and Resume) while inspecting, otherwise inspect every file again
-    var btn = !LIB.key ? "" : job ? '<button class="btn" type="button" data-act="job" data-job="' + (job.paused ? "resume" : "pause") + '">' + (job.paused ? H("Resume") : H("Pause")) + "</button>"
-      : lj.queued ? '<button class="btn" type="button" disabled>' + H("Queued") + "</button>"
-      : '<button class="btn" type="button" data-act="lib-survey">' + H("Inspect Files Again") + "</button>";
+    var lj = LIB.key ? libJob(LIB.key) : {}, job = lj.running || lj.paused ? lj : null;
+    if (lj.running) LIB.inspecting = true;
+    else if (LIB.inspecting) { LIB.inspecting = false; libFetch(true); }  // just finished (or paused): the files as they are now
+    // one button: Pause while inspecting, Resume when paused, otherwise inspect every file again
+    var btn = !LIB.key ? "" : lj.running ? '<button class="btn" type="button" data-act="lib-survey" data-how="pause">' + H("Pause") + "</button>"
+      : lj.paused ? '<button class="btn" type="button" data-act="lib-survey" data-how="resume">' + H("Resume") + "</button>"
+      : '<button class="btn" type="button" data-act="lib-survey" data-how="again">' + H("Inspect Files Again") + "</button>";
     var out = top(T("Library Health"), H("What’s where in each file — its start, the video, and the metadata at its end — the blocks they land on, and what caching keeps of it.") +
       " " + H("Files are inspected when the page opens: only ones new or changed since."), btn);
     out += '<div class="stack"><section class="card">';
+    if (!LIB.key) {  // (until the first scan: Plex's libraries are still being read)
+      var plexSet = S.plex && S.plex.url && S.plex.token_set;
+      return out + '<p class="muted">' + ((ST.library || {}).scanning || plexSet ? H("Reading your libraries from Plex…")
+        : H("No libraries yet. Connect Plex in <a href=\"/system\" data-nav>System</a>.")) + "</p></section></div>";
+    }
     out += '<div class="lctl"><div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + libs.map(function (l) {
       return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(LIB.key)) + '" data-act="lib-tab" data-key="' + esc(l.key) + '">' + libIcon(l.key) + esc(l.title) + "</button>";
     }).join("") + "</div></div>";
     var d = LIB.data && LIB.data.library === LIB.key ? LIB.data : null;
-    if (!LIB.key) return out + '<p class="muted">' + H("No libraries yet.") + "</p></section></div>";
     // while inspecting (or waiting to): a progress bar
     if (job) {
       var pct = job.total ? Math.round(100 * (job.done || 0) / job.total) : 0;
       out += '<div class="linspect"><div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>' +
         '<div class="det">' + (job.paused ? H("Inspecting paused: {done} of {total} files", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) })
           : H("Inspecting files: {done} of {total}", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) })) + "</div></div>";
-    } else if (lj.queued) out += '<div class="linspect det">' + H("Inspecting the files waits for the file job running now.") + "</div>";
-    out += '<div class="lhead"><input type="search" id="lib-q" class="lsearch" placeholder="' + esc(T("Find a title")) + '" value="' + esc(LIB.q) + '"></div>' + libLegend();
+    }
+    // the legend with the search after it (taking the room the legend's last line leaves), kept at the
+    // top of the window while the files scroll under it, with the table's column names
+    out += "<!--lsummary-->" + '<div class="lstick">' + libLegend('<input type="search" id="lib-q" class="lsearch" placeholder="' + esc(T("Find a title")) + '" value="' + esc(LIB.q) + '">') + "</div>";
     if (!d) return out + "</section></div>";
+    out = out.replace("<!--lsummary-->", libSummary(d.summary));
     if (!d.files.length) return out + '<p class="muted">' + H("No files.") + "</p></section></div>";
     var key = function (x) { return x.label; };
-    out += '<div class="tbl-wrap"><table class="tbl lfiles"><thead><tr><th scope="col"></th><th scope="col">' + H("File") + '</th><th scope="col">' + H("Size") +
-      '</th><th scope="col" style="width:50%">' + H("Blocks always cached: the start · the end") + "</th></tr></thead><tbody>";
+    out += '<div class="tbl-wrap lfwrap"><table class="tbl lfiles"><thead><tr><th scope="col"></th><th scope="col">' + H("File") + '</th><th scope="col">' + H("Size") +
+      '</th><th scope="col" style="width:60%">' + H("Blocks always cached: the start · the end") + "</th></tr></thead><tbody>";
+    var openHere = null;
     d.files.forEach(function (f, i) {
       var first = i === 0 || key(d.files[i - 1]) !== key(f), span = 1;
       while (first && i + span < d.files.length && key(d.files[i + span]) === key(f)) span++;
       var more = i + 1 < d.files.length && key(d.files[i + 1]) === key(f);
-      var name = (first ? '<div class="what">' + esc(f.label) + "</div>" : "") + '<div class="det mono">' + esc(f.file.split("/").pop()) + "</div>";
+      var name = (first ? '<div class="what">' + esc(f.label) + "</div>" : "") + (span > 1 || !first ? '<div class="det mono">' + esc(f.file.split("/").pop()) + "</div>" : "");
       out += '<tr class="lrow' + (more ? " ingrp" : "") + (LIB.open === f.file ? " open" : "") + '" data-act="lib-open" data-file="' + esc(f.file) + '">' +
         (first ? "<td" + (span > 1 ? ' rowspan="' + span + '"' : "") + ">" + posterImg(f.poster) + "</td>" : "") +
-        '<td style="min-width:200px">' + name + '</td><td class="nw">' + esc(fmtBytesShort(f.size)) + "</td><td>" + libBlocks(f, false, f.file) + "</td></tr>";
-      if (LIB.open === f.file) out += '<tr class="ldrow"><td colspan="4">' + libDetail(f.file) + "</td></tr>";
+        '<td style="min-width:200px">' + name + '</td><td class="nw">' + esc(fmtBytesShort(f.size)) + (f.health ? '<div class="det">' + healthBadge(f.health) + "</div>" : "") +
+        "</td><td>" + libBlocks(f, false, f.file) + "</td></tr>";
+      if (LIB.open === f.file) openHere = f.file;
+      if (openHere && !more) { out += '<tr class="ldrow"><td colspan="4">' + libDetail(openHere) + "</td></tr>"; openHere = null; }
     });
     out += "</tbody></table></div>";
     if (d.total > 100) out += '<div class="det">' + H("{from}–{to} of {total}", { from: fmtNum(d.offset + 1), to: fmtNum(Math.min(d.offset + 100, d.total)), total: fmtNum(d.total) }) + " " +
@@ -1599,8 +2024,11 @@ PCI18N.ready.then(function () {
       (d.offset + 100 < d.total ? '<button class="link" type="button" data-act="lib-page" data-offset="' + (d.offset + 100) + '">' + H("Next") + "</button>" : "") + "</div>";
     return out + "</section></div>";
   }
-  document.addEventListener("change", function (e) {
-    if (e.target && e.target.id === "lib-q") { LIB.q = e.target.value.trim(); LIB.offset = 0; LIB.open = null; libFetch(true); }
+  var libTyping = null;
+  document.addEventListener("input", function (e) {
+    if (!e.target || e.target.id !== "lib-q") return;
+    clearTimeout(libTyping);
+    libTyping = setTimeout(function () { LIB.q = e.target.value.trim(); LIB.offset = 0; LIB.open = null; libFetch(true); }, 250);
   });
 
   function pageSsd() {
@@ -1615,7 +2043,7 @@ PCI18N.ready.then(function () {
         '</td><td class="nw">' + (p.l2_total ? esc(fmtBytes(p.l2_total)) : "—") + "</td></tr>";
     }).join("");
     var arc = ST.zfs.arc;
-    out += '<section class="card"><h2>' + H("L2ARC on your media pools") + "</h2>" +
+    out += '<section class="card"><h2>' + H("L2ARC on Your Media Pools") + "</h2>" +
       (rows ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Pool") + '</th><th scope="col">' + H("Cache devices") + '</th><th scope="col">' + H("Size") + "</th></tr></thead><tbody>" + rows + "</tbody></table></div>"
         : '<p class="muted">' + (ST.l2arc === "unknown" ? H("Couldn’t check the pools yet. <a href=\"/system\" data-nav>Connect TrueNAS in System</a> to see them.") : H("No media pools found yet.")) + "</p>") +
       (arc && arc.l2_present ? '<p class="muted" style="font-size:13px;margin:10px 0 0">' + H("L2ARC (SSD cache): {used} of {total} filled", { used: fmtBytes(arc.l2_asize), total: fmtBytes(ST.zfs.l2_total || arc.l2_size || 0) }) + "</p>" : "") +
@@ -1673,7 +2101,8 @@ PCI18N.ready.then(function () {
   function cacheLibs() { return ((ST.library && ST.library.libraries) || []).filter(function (l) { return !l.excluded && l.kind; }); }
   function libKind(l) { return l.prefetch_kind || (l.kind === "movie" ? "movies" : l.kind === "tv" ? "tv" : "music"); }
   function libHead(l, kind, extra) {
-    return '<div class="pflib-head">' + libIcon(l.key) + esc(l.title) + ' <span class="muted">· ' + esc(PF_KIND[kind]) + "</span>" + (extra || "") + "</div>";
+    var k = PF_KIND[kind], says = l.title.toLowerCase().indexOf(k.toLowerCase()) >= 0;  // "Movies · movies": once is enough
+    return '<div class="pflib-head">' + libIcon(l.key) + esc(l.title) + (says ? "" : ' <span class="muted">· ' + esc(k) + "</span>") + (extra || "") + "</div>";
   }
 
   var L2ARC_NOTE = H("What’s needed soon is read straight away, into RAM: RAM keeps one-off reads for hours at most. What’s needed later goes to the SSD: choices with the grey SSD icon need an L2ARC, " +
@@ -1716,8 +2145,8 @@ PCI18N.ready.then(function () {
           (ST.warmup.next_run ? H("Next run {when}", { when: fmtIso(ST.warmup.next_run) }) : timed ? "" : H("Every library warms up at boot only.")) +
           (used.indexOf("twice_weekly") >= 0 ? " " + H("Twice weekly: this day and three days later.") : "") +
           (used.indexOf("twice_monthly") >= 0 ? " " + H("Twice monthly: the 1st and 15th.") : "") + "</div></div>" +
-        '<div class="fld"><span class="lbl">' + H("Warm up now") + '</span><div class="acts" style="margin-top:0"><button class="btn" data-act="warmup-run"' + (ST.warmup.running ? " disabled" : "") +
-        ">" + H("Run now") + '</button></div><div class="help">' + (ST.warmup.last_run ? H("Last run {when}", { when: fmtIso(ST.warmup.last_run) }) : H("Hasn't run yet")) + " · " +
+        '<div class="fld"><span class="lbl">' + H("Manual warm-up") + '</span><div class="acts" style="margin-top:0"><button class="btn" data-act="warmup-run"' + (ST.warmup.running ? " disabled" : "") +
+        ">" + H("Run Now") + '</button></div><div class="help">' + (ST.warmup.last_run ? H("Last run {when}", { when: fmtIso(ST.warmup.last_run) }) : H("Hasn’t run yet")) + " · " +
         H("Full speed, every library with a warm-up.") + "</div></div>" +
         "</div>" + estimateHtml() + "</div>";
     }
@@ -1776,7 +2205,7 @@ PCI18N.ready.then(function () {
     return out;
   }
 
-  // ---- How long cached data lasts: every read again is timed, so each one says whether what
+  // ---- How Long Cached Data Lasts: every read again is timed, so each one says whether what
   // was cached N hours earlier was still there (plexcache/cachelog.py). RAM and SSD apart, and
   // per library. Two views of the same reads: "Hit age" (still cached, by age) and "Fresh vs
   // stale" (hit rate on each side of an age you pick; only changes what's shown).
@@ -1809,8 +2238,8 @@ PCI18N.ready.then(function () {
   }
   function lastsLibs(route) {
     // "All libraries" (every read, including those from before reads were noted per library), then each library
-    return [{ key: "*", name: T("All libraries"), rows: route.rows, all: true, suggest: route.suggest }].concat((route.libs || []).map(function (l) {
-      return { key: l.key, name: l.name || (l.key ? T("Library {key}", { key: l.key }) : T("Other")), rows: l.rows, fine: l.fine, first: l.first, cached: l.cached !== false, l2arc: l.l2arc, suggest: l.suggest };
+    return [{ key: "*", name: T("All libraries"), rows: route.rows, all: true, suggest: route.suggest, fully: route.fully }].concat((route.libs || []).map(function (l) {
+      return { key: l.key, name: l.name || (l.key ? T("Library {key}", { key: l.key }) : T("Other")), rows: l.rows, fine: l.fine, first: l.first, cached: l.cached !== false, l2arc: l.l2arc, suggest: l.suggest, fully: l.fully };
     }));
   }
 
@@ -1839,7 +2268,8 @@ PCI18N.ready.then(function () {
         return q.pct == null ? "" : '<span class="ldot' + (q.n < LASTS_FEW ? " few" : "") + '" style="left:' + ((i + 0.5) / cols * 100) + "%;top:" + Y(q.pct) + 'px"></span>';
       }).join("");
       out += '<div class="lname' + (lib.all ? " all" : "") + '">' + esc(lib.name) +
-        '<div class="lcool">' + (lib.suggest ? H("Cooldown: up to {age}", { age: ageShort(lib.suggest) }) : H("Cooldown: not enough data")) + "</div></div>" +
+        '<div class="lcool">' + (lib.suggest ? H("Cooldown: up to {age}", { age: ageShort(lib.suggest) }) :
+          lib.fully && lib.fully.n >= SUGGEST_MIN && !lib.fully.age ? H("Cooldown: none to suggest") : H("Cooldown: not enough data")) + "</div></div>" +
         '<div class="lline"><svg viewBox="0 0 ' + W + " " + Hh + '" preserveAspectRatio="none" aria-hidden="true">' +
         '<line x1="0" x2="' + W + '" y1="' + Y(100) + '" y2="' + Y(100) + '"/><line x1="0" x2="' + W + '" y1="' + Y(0) + '" y2="' + Y(0) + '"/>' +
         (d ? '<path d="' + d + '"/>' : "") + "</svg>" + dots +
@@ -2078,7 +2508,7 @@ PCI18N.ready.then(function () {
     var tab = function (attr, v, cur, label) { return '<button role="tab" type="button" aria-selected="' + (String(v) === String(cur)) + '" ' + attr + '="' + v + '">' + label + "</button>"; };
     var hours = COV ? Math.max(1, Math.round(Math.exp(covRange / 1000 * Math.log(Math.max(2, COV.hours.length))))) : 1;
     var span = hours < 48 ? P(hours, "{n} hour", "{n} hours") : hours < 24 * 60 ? P(Math.round(hours / 24), "{n} day", "{n} days") : P(Math.round(hours / 720), "{n} month", "{n} months");
-    return '<section class="card" id="coverage" style="margin-bottom:20px"><h2>' + H("Library cached over time") + "</h2>" +
+    return '<section class="card" id="coverage" style="margin-bottom:20px"><h2>' + H("Library Cached Over Time") + "</h2>" +
       '<p class="hint">' + H("Each hour: the share of the library this app cached within the last hour, 24 hours, 7 days, 30 days and 6 months — in RAM or on the SSD. Wider means more of it. Hover for any hour.") + "</p>" +
       '<div class="lctl"><div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + tab("data-cov-lib", "*", covLib, H("All libraries")) +
       libs.map(function (l) { return tab("data-cov-lib", l.key, covLib, libIcon(l.key) + esc(l.title)); }).join("") + "</div>" +
@@ -2095,22 +2525,21 @@ PCI18N.ready.then(function () {
     if (noL2) lastsTier = "ram";  // "I won't use an L2ARC": only RAM is measured, so no switch
     var route = sv.routes[lastsTier] || sv.routes.ram;
     var segBtn = function (attr, val, cur, label) { return '<button role="tab" type="button" aria-selected="' + (val === cur) + '" ' + attr + '="' + val + '">' + label + "</button>"; };
-    var sug = (route.suggest ? H("Suggested cooldown: up to {age} (fully cached age, last 7 days)", { age: ageShort(route.suggest) }) : H("Not enough data yet to suggest a cooldown")) +
+    var sug = (route.suggest ? H("Suggested cooldown: up to {age} (fully cached age, last 7 days)", { age: ageShort(route.suggest) }) : noSuggestion(route)) +
       (route.auto ? " · " + H("Automatic uses up to {age} now", { age: ageShort(route.auto) }) : "");
-    var out = '<section class="card" id="lasts" style="margin-bottom:20px"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline"><h2>' + H("How long cached data lasts") + "</h2>" +
-      guideBtn("lasts", H("How this works"), H("Hide how this works")) + "</div>" +
+    var out = '<section class="card" id="lasts" style="margin-bottom:20px"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline"><h2>' + H("How Long Cached Data Lasts") + "</h2>" +
+      guideBtn("lasts") + "</div>" +
       '<div class="muted" style="font-size:13px">' + H("Since {when}", { when: fmtTime(sv.since) }) + ' · <button class="link" type="button" data-act="lasts-reset">' + H("Start again") + "</button>" +
       ' · <a class="link" href="/api/cachelog/export" download>' + H("Export log") + "</a></div>" +
       guide("lasts", [
         [H("What’s measured"), H("Every time something is read again — by Now Playing Cache, Prefetch or warm-up — the read is timed, so it tells us whether what was cached that long ago was still there. " +
           "Nothing is read again within its cooldown, so ages shorter than the cooldown aren’t measured: a short cooldown, even none, collects data fastest.")],
-        [H("RAM and SSD"), H("<strong>RAM</strong>: reads meant to stay in RAM. Every read again counts, its age measured from the last time the app read that data (what the cooldown counts from too); a write from before the last reboot isn’t counted, since a reboot empties RAM. " +
-          "<strong>SSD</strong>: reads on their way to the L2ARC; a hit there doesn’t move the data, so every read again counts. The L2ARC is per pool, so some libraries may have one and others not.")],
-        [H("Hit age"), H("How much was still cached when read again, by how long ago it was cached. " +
-          "")],
-        [H("Fully cached age"), H("Of the reads again in a window, ordered by age: the age of the oldest one still cached before the first that had to come from the disks. Everything read again up to that age was still cached; with no misses at all, it lasted at least that long (≥). " +
+        [H("RAM and SSD"), H("<strong>RAM</strong>: reads meant to stay in RAM. Every re-read counts, its age measured from the last time the app read that data (what the cooldown counts from too); a write from before the last reboot isn’t counted, since a reboot empties RAM. " +
+          "<strong>SSD</strong>: reads on their way to the L2ARC; a hit there doesn’t move the data, so every re-read counts. The L2ARC is per pool, so some libraries may have one and others not.")],
+        [H("Hit age"), H("How much was still cached when read again, by how long ago it was cached.")],
+        [H("Fully cached age"), H("Of the re-reads in a window, ordered by age: the age of the oldest one still cached before the first that had to come from the disks. Everything read again up to that age was still cached; with no misses at all, it lasted at least that long (≥). " +
           "Shown hour by hour (or day by day over 30 days), for every library and each one apart: the peaks and valleys show how much what the NAS is doing changes it. " +
-          "The suggested cooldown is the fully cached age over the last 7 days (with at least 3 reads again), and so is the Automatic one — per library where it has enough reads. A miss at the youngest age measured sets Automatic to 10 minutes, so shorter ages get measured again.")],
+          "The suggested cooldown is the fully cached age over the last 7 days (with at least 3 re-reads), and so is the Automatic one — per library where it has enough reads. A miss at the youngest age measured sets Automatic to 10 minutes, so shorter ages get measured again.")],
         [H("Fresh vs stale"), H("Pick an age with the slider — it only changes what’s shown here, not caching. Reads of data cached that long ago or less are fresh, older ones stale, and each side shows its hits and misses. " +
           "<strong>Virgin cache</strong>, in the middle: data the log hasn’t seen in its 6 months. It may have been cached before that, or by Plex itself, so its history is unknown and it has no hit rate — but a wide middle means mostly new data is being read, not data read again.")]
       ]);
@@ -2137,7 +2566,7 @@ PCI18N.ready.then(function () {
 
     // sessions
     var ss = ST.playback.sessions;
-    out += '<section class="card" style="margin-bottom:20px"><h2 style="margin-bottom:14px">' + H("Playing now") + "</h2>";
+    out += '<section class="card" style="margin-bottom:20px"><h2 style="margin-bottom:14px">' + H("Playing Now") + "</h2>";
     if (ST.playback.error) out += '<div class="note">' + esc(ST.playback.error) + "</div>";
     if (!ss.length) out += '<p class="muted" style="margin:0">' + H("Nothing is playing.") + "</p>";
     ss.forEach(function (s) {
@@ -2175,14 +2604,14 @@ PCI18N.ready.then(function () {
     out += "</section>";
 
     // runs
-    out += '<section class="card" style="margin-bottom:20px"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline"><h2>' + H("Warm-up runs") + info(H("“L2ARC grew” compares cache size before and after each run. ZFS fills L2ARC gradually, so it can lag a little. " +
-      "If it stays near zero and “Already cached” stays low on repeat runs, reads aren’t landing in L2ARC — Health will flag it."), T("warm-up runs")) + '</h2><span class="muted" style="font-size:13px">' +
+    out += '<section class="card" style="margin-bottom:20px"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline"><h2>' + H("Warm-up Runs") + info(H("“L2ARC grew” compares cache size before and after each run. ZFS fills the L2ARC gradually, so it can lag a little. " +
+      "If it stays near zero and “Already cached” stays low on repeat runs, reads aren’t landing in the L2ARC — Health will flag it."), T("warm-up runs")) + '</h2><span class="muted" style="font-size:13px">' +
       (isOn("warmup") ? (ST.warmup.next_run ? H("Next run {when}", { when: fmtIso(ST.warmup.next_run) }) : H("No timed runs")) : H("No library has a warm-up")) + "</span></div>" + warmupStatus();
     if (!a.runs.length) out += '<p class="muted">' + H("No runs yet.") + "</p>";
     else {
       out += '<div class="tbl-wrap"><table class="tbl"><thead><tr>' + [N("Started"), N("Files"), N("Read"), N("Already cached"), N("L2ARC grew"), N("Next day"), N("Took"), N("Result")].map(function (c) {
         return '<th scope="col">' + H(c) + (c === "Next day" ? info(H("A day after each run, one quick read from the start of a sample of the files it warmed up shows how many are still on the SSD. " +
-          "The L2ARC reuses its space oldest first, so this is how long lead-ins really last on your NAS: if it’s low, warm up more often, or write less else to the SSD (fewer whole files in the Whole File Cache)."), T("Next day")) : "") + "</th>"; }).join("") + "</tr></thead><tbody>";
+          "The L2ARC reuses its space oldest first, so this is how long lead-ins really last on your NAS: if it’s low, warm up more often, or send less of everything else to the SSD (fewer whole files in the Whole File Cache)."), T("Next day")) : "") + "</th>"; }).join("") + "</tr></thead><tbody>";
       a.runs.slice(0, 20).forEach(function (r) {
         out += '<tr><td class="nw">' + esc(fmtTime(r.started)) + (r.manual ? " " + badge("manual", T("manual")) : "") + '</td><td class="nw">' + fmtNum(r.files) + '</td><td class="nw">' + esc(fmtBytes(r.bytes)) +
           '</td><td class="nw">' + (r.hit_rate == null ? "—" : Math.round(r.hit_rate * 100) + "%") + '</td><td class="nw">' +
@@ -2200,7 +2629,7 @@ PCI18N.ready.then(function () {
     out += coverageCard();
 
     // events
-    out += '<section class="card"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center"><h2>' + H("Recent events") + '</h2></div><div class="log" style="margin-top:12px">';
+    out += '<section class="card"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center"><h2>' + H("Recent Events") + '</h2></div><div class="log" style="margin-top:12px">';
     if (!a.events.length) out += '<div class="muted">' + H("Nothing yet.") + "</div>";
     a.events.forEach(function (e) {
       var t = new Date(e.t * 1000).toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -2255,8 +2684,8 @@ PCI18N.ready.then(function () {
     };
     var known = libs.reduce(function (a, l) { return a + l.total; }, 0);
     var rows = [{ key: "*", name: T("All libraries"), total: t.total, expected: t.expected, all: true }].concat(libs);
-    if (t.total > known) rows.push({ key: "?", name: T("Before libraries were noted"), total: t.total - known, expected: Math.max(0, t.expected - libs.reduce(function (a, l) { return a + l.expected; }, 0)) });
-    var out = '<section class="card" id="skips" style="margin-bottom:20px"><h2>' + H("Skips served from cache") + "</h2>" +
+    if (t.total > known) rows.push({ key: "?", name: T("Library not recorded"), total: t.total - known, expected: Math.max(0, t.expected - libs.reduce(function (a, l) { return a + l.expected; }, 0)) });
+    var out = '<section class="card" id="skips" style="margin-bottom:20px"><h2>' + H("Skips Served from Cache") + "</h2>" +
       '<p class="hint">' + H("{period}: each skip counted by how likely it came from cache — where it landed, how long ago that part was cached, and how long cached data lasts in its library.", { period: r.span }) + "</p>";
     out += '<div class="srows">' + rows.map(function (l) {
       return '<div class="lname' + (l.all ? " all" : "") + '">' + (l.all ? "" : libIcon(l.key)) + esc(l.name) + '</div><div>' + bar(l.expected, l.total) + "</div>" +
@@ -2344,7 +2773,7 @@ PCI18N.ready.then(function () {
       c.keys.map(function (k) { return '<th scope="col">' + esc(k[1]) + "</th>"; }).join("") + "</tr></thead><tbody>" +
       data.map(function (d) { return "<tr><td>" + esc(d.label) + "</td>" + c.keys.map(function (k) { return "<td>" + (d[k[0]] == null ? "—" : esc(c.fmt(d[k[0]]))) + "</td>"; }).join("") + "</tr>"; }).join("") +
       "</tbody></table></div>";
-    return '<section class="card chartcard" style="margin-bottom:20px"><div class="head"><h2>' + H("Over time") + '</h2><span style="flex:1"></span><div class="seg small" role="tablist" aria-label="' + H("Chart") + '">' + tabs + "</div></div>" +
+    return '<section class="card chartcard" style="margin-bottom:20px"><div class="head"><h2>' + H("Over Time") + '</h2><span style="flex:1"></span><div class="seg small" role="tablist" aria-label="' + H("Chart") + '">' + tabs + "</div></div>" +
       '<p class="hint">' + esc(c.hint) + "</p>" + legend +
       (any ? '<div class="chartwrap">' + svg + '<div class="chart-tip" hidden></div></div>' : '<p class="muted" style="margin:18px 0">' + H("Nothing measured in this period yet.") + "</p>") +
       details("chart-table", H("Show as a table"), table) + "</section>";
@@ -2362,7 +2791,7 @@ PCI18N.ready.then(function () {
     function frac(n, d) { return d ? H("{n} <small>of {total}</small>", { n: n, total: d }) : "—"; }
     out += '<div class="tiles rtiles">';
     // Weighted by how likely each one really came from cache: how long ago that part was cached,
-    // and how long cached data lasts in its library (Metrics → How long cached data lasts)
+    // and how long cached data lasts in its library (Metrics → How Long Cached Data Lasts)
     function est(x, total) { return total ? Math.round(100 * x / total) : null; }
     var sk = est(t.skips.expected, t.skips.total);
     out += rtile(T("Skips served from cache"), sk == null ? "—" : H("{n}%", { n: sk }),
@@ -2371,10 +2800,12 @@ PCI18N.ready.then(function () {
       T("When someone jumps ahead or back (more than 30 seconds), was that part cached? Each skip counts by how likely it really came from cache: where it landed, how long ago that part was cached (by Now Playing Cache, a whole file, or the lead-in), and how long cached data lasts in that library. Added up, that’s the share of skips expected to have started straight away instead of waiting on the disks."), "skips");
     var fc = t.fully || {};
     out += rtile(T("Fully cached age"), fc.n ? (fc.age ? esc(ageShort(fc.age)) : H("under {age}", { age: ageShort(fc.miss) })) : "—",
-      fc.n ? (fc.bound ? PH(fc.n, "no misses in {n} re-read", "no misses in {n} re-reads") : H("first miss at {age}", { age: ageShort(fc.miss) }) + " · " + PH(fc.n, "{n} re-read", "{n} re-reads")) : H("no history yet"),
+      // (the first miss only when it says something the age above doesn't)
+      fc.n ? (fc.bound ? PH(fc.n, "no misses in {n} re-read", "no misses in {n} re-reads") :
+        (fc.age && ageShort(fc.miss) !== ageShort(fc.age) ? H("first miss at {age}", { age: ageShort(fc.miss) }) + " · " : "") + PH(fc.n, "{n} re-read", "{n} re-reads")) : H("no history yet"),
       !fc.n ? "none" : "ok",
       T("Everything read again up to this age was still cached: of the re-reads in this period, ordered by age, the oldest one before the first that had to come from the disks. With no misses, it lasted at least this long."), "lasts:fully");
-    out += rtile(T("Media served lead-in cached"), t.lead.pct == null ? "—" : H("{n}%", { n: t.lead.pct }),
+    out += rtile(T("Plays started from cache"), t.lead.pct == null ? "—" : H("{n}%", { n: t.lead.pct }),
       t.lead.streams ? PH(t.lead.streams, "expected, over {n} play", "expected, over {n} plays") : H("no plays yet"),
       t.lead.pct == null ? "none" : (t.lead.pct >= 50 ? "ok" : "warn"),
       T("Of everything played, how much started from a lead-in (or whole file) that was already cached — by warm-up, Prefetch, or an earlier play. Each play counts by how likely that lead-in was still there, from how long ago it was cached and how long cached data lasts in its library.", "lasts:fresh"));
@@ -2385,7 +2816,7 @@ PCI18N.ready.then(function () {
     out += "</div>" + chartCard(r) + skipsCard(r);
 
     if (r.attention.length) {
-      out += '<section class="card" style="margin-bottom:20px"><h2>' + H("Needs attention") + '</h2><p class="hint">' + H("Only shows up when something could be better.") + "</p>";
+      out += '<section class="card" style="margin-bottom:20px"><h2>' + H("Needs Attention") + '</h2><p class="hint">' + H("Only shows up when something could be better.") + "</p>";
       r.attention.forEach(function (x) {
         out += itemRow({ status: x.status, title: x.title, detail: x.detail, fix: x.fix },
           x.link ? '<a href="' + esc(x.link) + '" data-nav style="font-size:13px">' + H("Go there") + "</a>" : "");
@@ -2394,17 +2825,21 @@ PCI18N.ready.then(function () {
     }
 
     // RAM limits right now, and how busy the disks were while people watched
+    function ramShort(r) {  // what ran out of room in the period, or that nothing did
+      var bits = [];
+      if (r.ram.limited) bits.push(P(r.ram.limited, "{n} file only partly fitted", "{n} files only partly fitted"));
+      if (r.ram.no_room) bits.push(P(r.ram.no_room, "{n} time there was no room at all", "{n} times there was no room at all"));
+      return bits.length ? H("{period}: {list}", { period: r.span, list: bits.join(" · ") }) : H("{period}: nothing ran out of room.", { period: r.span });
+    }
     function meter(label, used, limit) {
       var pct = limit ? Math.min(100, used / limit * 100) : 0;
       return '<div style="margin:6px 0 12px"><div style="display:flex;justify-content:space-between;font-size:13px"><span>' + esc(label) + '</span><span class="muted">' +
         H("{used} of {limit}", { used: fmtBytes(used), limit: fmtBytes(limit) }) + '</span></div><div class="meter"><div style="width:' + pct.toFixed(1) + '%"></div></div></div>';
     }
-    out += '<div class="cols2" style="margin-bottom:20px"><section class="card"><h2>' + H("RAM limits") + '</h2><p class="hint">' + H("In use right now, by streams that are playing.") + "</p>" +
+    out += '<div class="cols2" style="margin-bottom:20px"><section class="card"><h2>' + H("RAM Limits") + '</h2><p class="hint">' + H("In use right now, by streams that are playing.") + "</p>" +
       meter(T("Now Playing Cache"), r.ram.nowplaying.in_use, r.ram.nowplaying.limit) + meter(T("Prefetch"), r.ram.nextepisode.in_use, r.ram.nextepisode.limit) +
-      '<div class="muted" style="font-size:13px">' + H("{period}: {files} · {times}", { period: r.span,
-        files: P(r.ram.limited, "{n} file only partly fitted", "{n} files only partly fitted"),
-        times: P(r.ram.no_room, "{n} time there was no room at all", "{n} times there was no room at all") }) + "</div></section>";
-    out += '<section class="card"><h2>' + H("Disks while people watched") + '</h2><p class="hint">' + H("How busy the media pool’s disks were during streams.") + "</p>";
+      '<div class="muted" style="font-size:13px">' + ramShort(r) + "</div></section>";
+    out += '<section class="card"><h2>' + H("Disks While People Watched") + '</h2><p class="hint">' + H("How busy the media pool’s disks were during streams.") + "</p>";
     if (r.disk.avg == null) out += '<p class="muted" style="margin:0">' + H("Measured during streams; nothing yet.") + "</p>";
     else out += '<div class="big" style="font-size:28px">' + H("{n}% <small class=\"muted\" style=\"font-size:14px\">average</small>", { n: r.disk.avg }) + '</div><div class="meter"><div style="width:' + r.disk.avg + '%"></div></div>' +
       '<div class="muted" style="font-size:13px;margin-top:6px">' + PH(r.disk.streams, "Peak {peak}% · over {n} stream", "Peak {peak}% · over {n} streams", { peak: r.disk.peak }) + "</div>";
@@ -2431,12 +2866,85 @@ PCI18N.ready.then(function () {
       '" data-set="' + sec + "." + key + '">' + helpDiv(h) + "</div>";
   }
 
+  // A second Plex server with the same files (plex2.py): signed in, chosen from the account's servers,
+  // its libraries paired with these — so converting waits for both before an original goes
+  var PLEX2_LIST = null;
+  function plex2Card() {
+    var p2 = ST.plex2 || {}, libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
+    var out = '<section class="card" id="plex2"><h2>' + H("Second Plex Server") + ' <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional") + "</span></h2>" +
+      '<p class="hint">' + H("Another Plex server with the same files — at another site, kept in step by syncing the folders. A file converted to MKV keeps its original until both servers have the MKV as a version of the same item, so neither loses its metadata (edits, watch history, collections).") + "</p>";
+    var signin = '<button class="btn" type="button" data-act="plex2-signin">' + (p2.own_signin ? H("Sign In Again") : H("Use Another Plex Account")) + "</button> ";
+    if (p2.configured) {
+      out += '<div class="det">' + badge("pass", T("Watching")) + " " + H("{name} at {url}", { name: p2.name || T("the server"), url: p2.url }) + "</div>";
+      if (p2.error) out += '<div class="det bad">' + esc(p2.error) + "</div>";
+    } else if (p2.signed_in) {
+      out += '<div class="det">' + H("Choose it from your Plex account’s servers: this server’s sign-in lists them, so there’s nothing more to sign in to — unless it’s on another account.") + "</div>";
+    } else {
+      out += '<div class="det">' + H("Sign in with Plex first (System → Plex): your account’s servers are listed from there.") + "</div>";
+    }
+    out += '<div class="acts">' + (p2.signed_in ? '<button class="btn' + (p2.configured ? "" : " pri") + '" type="button" data-act="plex2-list">' +
+      (p2.configured ? H("Choose Another Server") : H("Choose the Server")) + "</button> " : "") + signin +
+      (p2.configured ? '<button class="btn" type="button" data-act="plex2-refresh">' + H("Check Again") + '</button> <button class="link" type="button" data-act="plex2-forget">' + H("Stop Watching") + "</button>" : "") + "</div>";
+    if (PLEX2_LIST) {
+      out += PLEX2_LIST.length ? '<div class="tbl-wrap"><table class="tbl"><tbody>' + PLEX2_LIST.map(function (sv) {
+        return "<tr><td>" + esc(sv.name) + '<div class="det">' + (sv.owned ? H("Yours") : H("Shared with you")) + " · " + esc(P(sv.addresses, "{n} address", "{n} addresses", { n: sv.addresses })) +
+          '</div></td><td><button class="btn sm" type="button" data-act="plex2-use" data-id="' + esc(sv.id) + '">' + H("Watch This One") + "</button></td></tr>";
+      }).join("") + "</tbody></table></div>" : '<p class="muted">' + H("This account has no other Plex server.") + "</p>";
+    }
+    if (p2.configured && libs.length) {
+      var theirs = p2.libraries || [];
+      out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library here") + '</th><th scope="col">' + H("Its library there") +
+        '</th><th scope="col">' + H("Files found there") + "</th></tr></thead><tbody>" + libs.map(function (l) {
+          var key = String(l.key), cur = (p2.pairs || {})[key] || "", rate = (p2.rates || {})[key];
+          var sel = '<select data-p2lib="' + esc(key) + '" aria-label="' + esc(T("Its library there")) + '"><option value="">' + H("None") + "</option>" +
+            theirs.filter(function (t) { return t.kind === l.kind; }).map(function (t) {
+              return '<option value="' + esc(t.key) + '"' + (t.key === cur ? " selected" : "") + ">" + esc(t.title) + "</option>";
+            }).join("") + "</select>";
+          var found = !cur ? '<span class="muted">' + H("Not watched there") + "</span>" : rate == null ? '<span class="muted">—</span>'
+            : rate >= p2.matched ? badge("pass", T("{pct}%", { pct: Math.round(100 * rate) }))
+            : badge("warn", T("{pct}%", { pct: Math.round(100 * rate) })) + '<div class="det">' + H("Too few for the paths to line up: no original is deleted on this server’s word.") + "</div>";
+          var chosen = ((S.plex2 || {}).libraries || {})[key] !== undefined;
+          var rv = chosen ? ' <button type="button" class="revert" data-p2lib-revert="' + esc(key) + '" title="' + H("Back to the default ({value})", { value: T("the library of the same name") }) + '">↺</button>' : "";
+          return "<tr><td>" + libIcon(key) + esc(l.title) + "</td><td>" + sel + rv + "</td><td>" + found + "</td></tr>";
+        }).join("") + "</tbody></table></div>";
+    }
+    out += details("plex2manual", H("Or enter its address and token by hand"), '<div class="grid">' +
+      textInput("plex2", "url", T("Server address"), "s-p2url", H("An address this NAS can reach: the other site’s public address with Remote Access on, or one over a VPN."), "https://") +
+      secretInput("plex2", "token", T("Token"), "s-p2tok") + "</div>", false);
+    return out + "</section>";
+  }
+  // Sync: the servers kept in step with this one, and what uses them
+  function pageSync() {
+    var out = top(T("Sync"), H("Other Plex servers with the same files — at another site, kept in step by syncing the folders — and what Plex Cache does with them."), "");
+    out += '<div class="stack" style="max-width:980px">' + plex2Card();
+    var p2 = ST.plex2 || {};
+    out += '<section class="card">' + heading(esc(T("What Uses It")), "") + '<div class="row">' + badge(p2.configured ? "pass" : "info", p2.configured ? T("On") : T("Waiting")) +
+      '<div class="grow"><div class="what">' + H("Converting to MKV") + '</div><div class="det">' +
+      H("A converted file’s original is deleted only once every server watched here has the MKV as a version of the same item. <a href=\"/optimizer#convert\" data-nav>Optimizer → Convert to MKV</a>") + "</div></div></div>" +
+      '<div class="row">' + badge("info", T("Planned")) + '<div class="grow"><div class="what">' + H("Library sync") + '</div><div class="det">' +
+      H("Bringing the other server’s matches, versions, edits, posters, collections and watched state in line with this one’s.") + "</div></div></div>" +
+      '<div class="row">' + badge("info", T("Planned")) + '<div class="grow"><div class="what">' + H("Converting a folder to a child dataset, on synced folders") + '</div><div class="det">' +
+      H("Keeping the new dataset and the old folder out of the sync while the folder is converted, so nothing is sent to the other site.") + "</div></div></div></section>";
+    return out + "</div>";
+  }
   function pageSystem() {
     var c = ST.connections || {}, testing = ST.testing;
     var out = top(T("System"), H("Connections and system-wide options. Stored in the app’s config folder, so they survive updates."),
-      '<button class="btn" data-act="retest"' + (testing ? " disabled" : "") + ">" + (testing ? H("Testing…") : H("Re-test settings")) + "</button>");
+      '<button class="btn" data-act="retest"' + (testing ? " disabled" : "") + ">" + (testing ? H("Testing…") : H("Re-test Settings")) + "</button>");
     out += banner(settingsSummary(c.summary), testing);
     out += '<div class="stack" style="max-width:980px">';
+
+    // ---- Access: who may use the web UI and the API
+    var au = ST.auth || {};
+    out += '<section class="card"><h2>' + H("Access") + '</h2><p class="hint">' + H("Who can open Plex Cache and change its settings.") + "</p>" +
+      '<div class="det">' + (au.enabled ? badge("pass", T("Sign-in required")) + " " + H("Signed in as {user}.", { user: au.user })
+        : badge(S.general.lan_only ? "info" : "warn", T("No sign-in")) + " " +
+          (S.general.lan_only ? H("Any device on your local network can change settings and run the optimizer.") : H("Any device that can reach it can change settings and run the optimizer.")) + " " +
+          H("To require a sign-in, set PLEXCACHE_USERNAME and PLEXCACHE_PASSWORD in the app’s YAML (Apps → plex-cache → Edit).")) + "</div>" +
+      '<div style="margin-top:10px">' + checkbox("general", "lan_only", T("Local network only"),
+        { s: H("Devices outside your network — the internet — are refused, signed in or not."),
+          more: H("Your network means private addresses (10.x.x.x, 172.16–31.x.x, 192.168.x.x), this NAS, and VPNs into your network that use their own range, such as Tailscale (100.64–127.x.x). " +
+            "Behind a reverse proxy, the proxy’s address is what counts. Turning this off from outside your network isn’t possible: change it from a device on your network.") }) + "</div></section>";
 
     // ---- Plex
     var guessPlex = ST.host ? "http://" + ST.host + ":32400" : "http://192.168.1.10:32400";
@@ -2454,15 +2962,15 @@ PCI18N.ready.then(function () {
           "<strong>10 seconds</strong> — fine for mostly movies and TV watched straight through.<br>" +
           "<strong>30 seconds</strong> — the fewest requests, but streams and skips can be noticed up to half a minute late; short songs may be half over, and brief buffering can be missed.<br><br>" +
           "Faster than 3 seconds gains little: Now Playing Cache waits for Plex’s own start-up buffer anyway.") }) + "</div>" +
-      '<div class="acts"><button class="btn' + (tokOk ? "" : " pri") + '" data-act="plex-signin">' + (tokOk ? H("Sign in again") : H("Sign in with Plex")) + "</button>" +
+      '<div class="acts"><button class="btn' + (tokOk ? "" : " pri") + '" data-act="plex-signin">' + (tokOk ? H("Sign In Again") : H("Sign In with Plex")) + "</button>" +
       '<span class="muted" style="font-size:13px">' + H("Why sign in?") + info(H("Plex only shares your libraries and what’s playing with apps that hold a token for your account, so this step is required. " +
-      "“Sign in with Plex” opens plex.tv; once you approve “Plex Cache”, Plex gives this app a token. It’s kept only in this app’s config folder and is used to read from your server — " +
+      "“Sign In with Plex” opens plex.tv; once you approve “Plex Cache”, Plex gives this app a token. It’s kept only in this app’s config folder and is used to read from your server — " +
       "it can’t see your password. If you already have a token, you can paste it instead."), T("signing in")) + "</span></div></section>";
 
     // ---- TrueNAS
     var guessTn = ST.host ? "https://" + ST.host : "https://192.168.1.10";
     out += '<section class="card"><h2>TrueNAS <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional, recommended") + "</span></h2>" +
-      '<p class="hint">' + H("Read-only: checks cache devices and dataset settings.") + info(H("Lets the app check cache devices and dataset settings, and size the L2ARC. It only reads; it never changes anything."), "TrueNAS") + "</p>" +
+      '<p class="hint">' + H("Read-only: checks cache devices and dataset settings.") + info(H("It’s also how the app sizes the L2ARC, pauses for scrubs and resilvers, and checks the optimizer’s service. It never changes anything."), "TrueNAS") + "</p>" +
       '<div class="lights">' + lightFor(c.truenas_server, "TrueNAS", testing) + lightFor(c.truenas_key, T("API key"), testing) + "</div>" +
       '<div class="grid">' +
       textInput("truenas", "url", T("TrueNAS address"), "s-turl", H("https:// is used automatically — TrueNAS revokes API keys sent over plain http."), guessTn) +
@@ -2476,7 +2984,7 @@ PCI18N.ready.then(function () {
         !(c.truenas_key && c.truenas_key.status === "ok")) +
       "</section>";
 
-    // ---- Media mappings
+    // ---- Media Mappings
     out += mappingsCard();
 
     // ---- Updates
@@ -2484,7 +2992,7 @@ PCI18N.ready.then(function () {
     out += '<section class="card"><h2>' + H("Updates") + '</h2>' +
       '<div class="chk" style="margin-top:8px"><label><input type="checkbox" data-check="general.update_check"' + (g.update_check ? " checked" : "") +
       ">" + H("Check GitHub for new versions") + info(H("Every 6 hours the app downloads one small file from GitHub (the version number on the main branch) " +
-        "and, when there's a newer version, says so under the app's name and in Home Assistant’s update entity. Nothing about your setup is sent. " +
+        "and, when there’s a newer version, says so under the app’s name and in Home Assistant’s update entity. Nothing about your setup is sent. " +
         "Updating is still done in TrueNAS."), T("update check")) + "</label>" + revertBtn("general", "update_check", "") + updateLine() + "</div></section>";
     out += diskSpeedCard();
     out += mqttCard();
@@ -2525,7 +3033,7 @@ PCI18N.ready.then(function () {
       txt = secs ? H("Trying again in {n} s.", { n: secs }) : H("Trying again…");
     } else if (m.state === "connecting") txt = H("Connecting…");
     return '<div class="acts"><button class="btn" data-act="mqtt-retry"' + (m.state === "connecting" ? " disabled" : "") + ">" +
-      (m.state === "connected" ? H("Reconnect") : H("Reconnect now")) + "</button>" +
+      (m.state === "connected" ? H("Reconnect") : H("Reconnect Now")) + "</button>" +
       (txt ? '<span class="muted" style="font-size:13px">' + txt + "</span>" : "") + "</div>";
   }
   function mqttCard() {
@@ -2537,7 +3045,7 @@ PCI18N.ready.then(function () {
         "says <code>online</code>/<code>offline</code> on <code>{base}/availability</code>, and takes commands on <code>{base}/set/…</code>. " +
         "Node-RED, openHAB, ioBroker, Telegraf and others can read those directly.<br><br>" +
         "<strong>Home Assistant:</strong> with discovery on, a “Plex Cache” device appears with sensors for health, streams, RAM, ARC/L2ARC, warm-up, " +
-        "the Activity report and lifetime totals, plus switches, buttons and selects. Install the <strong>Mosquitto broker</strong> add-on and the " +
+        "the Metrics figures and lifetime totals, plus switches, buttons and selects. Install the <strong>Mosquitto broker</strong> add-on and the " +
         "<strong>MQTT</strong> integration, add a Home Assistant user for this app (Settings → People → Users), and enter its name and password here.<br><br>" +
         "<strong>Security:</strong> the broker login is the lock. Use a separate login per device, use TLS if your broker offers it, and switch off " +
         "“Allow control” for a watch-only connection. Broker ACLs can limit this login to the <code>{base}/#</code> and <code>{prefix}/#</code> topics.",
@@ -2586,17 +3094,17 @@ PCI18N.ready.then(function () {
   function diskSpeedCard() {
     var g = S.general, b = ST.benchmark, speeds = g.disk_speeds || {};
     var ds = (ST.zfs.datasets || []).filter(function (d) { return d.keys.length; });
-    var out = '<section class="card" id="disk-speed"><div class="head"><h2>' + H("Disk speed") + '</h2><span style="flex:1"></span>' +
+    var out = '<section class="card" id="disk-speed"><div class="head"><h2>' + H("Disk Speed") + '</h2><span style="flex:1"></span>' +
       '<button class="btn" data-act="benchmark"' + (b.running || !ds.length ? " disabled" : "") + ">" +
-      (b.running ? (b.progress ? H("Measuring {n} of {total}…", { n: b.progress.done + 1, total: b.progress.total }) : H("Measuring…")) : H("Benchmark now")) + "</button></div>" +
+      (b.running ? (b.progress ? H("Measuring {n} of {total}…", { n: b.progress.done + 1, total: b.progress.total }) : H("Measuring…")) : H("Benchmark Now")) + "</button></div>" +
       '<p class="hint">' + H("How fast each dataset reads when nothing is cached.") + info(H("The app uses it to tell a cache hit from a disk read " +
       "(a read at least 4× faster came from cache) — that’s how warm-up reports what was already cached — to time Now Playing Cache’s automatic start, and to work out how hard background " +
       "warm-up is working your disks. Datasets on different disks (HDD, SSD, mixed) get their own speed.<br><br>" +
-      "<strong>Benchmark now</strong> reads up to 64 MB from five random media files on each dataset and times it. The middle result becomes that dataset’s speed, " +
+      "<strong>Benchmark Now</strong> reads up to 64 MB from five random media files on each dataset and times it. The middle result becomes that dataset’s speed, " +
       "so one file that happened to be cached already doesn’t skew it. It takes a few seconds per dataset, only reads, and is harmless. " +
       "Run it again after adding disks or SSDs, or type a speed in by hand."), T("disk speed")) + "</p>";
     if (!ds.length) {
-      out += '<p class="muted" style="margin:0">' + H("Datasets appear here once a library’s files are readable (see Media mappings above).") + "</p>";
+      out += '<p class="muted" style="margin:0">' + H("Datasets appear here once a library’s files are readable (see Media Mappings above).") + "</p>";
     } else {
       out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Dataset") + '</th><th scope="col">' + H("Libraries") + '</th><th scope="col">' + H("Uncached speed") +
         '</th><th scope="col">' + H("Measured") + "</th></tr></thead><tbody>";
@@ -2629,8 +3137,8 @@ PCI18N.ready.then(function () {
     (ST.locations || []).forEach(function (l) { if (off.indexOf(l.key) < 0 && l.status !== "ok" && !bad[l.key]) { bad[l.key] = l.library; n++; } });
     if (!n) return sum;
     var names = Object.keys(bad).map(function (k) { return bad[k]; });
-    if (sum.status === "ok") return { status: "warn", text: P(n, "Connected, but {n} library isn’t being cached: {list} — see Media mappings below.", "Connected, but {n} libraries aren’t being cached: {list} — see Media mappings below.", { list: names }) };
-    return { status: sum.status, text: msg(sum.text) + " " + P(n, "Also, {n} library isn’t being cached: {list} — see Media mappings below.", "Also, {n} libraries aren’t being cached: {list} — see Media mappings below.", { list: names }) };
+    if (sum.status === "ok") return { status: "warn", text: P(n, "Connected, but {n} library isn’t being cached: {list} — see Media Mappings below.", "Connected, but {n} libraries aren’t being cached: {list} — see Media Mappings below.", { list: names }) };
+    return { status: sum.status, text: msg(sum.text) + " " + P(n, "Also, {n} library isn’t being cached: {list} — see Media Mappings below.", "Also, {n} libraries aren’t being cached: {list} — see Media Mappings below.", { list: names }) };
   }
 
   function lightFor(r, title, testing) {
@@ -2653,7 +3161,7 @@ PCI18N.ready.then(function () {
 
   function mappingsCard() {
     var locs = ST.locations || [];
-    var out = '<section class="card" id="mappings"><h2>' + H("Media mappings") + "</h2>" +
+    var out = '<section class="card" id="mappings"><h2>' + H("Media Mappings") + "</h2>" +
       '<p class="hint">' + H("Tick the libraries to cache.") + info(H("All libraries are ticked by default; unticked ones are skipped by every feature and by the health checks. " +
       "Plex lists each library’s folders as it sees them inside its own app; if this app has a folder mounted somewhere else, choose where. " +
       "Folders marked ✓ contain that library’s files. A library is only cached once all its folders are found."), T("media mappings")) + "</p>";
@@ -2722,7 +3230,7 @@ PCI18N.ready.then(function () {
   }
 
   // --------------------------------------------------------------- render
-  var PAGES = { health: pageHealth, caching: pageCaching, ssd: pageSsd, library: pageLibrary, optimizer: pageOptimizer, processes: pageProcesses, activity: pageActivity, system: pageSystem };
+  var PAGES = { health: pageHealth, caching: pageCaching, ssd: pageSsd, library: pageLibrary, optimizer: pageOptimizer, processes: pageProcesses, sync: pageSync, activity: pageActivity, system: pageSystem };
   var ALIAS = { features: "caching", settings: "system" };  // pages before 0.15
 
   // The side menu folds down to its icons (remembered in this browser); folded, each item's
@@ -2789,8 +3297,21 @@ PCI18N.ready.then(function () {
     main.innerHTML = PAGES[page]();
     fitPosters();
     reattachInfo();
+    stickHeights();
   }
+  // Library Health's legend stays at the top of the window, and the table's column names just under it
+  function stickHeights() {
+    var ls = main.querySelector(".lstick");
+    if (ls) main.style.setProperty("--lstick", ls.offsetHeight + "px");
+  }
+  window.addEventListener("resize", stickHeights);
 
+  // Scroll to a part of a page — once it's there: a page whose data is still loading draws it a little later
+  function scrollToSoon(id, tries) {
+    var target = document.getElementById(id);
+    if (target) return target.scrollIntoView({ block: "start" });
+    if ((tries || 0) < 30) setTimeout(function () { scrollToSoon(id, (tries || 0) + 1); }, 100);
+  }
   function editing() {
     if (main.querySelector(".pick.open")) return true;  // a dropdown is open
     var a = document.activeElement;
@@ -2820,7 +3341,7 @@ PCI18N.ready.then(function () {
     if (page === "ssd") EST = {};  // the what-if sliders start from your settings every time
     if (push) history.pushState({}, "", "/" + page);
     else if (location.pathname !== "/" + page && location.pathname !== "/") history.replaceState({}, "", "/" + page + location.hash);
-    document.title = "Plex Cache – " + { health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), library: T("Library Health"), optimizer: T("Optimizer"), processes: T("Processes"), activity: T("Metrics"), system: T("System") }[page];
+    document.title = "Plex Cache – " + { health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), library: T("Library Health"), optimizer: T("Optimizer"), processes: T("Processes"), sync: T("Sync"), activity: T("Metrics"), system: T("System") }[page];
     render();
     window.scrollTo(0, 0);
     main.focus({ preventScroll: true });
@@ -2902,6 +3423,28 @@ PCI18N.ready.then(function () {
   window.addEventListener("resize", function () { if (popFor) reattachInfo(); });
 
   document.addEventListener("click", function (e) {
+    // ↺ on the Optimizer page and the second server's pairs: back to the default
+    var orv = e.target.closest("[data-optlib-revert], [data-convtype-revert], [data-p2lib-revert]");
+    if (orv) {
+      e.preventDefault();
+      if (orv.dataset.optlibRevert !== undefined) {
+        var libs = JSON.parse(JSON.stringify((S.optimizer || {}).libraries || {}));
+        var lib = libs[orv.dataset.optlibRevert] = optChoices(orv.dataset.optlibRevert);
+        lib[orv.dataset.field] = ((ST.optimizer_defaults || {}).library || {})[orv.dataset.field];
+        queueSave("optimizer", "libraries", libs, true);
+      } else if (orv.dataset.convtypeRevert !== undefined) {
+        var types = JSON.parse(JSON.stringify((S.optimizer || {}).convert_types || {}));
+        types[orv.dataset.convtypeRevert] = ((ST.optimizer_defaults || {}).convert_types || {})[orv.dataset.convtypeRevert];
+        queueSave("optimizer", "convert_types", types, true);
+      } else {
+        var pairs = JSON.parse(JSON.stringify((S.plex2 || {}).libraries || {}));
+        delete pairs[orv.dataset.p2libRevert];
+        queueSave("plex2", "libraries", pairs, true);
+        setTimeout(function () { api("/api/plex2/refresh", {}).then(function () { load(); }); }, 1500);
+      }
+      render();
+      return;
+    }
     var sr = e.target.closest("[data-libsec-revert]");
     if (sr) {
       e.preventDefault();
@@ -2981,10 +3524,7 @@ PCI18N.ready.then(function () {
       e.preventDefault();
       var parts = a.getAttribute("href").split("#");
       go(parts[0].replace("/", ""), true);
-      if (parts[1]) {
-        var target = document.getElementById(parts[1]);
-        if (target) target.scrollIntoView({ block: "start" });
-      }
+      if (parts[1]) scrollToSoon(parts[1]);
       return;
     }
     var t = e.target.closest("[data-toggle],[data-guide],[data-act],[data-copy]");
@@ -3020,6 +3560,12 @@ PCI18N.ready.then(function () {
     else if (act === "optimizer-check") {
       el.disabled = true;
       api("/api/optimizer/check", {}).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+    }
+    else if (act === "conv") {
+      // a converted file's original: delete now, keep both, or ask Plex again (converting.py)
+      el.disabled = true;
+      api("/api/conversions", { original: el.dataset.orig, action: el.dataset.conv }).then(function () { load(); })
+        .catch(function (e) { toast(e.message); load(); });
     }
     else if (act === "optimize-covers") {
       api("/api/optimize/library", { library: el.dataset.key, mode: "covers" }).then(function (r) {
@@ -3062,7 +3608,11 @@ PCI18N.ready.then(function () {
       }).catch(function (e) { toast(e.message); el.disabled = false; });
     }
     else if (act === "file-toggle") { SHOWFILE[el.dataset.file] = !SHOWFILE[el.dataset.file]; render(); }
-    else if (act === "lib-tab") { LIB.key = el.dataset.key; LIB.offset = 0; LIB.open = null; LIB.data = null; libFetch(true); render(); }
+    else if (act === "lib-tab") {
+      // the library opened inspects its files (pausing the one before, which carries on when it's opened again)
+      LIB.key = el.dataset.key; LIB.offset = 0; LIB.open = null; LIB.data = null; LIB.auto[LIB.key] = false;
+      libFetch(true); render();
+    }
     else if (act === "lib-page") { LIB.offset = Number(el.dataset.offset) || 0; LIB.open = null; libFetch(true); }
     else if (act === "lib-block") {
       var bn = el.dataset.n === "video" ? "video" : Number(el.dataset.n);
@@ -3070,14 +3620,18 @@ PCI18N.ready.then(function () {
       render();
     }
     else if (act === "lib-open") {
-      var lf = el.dataset.file;
+      var lf = el.dataset.file, before = el.getBoundingClientRect().top;
       LIB.open = LIB.open === lf ? null : lf;
       if (LIB.open) libDetailFetch(lf);
       render();
+      var row = Array.prototype.find.call(main.querySelectorAll("tr.lrow"), function (r) { return r.dataset.file === lf; });
+      if (row) window.scrollBy(0, row.getBoundingClientRect().top - before);  // (one above closing doesn't move it)
     }
     else if (act === "lib-survey") {
       el.disabled = true;
-      api("/api/library/survey", { library: LIB.key, force: true }).then(function (r) { toast(r.started ? T("Inspecting the files…") : r.queued ? T("Added to the queue") : T("Already queued")); load(); });
+      var how = el.dataset.how;
+      if (how === "pause") LIB.auto[LIB.key] = true;  // (not started again by itself while it's open)
+      api("/api/library/survey", how === "pause" ? { library: LIB.key, pause: true } : { library: LIB.key, force: how === "again" }).then(function () { load(); });
     }
     else if (act === "proc-sort") { var sj = el.dataset.job, sk = el.dataset.key; procSort[sj] = procSort[sj] === sk ? null : sk; procFilesFetch(sj, 0); }
     else if (act === "proc-page") { procFilesFetch(el.dataset.job, Number(el.dataset.offset) || 0); }
@@ -3099,6 +3653,20 @@ PCI18N.ready.then(function () {
     }
     else if (act === "retest") { flush().then(function () { return api("/api/test", {}); }).then(function () { ST.testing = true; render(); load(); }); }
     else if (act === "plex-signin") { signIn(); }
+    else if (act === "plex2-signin") { signIn("plex2"); }
+    else if (act === "plex2-list") {
+      el.disabled = true;
+      api("/api/plex2/servers", {}).then(function (r) { PLEX2_LIST = r.servers || []; render(); }).catch(function (e) { toast(e.message); render(); });
+    }
+    else if (act === "plex2-use") {
+      el.disabled = true;
+      toast(T("Trying its addresses…"));
+      api("/api/plex2/use", { id: el.dataset.id }).then(function () { PLEX2_LIST = null; load(); }).catch(function (e) { toast(e.message); render(); });
+    }
+    else if (act === "plex2-refresh" || act === "plex2-forget") {
+      el.disabled = true;
+      api("/api/" + act.replace("-", "/"), {}).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+    }
   }
 
   // navigator.clipboard only works on https:// or localhost; this app is usually
@@ -3138,14 +3706,15 @@ PCI18N.ready.then(function () {
     if (d.tagName === "DETAILS" && d.dataset.key && (d.dataset.key in openDetails || d.open !== (d.dataset.def === "1"))) openDetails[d.dataset.key] = d.open;
   }, true);
 
-  function signIn() {
+  function signIn(target) {
+    var base = target === "plex2" ? "/api/plex2/pin" : "/api/plex/pin";  // (the second server's sign-in keeps its own token)
     var win = window.open("about:blank", "plexauth", "width=800,height=720");
-    api("/api/plex/pin", {}).then(function (pin) {
+    api(base, {}).then(function (pin) {
       if (win) win.location = pin.auth_url; else window.open(pin.auth_url, "_blank");
       var tries = 0;
       var timer = setInterval(function () {
         if (++tries > 90) { clearInterval(timer); toast(T("Sign-in timed out")); return; }
-        api("/api/plex/pin/" + pin.id, {}).then(function (r) {
+        api(base + "/" + pin.id, {}).then(function (r) {
           if (r.done) {
             clearInterval(timer);
             if (win) try { win.close(); } catch (e) { /* ignore */ }
@@ -3277,6 +3846,25 @@ PCI18N.ready.then(function () {
     if (!el.dataset || el.dataset.libsec === undefined) return;
     var v = document.querySelector('[data-val="' + el.id + '"]');
     if (v) v.textContent = secText(el.value, el.dataset.unit);
+  });
+  // System: the second Plex server's library pairs
+  document.addEventListener("change", function (e) {
+    var el = e.target;
+    if (!el.dataset || el.dataset.p2lib === undefined) return;
+    var pairs = JSON.parse(JSON.stringify((S.plex2 || {}).libraries || {}));
+    pairs[el.dataset.p2lib] = el.value;
+    queueSave("plex2", "libraries", pairs, true);
+    setTimeout(function () { api("/api/plex2/refresh", {}).then(function () { load(); }); }, 1500);
+  });
+  // The Optimizer page: which kinds of file are converted, and how long originals are kept
+  document.addEventListener("change", function (e) {
+    var el = e.target;
+    if (!el.dataset) return;
+    if (el.dataset.convtype !== undefined) {
+      var types = JSON.parse(JSON.stringify((S.optimizer || {}).convert_types || {}));
+      types[el.dataset.convtype] = el.checked;
+      queueSave("optimizer", "convert_types", types, true);
+    }
   });
   // The Optimizer page: each library's choices (sync, mkv: checkboxes; images: the cover art select)
   document.addEventListener("change", function (e) {

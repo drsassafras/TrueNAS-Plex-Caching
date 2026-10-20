@@ -94,6 +94,10 @@ h2{font-size:17px;margin:0 0 4px;font-weight:600}
 .b-reading,.b-running,.b-scanning{background:var(--run-bg);color:var(--run)}
 .what{font-weight:600}
 .det{color:var(--soft);font-size:14px;margin-top:3px}
+/* Nothing in a page may make it wider than the window: grid cells and flex items can shrink below
+   their content, and a long path or name without spaces wraps anywhere */
+.tiles>*,.grid>*,.cols2>*,.guide>*,.libmodes>*,.pflib-grid>*,.estgrid>*,.stack>*{min-width:0}
+.det,.what,.note,.help{overflow-wrap:anywhere}
 .fix{margin-top:10px;background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:13px}
 .cmd{display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap}
 .cmd code{font-family:var(--mono);font-size:13px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;overflow-wrap:anywhere}
@@ -462,9 +466,11 @@ h2 .mode-ic{vertical-align:-3px}
 .libicon{width:1.05em;height:1.05em;vertical-align:-0.15em;margin-right:6px;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round;opacity:.75;flex:none}
 .procfiles td .link{text-align:left}
 /* Library Health: what's where in each file */
-.lhead{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:12px 0 4px}
-.lsearch{margin-left:auto;min-width:200px;font:inherit;font-size:14px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}
-.llegend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--soft);margin:8px 0 10px}
+.lsearch{flex:1 1 200px;min-width:200px;font:inherit;font-size:14px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}
+.llegend{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;font-size:12px;color:var(--soft);margin:0}
+.lstick{position:sticky;top:0;z-index:4;background:var(--panel);padding:10px 0 8px;margin-top:8px}
+/* the column names under the legend while scrolling: only where the table needn't scroll sideways */
+@media (min-width:900px){.lfwrap{overflow:visible}.lfiles thead th{position:sticky;top:var(--lstick,0px);z-index:3;background:var(--panel)}}
 .llegend span{display:inline-flex;align-items:center;gap:5px}
 .lsw{display:inline-block;width:12px;height:10px;border-radius:2px;vertical-align:-1px}
 .lp{stroke:var(--panel);stroke-width:.4}
@@ -515,3 +521,73 @@ h2 .mode-ic{vertical-align:-3px}
 .lp-segment{background:#A9B2AD}
 .linspect{margin:12px 0 0}
 .linspect .meter{margin:4px 0}
+/* Library Health bars use the whole width: every block (a run of like blocks counts once) and the
+   video share it equally, so blocks are as wide as there's room for and the video is never narrower
+   than one of them */
+.lblocks{width:100%}
+.lblk,.lblk.big{flex:1 1 0;width:auto;min-width:14px}
+.lblk.big{min-width:44px}
+.lblocks .lgap{flex:1 1 0;min-width:96px}
+.lblocks.big .lgap{min-width:130px}
+/* the parts every file starts with (header, segment, table of contents, file info, track list): one colour */
+.lp-head{fill:#7C8781;background:#7C8781}
+/* a padding row in a block's list sits under its part, like a sub-item */
+.tbl td.lpadrow{padding-left:30px}
+/* the block picked in a file's view grows, to show its smaller slices (the list above stays to scale) */
+.lblk.big.sel{flex-grow:2.5}
+.lsummary{margin:4px 0 10px;font-size:14px}
+.lsummary .badge{margin-left:6px}
+.lsummary ul{margin:2px 0 0;padding-left:20px}
+.lmixsum{margin-top:8px}
+.lgains{margin:2px 0 0;padding-left:20px}
+.lcount{margin:2px 0 6px;font-size:14px}
+.lcount .badge{margin-left:6px}
+/* Optimize Files: the buttons stacked, so the table fits without scrolling sideways */
+.optlibs .optacts{display:flex;flex-direction:column;align-items:stretch;gap:6px;min-width:140px}
+.optlibs .optacts .btn{white-space:nowrap}
+.optlibs select{max-width:190px}
+.convtypes{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px 22px;margin:8px 0 6px}
+.convtypes>*{min-width:0}
+.convtype{display:flex;align-items:center;gap:4px;font-size:14px}
+.convtype label{display:inline-flex;align-items:center;gap:6px}
+#convert select[data-convhold]{width:auto}
+.optlibs .optsel{display:flex;flex-direction:column;gap:2px;margin:2px 0 6px}
+.optlibs .optsel .muted{font-size:12px}
+.optlibs .optline{display:block}
+.optlibs .optline label{display:flex;gap:6px;align-items:flex-start;white-space:normal;margin:2px 0}
+.optlibs .optacts{min-width:120px}
+.optlibs td:nth-child(2){max-width:210px}
+.optlibs td:nth-child(4){max-width:160px}
+/* Convert Folder to Child Dataset, the switch: each step's button first, what it does after */
+.migsteps{margin:10px 0 0;padding-left:22px}
+.migsteps>li{margin:0 0 12px}
+.migstep{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:flex-start}
+.migbtns{flex:none;display:flex;flex-wrap:wrap;gap:6px}
+.migtext{flex:1 1 320px;min-width:0;font-size:14px}
+.migprog{margin:8px 0;padding:10px 12px;border:1px solid var(--line);border-radius:8px}
+.optkinds{display:block;margin:0 0 4px 24px}
+/* Library Health: the always-cached blocks compared — the rows' names once, Streamed and Cached side by side;
+   each bar with a bar above it as long as what's kept, with its total */
+.lcgrid{display:grid;grid-template-columns:auto auto minmax(0,1fr);gap:3px 14px;align-items:end;margin:6px 0 2px}
+.lcgroup{font-size:13px;font-weight:600;align-self:center;white-space:nowrap}
+.lcgap{grid-column:1/-1;height:6px}
+.lclbl{font-size:12px;align-self:end;padding-bottom:3px;white-space:nowrap}
+.lccell{min-width:0}
+.lcline{position:relative;display:flex;height:4px;margin:16px 0 3px}
+.lcline>span{display:block;height:4px}
+.lclv{background:#2F6FA8}
+.lclm{background:#D9822B}
+.lclr{background:#A9B2AD}
+.lcline em{position:absolute;bottom:6px;transform:translateX(-100%);font-style:normal;font-size:11px;color:var(--soft);white-space:nowrap;line-height:12px}
+.lcbar{display:flex;height:20px;border-radius:3px;overflow:hidden}
+.lcbar>span{display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;white-space:nowrap;overflow:hidden;min-width:1px;cursor:default}
+.lcvidend{background:#8F9792}
+.lcout{background:#D45D8A}
+.lclegend{margin:2px 0 4px}
+/* Library Health: each part's ⓘ at the front of its line (a slot where it has none), its checks after it */
+.lblkinfo td>.info:first-child{margin:0 6px 0 0}
+.infoslot{display:inline-block;width:18px;margin-right:6px}
+.lcheck{display:inline-flex;align-items:center;gap:4px;margin-left:10px;font-size:13px;font-weight:400}
+.lcheck .badge{margin:0}
+.lcheck .info{margin-left:2px}
+.lcountn{cursor:default}

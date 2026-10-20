@@ -150,16 +150,22 @@ def read_layout(path: str) -> dict:
             out["seek"].setdefault(name, off)
         # Our tags: the optimizer's version, and whether the cover art is Plex's poster
         out["ours"] = {}
+        out["tags_size"], out["foreign_tags"] = 0, False
         tg = out["seek"].get("Tags")
         if tg:
             fh.seek(tg)
             hdr = fh.read(16)
             eid, n1 = _vint(hdr, 0, True)
             size, n2 = _vint(hdr, n1, False)
+            if eid == TAGS and size > 0:
+                out["tags_size"] = n1 + n2 + size
+                out["foreign_tags"] = True  # (unless read below: a Tags element too large to read is someone else's)
             if eid == TAGS and 0 < size <= MAX_TAGS:
                 fh.seek(tg + n1 + n2)
                 try:
-                    out["ours"] = _our_tags(fh.read(size))
+                    body = fh.read(size)
+                    out["ours"] = _our_tags(body)
+                    out["foreign_tags"] = _foreign_tags(body)
                 except (NotMatroska, IndexError, ValueError):
                     out["ours"] = {}  # tags we can't read: as if there were none of ours
     return out
@@ -187,6 +193,20 @@ def _our_tags(body: bytes) -> dict:
         if is_global:
             out.update(simple)
     return out
+
+
+def _foreign_tags(body: bytes) -> bool:
+    """Whether the tags hold anything besides ours (titles, statistics, encoder notes…)."""
+    for eid, s, size in _children(body):
+        if eid != TAG:
+            continue
+        for cid, cs, csz in _children(body, s, s + size):
+            if cid != SIMPLE_TAG:
+                continue
+            for did, ds, dsz in _children(body, cs, cs + csz):
+                if did == TAG_NAME and not body[ds:ds + dsz].decode("utf-8", "replace").startswith(OUR_TAG):
+                    return True
+    return False
 
 
 def _tracks(body: bytes) -> list[dict]:
@@ -293,7 +313,8 @@ def check(path: str, keep_images: bool = True) -> dict:
     if sum(size for name, _, size in lay["front"] if name == "Void") > BIG_VOID:
         problems.append("void")
     return {"applies": True, "optimized": not problems, "problems": problems, "attachments": len(atts),
-            "images": len(images), "image_subs": len(subs), "ours": lay.get("ours") or {}}
+            "images": len(images), "image_subs": len(subs), "ours": lay.get("ours") or {},
+            "tags_size": lay.get("tags_size", 0), "foreign_tags": lay.get("foreign_tags", False)}
 
 
 # ---------------------------------------------------------------- writing

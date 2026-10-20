@@ -152,7 +152,10 @@ def copy_tree(src: str, dst: str, ctl: Paused, report=lambda **kw: None, mirror:
             if not ctl.wait():
                 raise InterruptedError("stopped")
             sp, dp = os.path.join(dirpath, n), os.path.join(target, n)
-            st = os.lstat(sp)
+            try:
+                st = os.lstat(sp)
+            except FileNotFoundError:
+                continue  # deleted from the folder meanwhile: the last pass sees to it
             if stat.S_ISLNK(st.st_mode):
                 if not os.path.lexists(dp):
                     os.symlink(os.readlink(sp), dp)
@@ -170,7 +173,12 @@ def copy_tree(src: str, dst: str, ctl: Paused, report=lambda **kw: None, mirror:
                 c["skipped"] += 1
                 c["bytes_done"] += st.st_size
             else:
-                _copy_file(sp, dp, st, ctl, moved)
+                try:
+                    _copy_file(sp, dp, st, ctl, moved)
+                except FileNotFoundError:
+                    if os.path.lexists(sp):
+                        raise
+                    continue  # deleted just before it was opened: as above
                 c["copied"] += 1
                 if (os.stat(dp).st_uid, os.stat(dp).st_gid) != (st.st_uid, st.st_gid):
                     c["owners_not_kept"] += 1
@@ -188,7 +196,10 @@ def copy_tree(src: str, dst: str, ctl: Paused, report=lambda **kw: None, mirror:
                 shutil.rmtree(dirpath, ignore_errors=True)
                 c["removed"] += 1
     for sp, dp in reversed(dirs):  # folders last, so their times aren't changed by what's copied into them
-        st = os.lstat(sp)
+        try:
+            st = os.lstat(sp)
+        except FileNotFoundError:
+            continue  # a folder deleted meanwhile
         _copy_xattrs(sp, dp)
         if not _copy_meta(st, dp):
             c["owners_not_kept"] += 1

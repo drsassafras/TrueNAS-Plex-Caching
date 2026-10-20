@@ -17,6 +17,10 @@ RUN apk add --no-cache mkvtoolnix ffmpeg oxipng libjpeg-turbo-utils
 
 WORKDIR /app
 COPY plexcache /app/plexcache
+# Library Health names codecs the way the MKVToolNix in this image does: its release's own list
+# (the committed one stays if it can't be read)
+COPY dev/codecs.py /app/dev/codecs.py
+RUN python /app/dev/codecs.py --installed && rm -r /app/dev
 
 # 568 is the "apps" user on TrueNAS.
 RUN mkdir -p /config && chown 568:568 /config

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 
 from . import cachemode, prefetch, zfs
 from .layout import min_head, tail_ranges
-from .i18n import Fixed, M, duration_text, join, msg, size_text
+from .i18n import M, duration_text, join, msg, size_text
 from .pauses import L2arcPauses, busy_percent
 from .plex import PlexClient, PlexError
 from .reader import MiB, Pacer, Stopped, is_probe_hit, read_range
@@ -319,7 +319,7 @@ class PlaybackMonitor:
                 self.last_error = None
             except PlexError as e:
                 if self.last_error != str(e):
-                    self.app.activity.event("playback", M("can't read Plex sessions: {why}", why=msg(e)), "warn")
+                    self.app.activity.event("playback", M("can’t read Plex sessions: {why}", why=msg(e)), "warn")
                 self.last_error = msg(e)
             except Exception as e:  # never let the monitor die
                 self.last_error = M("unexpected error: {why}", why=str(e))
@@ -395,7 +395,7 @@ class PlaybackMonitor:
                 self._maybe_prefetch(key, s, settings, client)
             else:
                 lib = self.app.library_info(s.library_key) or {}
-                self._why(key, s, M("this library isn't being cached ({library})", library=lib.get("title") or s.library_key or M("no library given")))
+                self._why(key, s, M("this library isn’t being cached ({library})", library=lib.get("title") or s.library_key or M("no library given")))
         self._sample_disks()
         self._check_retention()
 
@@ -558,7 +558,7 @@ class PlaybackMonitor:
         if not cfg["enabled"]:
             return
         if not s.files:
-            self._why(key, s, M("Plex didn't say which file is playing"))
+            self._why(key, s, M("Plex didn’t say which file is playing"))
             return
         if s.state != "playing":
             if s.state not in ("paused", "buffering"):
@@ -569,7 +569,7 @@ class PlaybackMonitor:
         if "missing" not in self._seen[key]:  # (looked at once per stream)
             self._seen[key]["missing"] = not os.path.exists(path)
         if self._seen[key]["missing"]:
-            self._why(key, s, M("its file isn't found here: {path} (see System → Media mappings)", path=path))
+            self._why(key, s, M("its file isn’t found here: {path} (see System → Media Mappings)", path=path))
             return
         if not self._seen[key]["now"] and self.app.recently_cached(path, whole=True):
             self._seen[key]["now"] = True  # the whole file was cached within its cooldown (Prefetch, usually)
@@ -650,7 +650,7 @@ class PlaybackMonitor:
         try:
             steps = self._steps(client, s, kind)
         except PlexError as e:
-            self.app.activity.event("next-episode", M("couldn't look up what plays after {title}: {why}", title=s.label, why=msg(e)), "warn")
+            self.app.activity.event("next-episode", M("couldn’t look up what plays after {title}: {why}", title=s.label, why=msg(e)), "warn")
             return
         if steps is None:
             return
@@ -961,7 +961,7 @@ class PlaybackMonitor:
             if res.error:
                 job.state = "failed"
                 job.message = res.error
-                self.app.activity.event(job.feature, M("couldn't read {path}: {why}", path=job.path, why=res.error), "warn")
+                self.app.activity.event(job.feature, M("couldn’t read {path}: {why}", path=job.path, why=res.error), "warn")
                 return
             job.state = "done"
             job.paused = None

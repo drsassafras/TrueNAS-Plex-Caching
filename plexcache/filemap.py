@@ -5,7 +5,7 @@ language, compression) and each attachment (and whether it's an image).
 
 ``describe()`` reads only the parts' headers (a few small reads, wherever the file is), never the
 video. ``FileMaps`` keeps what was found with the file's size, modification time and inode, so a
-file is read again only when it changes; the Survey job (``SurveyJob``) fills it for a library.
+file is read again only when it changes; the Inspector fills it for a library.
 What caching takes from each file comes from the same reading of its layout as caching itself
 (layout.tail_ranges, layout.min_head), so the page shows what really happens.
 """
@@ -19,11 +19,12 @@ import threading
 import time
 
 from . import layout
-from .jobs import Job
 from .layout import _element, _pread
 from .i18n import M
 
 STORE = "file-maps.json"
+MAP_VERSION = 4  # what's read from each file; a map from an older version is read again (2: JPEG tables, 3: mix, 4: audio files)
+LAYOUT_VERSION = 2  # the oldest map still shown while it waits to be read again (it lacks only the mix)
 MAX_PARTS = 512  # top-level parts to read from either end before giving up
 MAX_TRACKS = 128
 NAMES = {  # MKV top-level parts, as the page names them
@@ -33,6 +34,16 @@ NAMES = {  # MKV top-level parts, as the page names them
 }
 TRACK_TYPES = {1: "video", 2: "audio", 3: "complex", 0x10: "logo", 0x11: "subtitles", 0x12: "buttons", 0x20: "control"}
 COMPRESSION = {0: "zlib", 1: "bzlib", 2: "lzo", 3: "header stripping"}
+
+
+def codec_name(codec_id: str) -> str:
+    """A codec ID's name as MKVToolNix shows it ("HEVC/H.265/MPEG-H"), or "" when it doesn't know it."""
+    import re
+    from .codec_names import CODECS
+    for name, pattern in CODECS:
+        if re.fullmatch(f"(?:{pattern})", codec_id or "", re.I):
+            return name
+    return ""
 
 
 def _children(buf: bytes, start: int, end: int):
@@ -61,6 +72,7 @@ def _tracks(buf: bytes) -> list[dict]:
         if eid != 0xAE or len(out) >= MAX_TRACKS:
             continue
         t = {"number": None, "type": None, "codec": "", "language": "", "name": "", "compression": None}
+        bcp47 = ""
         for cid, ca, cb in _children(buf, a, b):
             v = buf[ca:cb]
             if cid == 0xD7:
@@ -69,8 +81,10 @@ def _tracks(buf: bytes) -> list[dict]:
                 t["type"] = TRACK_TYPES.get(_uint(v), "other")
             elif cid == 0x86:
                 t["codec"] = v.decode("ascii", "replace")
-            elif cid in (0x22B59C, 0x22B59D):  # Language, LanguageIETF (the second wins)
+            elif cid == 0x22B59C:  # Language
                 t["language"] = v.decode("ascii", "replace")
+            elif cid == 0x22B59D:  # LanguageBCP47: wins over Language, wherever it is
+                bcp47 = v.decode("ascii", "replace")
             elif cid == 0x536E:
                 t["name"] = v.decode("utf-8", "replace")
             elif cid == 0xE0:  # Video: its size
@@ -88,6 +102,7 @@ def _tracks(buf: bytes) -> list[dict]:
                                 if zid == 0x4254:
                                     algo = _uint(buf[za:zb])
                             t["compression"] = COMPRESSION.get(algo, "other")
+        t["language"] = bcp47 or t["language"] or "eng"  # (Matroska's default when neither is written)
         if not t["type"]:  # not recorded: from the codec ("V_…", "A_…", "S_…")
             t["type"] = {"V": "video", "A": "audio", "S": "subtitles"}.get(t["codec"][:1], "other")
         out.append(t)
@@ -108,16 +123,53 @@ def _attachments(fd: int, at: int, size: int) -> list[dict]:
         if cid == layout.ATTACHED_FILE:
             head = _pread(fd, p + chl, min(csize, 4096))
             name = mime = ""
+            data_at = None
             for fid, fa, fb in _children(head, 0, len(head)):
                 if fid == layout.FILE_DATA:
+                    data_at = p + chl + fa
                     break
                 if fid == layout.FILE_NAME:
                     name = head[fa:fb].decode("utf-8", "replace")
                 elif fid == layout.FILE_MIME:
                     mime = head[fa:fb].decode("utf-8", "replace")
-            out.append({"name": name, "mime": mime, "pos": p, "size": chl + csize, "image": layout._is_image(name, mime)})
+            a = {"name": name, "mime": mime, "pos": p, "size": chl + csize, "image": layout._is_image(name, mime)}
+            if a["image"] and data_at is not None:
+                a["jpeg_tables"] = jpeg_tables(_pread(fd, data_at, 64 * 1024))
+            out.append(a)
         p += chl + csize
     return out
+
+
+# The Huffman tables JPEG's standard suggests (ITU T.81, Annex K): the code counts per length of each.
+# A JPEG that uses them was saved without optimizing them; jpegtran -optimize (and most tools that
+# squeeze JPEGs) replace them with tables made for the picture — smaller, with every pixel the same.
+STANDARD_HUFFMAN = {
+    bytes([0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]), bytes([0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0]),
+    bytes([0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7D]), bytes([0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77])}
+
+
+def jpeg_tables(data: bytes) -> str | None:
+    """A JPEG's Huffman tables, from its first bytes: "standard" (not optimized: lossless compression
+    would make it smaller), "optimized", "progressive" (its own tables too), or None (not a JPEG, or
+    not read far enough)."""
+    if data[:2] != b"\xff\xd8":
+        return None
+    p, counts = 2, []
+    while p + 4 <= len(data):
+        if data[p] != 0xFF:
+            return None
+        marker, n = data[p + 1], int.from_bytes(data[p + 2:p + 4], "big")
+        if marker == 0xC2:
+            return "progressive"
+        if marker == 0xC4:  # one or more tables: class/id byte, 16 counts, then the symbols
+            q, end = p + 4, p + 2 + n
+            while q + 17 <= min(end, len(data)):
+                counts.append(bytes(data[q + 1:q + 17]))
+                q += 17 + sum(data[q + 1:q + 17])
+        if marker == 0xDA:  # the picture itself starts: every table has been seen
+            return "standard" if counts and all(c in STANDARD_HUFFMAN for c in counts) else "optimized" if counts else None
+        p += 2 + n
+    return None
 
 
 def _walk(fd: int, start: int, size: int, stop_at_video: bool) -> list[dict]:
@@ -183,6 +235,100 @@ def _mkv(fd: int, size: int) -> dict:
         parts.append({"part": "other", "pos": end, "size": size - end})
     return {"format": "mkv", "parts": parts, "tracks": tracks, "attachments": attachments,
             "video_start": video_start, "video_end": video_end}
+
+
+AUDIO_EXT = (".mp3", ".flac", ".m4a", ".m4b", ".aac", ".ogg", ".oga", ".opus", ".wav", ".aif", ".aiff", ".wma", ".ape", ".wv", ".dsf", ".mka")
+
+
+def _picture(fd: int, pos: int, size: int, data_at: int, name: str, mime: str) -> dict:
+    """Cover art in an audio file's tags, as an attachment (its frame or block, whole)."""
+    a = {"name": name, "mime": mime, "pos": pos, "size": size, "image": True}
+    a["jpeg_tables"] = jpeg_tables(_pread(fd, data_at, 64 * 1024)) if data_at < pos + size else None
+    return a
+
+
+def _id3(fd: int, size: int) -> tuple[list[dict], list[dict], int]:
+    """An ID3v2 tag at the start: (parts, pictures, where the audio starts). Its frames are tags,
+    its pictures (APIC) attachments, the zeros after them padding."""
+    head = _pread(fd, 0, 10)
+    if head[:3] != b"ID3" or size < 10:
+        return [], [], 0
+    ver, flags = head[3], head[5]
+    syncsafe = lambda b: (b[0] << 21) | (b[1] << 14) | (b[2] << 7) | b[3]
+    total = min(10 + syncsafe(head[6:10]) + (10 if flags & 0x10 else 0), size)
+    parts, pics = [{"part": "id3", "pos": 0, "size": 10}], []
+    if ver not in (3, 4):  # (ID3v2.2: read as one block of tags)
+        parts.append({"part": "tags", "pos": 10, "size": total - 10})
+        return parts, pics, total
+    p, run = 10, None
+    while p + 10 <= total:
+        h = _pread(fd, p, 10)
+        if h[0] == 0:
+            break  # padding from here
+        fid = h[:4]
+        n = syncsafe(h[4:8]) if ver == 4 else int.from_bytes(h[4:8], "big")
+        if n <= 0 or p + 10 + n > total:
+            break
+        if fid == b"APIC":
+            body = _pread(fd, p + 10, min(n, 512))
+            mime = body[1:body.find(b"\0", 1)].decode("latin-1", "replace") if b"\0" in body[1:] else ""
+            at = next((i for i in (body.find(b"\xff\xd8"), body.find(b"\x89PNG")) if i >= 0), len(body))
+            pics.append(_picture(fd, p, 10 + n, p + 10 + at, "APIC", mime))
+            parts.append({"part": "attachments", "pos": p, "size": 10 + n})
+            run = None
+        elif run:
+            run["size"] += 10 + n
+        else:
+            run = {"part": "tags", "pos": p, "size": 10 + n}
+            parts.append(run)
+        p += 10 + n
+    if p < total:
+        parts.append({"part": "padding", "pos": p, "size": total - p})
+    return parts, pics, total
+
+
+FLAC_BLOCKS = {0: "info", 1: "padding", 2: "other", 3: "index", 4: "tags", 5: "chapters", 6: "attachments"}
+
+
+def _flac(fd: int, size: int, at: int) -> tuple[list[dict], list[dict], int] | None:
+    """A FLAC's metadata blocks (from ``at``, after any ID3v2 tag): stream info, seek table (its
+    index), Vorbis comments (tags), cue sheet (chapters), pictures and padding. None if not FLAC."""
+    if _pread(fd, at, 4) != b"fLaC":
+        return None
+    parts, pics, p = [{"part": "flac", "pos": at, "size": 4}], [], at + 4
+    while p + 4 <= size:
+        h = _pread(fd, p, 4)
+        kind, n = h[0] & 0x7F, int.from_bytes(h[1:4], "big")
+        part = FLAC_BLOCKS.get(kind, "other")
+        if part == "attachments":
+            body = _pread(fd, p + 4, min(n, 1024))
+            ml = int.from_bytes(body[4:8], "big")
+            mime = body[8:8 + ml].decode("latin-1", "replace")
+            dl = int.from_bytes(body[8 + ml:12 + ml], "big")
+            pics.append(_picture(fd, p, 4 + n, p + 4 + 12 + ml + dl + 20, "PICTURE", mime))
+        parts.append({"part": part, "pos": p, "size": min(4 + n, size - p)})
+        p += 4 + n
+        if h[0] & 0x80:
+            break
+    return parts, pics, min(p, size)
+
+
+def _audio(fd: int, size: int, path: str) -> dict:
+    """An MP3 or FLAC (or another audio file with an ID3v2 tag in front): its tags and cover art in
+    front of the audio, and an ID3v1 tag at its end. Anything else: the whole file as its streams."""
+    parts, pics, start = _id3(fd, size)
+    flac = _flac(fd, size, start)
+    fmt = "flac" if flac else "mp3" if parts or path.lower().endswith(".mp3") else "stream"
+    if flac:
+        parts, pics, start = parts + flac[0], pics + flac[1], flac[2]
+    end = size - 128 if size - 128 > start and _pread(fd, size - 128, 3) == b"TAG" else size
+    parts.append({"part": "video", "pos": start, "size": end - start})  # (the streams: audio here)
+    if end < size:
+        parts.append({"part": "tags", "pos": end, "size": size - end})
+    codec = {"flac": "A_FLAC", "mp3": "A_MPEG/L3"}.get(fmt, "")
+    audio = fmt != "stream" or path.lower().endswith(AUDIO_EXT)
+    return {"format": fmt, "parts": parts, "attachments": pics, "video_start": start, "video_end": end,
+            "tracks": [{"type": "audio" if audio else "video", "codec": codec, "number": 1}]}
 
 
 def _seek_targets(fd: int, buf: bytes, seg: int, size: int) -> list[tuple[int, int]]:
@@ -251,13 +397,90 @@ def describe(path: str) -> dict:
             out.update(_mkv(fd, size))
         elif magic[4:8] in (b"ftyp", b"moov", b"mdat", b"free", b"wide", b"skip"):
             out.update(_mp4(fd, size))
+            if path.lower().endswith(AUDIO_EXT):
+                out["tracks"] = [{"type": "audio", "codec": "", "number": 1}]  # (an M4A/M4B: its tracks aren't read)
+        elif size:
+            out.update(_audio(fd, size, path))
     except (OSError, ValueError, struct.error) as e:
         out["error"] = str(e)
     finally:
         os.close(fd)
-    meta, info = layout.tail_ranges(path, size, 0)
-    out["meta"] = [list(r) for r in meta]
-    out["video_start"] = out.get("video_start") if out.get("video_start") is not None else info.get("video_start")
+    if out["format"] in ("mp3", "flac", "stream"):
+        # (warm-up doesn't know these: the metadata at the end is what's after the audio)
+        end = out.get("video_end") or size
+        out["meta"] = [[p["pos"], p["size"]] for p in out["parts"] if p["pos"] >= end]
+    else:
+        meta, info = layout.tail_ranges(path, size, 0)
+        out["meta"] = [list(r) for r in meta]
+        out["video_start"] = out.get("video_start") if out.get("video_start") is not None else info.get("video_start")
+    try:
+        out["mix"] = cache_mix(path, out, out["blksize"] or -(-max(size, 1) // 4096) * 4096)
+    except OSError:
+        out["mix"] = None
+    return out
+
+
+MIX_KEYS = ("video", "meta", "unused", "video_disk", "meta_disk", "unused_disk")
+HEAD_KINDS = ("header", "segment", "seekhead", "info", "tracks", "checksum", "id3", "flac")  # what a player reads first
+
+
+def store(mix: dict, record: int, video: int, meta: int, packed: int, unused: int) -> None:
+    """Add one block to ``mix`` as ZFS stores it: compressed only if that saves 1/8 of it (ZFS's own
+    rule), in whole 4K sectors — then its unused room (zeros, padding) is gone and its metadata takes
+    what's left after the video (which doesn't compress); otherwise everything as it is.
+    ``packed``: the metadata's bytes compressed."""
+    mix["blocks"] = mix.get("blocks", 0) + 1
+    mix["video"] += video
+    mix["meta"] += meta
+    mix["unused"] += unused
+    mix["video_disk"] += video
+    if record - (video + packed) >= record // 8:
+        mix["meta_disk"] += max(0, -(-(video + packed) // 4096) * 4096 - video)
+    else:
+        mix["meta_disk"] += meta
+        mix["unused_disk"] += unused
+
+
+def cache_mix(path: str, m: dict, record: int) -> dict | None:
+    """What the blocks caching always keeps of a file (block_map: its start and its end, not the
+    lead-in) hold: video (the streams), metadata, and unused room (padding, and the zeros past the end
+    of the file) — as they are, and as ZFS stores them (``*_disk``, store()). Only the metadata is
+    read: video doesn't compress, and zeros compress away. zlib stands in for ZFS's ZSTD (similar on
+    metadata). ``kinds``: each kind of metadata's bytes, as they are and compressed — what the
+    optimizer's result is estimated from (projection.py)."""
+    import zlib
+    size = m.get("size") or 0
+    bm = block_map(m, size, {"floor": layout.min_head(m.get("video_start"), record, size), "start": 0}, record)
+    if not bm:
+        return None
+    parts = pieces(m)
+    out = dict.fromkeys(MIX_KEYS, 0)
+    out.update(blocks=0, record=record)
+    kinds: dict[str, list[int]] = {}
+    with open(path, "rb") as fh:
+        for b in bm["start"] + bm["end"]:
+            a = b["from"]
+            e = a + record
+            video = unused = 0
+            data = b""
+            for p in parts:
+                lo, hi = max(a, p["pos"]), min(e, p["pos"] + p["size"])
+                if hi <= lo:
+                    continue
+                if p["kind"] == "video":
+                    video += hi - lo
+                elif p["kind"] == "padding":
+                    unused += hi - lo
+                else:
+                    fh.seek(lo)
+                    got = fh.read(hi - lo)
+                    data += got
+                    k = kinds.setdefault(p["kind"], [0, 0])
+                    k[0] += len(got)
+                    k[1] += len(zlib.compress(got, 6))
+            unused += record - b["data"]
+            store(out, record, video, record - video - unused, len(zlib.compress(data, 6)) if data else 0, unused)
+    out["kinds"] = kinds
     return out
 
 
@@ -267,7 +490,7 @@ def cache_plan(m: dict | None, size: int, kbps: int, seconds: float, record: int
     warm-up reads them. Without the file's layout, estimated (``estimated``)."""
     from .warmup import DEFAULT_FRONT, DEFAULT_INDEX, align_ranges, preload_bytes
     lead = preload_bytes(kbps or 1, seconds, size, record)
-    if m and m.get("format") in ("mkv", "mp4"):
+    if m and m.get("format") in ("mkv", "mp4", "mp3", "flac", "stream"):
         vs = m.get("video_start")
         floor = layout.min_head(vs, record, size)
         start = max(lead, floor)
@@ -290,11 +513,18 @@ def pieces(m: dict) -> list[dict]:
     Kinds: the parts' (header, seekhead, info, tracks, chapters, padding, video, index, tags,
     checksum, other) and, for attachments, image, font or attachment."""
     out = []
+    owner = None  # the part before: padding is the room left after it (an edit grew into it, or can)
+    kinds = {t.get("type") for t in m.get("tracks") or []}
+    audio = {"stream": "audio"} if kinds == {"audio"} else {}  # (an audio file's streams: named so)
     for p in m.get("parts") or []:
         atts = [a for a in m.get("attachments") or [] if p["part"] == "attachments" and p["pos"] <= a["pos"] < p["pos"] + p["size"]]
         if not atts:
-            out.append({"kind": p["part"], "pos": p["pos"], "size": p["size"]})
+            out.append(dict({"kind": p["part"], "pos": p["pos"], "size": p["size"]},
+                            **({"of": owner} if p["part"] == "padding" and owner else {}), **(audio if p["part"] == "video" else {})))
+            if p["part"] not in ("padding", "segment"):
+                owner = p["part"]
             continue
+        owner = "attachments"
         at = p["pos"]
         for a in atts:
             if a["pos"] > at:
@@ -322,7 +552,8 @@ def block_map(m: dict | None, size: int, plan: dict, record: int | None) -> dict
         for p in parts:
             lo, hi = max(a, p["pos"]), min(b, p["pos"] + p["size"])
             if hi > lo:
-                got.append(dict({"kind": p["kind"], "bytes": hi - lo}, **({"name": p["name"]} if p.get("name") else {})))
+                got.append(dict({"kind": p["kind"], "bytes": hi - lo}, **({"name": p["name"]} if p.get("name") else {}),
+                                **({"of": p["of"]} if p.get("of") else {}), **({"stream": p["stream"]} if p.get("stream") else {})))
         data = max(0, min(b, size) - a)
         if data < record:
             got.append({"kind": "empty", "bytes": record - data})  # past the end of the file: zeros
@@ -338,7 +569,9 @@ def block_map(m: dict | None, size: int, plan: dict, record: int | None) -> dict
         hi = (max(o + n for o, n in end_ranges) - 1) // record
         end = [block(n) for n in range(lo, hi + 1)]
     lead = max(0, -(-plan["start"] // record) - len(start))
-    return {"record": record, "start": start, "end": end, "lead_blocks": lead,
+    kinds = {t.get("type") for t in m.get("tracks") or []}
+    streams = [k for k in ("video", "audio", "subtitles") if k in kinds] or ["video"]  # (MP4: not read, so just "video")
+    return {"record": record, "start": start, "end": end, "lead_blocks": lead, "streams": streams,
             "total_blocks": -(-size // record), "video": max(0, (m.get("video_end") or size) - vs)}
 
 
@@ -380,27 +613,46 @@ class FileMaps:
     def _ident(st: os.stat_result) -> list:
         return [st.st_size, st.st_mtime_ns, st.st_ino]
 
-    def get(self, path: str, st: os.stat_result | None = None) -> dict | None:
-        """The file's layout if it's known and the file hasn't changed since (``st``: its stat)."""
+    def get(self, path: str, st: os.stat_result | None = None, full: bool = False) -> dict | None:
+        """The file's layout if it's known and the file hasn't changed since (``st``: its stat).
+        ``full``: only one read with everything read now (MAP_VERSION), not just its layout."""
         with self.lock:
             e = self.files.get(path)
         if not e:
             return None
         if st is not None and e.get("id") != self._ident(st):
             return None
+        if (e.get("v") or 0) < (MAP_VERSION if full else LAYOUT_VERSION):
+            return None  # read with less than is read now: again
         return e.get("map")
 
     def read(self, path: str, force: bool = False) -> dict:
         """The file's layout: known, or read now (and kept). ``force``: read again even if unchanged."""
         st = os.stat(path)
-        got = None if force else self.get(path, st)
+        got = None if force else self.get(path, st, full=True)
         if got is None:
             got = describe(path)
             got["read"] = time.time()
             with self.lock:
-                self.files[path] = {"id": self._ident(st), "map": got}
+                before = (self.files.get(path) or {}).get("before")
+                self.files[path] = dict({"id": self._ident(st), "map": got, "v": MAP_VERSION}, **({"before": before} if before else {}))
                 self.dirty = True
         return got
+
+    def before(self, path: str) -> dict | None:
+        """The file's mix before it was optimized (keep_before), or None."""
+        with self.lock:
+            return (self.files.get(path) or {}).get("before")
+
+    def keep_before(self, path: str) -> None:
+        """The optimizer has just rewritten the file: its mix as last read is what it was before (kept
+        through later reads; the first optimizing's, if it's optimized again)."""
+        with self.lock:
+            e = self.files.get(path)
+            mix = ((e or {}).get("map") or {}).get("mix")
+            if e and mix and not e.get("before"):
+                e["before"] = mix
+                self.dirty = True
 
     def known(self, paths) -> int:
         with self.lock:
@@ -411,7 +663,7 @@ class FileMaps:
         n = 0
         for p in paths:
             try:
-                n += self.get(p, os.stat(p)) is not None
+                n += self.get(p, os.stat(p), full=True) is not None  # (read by an older version: read again)
             except OSError:
                 continue
         return n
@@ -430,7 +682,7 @@ class FileMaps:
                 return
             data = json.dumps({"files": self.files}, separators=(",", ":"))
             self.dirty = False
-        tmp = self.path + ".tmp"
+        tmp = f"{self.path}.{threading.get_ident()}.tmp"  # (the page and a survey can save at once)
         try:
             with open(tmp, "w", encoding="utf-8") as fh:
                 fh.write(data)
@@ -439,38 +691,108 @@ class FileMaps:
             self.dirty = True  # the config folder isn't writable: Health says so
 
 
-class SurveyJob(Job):
-    """Read the layout of every file in a library (the Library Health page), as a file job: only
-    files that changed since they were last read. Reads a few small parts of each file, never the
-    video. Not kept in the job log (nothing changes on disk)."""
+class Inspector:
+    """Reads the layout of a library's files for the Library Health page — only files new or changed
+    since they were last read, unless asked for every one. One library at a time: starting one pauses
+    the one running, and each picks up where it was paused. Not a file job: it only reads a few small
+    parts of each file, so it never waits for (or holds up) optimizing."""
 
-    kind = "survey"
-    logged = False
+    def __init__(self, app):
+        self.app = app
+        self.lock = threading.Lock()
+        self.libs: dict[str, dict] = {}  # key -> {"todo": [paths], "done", "total", "read", "paused", "finished"}
+        self.current: str | None = None
+        self.working = False  # the reading thread is (still) going
 
-    def __init__(self, app, library: str, resumed: dict | None = None, force: bool = False):
-        title = (app.library_info(str(library)) or {}).get("title") or (resumed or {}).get("title")
-        super().__init__(app.jobs, resumed, library=str(library), mode="survey", title=title, force=bool(force))
+    def start(self, key: str, force: bool = False) -> dict:
+        """Inspect a library (resuming it if it was paused), pausing any other. ``force``: every file
+        again. A library with nothing left to read isn't started (unless ``force``)."""
+        key = str(key)
+        app, maps = self.app, self.app.file_maps
+        with self.lock:
+            st = self.libs.get(key)
+            if force or not st or not st["todo"]:
+                paths = [app.map_path(f.path) for f in list(app.files) if str(f.library_key) == key]
+                todo = paths if force else [p for p in paths if not self._current(maps, p)]
+                if not todo and st:
+                    return self.snapshot_locked()  # nothing new since: the last inspection stands
+                st = self.libs[key] = {"todo": todo, "done": 0, "total": len(todo), "read": 0, "paused": False,
+                                       "finished": None if todo else time.time(), "force": bool(force)}
+            if not st["todo"]:
+                return self.snapshot_locked()
+            st["paused"] = False
+            for k, other in self.libs.items():
+                if k != key and other["todo"]:
+                    other["paused"] = True  # (one at a time: the other picks up where it was)
+            self.current = key
+            if not self.working:
+                self.working = True
+                threading.Thread(target=self._work, name="inspect", daemon=True).start()
+            return self.snapshot_locked()
 
-    def args(self) -> dict:
-        return {"library": self.state["library"], "force": self.state["force"]}
+    def pause(self, key: str) -> None:
+        with self.lock:
+            st = self.libs.get(str(key))
+            if st and st["todo"]:
+                st["paused"] = True
+            if self.current == str(key):
+                self.current = None
 
-    def run(self) -> None:
-        app, key = self.app, self.state["library"]
-        maps = app.file_maps
-        mine = [(app.map_path(f.path), f.size) for f in list(app.files) if str(f.library_key) == key]
-        self.update(total=len(mine), todo_bytes=len(mine), phase="working")
-        for i, (path, _size) in enumerate(mine):
-            if not self.wait_while_paused():
+    @staticmethod
+    def _current(maps, path) -> bool:
+        try:
+            return maps.get(path, os.stat(path), full=True) is not None
+        except OSError:
+            return True  # missing: nothing to read
+
+    def _work(self) -> None:
+        maps, since_save = self.app.file_maps, 0
+        while True:
+            finished = None
+            with self.lock:  # (what to do next, and whether to stop, decided together with start())
+                st = self.libs.get(self.current) if self.current else None
+                if not st or st["paused"]:
+                    self.working = False
+                    break
+                if not st["todo"]:
+                    st["finished"] = time.time()
+                    finished, self.current, self.working = (self.current, st["read"]), None, False
+                    path = None
+                else:
+                    path = st["todo"].pop(0)
+            if finished:
+                self._finished(*finished)
                 break
-            self.update(current=os.path.basename(path), current_file=path, current_title=app.title_of(path) or None)
-            t0 = time.time()
             try:
-                maps.read(path, force=self.state["force"])  # (again: every file, changed or not)
-                result = "copied"  # (read: counted for the estimate, not as optimized)
+                maps.read(path, force=st["force"])
+                with self.lock:
+                    st["read"] += 1
             except OSError:
-                result = "skipped"
-            self.file_done(1, result, time.time() - t0)
-            if i % 200 == 0:
+                pass
+            with self.lock:
+                st["done"] += 1
+            since_save += 1
+            if since_save >= 200:
                 maps.save()
+                since_save = 0
         maps.save()
-        app.activity.event("optimizer", M("inspected {n} files in {library}", n=len(mine), library=self.state.get("title") or key))
+
+    def _finished(self, key: str, read: int) -> None:
+        app, maps = self.app, self.app.file_maps
+        everything = {app.map_path(f.path) for f in list(app.files)}
+        if everything:  # (not when the library list is empty for now: that's Plex unreachable, not every file gone)
+            maps.forget_missing(everything)  # files no longer in any library: their entries go
+        maps.save()
+        title = (app.library_info(key) or {}).get("title") or key
+        # (the files actually read: not the missing ones)
+        app.activity.event("library health", M("inspected {n} files in {library}", one="inspected {n} file in {library}",
+                                                n=read, library=title))
+
+    def snapshot_locked(self) -> dict:
+        return {"current": self.current, "libs": {k: {"done": v["done"], "total": v["total"], "paused": v["paused"],
+                                                      "running": k == self.current and not v["paused"] and bool(v["todo"]),
+                                                      "finished": v["finished"]} for k, v in self.libs.items()}}
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return self.snapshot_locked()

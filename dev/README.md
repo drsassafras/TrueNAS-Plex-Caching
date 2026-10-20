@@ -7,6 +7,7 @@ This folder holds what you need to try changes on a real TrueNAS before pushing 
 | `compose.dev.yaml` | A **test copy** of the app (`plex-cache-dev`, port 8643) that runs the published image but with its code replaced by whatever you last copied to the NAS. It has its own settings, so it never touches the real `plex-cache` app. |
 | `tnsync` | A small script that **copies your code to the NAS, restarts the test app and runs the tests** — in one command, from your Mac. |
 | `coverage.py` | Runs the tests and shows how much of the code they reach, per file. No installs needed (Python 3.12+). |
+| `codecs.py` | Codec names as MKVToolNix shows them, for Library Health (`plexcache/codec_names.py`). The image build runs it for the MKVToolNix release it installs; run it by hand to refresh the committed copy. |
 | `screenshots.js` | Makes the README screenshots from the demo (see below). |
 | `make_fixtures.py` | Makes the optimizer's test files (`tests/fixtures/*.mkv`: many real-world features, a few hundred KB) and the snapshot of what optimizing them gives. Run it with `--snapshot` after checking a change the tests caught (needs ffmpeg and MKVToolNix). |
 

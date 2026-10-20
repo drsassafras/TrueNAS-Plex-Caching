@@ -242,7 +242,8 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | N
             """What the library's lead-ins take at ``sec`` seconds each."""
             if mix:
                 return n * sum(share * cached_bytes(bps * sec, ix["avg"], ix["share"], bs, size, False, front) for bs, share in mix)
-            return max(per_sec * sec, n * MiB) + n * idx  # record size unknown: whole MiB, as warm-up reads then
+            least = max(per_sec * sec, n * MiB) + n * idx  # record size unknown: whole MiB, as warm-up reads then
+            return min(least, n * size) if size else least  # (never more than the whole files)
 
         row = {"key": lib["key"], "name": lib["name"], "kind": k, "count": n, "kbps": lib["avg_kbps"],
                "per_sec": per_sec, "set_sec": hi, "min_sec": 0.0, "max": cost(hi), "min": cost(0),
@@ -284,7 +285,7 @@ def plan(stats: LibraryStats, w: dict, l2_total: int | None, index_avg: dict | N
             status, note = "reduced", M("Too big for your L2ARC — seconds are reduced automatically to fit.")
         else:
             cut = 1.0
-            status, note = "insufficient", M("Even each file's metadata doesn't fit. Lower the system buffer or add L2ARC.")
+            status, note = "insufficient", M("Even each file’s metadata doesn’t fit. Lower the system buffer, or add a larger L2ARC.")
     seconds, by_kind = {}, {k: {"need": 0.0, "used": 0.0, "index": 0.0} for k in KINDS}
     for r in rows:
         sec = _cut_sec(r["set_sec"], cut)

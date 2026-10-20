@@ -33,8 +33,8 @@ KEEP = 182 * 24 * 3600
 FILE_FIELDS = ("at", "job", "kind", "library", "file", "label", "result", "seconds", "size_before", "size_after",
                "disk_before", "disk_after", "verified", "reason", "rs_before", "rs_after", "compression_before",
                "compression_after", "layout", "version_before", "version", "cover", "images_before", "images_after",
-               "images_saved", "poster_added")
-WROTE = ("optimized", "rewritten")
+               "images_saved", "poster_added", "new")
+WROTE = ("optimized", "rewritten", "converted")
 
 
 def _pct(b, a):
@@ -42,7 +42,7 @@ def _pct(b, a):
 
 
 # The files list, sorted by a column (stable, so the order done within each)
-RESULT_ORDER = {"failed": 0, "skipped": 1, "rewritten": 2, "optimized": 3, "already": 4, "copied": 5}
+RESULT_ORDER = {"failed": 0, "skipped": 1, "rewritten": 2, "converted": 3, "optimized": 3, "already": 4, "copied": 5}
 SORTS = {
     # by title (each edition's files together, in file order), the default
     "file": lambda f: ((f.get("label") or os.path.basename(f.get("file") or "")).lower(), f.get("file") or ""),
@@ -231,5 +231,11 @@ def _cell(v) -> str:
     if v is None:
         return ""
     if isinstance(v, (dict, list)):
-        return json.dumps(v, default=str)
-    return str(v)
+        text = json.dumps(v, default=str)
+    else:
+        text = str(v)
+    # A cell starting like a formula (a file named "=HYPERLINK(…)") would run as one in a spreadsheet:
+    # a leading ' keeps it text (OWASP's CSV injection advice). Numbers aren't touched.
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r") and not isinstance(v, (int, float)):
+        text = "'" + text
+    return text

@@ -101,18 +101,18 @@ def location_report(app, mount_list: list[dict] | None = None) -> list[dict]:
                 # Not scanned, so only say whether the folder is there.
                 there = os.path.isdir(local)
                 row.update(status="ok" if there else "missing",
-                           detail=M("Not cached (unticked)") if there else M("{path} isn't mounted in this app", path=local))
+                           detail=M("Not cached (unticked)") if there else M("{path} isn’t mounted in this app", path=local))
                 rows.append(row)
                 continue
             if not os.path.isdir(local):
-                row.update(status="missing", detail=M("{path} isn't mounted in this app", path=local))
+                row.update(status="missing", detail=M("{path} isn’t mounted in this app", path=local))
             elif rels and any(_readable(os.path.join(local, r)) for r in rels):
                 row.update(status="ok", detail=M("Files readable"))
             elif rels and _is_empty_dir(local):
                 row.update(status="empty", detail=M("{path} is mounted but empty", path=local))
             elif rels:
                 row.update(status="unreadable",
-                           detail=M("{path} exists but this library's files aren't in it, or can't be read", path=local))
+                           detail=M("{path} exists but this library’s files aren’t in it, or can’t be read", path=local))
             else:
                 row.update(status="ok", detail=M("Mounted (no files in this folder yet)"))
             if row["status"] != "ok":

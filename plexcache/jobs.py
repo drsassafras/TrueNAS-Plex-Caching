@@ -190,11 +190,13 @@ class Job:
                     self.app._save_json(JOB_FILE, {})  # done (or cancelled): nothing to pick up after a restart
                     self.update(running=False, current=None, current_file=None, step=None, file_pct=None, finished=time.time(),
                                 cancelled=self.stopped, paused_by=None, paused_why=None)
-                    self.jobs.last = {k: v for k, v in self.state.items() if not k.startswith("_")}
+                    if self.logged:  # (an inspection isn't a job to report: the last real one stays)
+                        self.jobs.last = {k: v for k, v in self.state.items() if not k.startswith("_")}
                 s = self.state
                 self.log(type="job", event="cancelled" if self.stopped else "finished", done=s["done"], total=s["total"],
                          counts={k: s.get(k) for k in ("optimized", "rewritten", "skipped", "failed", "conflicts")})
-                self.app._save_json(LAST_FILE, self.jobs.last)  # its counts and failures stay until dismissed
+                if self.logged:
+                    self.app._save_json(LAST_FILE, self.jobs.last)  # its counts and failures stay until dismissed
                 threading.Thread(target=self.jobs.start_next, daemon=True).start()  # the next in the queue
 
 
@@ -209,7 +211,11 @@ class Jobs:
         self.waiting: dict | None = None  # after a restart: the job that carries on once the optimizer is ready
         self.removed: dict[str, callable] = {}  # kind -> removed(item)
         self.queue: list[dict] = (app._load_json(QUEUE_FILE) or {}).get("items") or []  # work waiting its turn
+        # hold(kind) -> why queued work of that kind can't start now, or None (a folder mid-switch, say)
+        self.holds: list = []
         self.last: dict | None = app._load_json(LAST_FILE) or None  # the last job that ended (until dismissed)
+        if self.last and self.last.get("kind") == "survey":
+            self.last = None  # kept by an earlier version: an inspection isn't one to report
         self.log = JobLog(app.config_dir)  # what every job did, file by file (Processes page), six months
         try:
             self.log.prune()
@@ -259,12 +265,18 @@ class Jobs:
                 self.removed[q["kind"]](q)
         return bool(gone)
 
+    def hold_reason(self, kind: str = "") -> str | None:
+        """Why queued work (of ``kind``) waits beyond its turn, or None."""
+        return next((r for r in (h(kind) for h in list(self.holds)) if r), None)
+
     def start_next(self) -> bool:
         """Start the first queued work, if no job runs (and drop what can't start any more)."""
         while True:
             with self.lock:
                 if (self.job and self.job.state.get("running")) or self.waiting or not self.queue:
                     return False
+                if self.hold_reason(self.queue[0]["kind"]):
+                    return False  # (started once the hold is lifted)
                 item = self.queue.pop(0)
             self._save_queue()
             make = self.kinds.get(item["kind"])

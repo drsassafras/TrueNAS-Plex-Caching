@@ -1,3 +1,5 @@
+import contextlib
+import copy
 import datetime as dt
 import hashlib
 import io
@@ -5,6 +7,7 @@ import json
 import logging
 from unittest import mock
 import os
+import re
 import shutil
 import struct
 import sys
@@ -13,6 +16,7 @@ import errno
 import socket
 import threading
 import time
+import types
 import unittest
 import urllib.error
 import urllib.request
@@ -171,7 +175,7 @@ class PlexTests(unittest.TestCase):
             PlexClient(PLEX.url, "bad").libraries()
 
     def test_unreachable(self):
-        with self.assertRaisesRegex(PlexError, "Can't reach"):
+        with self.assertRaisesRegex(PlexError, "Can’t reach"):
             PlexClient("http://127.0.0.1:1", "x", timeout=2).ping()
 
     def test_libraries_and_files(self):
@@ -373,6 +377,34 @@ class ReaderAndPlanTests(unittest.TestCase):
         self.assertEqual(r["by_kind"]["movie"]["hits"] + r["by_kind"]["movie"]["reads"], 4)
         self.assertEqual(r["result"], "ok")
         self.assertEqual(r["l2_growth"], 0)
+
+    def test_warmup_run_outcomes(self):
+        """A run stopped before it starts, one where most files can't be read ("errors"), reads that
+        came from the disks, a sample of at most 30 files for the next-day check — and a plan that
+        only just fits, and a schedule worked out from the caching mode alone."""
+        import threading
+        from plexcache import warmup
+        from plexcache.plex import MediaFile
+        d = tempfile.mkdtemp(dir=TMP)
+        files = []
+        for i in range(warmup.SAMPLE_FILES + 5):
+            p = os.path.join(d, f"f{i}.mkv")
+            with open(p, "wb") as fh:
+                fh.write(os.urandom(4096))
+            files.append(MediaFile(p, 8000, 4096, "movie"))
+        stop = threading.Event()
+        stop.set()
+        run = WarmupRun(files, {"movie": 2}, 100, 150, stop)
+        self.assertEqual(run.run()["result"], "stopped")
+        self.assertEqual(run.progress()["done"], 0)
+        r = WarmupRun(files, {"movie": 2}, 100, 10 ** 9, threading.Event()).run()      # disks "faster" than any read: none was a hit
+        self.assertEqual((r["result"], r["by_kind"]["movie"]["hits"], len(r["sample"])), ("ok", 0, warmup.SAMPLE_FILES))
+        missing = [MediaFile(f"/missing/{i}.mkv", 8000, 10 * MiB, "movie") for i in range(3)]
+        self.assertEqual(WarmupRun(missing + files[:1], {"movie": 2}, 100, 150, threading.Event()).run()["result"], "errors")
+        w = dict(config.DEFAULTS["warmup"], libraries={})
+        need = plan(self._stats(), w, None)["need_max"]
+        self.assertEqual(plan(self._stats(), w, int(need / 0.95) + w["reserve_gb"] * warmup.GB)["status"], "tight")
+        self.assertEqual(warmup.resolve_schedule("ram", "1", "default"), "none")
 
     def test_next_day_check(self):
         import threading
@@ -817,6 +849,14 @@ class PrefetchPlanTests(unittest.TestCase):
             nxt = "\n".join(js[m.end():].split("\n")[:5])                           # (the field, as built over a few lines)
             sec, k = key.split(".")
             self.assertTrue(f'revertBtn("{sec}", "{k}"' in line + nxt, f"{key} has no ↺ back-to-default button")
+        # Controls with their own save handler (a library's optimizer choices, the kinds converted, a
+        # library's warm-up seconds, the second server's pairs…) carry their own ↺ too: every handler
+        # keyed on el.dataset.<name> has a data-<name>-revert button. Not: a what-if slider (est), where
+        # your folders are (map) and measured disk speeds (speed) — they have no default.
+        handled = set(re.findall(r"el\.dataset\.([a-z0-9]+) [!=]== undefined", js))
+        self.assertTrue({"optlib", "convtype", "libsec", "p2lib"} <= handled, handled)       # (the search finds them)
+        for name in sorted(handled - {"est", "map", "speed"}):
+            self.assertIn(f"data-{name}-revert", js, f"the {name} controls have no ↺ back-to-default button")
         # ...and everything the builders are called with has a default the page is sent
         defaults = config.public_defaults()
         calls = re.findall(r'\b(?:range|ramSlider|select|number|checkbox|textInput)\("([a-z]+)", "([a-z_]+)"', js)
@@ -977,6 +1017,15 @@ class LayoutTests(unittest.TestCase):
             self.assertLess(info["bytes"], 100_000, kw)
         # an index inside what's read from the start anyway isn't read twice
         self.assertEqual(tail_ranges(p, size, size - 10)[0], [])
+        # what the always-cached blocks hold: every byte of them is video, metadata or unused room;
+        # the end block (metadata, compressible) is stored compressed
+        from plexcache import filemap
+        x = filemap.cache_mix(p, filemap.describe(p), MiB)
+        self.assertEqual(x["video"] + x["meta"] + x["unused"], x["blocks"] * MiB)
+        self.assertLessEqual(x["unused_disk"], x["unused"])
+        self.assertLessEqual(x["meta_disk"], x["meta"])
+        self.assertEqual(x["video_disk"], x["video"])
+        self.assertIsNone(filemap.cache_mix(p, {"size": size}, MiB))      # no layout: nothing to say
 
     def test_metadata_and_least_start(self):
         """What's cached from each file: the metadata at its end without the cover art (for a file
@@ -1059,14 +1108,14 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual([e["n"] for e in est], [1, last["n"]])                     # (past the end: none)
         self.assertEqual(est[0]["stored"], rec)                                     # mostly random: kept as it is
         self.assertLess(est[1]["stored"], rec)
-        # an MP4: its boxes; something else: just its size
+        # an MP4: its boxes; something else: its streams, whole
         q = os.path.join(self.dir, "f.mp4")
         fakes.make_mp4(q, 40 * MiB, moov_size=300_000)
         self.assertEqual([x["part"] for x in filemap.describe(q)["parts"]], ["header", "video", "index"])
         r = os.path.join(self.dir, "f.avi")
         with open(r, "wb") as fh:
             fh.write(b"RIFF" + b"\0" * 100)
-        self.assertEqual((filemap.describe(r)["format"], filemap.describe(r)["parts"]), ("other", []))
+        self.assertEqual((filemap.describe(r)["format"], filemap.describe(r)["parts"]), ("stream", [{"part": "video", "pos": 0, "size": 104}]))
         # kept with the file's identity: read again only once it changes
         maps = filemap.FileMaps(self.dir)
         first = maps.read(p)
@@ -1084,6 +1133,209 @@ class LayoutTests(unittest.TestCase):
         again.forget_missing({q})
         self.assertEqual(again.known([p]), 0)
 
+    def test_codec_names_follow_mkvtoolnix(self):
+        """Tracks are named the way MKVToolNix names them (dev/codecs.py makes the list from its source);
+        an ID it doesn't know stays as it is. The list's patterns all work in Python."""
+        import importlib.util
+        from plexcache import codec_names, filemap
+        for name, pattern in codec_names.CODECS:
+            re.compile(pattern)
+        self.assertEqual([filemap.codec_name(x) for x in ("V_MPEGH/ISO/HEVC", "v_mpeg4/iso/avc", "A_AAC", "S_TEXT/UTF8", "S_VOBSUB", "S_HDMV/PGS", "X_NEW")],
+                         ["HEVC/H.265/MPEG-H", "AVC/H.264/MPEG-4p10", "AAC", "SubRip/SRT", "VobSub", "HDMV PGS", ""])
+        spec = importlib.util.spec_from_file_location("codecs_tool", os.path.join(ROOT, "dev", "codecs.py"))
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        cpp = ('s_codecs.emplace_back("AAC", type_e::A_AAC, track_audio, "mp4a|aac.|A_AAC.*");\n'
+               's_codecs.emplace_back("Odd", type_e::V_X, track_video, "", fourcc_c{1u});\n'
+               's_codecs.emplace_back("HDMV PGS", type_e::S_HDMV_PGS, track_subtitle, MKV_S_HDMV_PGS);\n'
+               's_codecs.emplace_back("Dots", type_e::V_D, track_video, "a\\\\.b");\n')
+        header = 'constexpr auto MKV_S_HDMV_PGS = "S_HDMV/PGS";'
+        self.assertEqual(tool.parse(cpp, header), [("AAC", "mp4a|aac.|A_AAC.*"), ("HDMV PGS", "S_HDMV/PGS"), ("Dots", "a\\.b")])
+        # the image build: without mkvmerge, or offline, the committed names stay as they are
+        before = open(tool.OUT, encoding="utf-8").read()
+        said = io.StringIO()  # (what the build log says: kept here, not in the test run's output)
+        with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+            with mock.patch.object(tool.subprocess if hasattr(tool, "subprocess") else __import__("subprocess"), "run",
+                                   mock.Mock(side_effect=FileNotFoundError("mkvmerge"))):
+                self.assertEqual(tool.main(["codecs.py", "--installed"]), 0)
+            with mock.patch.object(tool.urllib.request, "urlopen", mock.Mock(side_effect=OSError("offline"))):
+                self.assertEqual(tool.main(["codecs.py", "102.0"]), 0)
+        self.assertIn("mkvmerge isn't installed", said.getvalue())
+        self.assertIn("offline", said.getvalue())
+        self.assertEqual(open(tool.OUT, encoding="utf-8").read(), before)
+
+    def test_cover_art_compression_is_told_apart(self):
+        """A JPEG still using the standard Huffman tables hasn't been compressed losslessly; one with its
+        own (or progressive) has; anything else isn't known. Read while inspecting, from the picture's
+        first bytes; maps read before this was looked at are read again."""
+        from plexcache import filemap
+        seg = lambda m, body: b"\xff" + bytes([m]) + (len(body) + 2).to_bytes(2, "big") + body
+        table = lambda counts: b"\x00" + bytes(counts) + bytes(sum(counts))
+        std = [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]
+        mine = [0, 2, 2, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]
+        jpeg = lambda counts, sof=0xC0: b"\xff\xd8" + seg(0xE0, b"JFIF\x00") + seg(sof, b"\x08") + seg(0xC4, table(counts)) + seg(0xDA, b"\x00")
+        self.assertEqual([filemap.jpeg_tables(jpeg(std)), filemap.jpeg_tables(jpeg(mine)), filemap.jpeg_tables(jpeg(std, 0xC2)),
+                          filemap.jpeg_tables(b"\x89PNG\r\n"), filemap.jpeg_tables(b"\xff\xd8\x00")],
+                         ["standard", "optimized", "progressive", None, None])
+        p = os.path.join(self.dir, "cover.mkv")
+        build_mkv(p, front_atts=[("cover.jpg", "image/jpeg", jpeg(std) + os.urandom(2000)), FONT])
+        (cover,) = [a for a in filemap.describe(p)["attachments"] if a["image"]]
+        self.assertEqual(cover["jpeg_tables"], "standard")
+        maps = filemap.FileMaps(self.dir)
+        maps.read(p)
+        maps.files[p]["v"] = filemap.LAYOUT_VERSION - 1                   # read by a much older version
+        self.assertIsNone(maps.get(p, os.stat(p)))
+        maps.files[p]["v"] = filemap.MAP_VERSION - 1                      # only the mix missing: shown, but read again
+        self.assertIsNotNone(maps.get(p, os.stat(p)))
+        self.assertIsNone(maps.get(p, os.stat(p), full=True))
+
+    def test_file_map_audio(self):
+        """Library Health's reading of audio files: an MP3's ID3v2 tag (its frames, cover art and padding)
+        and ID3v1 tag, and a FLAC's metadata blocks — in front of the audio, which is named as such;
+        and a file it can't read into parts is still its streams, in blocks (one, if it's small)."""
+        from plexcache import filemap
+        d = tempfile.mkdtemp(dir=TMP)
+        jpeg = b"\xff\xd8\xff\xe0" + os.urandom(3000)
+        frame = lambda fid, body: fid + len(body).to_bytes(4, "big") + b"\0\0" + body
+        frames = frame(b"TIT2", b"\0Title") + frame(b"APIC", b"\0image/jpeg\0\x03\0" + jpeg) + b"\0" * 500
+        size = len(frames)
+        id3 = b"ID3\x03\0\0" + bytes([(size >> 21) & 127, (size >> 14) & 127, (size >> 7) & 127, size & 127]) + frames
+        mp3 = os.path.join(d, "a.mp3")
+        with open(mp3, "wb") as fh:
+            fh.write(id3 + os.urandom(3 * MiB) + b"TAG" + b"\0" * 125)
+        m = filemap.describe(mp3)
+        self.assertEqual(m["format"], "mp3")
+        self.assertEqual([p["part"] for p in m["parts"]], ["id3", "tags", "attachments", "padding", "video", "tags"])
+        self.assertEqual((m["video_start"], m["tracks"][0]["type"]), (len(id3), "audio"))
+        self.assertEqual([(a["mime"], a["image"]) for a in m["attachments"]], [("image/jpeg", True)])
+        self.assertEqual(m["meta"], [[len(id3) + 3 * MiB, 128]])                 # the ID3v1 tag: metadata at the end
+        self.assertEqual({p.get("stream") for p in filemap.pieces(m) if p["kind"] == "video"}, {"audio"})
+        block = lambda kind, body, last=False: bytes([(0x80 if last else 0) | kind]) + len(body).to_bytes(3, "big") + body
+        pic = (3).to_bytes(4, "big") + (10).to_bytes(4, "big") + b"image/jpeg" + (0).to_bytes(4, "big") + b"\0" * 16 + len(jpeg).to_bytes(4, "big") + jpeg
+        flac = os.path.join(d, "b.flac")
+        with open(flac, "wb") as fh:
+            fh.write(b"fLaC" + block(0, b"\0" * 34) + block(4, b"\0" * 200) + block(6, pic) + block(1, b"\0" * 4000, True) + os.urandom(2 * MiB))
+        m = filemap.describe(flac)
+        self.assertEqual((m["format"], [p["part"] for p in m["parts"]]), ("flac", ["flac", "info", "tags", "attachments", "padding", "video"]))
+        self.assertEqual(m["attachments"][0]["mime"], "image/jpeg")
+        self.assertIsNotNone(filemap.block_map(m, m["size"], {"floor": MiB, "start": 0}, MiB))
+        other = os.path.join(d, "c.wav")
+        with open(other, "wb") as fh:
+            fh.write(os.urandom(300_000))
+        m = filemap.describe(other)
+        self.assertEqual((m["format"], m["tracks"][0]["type"]), ("stream", "audio"))
+        from plexcache.app import file_block
+        self.assertEqual(file_block(dict(m, blksize=None), 300_000, 512 * 1024), 303_104)  # smaller than a record: one block of its own size
+        self.assertEqual(len(filemap.block_map(m, 300_000, {"floor": 0, "start": 0}, 303_104)["start"]), 1)
+
+    def test_projection(self):
+        """What optimizing would make of a file, from its inspection alone: cover art in front (the
+        video pushed out of the first block) taken out when the library strips it, tags too when it
+        strips them, the rest at the end — less metadata cached, more video in the first block."""
+        from plexcache import filemap, projection
+        p = os.path.join(self.dir, "proj.mkv")
+        big = ("cover.jpg", "image/jpeg", b"\xff\xd8" + os.urandom(40_000))
+        build_mkv(p, front_atts=[big, FONT], cluster=os.urandom(400_000))
+        m = filemap.describe(p)
+        rec = 16 * 1024
+        m["mix"] = filemap.cache_mix(p, m, rec)
+        self.assertGreater(m["video_start"], rec)                               # the cover art pushes the video out of the first block
+        keep = projection.project(m, rec, "compress", False)
+        gone = projection.project(m, rec, "remove", True)
+        self.assertEqual(keep["removed"], {})
+        self.assertEqual(set(gone["removed"]), {"image", "tags"})
+        self.assertGreater(gone["removed"]["image"], 40_000)
+        self.assertEqual(keep["first_video_now"], 0)
+        self.assertGreater(keep["first_video"], rec // 2)                       # only the header in front now
+        self.assertLess(gone["mix"]["meta_disk"], keep["mix"]["meta_disk"])
+        self.assertLessEqual(keep["mix"]["meta"], m["mix"]["meta"])
+        # the charts' rows: the video split into the start's (the lead-in's) and the end's (cached with the
+        # metadata there); the total kept never counts what's taken out — now, or once optimized
+        v = projection.views(m, gone)
+        now, after = v["now"], v["after"]
+        # now, what's to go is read and cached like the rest (players read cover art when they open a
+        # file): in the total; once optimized, it's gone — the total is that much less
+        for row, mix, out in ((now, m["mix"], True), (after, gone["mix"], False)):
+            st, ca = row["stream"], row["cache"]
+            self.assertEqual(st["lead"] + st["tail"], mix["video"])
+            self.assertEqual(st["total"], st["lead"] + st["tail"] + st["meta"] + (st["out"] if out else 0))
+            self.assertEqual(ca["total"], ca["lead"] + ca["tail"] + ca["meta"] + (ca["out"] if out else 0))
+        self.assertEqual(now["stream"]["total"], m["mix"]["video"] + m["mix"]["meta"])             # every byte of the cached blocks a play reads
+        self.assertEqual(now["cache"]["total"], m["mix"]["video_disk"] + m["mix"]["meta_disk"] + m["mix"]["unused_disk"])
+        self.assertEqual(now["stream"]["out"], sum(gone["removed"].values()))
+        self.assertEqual(now["stream"]["meta"], m["mix"]["meta"] - sum(gone["removed"].values()))   # (what's to go: apart)
+        self.assertEqual((now["gone"], after["gone"]), (False, True))
+        self.assertNotIn("image", after["kinds"])
+        # meaningful: what's streamed less the dead weight — the video at the end, tags, cover art
+        for row in (now, after):
+            mf = row["meaningful"]
+            self.assertEqual((mf["lead"], mf["tail"], mf["out"]), (row["stream"]["lead"], 0, 0))
+            self.assertEqual(mf["meta"], sum(row["useful_kinds"].values()))
+            self.assertFalse({"tags", "image"} & set(row["useful_kinds"]))
+            self.assertLessEqual(mf["total"], row["stream"]["total"])
+        self.assertIn("image", now["left_out"])                                               # (now: the cover art's there, and left out)
+        self.assertEqual(set(now["out_kinds"]), {"image", "tags"})
+        for row in (now, after):                                                              # at least 60% of a block of video at the start
+            self.assertGreaterEqual(row["stream"]["lead"], 0.6 * rec)
+        self.assertLess(after["blocks"], now["blocks"])                                       # (here: fewer blocks for the file's start)
+        self.assertEqual(projection.add_view(projection.add_view(None, now), now)["stream"]["total"], 2 * now["stream"]["total"])
+        self.assertIsNone(projection.project(dict(m, format="mp4"), rec, "compress", False))   # only MKV files
+        self.assertIsNone(projection.project(dict(m, mix={"video": 0}), rec, "compress", False))  # measured by an older version
+
+    def test_file_map_damaged_files(self):
+        """Library Health's reading of damaged files: an EBML header of unknown size, garbage instead of
+        the SeekHead's targets, a part of unknown size, a second SeekHead, room after the last attachment,
+        and other elements among the tracks — what can be read is shown, the rest is said, never an error."""
+        from plexcache import filemap
+        d = tempfile.mkdtemp(dir=TMP)
+        E, UNKNOWN = fakes.ebml, b"\x01" + b"\xff" * 7
+
+        def write(name, data, size=None):
+            path = os.path.join(d, name)
+            with open(path, "wb") as fh:
+                fh.write(data)
+                if size:
+                    fh.truncate(size)
+            return path
+        self.assertEqual(filemap.describe(write("u.mkv", bytes.fromhex("1A45DFA3") + UNKNOWN + b"\x00" * 64))["format"], "other")
+        head = E("1A45DFA3", E("4282", b"matroska"))
+        seg_hdr = bytes.fromhex("18538067") + UNKNOWN
+        seg = len(head) + len(seg_hdr)
+        seek = lambda eid, at: E("4DBB", E("53AB", bytes.fromhex(eid)) + E("53AC", (at - seg).to_bytes(8, "big")))
+        cluster = E("1F43B675", b"\x00" * 64)
+        # a second SeekHead at the end, listing Tags of unknown size
+        far = 1 * MiB
+        body = E("114D9B74", seek("114D9B74", far)) + E("1549A966", b"") + cluster
+        tags = bytes.fromhex("1254C367") + UNKNOWN + b"\x00" * 32
+        p = write("s.mkv", head + seg_hdr + body, size=far + 4096)
+        sh2 = E("114D9B74", seek("1254C367", far + 54))
+        with open(p, "r+b") as fh:
+            fh.seek(far)
+            fh.write(sh2 + tags)
+        m = filemap.describe(p)
+        self.assertEqual([x["part"] for x in m["parts"]][-2:], ["seekhead", "tags"])
+        self.assertEqual(m["parts"][-1]["size"], os.path.getsize(p) - (far + len(sh2)))       # (to the end: its size is unknown)
+        # garbage where the SeekHead says something is: the video runs to the end
+        p = write("g.mkv", head + seg_hdr + E("114D9B74", seek("1C53BB6B", 900)) + E("1549A966", b"") + cluster, size=4096)
+        m = filemap.describe(p)
+        self.assertEqual(m["parts"][-1]["part"], "video")
+        # attachments with room after the last one, and an attachment of unknown size
+        att = E("1941A469", E("61A7", E("466E", b"cover.jpg") + E("4660", b"image/jpeg") + E("465C", b"\xff" * 100)) + E("EC", b"\x00" * 10))
+        p = write("a.mkv", head + seg_hdr + E("1549A966", b"") + att + cluster)
+        kinds = [x["kind"] for x in filemap.pieces(filemap.describe(p))]
+        self.assertEqual(kinds[kinds.index("image") + 1], "attachments")
+        p = write("b.mkv", head + seg_hdr + E("1549A966", b"") + E("1941A469", bytes.fromhex("61A7") + UNKNOWN) + cluster)
+        self.assertEqual(filemap.describe(p)["attachments"], [])
+        fd = os.open(p, os.O_RDONLY)
+        try:
+            self.assertEqual(filemap._attachments(fd, 0, os.path.getsize(p)), [])      # not an Attachments element there
+        finally:
+            os.close(fd)
+        self.assertEqual(filemap._tracks(E("EC", b"")), [])
+        # a file that can't be parsed at all says why
+        with mock.patch.object(filemap, "_mkv", mock.Mock(side_effect=ValueError("bad element"))):
+            self.assertEqual(filemap.describe(p)["error"], "bad element")
+
     def test_file_map_details(self):
         """Track details (language, name, picture size, each kind of compression), attachments in front of
         the video, unusual MP4 boxes, and files that can't be read — never an error."""
@@ -1093,11 +1345,13 @@ class LayoutTests(unittest.TestCase):
         tracks = (entry(_el("D7", u(1)), _el("83", u(1)), _el("86", b"V_MPEGH/ISO/HEVC"), _el("E0", _el("B0", u(1920, 2)) + _el("BA", u(1080, 2))))
                   + entry(_el("D7", u(2)), _el("83", u(2)), _el("86", b"A_AC3"), _el("22B59C", b"eng"), _el("536E", "Commentary".encode()))
                   + entry(_el("D7", u(3)), _el("86", b"S_VOBSUB"), _el("6D80", _el("6240", _el("5034", _el("4254", u(3))))))
-                  + entry(_el("D7", u(4)), _el("86", b"S_TEXT/ASS"), _el("6D80", _el("6240", _el("5034", _el("4254", u(9)))))))
+                  + entry(_el("D7", u(4)), _el("86", b"S_TEXT/ASS"), _el("6D80", _el("6240", _el("5034", _el("4254", u(9))))))
+                  + entry(_el("D7", u(5)), _el("86", b"S_TEXT/UTF8"), _el("22B59D", b"fr-CA"), _el("22B59C", b"fre")))
         got = filemap._tracks(tracks)
+        # no Language written means English (Matroska's default); LanguageBCP47 wins over Language
         self.assertEqual([(t["type"], t["language"], t["name"], t["compression"]) for t in got],
-                         [("video", "", "", None), ("audio", "eng", "Commentary", None), ("subtitles", "", "", "header stripping"),
-                          ("subtitles", "", "", "other")])
+                         [("video", "eng", "", None), ("audio", "eng", "Commentary", None), ("subtitles", "eng", "", "header stripping"),
+                          ("subtitles", "eng", "", "other"), ("subtitles", "fr-CA", "", None)])
         self.assertEqual((got[0]["width"], got[0]["height"]), (1920, 1080))
         # attachments kept in front of the video
         p = os.path.join(self.dir, "front.mkv")
@@ -1183,6 +1437,21 @@ class LayoutTests(unittest.TestCase):
         # reading from the play position then wrapping round: index first, the rest in order
         r = with_index(p, size, [(30 * MiB, 10 * MiB), (0, 30 * MiB)], size)
         self.assertEqual(r, [(m["cues_at"], m["cues_len"]), (30 * MiB, m["cues_at"] - 30 * MiB), (0, 30 * MiB)])
+
+    def test_read_plan_helpers(self):
+        """What's been read so far (across the ranges in order), cutting reads out of the middle of a
+        range, an empty file, a budget that drops whole ranges, and jobs that can't be restarted."""
+        from plexcache import playback
+        size = 40 * MiB
+        p = os.path.join(self.dir, "c.mkv")
+        m = fakes.make_mkv(p, size, cues_size=60_000)
+        job = playback.Job("nowplaying", "x", p, [(0, 10), (100, 10)], state="reading", read=15)
+        self.assertEqual([job.loaded(x) for x in (5, 102, 106)], [True, True, False])
+        self.assertEqual(playback._without([(0, 100)], [(40, 10)]), [(0, 40), (50, 50)])
+        self.assertEqual(playback.with_index(p, 0, [(0, 10)], 10), [(0, 10)])          # (no size: nothing to add)
+        r = playback.with_index(p, size, [(0, 10 * MiB), (20 * MiB, 1 * MiB)], m["cues_len"] + 5 * MiB)
+        self.assertEqual(r, [(m["cues_at"], m["cues_len"]), (0, 5 * MiB)])                     # the last range dropped
+        self.assertFalse(playback.needs_restart(playback.Job("nowplaying", "x", p, [(0, 10)], state="failed"), 500))
 
     def test_recommend_recordsize(self):
         from plexcache.warmup import recommend_recordsize as rec
@@ -1483,6 +1752,62 @@ class AppTests(unittest.TestCase):
             with self.subTest(action=action):
                 self.assertEqual(self.post("/api/migration", {"action": action})[0], 200)
 
+    def test_local_network_only_and_local_names(self):
+        """System → Local network only: devices outside the network are refused (pages, the API, sign-in),
+        but not the container's health check. Without a sign-in, only local names are answered."""
+        from plexcache import server
+        cases = [("192.168.50.59", True), ("10.1.2.3", True), ("172.17.0.1", True), ("100.100.1.1", True), ("127.0.0.1", True),
+                 ("::1", True), ("::ffff:192.168.1.5", True), ("fe80::1%eth0", True), ("fd00::5", True),
+                 ("8.8.8.8", False), ("2001:4860::8888", False), ("172.32.0.1", False), ("junk", False)]
+        for address, local in cases:
+            self.assertEqual(server.local_address(address), local, address)
+        names = [("192.168.1.10:8642", True), ("truenas", True), ("nas.local:8642", True), ("[fe80::1]:8642", True),
+                 ("localhost:8642", True), (None, True), ("plexcache.example.com", False), ("evil.com:80", False)]
+        for host, ok in names:
+            self.assertEqual(server.host_allowed(host), ok, host)
+        with mock.patch.dict(os.environ, {"PLEXCACHE_URL": "https://plexcache.example.com"}):
+            self.assertTrue(server.host_allowed("plexcache.example.com"))              # the address it's set up at
+
+        def get(path, headers=None):
+            req = urllib.request.Request(self.base + path, headers=headers or {})
+            try:
+                with urllib.request.urlopen(req) as r:
+                    return r.status, r.read()
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, e.read()
+        app = self.app
+        self.assertTrue(app.settings.section("general")["lan_only"])                  # on by default
+        events = lambda: [e for e in app.activity.snapshot()["events"] if "refused" in json.dumps(e, default=str)]
+        before = len(events())
+        with mock.patch.object(server, "local_address", lambda a: False):              # as if from the internet
+            code, body = get("/api/state")
+            self.assertEqual(code, 403)
+            self.assertIn("local network", json.loads(body)["error"]["_t"])
+            code, body = get("/health")
+            self.assertEqual(code, 403)
+            self.assertIn(b"Local network only", body)
+            self.assertEqual(self.post("/api/settings", {"general": {"lan_only": False}})[0], 403)   # can't be turned off from outside
+            self.assertEqual(get("/healthz")[0], 200)                                  # the health check still answers
+            self.assertEqual(len(events()), before + 1)                                # logged once, not per request
+            app.settings.update({"general": {"lan_only": False}})
+            self.assertEqual(get("/api/state")[0], 200)
+            app.settings.update({"general": {"lan_only": True}})
+        # without a sign-in, a public name is refused (DNS rebinding); the IP address and local names are fine
+        self.assertFalse(app.auth.enabled)
+        self.assertEqual(get("/api/state", {"Host": "evil.example.com"})[0], 403)
+        self.assertEqual(get("/api/state", {"Host": "truenas.local:8642"})[0], 200)
+        # Health says who can use it
+        from plexcache import checks
+        access = lambda: (lambda a: (a["status"], en(a["title"]), en(a["detail"])))(checks._access_check(app))
+        self.assertEqual(access(), ("info", "No sign-in", "Any device on your local network can change settings and run the optimizer."))
+        app.settings.update({"general": {"lan_only": False}})                     # open to anything: a warning
+        self.assertEqual(access(), ("warn", "No sign-in", "Any device that can reach it can change settings and run the optimizer."))
+        with mock.patch.object(app, "auth", mock.Mock(enabled=True)):
+            self.assertEqual(access(), ("pass", "Sign-in required", "Any device that can reach it can use it after signing in."))
+            app.settings.update({"general": {"lan_only": True}})
+            self.assertEqual(access()[2], "Devices on your local network can use it after signing in.")
+
     def test_poster_thumbnails_kept(self):
         """Small posters from Plex, kept in memory: asked of Plex once each, the oldest dropped past 400."""
         from types import SimpleNamespace
@@ -1497,22 +1822,103 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(app._thumbs), 400)
         self.assertNotIn("/library/metadata/2/thumb/1", app._thumbs)                # the oldest gone
 
-    def test_survey_skips_missing_files(self):
-        """Reading a library's files: a file that's gone meanwhile is skipped, the rest read."""
+    def test_inspections_one_library_at_a_time(self):
+        """Reading a library's files (Library Health): a file that's gone meanwhile is skipped; starting
+        another library pauses the first, which carries on where it was when started again; a paused
+        one stays paused; only files new or changed are read unless every one is asked for."""
         from types import SimpleNamespace
         from plexcache import filemap
         app = _new_app()
         d = tempfile.mkdtemp(dir=TMP)
-        real = os.path.join(d, "a.mkv")
-        build_mkv(real)
-        app.files = [SimpleNamespace(path=real, library_key="1", size=1, kbps=1, kind="movie"),
-                     SimpleNamespace(path=os.path.join(d, "gone.mkv"), library_key="1", size=1, kbps=1, kind="movie")]
+        files = []
+        for lib in ("1", "2"):
+            for i in range(3):
+                p = os.path.join(d, f"{lib}-{i}.mkv")
+                build_mkv(p)
+                files.append(SimpleNamespace(path=p, library_key=lib, size=1, kbps=1, kind="movie"))
+        files.append(SimpleNamespace(path=os.path.join(d, "gone.mkv"), library_key="1", size=1, kbps=1, kind="movie"))
+        app.files = files
         app.map_path = lambda p: p
-        app.library_info = lambda key: {"title": "Movies"}
-        job = filemap.SurveyJob(app, "1")
-        job.run()
-        self.assertEqual((job.state["done"], job.state["skipped"]), (2, 1))
-        self.assertEqual(app.file_maps.known([real]), 1)
+        app.library_info = lambda key: {"title": "Movies " + key}
+        ins = filemap.Inspector(app)
+        gate = threading.Event()
+        real = app.file_maps.read
+
+        def slow(path, force=False):
+            gate.wait(10)
+            return real(path, force)
+        with mock.patch.object(app.file_maps, "read", slow):
+            ins.start("1")
+            self.assertTrue(ins.snapshot()["libs"]["1"]["running"])
+            ins.start("2")                                                    # the first is paused
+            snap = ins.snapshot()["libs"]
+            self.assertEqual((snap["1"]["paused"], snap["2"]["running"]), (True, True))
+            gate.set()
+            self.assertTrue(wait_for(lambda: ins.snapshot()["libs"]["2"]["finished"]))
+            self.assertFalse(ins.snapshot()["libs"]["1"]["finished"])         # still paused, where it was
+            ins.start("1")
+            self.assertTrue(wait_for(lambda: ins.snapshot()["libs"]["1"]["finished"]))
+        self.assertEqual(app.file_maps.known([f.path for f in files]), 6)    # (the missing one skipped)
+        self.assertEqual(ins.start("1")["libs"]["1"]["total"], 3)             # nothing new: not started again (a missing file is nothing to read)
+        ins.pause("1")
+        self.assertEqual(ins.start("1", force=True)["libs"]["1"]["total"], 4)
+        self.assertTrue(wait_for(lambda: ins.snapshot()["libs"]["1"]["finished"]))
+        self.assertTrue(any("inspected 3 files in Movies 1" in en(e["message"]) for e in app.activity.snapshot()["events"]))
+
+    def test_every_check_has_a_place_on_the_page(self):
+        """Library Health shows each check beside what it's about (a part's line, or a block's heading):
+        a new check with no place there would never be seen, so each one must have one."""
+        from plexcache import filechecks
+        js = open(os.path.join(ROOT, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        start = js.index("  var CHECK_PARTS = ")
+        placed = js[start:js.index("\n  }\n", js.index("  function blockChecks(", start))]
+        for cid in filechecks.NAMES:
+            self.assertIn(f'"{cid}"', placed, f"the check {cid} isn't placed on the Library Health page")
+
+    def test_file_caching_checks(self):
+        """Each check says Ideal, Pass or Warning, and the file takes the worst; the library's summary
+        counts files by their worst and checks by their warnings."""
+        from types import SimpleNamespace
+        from plexcache import filechecks as fc
+        M_ = 1024 * 1024
+        rec = {"best": M_, "alt": 2 * M_, "rs": M_}
+        good = {"format": "mkv", "size": 50 * M_, "blksize": M_, "video_start": 6000,
+                "parts": [{"part": "index", "pos": 49 * M_, "size": 9000}, {"part": "chapters", "pos": 49 * M_ + 9000, "size": 500},
+                          {"part": "tags", "pos": 49 * M_ + 9500, "size": 3000}],
+                "attachments": [{"image": True, "jpeg_tables": "standard"}]}
+        f = SimpleNamespace(size=50 * M_, matched=True)
+        opts = {"mkv": True, "sync": True, "images": "unmatched"}
+        ours = {"ours": {"PLEXCACHE_OPTIMIZER": "0.1.2"}}
+        by = lambda checks: {c["id"]: c["status"] for c in checks}
+        got = by(fc.check_file(None, f, "/x.mkv", good, rec, opts, ours, "optimal"))
+        self.assertEqual(got, {"blocks": "ideal", "compression": "ideal", "front": "ideal", "index": "ideal",
+                               "chapters": "ideal", "tags": "ideal", "cover": "ideal", "cover_setting": "warn"})   # cover art that isn't Plex's
+        bad = dict(good, blksize=128 * 1024, video_start=3 * M_, parts=[{"part": "index", "pos": 100, "size": 9000},
+                                                                        {"part": "tags", "pos": 49 * M_, "size": 300 * 1024}])
+        got = by(fc.check_file(None, f, "/x.mkv", bad, rec, opts, None, "unknown"))
+        self.assertEqual(got, {"blocks": "warn", "compression": "warn", "front": "warn", "index": "warn", "tags": "warn",
+                               "cover": "warn", "cover_setting": "warn"})
+        self.assertEqual(by(fc.check_file(None, f, "/x.mkv", dict(good, blksize=2 * M_, parts=[]), rec, {}, None, "assumed")),
+                         {"blocks": "pass", "compression": "pass", "front": "ideal", "index": "warn", "cover": "warn", "cover_setting": "warn"})
+        self.assertEqual(fc.check_file(None, f, "/x.mkv", None, rec, opts, None, None), [])   # not inspected: no checks
+        plex = {"ours": {"PLEXCACHE_OPTIMIZER": "0.1.2", "PLEXCACHE_COVER": "plex sha256:abc"}}
+        self.assertEqual(by(fc.check_file(None, f, "/x.mkv", good, rec, opts, plex, "optimal"))["cover_setting"], "pass")   # Plex's poster
+        self.assertEqual(by(fc.check_file(None, f, "/x.mkv", dict(good, attachments=[]), rec, opts, ours, "optimal"))["cover_setting"], "ideal")
+        results = [fc.check_file(None, f, "/x.mkv", good, rec, opts, ours, "optimal"), fc.check_file(None, f, "/x.mkv", bad, rec, opts, None, "unknown"), []]
+        sm = fc.summarize(results)
+        self.assertEqual((sm["checked"], sm["ideal"], sm["pass"], sm["warn"]), (2, 0, 0, 2))
+        warned = {w["id"]: w["n"] for w in sm["warnings"]}
+        self.assertNotIn("cover_setting", warned)                          # the library's own choice: not a warning to count
+        self.assertNotIn("cover", warned)                                  # a share instead
+        self.assertEqual((warned["index"], sm["cover"]), (1, {"files": 2, "compressed": 1}))
+        self.assertEqual(en(next(w["text"] for w in sm["warnings"] if w["id"] == "index")), "1 file with no index, or the index in front of the video")
+        self.assertEqual(fc.counts(results[1]), {"ideal": 0, "pass": 0, "warn": 7})
+        # music: cover art in the file is ideal (none passes), and a big cover in front is the format's way: a pass
+        song = {"format": "mp3", "size": 9 * M_, "blksize": M_, "video_start": 2 * M_, "tracks": [{"type": "audio"}],
+                "parts": [], "attachments": [{"image": True, "jpeg_tables": "standard"}]}
+        got = by(fc.check_file(None, f, "/x.mp3", song, rec, opts, None, "optimal"))
+        self.assertEqual((got["cover_setting"], got["front"], got["cover"]), ("ideal", "pass", "pass"))
+        self.assertEqual(by(fc.check_file(None, f, "/x.mp3", dict(song, attachments=[]), rec, opts, None, "optimal"))["cover_setting"], "pass")
 
     def test_library_health_endpoints(self):
         """The Library Health page: a library's files (estimated until read), the Survey job that reads
@@ -1535,10 +1941,8 @@ class AppTests(unittest.TestCase):
         self.assertTrue(all(f["plan"]["estimated"] and f["blocks"] is None for f in d["files"] if not f["read"]))
         self.assertEqual(self.post("/api/library/survey", {"library": "nope"})[0], 400)
         self.assertEqual(self.post("/api/library/survey", {"library": key})[0], 200)
-        for _ in range(200):
-            if not app.jobs.busy():
-                break
-            time.sleep(0.05)
+        self.assertTrue(wait_for(lambda: not (app.inspector.snapshot()["libs"].get(key) or {}).get("running")))
+        self.assertEqual(self.post("/api/library/survey", {"library": key, "pause": True})[0], 200)
         code, d = get("/api/library?key=" + key)
         self.assertEqual(d["surveyed"], d["total"])
         one = d["files"][0]
@@ -1552,7 +1956,9 @@ class AppTests(unittest.TestCase):
         self.assertEqual(get("/api/library/blocks?path=" + urllib.parse.quote(one["file"]) + "&n=x")[0], 400)
         self.assertEqual(get("/api/library/file?path=/etc/passwd")[0], 404)         # library files only
         self.assertEqual(get("/api/library/nope")[0], 404)
-        self.assertNotIn("survey", [j["kind"] for j in app.jobs.log.jobs()])         # not in the job log (nothing changed on disk)
+        self.assertNotIn("survey", [j["kind"] for j in app.jobs.log.jobs()])         # not a job: nothing changes on disk
+        self.assertIn(one["health"], ("ideal", "pass", "warn"))                        # each file's caching checks, worst wins
+        self.assertTrue(full["checks"] and d["summary"]["checked"] >= 1)
         self.assertEqual(len(get("/api/library?key=" + key + "&q=zzzz-none")[1]["files"]), 0)
 
     def test_health_results(self):
@@ -1563,7 +1969,7 @@ class AppTests(unittest.TestCase):
         # Music is ticked (wanted) but its folder isn't mounted: an error, fixed in Settings
         self.assertEqual(media["Music"]["status"], "fail")
         self.assertIn("/music", media["Music"]["detail"])
-        self.assertIn("System → Media mappings", media["Music"]["fix"])
+        self.assertIn("System → Media Mappings", media["Music"]["fix"])
         # Record size, compression and optimized are columns with their own info boxes: no items repeat them
         self.assertEqual([i["title"] for i in groups["media"]["items"]], [])
         self.assertEqual(media["Movies"]["record"]["status"], "warn")       # tank/plexfiles is 128K
@@ -1574,7 +1980,7 @@ class AppTests(unittest.TestCase):
                          ("warn", "lz4", "Use ZSTD-3"))
         # Movies, TV Shows and Audiobooks share it but need different record sizes: split it, saying how
         rs = dsrow["recordsize"]
-        if rs["status"] == "warn" and en(rs.get("badge", "")) == "Split Dataset":
+        if rs["status"] == "warn" and en(rs.get("badge", "")) == "Split dataset":
             self.assertEqual(len(rs["lines"]), 1)
             self.assertIn("to a dataset of its own;", en(rs["lines"][0]))
         self.assertNotIn("optimized", media["Movies"])                        # the Optimizer page has its own
@@ -1666,7 +2072,7 @@ class AppTests(unittest.TestCase):
             # no readable media → a row still appears, saying why nothing was checked
             self.app.zfs = zfs_with(saved, datasets=[])
             z = {i["title"]: i for i in checks.check_datasets(self.app)["items"]}
-            row = z["Media datasets: not checked yet"]
+            row = z["Media Datasets: not checked yet"]
             self.assertEqual(row["status"], "info")
             self.assertIn("no library folder is readable", row["detail"])
         finally:
@@ -1680,10 +2086,10 @@ class AppTests(unittest.TestCase):
             self.app.zfs = zfs_with(saved, {"tank/plexfiles": none, TV_DS: none})
             g = checks.check_datasets(self.app)
             z = dataset_fixes(g)
-            row = z[f"Cache settings for {TV_DS}: couldn't read"]
+            row = z[f"Cache settings for {TV_DS}: couldn’t read"]
             self.assertEqual(row["status"], "info")
             self.assertIn(f"sudo zfs get primarycache,secondarycache,recordsize {TV_DS}", row["fix_cmd"])
-            self.assertEqual({r["cache"]["text"] for r in g["datasets"]}, {"Couldn't read"})
+            self.assertEqual({r["cache"]["text"] for r in g["datasets"]}, {"Couldn’t read"})
             recs = {r["feature"]: r["verdict"] for r in checks.recommendations(self.app)}
             self.assertNotEqual(recs["nowplaying"], "avoid")
             self.assertNotEqual(recs["nextepisode"], "avoid")
@@ -1708,7 +2114,7 @@ class AppTests(unittest.TestCase):
                   "l2arc_rebuild_enabled": "0", "l2arc_mfuonly": "1"}
         # Automatic L2ARC pacing reads just under the fill rate, so there's nothing to warn about
         auto = {i["title"]: i for i in checks._l2arc_tuning_checks(self.app, params)}
-        self.assertNotIn("L2ARC fills slower than warm-up reads", auto)
+        self.assertNotIn("The L2ARC fills slower than warm-up reads", auto)
         self.app.settings.update({"warmup": {"pacing_auto": False, "pacing_percent": 50}, "general": {"hdd_mb_per_sec": 150}})
         try:
             items = {i["title"]: i for i in checks._l2arc_tuning_checks(self.app, params)}
@@ -1716,13 +2122,26 @@ class AppTests(unittest.TestCase):
             self.app.settings.update({"warmup": {"pacing_auto": True, "pacing_percent": 10}})
         self.assertIn("L2ARC only keeps frequently used data", items)
         self.assertEqual("echo 0 | sudo tee /sys/module/zfs/parameters/l2arc_mfuonly", items["L2ARC only keeps frequently used data"]["fix_cmd"])
-        self.assertIn("L2ARC is emptied on every reboot", items)
-        slow = items["L2ARC fills slower than warm-up reads"]
+        self.assertIn("The L2ARC is emptied on every reboot", items)
+        slow = items["The L2ARC fills slower than warm-up reads"]
         self.assertIn("8 MiB/s", slow["detail"])
         self.assertIn("75 MB/s", slow["detail"])
         self.assertIn("about 5%", slow["fix"])
         self.assertIn("automatic L2ARC pacing", slow["fix"])
         self.assertIn("Init/Shutdown Scripts", slow["fix"])
+        # A slow fill with a long warm-up ahead: said, with how long; pacing that keeps up; read-ahead copied too
+        from plexcache.warmup import L2ARC_RATE_SHARE
+        with mock.patch.object(self.app, "warmup_active", lambda: True), \
+                mock.patch.object(self.app, "lead_in_plan", lambda w: {"need_max": 8 * 1048576 * L2ARC_RATE_SHARE * 3 * 3600}):
+            held = {en(i["title"]): i for i in checks._l2arc_tuning_checks(self.app, dict(params, l2arc_noprefetch="0"))}
+        self.assertIn("takes about 3 hours at that speed", en(held["Warm-up is held to 8 MB/s by the L2ARC"]["detail"]))
+        self.assertIn("ZFS’s own read-ahead is copied too (l2arc_noprefetch=0)", en(held["L2ARC settings"]["detail"]))
+        self.app.settings.update({"warmup": {"pacing_auto": False, "pacing_percent": 5}})
+        try:
+            ok = {en(i["title"]): i for i in checks._l2arc_tuning_checks(self.app, {"l2arc_write_max": str(64 * 1048576)})}
+        finally:
+            self.app.settings.update({"warmup": {"pacing_auto": True, "pacing_percent": 10}})
+        self.assertEqual(en(ok["L2ARC settings"]["detail"]), "Suited to warm-up: fills at up to 64 MiB/s.")
         # Each library's record size against the one recommended for its media, and the next best
         K, M = 1024, 1024 * 1024
         real_stats, real_records = self.app.stats, self.app.library_records
@@ -1863,7 +2282,7 @@ class AppTests(unittest.TestCase):
         rows = {r["dataset"]: r for r in groups["datasets"]["datasets"]}
         self.assertEqual(rows["tank/spare"]["in_use"], {"status": "warn", "text": "No Plex library"})
         self.assertIsNone(rows["tank/spare"]["cache"])                 # nothing cached from it, so not checked
-        self.assertIn("tank/spare isn't used by any Plex library", dataset_fixes(groups["datasets"]))
+        self.assertIn("tank/spare isn’t used by any Plex library", dataset_fixes(groups["datasets"]))
 
     def test_benchmark_goes_one_dataset_at_a_time(self):
         import plexcache.app as appmod
@@ -1977,7 +2396,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(run["index"]["tv"]["files"], 6)
         self.assertEqual(run["index"]["tv"]["largest"], 20_012)
         msgs = [e["message"] for e in self.app.activity.snapshot()["events"]]
-        self.assertTrue(any("TV episodes: 6 of 6 had one at the end" in m for m in msgs), msgs[:5])
+        self.assertTrue(any("TV episodes: 6 of 6 had some" in m for m in msgs), msgs[:5])
         self.assertAlmostEqual(self.app.index_avg()["tv"], 20_012)
         self.assertEqual(self.app.index_layout()["tv"], {"share": 1.0, "avg": 20_012, "front": 96})   # front: before the video
         self.assertEqual(run["errors"], 0)
@@ -2082,6 +2501,23 @@ class PlaybackMonitorTests(unittest.TestCase):
     def session(self, ep, offset, state="playing", sid="m1"):
         PLEX.sessions = [{"id": sid, "item": ep, "offset": offset, "duration": 1200000, "state": state}]
 
+    def test_streams_that_cant_be_read(self):
+        """Plex not naming the file, or a stream in a state other than playing, paused or buffering: said
+        once in Recent events, and nothing is read. An episode or track Plex gives no show or album
+        for has nothing after it to prefetch."""
+        mon = self.app.monitor
+        settings = self.app.settings.get()
+        for key, s in (("odd1", types.SimpleNamespace(files=[], state="playing", label="Odd Stream", player="TV")),
+                       ("odd2", types.SimpleNamespace(files=[("/x.mkv", 100)], state="stopped", label="Stopped Stream", player=""))):
+            mon._seen[key] = {}
+            mon._maybe_nowplaying(key, s, settings)
+        ev = [en(e) for e in self.events()]
+        self.assertTrue(any("Odd Stream on TV: not cached — Plex didn’t say which file is playing" in e for e in ev), ev[:3])
+        self.assertTrue(any("Stopped Stream on unknown player: not cached — Plex reports it as “stopped”, not playing" in e for e in ev), ev[:3])
+        lonely = types.SimpleNamespace(type="episode", grandparent_rating_key="", parent_rating_key="", rating_key="1", library_key="2")
+        self.assertIsNone(mon._steps(None, lonely, "tv"))
+        self.assertIsNone(mon._steps(None, types.SimpleNamespace(**dict(vars(lonely), type="track")), "music"))
+
     def test_music_plays_are_read_logged_and_measured(self):
         app, mon = self.app, self.app.monitor
         app.library_cacheable = lambda *a, **k: True
@@ -2107,7 +2543,7 @@ class PlaybackMonitorTests(unittest.TestCase):
             PLEX.sessions = [{"id": "t9", "item": gone, "offset": 10000, "duration": 120000}]
             self.poll()
             self.poll()
-            self.assertEqual(sum("isn't found here" in en(e) for e in self.events()), 1)
+            self.assertEqual(sum("isn’t found here" in en(e) for e in self.events()), 1)
             self.assertEqual(app.monitor.last_sessions["sessions"][0]["rating_key"], "9999")   # (for the exported log)
             self.assertIn("plex_sessions", app.diagnostics())
             # Within the whole-file cooldown: not read again, and Recent events says why
@@ -2187,7 +2623,7 @@ class PlaybackMonitorTests(unittest.TestCase):
             self.assertEqual(queued("m3"), ["Author · Chapter 2", "Author · Chapter 3"])
             self.assertTrue(all(j.ram for j in jobs("m3")))                            # in RAM, so within the limit
             (fb,) = app.fallbacks.recent()
-            self.assertEqual((en(fb["chosen"]), en(fb["used"])), ("All the author's books", "Rest of the book"))
+            self.assertEqual((en(fb["chosen"]), en(fb["used"])), ("All the author’s books", "Rest of the book"))
             # Within the RAM limit, in order: here only the first fits
             self.app.cachelog.__init__()
             real = app.ram_budget
@@ -2329,7 +2765,7 @@ class PlaybackMonitorTests(unittest.TestCase):
         self.session(ghost, 60000)
         self.poll()
         self.assertEqual(self.jobs(), [])                       # nothing to read: it isn't there
-        self.assertTrue(any("isn't found here" in en(m) for m in self.events()))
+        self.assertTrue(any("isn’t found here" in en(m) for m in self.events()))
 
     def test_stream_ending_cancels_waiting_preload(self):
         force_settings(self.app, {"nowplaying": {"delay_sec": 1}})
@@ -2358,7 +2794,7 @@ class PlaybackMonitorTests(unittest.TestCase):
         force_settings(self.app, {"general": {"poll_seconds": 2}})
         real = mon.poll
         try:
-            for boom, expect in ((PlexError("Plex is down"), "can't read Plex sessions"), (ValueError("bad"), "unexpected error")):
+            for boom, expect in ((PlexError("Plex is down"), "can’t read Plex sessions"), (ValueError("bad"), "unexpected error")):
                 def failing(_settings, e=boom):
                     raise e
                 mon.poll = failing
@@ -2641,8 +3077,7 @@ class ReportTests(unittest.TestCase):
                 ("streamend", {"label": "A", "seconds": 60, "busy_avg": 12, "busy_peak": 40})]
         r = report.build(self.app_with(rows))
         self.assertEqual(r["verdict"]["status"], "ok")
-        self.assertEqual("Last 7 days, 2 streams: 1 of 1 skip came from cache.",
-                         r["verdict"]["text"])
+        self.assertEqual("Last 7 days, 2 streams: nothing to fix.", r["verdict"]["text"])
         t = r["tiles"]
         self.assertEqual((t["skips"]["cached"], t["next"]["lead_min"], t["retention"]["pct"], t["preloaded"]["cached_pct"]),
                          (1, 10, 100, 25))
@@ -2665,7 +3100,7 @@ class ReportTests(unittest.TestCase):
         titles = [a["title"] for a in r["attention"]]
         for want in ("1 skip went to disk: RAM limit full", "1 skip before Now Playing Cache started",
                      "1 skip ahead of Now Playing Cache", "1 skip without Now Playing Cache",
-                     "Cached data isn't staying in RAM (40% still cached)"):
+                     "Cached data isn’t staying in RAM (40% still cached)"):
             self.assertIn(want, titles)
         self.assertIn("Disks reached 95% busy while people watched", titles)
         self.assertEqual((r["ram"]["limited"], r["ram"]["no_room"]), (1, 1))
@@ -2678,7 +3113,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Disks reached 90% busy while people watched", [a["title"] for a in r["attention"]])
         # streams with nothing to report: still a green verdict
         r = report.build(self.app_with([("stream", {"label": "A"})]))
-        self.assertEqual(r["verdict"], {"status": "ok", "text": "Last 7 days, 1 stream, and caching had nothing to fix."})
+        self.assertEqual(r["verdict"], {"status": "ok", "text": "Last 7 days, 1 stream: nothing to fix."})
 
     def test_periods_and_chart_buckets(self):
         import datetime as dt
@@ -2824,18 +3259,21 @@ class BlockSizeTests(unittest.TestCase):
         self.assertIn("files", rows[TV_DS]["file_rs"]["text"])
         self.assertNotIn("block_scans", app.state())
 
-    def test_rewrite_script_is_served_and_rewrites_safely(self):
+    def test_rewrite_script_rewrites_safely(self):
         import subprocess
         import urllib.request
         srv_app = _new_app()
         from plexcache.server import serve
         httpd = serve(srv_app, "127.0.0.1", 0)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        try:
-            body = urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/tools/rewrite_blocks.py", timeout=5).read()
+        try:  # no longer served by the app (it runs as root: fetched over HTTPS from the release instead)
+            with self.assertRaises(urllib.error.HTTPError):
+                urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/tools/rewrite_blocks.py", timeout=5).read()
         finally:
             httpd.shutdown()
             httpd.server_close()
+        with open(os.path.join(ROOT, "plexcache", "tools", "rewrite_blocks.py"), "rb") as fh:
+            body = fh.read()
         self.assertIn(b"def rewrite(", body)
         # Run it against a folder, with a stand-in `zfs` command that reports recordsize=1M.
         d = tempfile.mkdtemp(dir=TMP)
@@ -2895,6 +3333,23 @@ class BlockSizeTests(unittest.TestCase):
             except SystemExit as e:
                 code = e.code
         return f"[exit {code}]\n" + out.getvalue()
+
+    def test_rewrite_script_with_nothing_to_do(self):
+        """Files that fit in one block are fine as they are, and a temporary copy left by an interrupted
+        run isn't counted: nothing to rewrite, and it stops there."""
+        d = tempfile.mkdtemp(dir=TMP)
+        media, bin_dir = os.path.join(d, "media"), os.path.join(d, "bin")
+        os.makedirs(media)
+        os.makedirs(bin_dir)
+        with open(os.path.join(bin_dir, "zfs"), "w") as fh:
+            fh.write("#!/bin/sh\ncase \"$*\" in *recordsize*) echo 1048576;; *mountpoint*) echo " + media + ";; *) ;; esac\n")
+        os.chmod(os.path.join(bin_dir, "zfs"), 0o755)
+        for name, size in (("small.mkv", 1000), (".big.mkv.rewrite-tmp", 300 * 1024)):
+            with open(os.path.join(media, name), "wb") as fh:
+                fh.write(os.urandom(size))
+        out = self.run_rewrite(bin_dir, ["tank/media"])
+        self.assertIn("[exit 0]", out)
+        self.assertIn("1 files: 1 already fine, 0 to rewrite", out)
 
     def test_rewrite_script_options_and_skips(self):
         rb = self.load_rewrite()
@@ -3161,6 +3616,33 @@ class WarmupScheduleTests(unittest.TestCase):
 
 
 class AppEdgeTests(unittest.TestCase):
+    def test_small_app_paths(self):
+        """Less common paths through the app: no Host header, Prefetch choices that aren't an object
+        or are the old shared ones, unknown libraries counting as cacheable, nothing to measure yet,
+        no library prefetching, one warm-up at a time, and settings files that can't be written."""
+        from plexcache import app as appmod
+        self.assertEqual(appmod._split_host(None), (None, None))
+        app = _new_app()
+        with self.assertRaises(config.SettingsError):
+            app.check_prefetch_libraries("everything")
+        app.check_prefetch_libraries({"*": {"start": "off"}})                   # the old shared choice: fine
+        self.assertTrue(app.library_cacheable(""))
+        self.assertTrue(app.library_cacheable("no-such-library"))
+        app.record_coverage(force=True)                                          # no files yet: nothing to record
+        app.scan_library()
+        app.settings.update({"nextepisode": {"libraries": {lib["key"]: {"start": "off", "end": "none"} for lib in app.libraries
+                                                           if lib["kind"]}}})
+        self.assertFalse(app.prefetch_active())
+        app.settings.update({"general": {"ram_cooldown_lead_in_minutes": config.AUTO}})
+        self.assertGreater(app.cooldown_seconds(False), 0)
+        app.warmup_run = object()                                                # one warm-up at a time
+        self.assertFalse(app.start_warmup(manual=True))
+        app.check_next_day()                                                     # (waits for the warm-up)
+        app.warmup_run = None
+        os.makedirs(os.path.join(app.config_dir, "blocked.json"))
+        with self.assertLogs("plexcache", level="WARNING"):
+            app._save_json("blocked.json", {"a": 1})
+
     """Start-up, scheduling, connection lights and fallbacks."""
 
     def test_start_and_scheduler(self):
@@ -3209,7 +3691,7 @@ class AppEdgeTests(unittest.TestCase):
         self.assertTrue(app.scan_error)
         app._warmup_worker(manual=True)
         msgs = [e["message"] for e in app.activity.snapshot()["events"]]
-        self.assertTrue(any("couldn't read libraries" in m for m in msgs))
+        self.assertTrue(any("couldn’t read libraries" in m for m in msgs))
 
     def test_warmup_skipped_without_l2arc_and_seconds_reduced(self):
         app = _new_app()
@@ -3309,8 +3791,8 @@ class AppEdgeTests(unittest.TestCase):
                                         "tv": {"files": 0, "bytes": 0, "largest": 0, "mp4_at_end": 0},
                                         "audio": {"files": 0, "bytes": 0, "largest": 0, "mp4_at_end": 0}},
                               "by_kind": {"movie": {"files": 3}, "tv": {"files": 5}, "audio": {"files": 0}}})
-        self.assertIn("movies: 3 of 3 had one at the end, 0.2 GB (largest 2.0 MB)", text)
-        self.assertIn("TV episodes: none at the end", text)
+        self.assertIn("movies: 3 of 3 had some, 0.2 GB (largest 2.0 MB)", text)
+        self.assertIn("TV episodes: none outside the lead-ins", text)
         self.assertIn("1 MP4 file keeps its index at the end", text)
 
     def test_main_entry_point(self):
@@ -3343,6 +3825,42 @@ class AppEdgeTests(unittest.TestCase):
             main_mod.serve, main_mod.App.start = real_serve, real_start
             del os.environ["PLEXCACHE_CONFIG"], os.environ["PLEXCACHE_PORT"]
         self.assertEqual((served["port"], served["ran"]), (9999, True))
+
+    def test_main_entry_point_other_starts(self):
+        """No usable config folder (it waits, then stops cleanly), the example password still set (said
+        in the log), and a stop signal shutting everything down."""
+        import logging
+        import signal
+        import plexcache.__main__ as main_mod
+        root = logging.getLogger()
+        saved_handlers, saved_level = list(root.handlers), root.level
+        handlers = {}
+        stopped = []
+
+        class FakeHTTPD:
+            def serve_forever(self):
+                handlers[signal.SIGTERM]()                          # TrueNAS stops the app
+                self.done.wait(10)
+
+            def shutdown(self):
+                stopped.append(True)
+                self.done.set()
+        FakeHTTPD.done = threading.Event()
+        env = {"PLEXCACHE_CONFIG": tempfile.mkdtemp(dir=TMP), "PLEXCACHE_PORT": "9998",
+               "PLEXCACHE_USERNAME": "admin", "PLEXCACHE_PASSWORD": "change-me"}
+        try:
+            with mock.patch.dict(os.environ, env), mock.patch.object(signal, "signal", lambda sig, h: handlers.__setitem__(sig, h)):
+                with mock.patch.object(main_mod, "wait_for_config", lambda *a: False):
+                    self.assertEqual(main_mod.main(), 0)
+                with mock.patch.object(main_mod, "serve", lambda app, host, port: FakeHTTPD()), \
+                        mock.patch.object(main_mod.App, "start", lambda self: None), \
+                        self.assertLogs("plexcache", "WARNING") as logs:
+                    self.assertEqual(main_mod.main(), 0)
+            self.assertTrue(any("still the default" in m for m in logs.output))
+            self.assertEqual(stopped, [True])
+        finally:
+            root.handlers[:] = saved_handlers
+            root.setLevel(saved_level)
 
 
 
@@ -3431,6 +3949,42 @@ class TrueNASEdgeTests(unittest.TestCase):
         with self.assertLogs("plexcache", level="ERROR"):
             app._autodetect("192.0.2.1")
 
+    def test_connection_problems(self):
+        """A connection that breaks mid-way (also during the login), a dataset TrueNAS doesn't list, and
+        an API key that can't see the apps' YAML: an error or a fallback each time, never a crash."""
+        from plexcache import truenas
+
+        class Broken:
+            def __init__(self, *a, **kw):
+                self.closed = False
+
+            def send_text(self, text):
+                raise truenas.WebSocketError("connection reset")
+
+            def recv_text(self):
+                return ""
+
+            def close(self):
+                self.closed = True
+        with mock.patch.object(truenas, "WebSocket", Broken):
+            self.assertFalse(truenas.probe("https://nas.local"))
+            with self.assertRaises(TrueNASError) as cm:
+                TrueNASClient("https://nas.local", "key")
+            self.assertIn("connection problem: connection reset", str(cm.exception))
+        with TrueNASClient(TRUENAS.url, "good-key") as tn:
+            calls = []
+
+            def call(method, params=None):
+                calls.append(method)
+                if method == "app.query" and params:
+                    raise TrueNASError("not allowed")
+                return [] if method.endswith("dataset.query") else [{"name": "plex-cache"}]
+            with mock.patch.object(tn, "call", call):
+                self.assertEqual(tn.dataset_cache_props("tank/gone"), None)
+                self.assertIn("no dataset tank/gone", " ".join(tn.last_props_raw))
+                self.assertEqual(tn.apps(config=True), [{"name": "plex-cache"}])     # without the YAML, then
+            self.assertEqual(calls[-2:], ["app.query", "app.query"])
+
     def test_errors_and_helpers(self):
         from plexcache.truenas import parse_size, probe
         with TrueNASClient(TRUENAS.url, "good-key") as tn:
@@ -3439,7 +3993,7 @@ class TrueNASEdgeTests(unittest.TestCase):
             self.assertIn("no such thing", str(cm.exception))
             with self.assertRaises(TrueNASError) as cm:
                 tn.call("test.garbage")
-            self.assertIn("isn't JSON", str(cm.exception))
+            self.assertIn("isn’t JSON", str(cm.exception))
             self.assertEqual(tn.disk_sizes([]), {})
             self.assertIsNone(tn.pool("nope") if False else None)
         with self.assertRaises(TrueNASError):
@@ -3573,8 +4127,424 @@ class SmallModuleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             layout._vint(b"\x00\x00", 0, True)
 
+    def test_zfs_readers_take_odd_input(self):
+        """The /proc readers skip what they can't parse, and the dataset scan skips links and files
+        that vanish mid-scan, reporting progress every 500 files."""
+        from plexcache import zfs
+        d = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(d, "spl/kstat/zfs"))
+        os.makedirs(os.path.join(d, "self"))
+        for name, text in (("spl/kstat/zfs/arcstats", "h1\nh2\nsize 4 1024\nc_max 4 lots\n"), ("stat", "cpu 1 2 3\nbtime 1700000000\n"),
+                           ("self/mountinfo", "too short - x\n36 35 0:1 / /data rw - zfs tank/data rw\n")):
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write(text)
+        with mock.patch.object(zfs, "PROC", d):
+            self.assertEqual(zfs.arcstats(), {"size": 1024})
+            self.assertEqual(zfs.boot_time(), 1700000000.0)
+            self.assertEqual([(m["mountpoint"], m["source"]) for m in zfs.mounts()], [("/data", "tank/data")])
+        with mock.patch.object(zfs, "PROC", os.path.join(d, "nothing")):
+            self.assertIsNone(zfs.own_container_id())
+        self.assertIsNone(zfs.recordsize(None))
+        root = tempfile.mkdtemp(dir=TMP)
+        for i in range(501):
+            open(os.path.join(root, f"f{i}"), "w").close()
+        os.symlink(os.path.join(root, "f0"), os.path.join(root, "link"))
+        os.makedirs(os.path.join(root, "gone-dir"))
+        open(os.path.join(root, "gone-file"), "w").close()
+        real = os.lstat
+
+        def lstat(path, *a, **kw):
+            if os.path.basename(path).startswith("gone-"):
+                raise FileNotFoundError(path)
+            return real(path, *a, **kw)
+        seen = []
+        with mock.patch.object(zfs.os, "lstat", lstat):
+            got = zfs.scan_block_sizes(root, progress=seen.append)
+        self.assertEqual((got["checked"], seen, got["complete"]), (501, [500], True))
+
+    def test_layout_damaged_files(self):
+        """Damaged or unusual files never raise and never send caching off reading nonsense: parts of
+        unknown size, garbage where a part should be, a SeekHead pointing at the wrong thing, MP4s
+        without their video or with 64-bit sizes — and no more than 64 MiB is ever taken from the end."""
+        from plexcache import layout
+        d = tempfile.mkdtemp(dir=TMP)
+        E, UNKNOWN = fakes.ebml, b"\x01" + b"\xff" * 7
+        hdr = E("1A45DFA3", E("4282", b"matroska"))
+        seg_hdr = bytes.fromhex("18538067") + UNKNOWN
+        seg = len(hdr) + len(seg_hdr)
+        seek = lambda eid, at: E("4DBB", E("53AB", bytes.fromhex(eid)) + E("53AC", (at - seg).to_bytes(8, "big")))
+
+        def mkv(name, body, size=None, at=()):
+            path = os.path.join(d, name)
+            with open(path, "wb") as fh:
+                fh.write(hdr + seg_hdr + body)
+                for off, data in at:
+                    fh.seek(off)
+                    fh.write(data)
+                if size:
+                    fh.truncate(size)
+            return path, os.path.getsize(path)
+        info = E("1549A966", b"\x00" * 20)
+        # no cluster before the end of the file; a part of unknown size; garbage where the next part should be
+        for body in (info, info + bytes.fromhex("1654AE6B") + UNKNOWN + b"\x00" * 64, info + b"\x00" * 8):
+            path, size = mkv("v.mkv", body)
+            ranges, got = layout.tail_ranges(path, size, 0)
+            self.assertEqual((ranges, got["video_start"]), ([], None))
+        # more parts in front than any real file has: given up on
+        path, size = mkv("many.mkv", E("EC", b"") * (layout.MAX_LEVEL1 + 1) + E("1F43B675", b"\x00" * 64))
+        self.assertIsNone(layout.tail_ranges(path, size, 0)[1]["video_start"])
+        self.assertEqual(layout.tail_ranges(path, size, size), ([], {"format": "small"}))  # all of it read from the start anyway
+        # garbage right after the segment starts: not parsed, nothing taken
+        path, size = mkv("g.mkv", b"\x00" * 64)
+        self.assertEqual(layout.tail_ranges(path, size, 0)[1]["format"], "unparsed")
+        # a SeekHead whose entries are cut short (unknown sizes) lists nothing
+        for bad in (bytes.fromhex("4DBB") + UNKNOWN, E("4DBB", bytes.fromhex("53AB") + UNKNOWN)):
+            self.assertEqual(layout._seekhead_entries(bad, 0, len(bad)), [])
+        # a SeekHead pointing at garbage (a second SeekHead, the Cues) or at another part (Tags): all skipped
+        far = 2 * MiB
+        heads = E("114D9B74", seek("114D9B74", far) + seek("1C53BB6B", far + 100) + seek("1254C367", far + 200))
+        path, size = mkv("s.mkv", heads + info + E("1F43B675", b"\x00" * 64), size=far + 4096,
+                         at=((far, b"\x00" * 16), (far + 100, b"\x00" * 16), (far + 200, E("EC", b"\x00" * 8))))
+        ranges, got = layout.tail_ranges(path, size, 0)
+        self.assertEqual((ranges, got["parts"]), ([], {}))
+        # more metadata at the end than is ever cached: the first 64 MiB of it
+        cues_at, tags_at = 10 * MiB, 100 * MiB
+        cues = bytes.fromhex("1C53BB6B") + b"\x01" + (65 * MiB).to_bytes(7, "big")
+        heads = E("114D9B74", seek("1C53BB6B", cues_at) + seek("1254C367", tags_at))
+        path, size = mkv("big.mkv", heads + info + E("1F43B675", b"\x00" * 64), size=tags_at + 4096,
+                         at=((cues_at, cues), (tags_at, E("1254C367", b"\x00" * 100))))
+        ranges, got = layout.tail_ranges(path, size, 0)
+        self.assertEqual((ranges, got["bytes"]), ([(cues_at, layout.MAX_TAIL)], layout.MAX_TAIL))
+
+        def mp4(name, boxes, size=None):
+            path = os.path.join(d, name)
+            with open(path, "wb") as fh:
+                fh.write(b"".join(boxes))
+                if size:
+                    fh.truncate(size)
+            return path, os.path.getsize(path)
+        box = lambda kind, body=b"": struct.pack(">I4s", 8 + len(body), kind) + body
+        ftyp, moov = box(b"ftyp", b"isom" + b"\x00" * 4), box(b"moov", b"\x00" * 8)
+        # a 64-bit box header cut off by the end of the file
+        path, size = mp4("cut.mp4", [ftyp, struct.pack(">I4s", 1, b"mdat")])
+        self.assertEqual(layout.tail_ranges(path, size, 0)[1]["note"], "no moov box found")
+        # the index at the front, then no video: past the end, a box too small to be real, too many boxes
+        for boxes in ([ftyp, moov, struct.pack(">I4sQ", 1, b"free", 4000)], [ftyp, moov, struct.pack(">I4s", 4, b"free")],
+                      [ftyp, moov] + [box(b"free")] * (layout.MAX_BOXES + 1)):
+            path, size = mp4("front.mp4", boxes, size=4000)
+            ranges, got = layout.tail_ranges(path, size, 1000)
+            self.assertEqual((ranges, got["index_at"], got["video_start"]), ([], "start", None))
+
+
+    def test_mkv_damaged_files(self):
+        """The optimizer's own MKV reading refuses what it can't rewrite safely, with a reason: cut-off or
+        malformed elements, no Segment, parts of unknown size, no video, a Cluster after the index, a
+        second set of attachments — and skips what doesn't concern it (other elements in a SeekHead,
+        a Tags or Tracks element, or a track's encodings)."""
+        from plexcache.optimize import mkv
+        d = tempfile.mkdtemp(dir=TMP)
+        bad = mkv.NotMatroska
+        for b, marker in ((b"", True), (b"\x00", True), (b"\x40", True)):
+            with self.assertRaises(bad):
+                mkv._vint(b, 0, marker)
+        self.assertEqual(mkv._vint(b"\xff", 0, False), (-1, 1))                 # an unknown size
+        with self.assertRaises(bad):
+            list(mkv._children(b"\xec\xff"))                                   # ... inside a master element
+        self.assertEqual(mkv._void(5), b"\xec\x83\x00\x00\x00")              # a short Void: one-byte size
+        with self.assertRaises(bad):
+            mkv._void(1)
+        E = _el
+        head = E("1A45DFA3", E("4282", b"matroska"))
+        seg = lambda body: bytes.fromhex("18538067") + (len(body) | (1 << 56)).to_bytes(8, "big") + body
+
+        def layout_of(raw):
+            path = os.path.join(d, "x.mkv")
+            with open(path, "wb") as fh:
+                fh.write(raw)
+            return mkv.read_layout(path)
+        for raw, why in ((head + E("1549A966", b""), "no Segment"),
+                         (head + seg(bytes.fromhex("1549A966") + b"\xff" + b"\x00" * 20), "unknown-size"),
+                         (head + seg(E("1549A966", b"\x00" * 4)), "no clusters")):
+            with self.assertRaises(bad) as cm:
+                layout_of(raw)
+            self.assertIn(why, str(cm.exception))
+        # a SeekHead with a checksum in it, and Tags/Tracks with other elements among theirs
+        sh = E("114D9B74", E("BF", b"\x00" * 4) + E("4DBB", E("53AB", bytes.fromhex("1549A966")) + E("53AC", (0).to_bytes(8, "big"))))
+        got = layout_of(head + seg(sh + E("1549A966", b"") + E("1F43B675", b"\x00" * 16)))
+        self.assertEqual(got["seek"]["Info"], len(head) + 12)                 # (the checksum skipped)
+        self.assertEqual(mkv._our_tags(E("EC", b"") + E("7373", E("63C0", b"") + E("67C8", E("45A3", b"PLEXCACHE_OPTIMIZER") + E("4487", b"0.1.0")))),
+                         {"PLEXCACHE_OPTIMIZER": "0.1.0"})
+        tracks = mkv._tracks(E("EC", b"") + E("AE", E("D7", b"\x02") + E("86", b"S_HDMV/PGS") + E("6D80", E("EC", b"") + E("6240", E("5034", E("4254", b"\x00"))))))
+        self.assertEqual([(t["number"], t["codec"], t["compression"]) for t in tracks], [(2, "S_HDMV/PGS", 0)])  # zlib
+        # rewriting the end: nothing there to sort; a Cluster after the index; attachments added twice
+        p = os.path.join(d, "plain.mkv")
+        build_mkv(p, tail=())
+        self.assertEqual(mkv.reorder_tail(p), [])
+        build_mkv(p)
+        with open(p, "ab") as fh:
+            fh.write(E("1F43B675", b"\x00" * 16))
+        with self.assertRaises(bad) as cm:
+            mkv.reorder_tail(p)
+        self.assertIn("Cluster after the index", str(cm.exception))
+        build_mkv(p, tail=("Cues", "Tags", "Attachments"), tail_atts=[("font.ttf", "font/ttf", b"\x00" * 100)])
+        with self.assertRaises(bad) as cm:
+            font = os.path.join(d, "a.ttf")
+            with open(font, "wb") as fh:
+                fh.write(b"\x00" * 10)
+            mkv.reorder_tail(p, attachments=mkv.attachments_element([{"name": "a.ttf", "mime": "font/ttf", "path": font, "uid": 1}]))
+        self.assertIn("attachments already", str(cm.exception))
+
+class PageStructureTests(unittest.TestCase):
+    def test_no_info_button_inside_another(self):
+        """An ⓘ's text opens in a pop-up, so an ⓘ inside that text can't be reached. Nothing passed to
+        info(), to a card heading's explanation (heading's second argument: it goes behind an ⓘ when
+        long) or to a field's longer help ({more: ...}) may contain an info() of its own."""
+        import importlib.util
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location("i18n_tool", os.path.join(root, "dev", "i18n.py"))
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        with open(os.environ.get("PLEXCACHE_CHECK_JS") or os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8") as fh:
+            src = fh.read()
+        toks = tool.js_tokens(src)
+        line = lambda k: src.count("\n", 0, toks[k][2]) + 1
+
+        def args(k):
+            """The arguments of the call whose "(" is toks[k]: a list of token lists."""
+            out, cur, depth = [], [], 0
+            for t in toks[k + 1:]:
+                if t[0] == "p" and t[1] in "([{":
+                    depth += 1
+                elif t[0] == "p" and t[1] in ")]}":
+                    if depth == 0:
+                        return out + [cur]
+                    depth -= 1
+                elif t[0] == "p" and t[1] == "," and depth == 0:
+                    out.append(cur)
+                    cur = []
+                    continue
+                cur.append(t)
+            return out + [cur]
+
+        def has_info(part):
+            return any(t == ("id", "info") and i + 1 < len(part) and part[i + 1][1] == "(" for i, (t) in enumerate((x[0], x[1]) for x in part)) \
+                or any(x[0] == "str" and 'class="info"' in x[1] for x in part)
+
+        def value(k):
+            """The tokens of an object's value after toks[k] (a ":"), up to its "," or "}"."""
+            out, depth = [], 0
+            for t in toks[k + 1:]:
+                if t[0] == "p" and t[1] in "([{":
+                    depth += 1
+                elif t[0] == "p" and t[1] in ")]}":
+                    if depth == 0:
+                        return out
+                    depth -= 1
+                elif t[0] == "p" and t[1] == "," and depth == 0:
+                    return out
+                out.append(t)
+            return out
+        bad = []
+        for k, (kind, v, _) in enumerate(toks[:-1]):
+            if kind != "id" or (k and toks[k - 1][1] in (".", "function")):
+                continue
+            if v in ("info", "heading") and toks[k + 1][1] == "(":
+                a = args(k + 1)
+                help_arg = a[0] if v == "info" else (a[1] if len(a) > 1 else [])
+                if has_info(help_arg):
+                    bad.append(f"app.js:{line(k)}: {v}() with an ⓘ inside its explanation")
+            if v == "more" and toks[k + 1][1] == ":" and has_info(value(k + 1)):
+                bad.append(f"app.js:{line(k)}: more: with an ⓘ inside it")
+        self.assertEqual(bad, [])
+        self.assertTrue(has_info(tool.js_tokens('x + info(H("y"))')))       # (the check itself sees one)
+
+
+class JobEdgeTests(unittest.TestCase):
+    def test_first_estimate_and_retries(self):
+        """A first estimate from how far through the first file a job is (not before 2%, and not once a
+        file is done); a retry that was cancelled leaves the failure standing; one that worked is
+        counted in the running job."""
+        from plexcache import jobs
+        app = _new_app()
+        j = jobs.Job(app.jobs, None, library="1")
+        j.state.update(todo_bytes=1000, done_bytes=0)
+        j.first_estimate(1000, 10, 1)                     # too early to tell
+        self.assertIsNone(j.state["eta"])
+        j.first_estimate(1000, 10, 10)                    # 10% of the first file in 10 s: about 90 s to go
+        self.assertEqual(j.state["eta"], 90)
+        j.state["work_seconds"] = 5                       # a file is done: real figures from then on
+        j.first_estimate(1000, 10, 50)
+        self.assertEqual(j.state["eta"], 90)
+        app.jobs.job = j
+        j.state.update(id="j1", errors=[{"file": "/a.mkv", "reason": "failed"}], failed=1)
+        app.jobs.retried("j1", "/a.mkv", {"result": "cancelled"})
+        self.assertEqual(j.state["failed"], 1)
+        with mock.patch.object(j, "save") as save:
+            app.jobs.retried("j1", "/a.mkv", {"result": "optimized"})
+        self.assertEqual((j.state["failed"], j.state["errors"]), (0, []))
+        save.assert_called_once()
+
+
+class LogFileEdgeTests(unittest.TestCase):
+    def test_coverage_and_cache_logs_on_odd_ground(self):
+        """The hourly coverage record and the cache log: nowhere to save, a folder that can't be
+        written, the same hour recorded twice, a library with no files, and stored data that's
+        malformed — skipped or kept for the next try, never an error."""
+        from plexcache import cachelog
+        from plexcache.coverage import Coverage
+        d = tempfile.mkdtemp(dir=TMP)
+        Coverage(None).save()                                                  # nowhere to keep it: fine
+        cov = Coverage(os.path.join(d, "no-such-folder", "coverage.json"))
+        now = 1_700_000_000.0
+        cov.record([("/a.mkv", 100, "1")], {"/a.mkv": now - 60}, now)
+        cov.record([("/a.mkv", 100, "1")], {}, now + 1)                        # the same hour again: replaced
+        self.assertEqual(len(cov.hours), 1)
+        cov.save()                                                             # can't be written: kept for later
+        cov.hours.append({"t": now + 3600, "libs": {"2": [0] * 12}})
+        series = cov.series({"1": "Films", "2": "Empty"})
+        self.assertIsNone(series["libs"]["2"][-1])                              # (an hour with no files in it)
+        self.assertIsNone(cachelog._load_lib("not a dict", True))
+        self.assertIsNone(cachelog._load_lib({"first": [1, 2, 3], "ages": []}, True))
+        log = cachelog.CacheLog(os.path.join(d, "no-such-folder", "cachelog.json"))
+        log.note("/a.mkv", whole=False)
+        log.save(force=True)
+        self.assertTrue(log._dirty)                                            # tried again next time
+        with mock.patch.object(cachelog, "MAX_READS", 2):
+            for i in range(4):
+                log.note("/b.mkv", whole=False, route="ram", hit=True, at=now + i * 4000)
+        self.assertLessEqual(len(log.reads), 2)
+
+
+class MoreEdgeTests(unittest.TestCase):
+    def test_library_view_and_chances(self):
+        """Library Health lists a file that's gone without failing; a re-check can rescan first; how
+        likely something is still cached comes from what's been measured once there's enough."""
+        app = _new_app()
+        app.scan_library()
+        f = next(f for f in app.files if os.path.exists(app.map_path(f.path)))
+        path = app.map_path(f.path)
+        os.rename(path, path + ".away")
+        try:
+            view = app.library_view(str(f.library_key), 0, 500, "")
+        finally:
+            os.rename(path + ".away", path)
+        self.assertTrue(any(r for r in view["files"]))
+        done = threading.Event()
+        with mock.patch.object(app, "run_checks", done.set), mock.patch.object(app, "scan_library") as scan:
+            app.run_checks_async(rescan=True)
+            self.assertTrue(done.wait(10))
+        scan.assert_called_once()
+        with mock.patch.object(app.cachelog, "written", lambda p, whole: (time.time() - 600, "ram", "1")), \
+                mock.patch.object(app.cachelog, "still_cached", lambda route, lib, age: 0.4):
+            self.assertEqual(app.cached_chance("/x.mkv", False), 0.4)
+
+    def test_connections_that_wont_close(self):
+        """A socket that errors on closing is let go all the same."""
+        from plexcache.mqttclient import MQTTClient
+
+        class Stuck:
+            def close(self):
+                raise OSError("bad file descriptor")
+
+            def sendall(self, data):
+                raise OSError("broken pipe")
+
+            def shutdown(self, how):
+                raise OSError("not connected")
+
+            def settimeout(self, t):
+                raise OSError("bad file descriptor")
+        c = MQTTClient("127.0.0.1", 1883)
+        c.sock = Stuck()
+        c._drop()
+        self.assertIsNone(c.sock)
+        c.sock = Stuck()
+        c.close()
+        self.assertIsNone(c.sock)
+
+    def test_unreadable_tags_are_none_of_ours(self):
+        """Tags that can't be parsed count as none of the optimizer's: the file is optimized again."""
+        from plexcache.optimize import mkv
+        p = os.path.join(tempfile.mkdtemp(dir=TMP), "t.mkv")
+        build_mkv(p, ours={"PLEXCACHE_OPTIMIZER": "0.1.2"})
+        tags_at = mkv.read_layout(p)["seek"]["Tags"]
+        with open(p, "r+b") as fh:
+            fh.seek(tags_at + 12)                                       # the first Tag inside: of unknown size
+            fh.write(bytes.fromhex("7373") + b"\xff")
+        self.assertEqual(mkv.read_layout(p)["ours"], {})
+
+
+class SmallEdgeTests(unittest.TestCase):
+    """Small helpers' less common paths: a job log that can't be written, tallies of what files
+    gained, sign-in that can't be kept, Basic auth that isn't base64, and media folders that
+    hold something other than the library's files."""
+
+    def test_job_log_edges(self):
+        from plexcache import joblog
+        t = {}
+        joblog.tally_file(t, {"result": "optimized", "rs_before": 131072, "rs_after": 1048576, "poster_added": True, "images_saved": 1234})
+        joblog.tally_file(t, {"result": "skipped", "rs_after": 1})                       # not written: not counted
+        self.assertEqual(t, {"written": 1, "rs_fixed": 1, "posters_added": 1, "posters_saved": 1234})
+        self.assertEqual(joblog._cell({"a": 1}), '{"a": 1}')
+        d = tempfile.mkdtemp(dir=TMP)
+        log = joblog.JobLog(d)
+        os.makedirs(log.path)                                        # (a folder where the file should be: can't be written)
+        log.add({"type": "job", "job": "j1", "event": "started"})    # never an error: the job carries on
+        log2 = joblog.JobLog(tempfile.mkdtemp(dir=TMP))
+        for e in ({"type": "file", "file": "/x"}, {"type": "job", "job": "j2", "event": "started", "kind": "optimize"},
+                  {"type": "file", "job": "j2", "file": "/a.mkv", "result": "cancelled"},
+                  {"type": "file", "job": "j2", "file": "/b.mkv", "result": "optimized"}):
+            log2.add(e)
+        (j,) = log2.jobs()
+        self.assertEqual((j["job"], j["files"]), ("j2", 1))                # the cancelled one wasn't tried
+
+    def test_sign_in_edges(self):
+        from plexcache.auth import Auth
+        d = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(d, "session.key"))                 # can't be written: sessions last until a restart
+        a = Auth("admin", "s3cret-long", d)
+        self.assertTrue(a.session_ok(a.new_session()))
+        a._revoked_path = None
+        a._save_revoked()                                            # nowhere to keep them: fine
+        self.assertFalse(a.request_ok({"Authorization": "Basic %%%not-base64"}))
+
+    def test_media_folder_report(self):
+        from plexcache import mapping
+        root = tempfile.mkdtemp(dir=TMP)
+        other = os.path.join(root, "other")
+        os.makedirs(other)
+        with open(os.path.join(other, "notes.txt"), "w") as fh:
+            fh.write("x")
+        os.makedirs(os.path.join(root, "nothing-yet"))
+        app = types.SimpleNamespace(map_path=lambda p: p, libraries=[
+            {"title": "Films", "key": "1", "kind": "movie", "excluded": False, "locations": [other], "samples": {other: [other + "/Film.mkv"]}},
+            {"title": "New", "key": "2", "kind": "movie", "excluded": False, "locations": [os.path.join(root, "nothing-yet")], "samples": {}}])
+        rows = {r["library"]: r for r in mapping.location_report(app, mount_list=[])}
+        self.assertEqual(rows["Films"]["status"], "unreadable")                  # files there, but not the library's
+        self.assertEqual((rows["New"]["status"], en(rows["New"]["detail"])), ("ok", "Mounted (no files in this folder yet)"))
+        self.assertFalse(mapping._is_empty_dir(os.path.join(root, "missing")))
+
 
 class PlexEdgeTests(unittest.TestCase):
+    def test_odd_answers(self):
+        """Episodes without numbers are named by title; libraries of a kind that isn't cached have no
+        files; a limit stops paging; posters come back as Plex has them; plex.tv down is an error."""
+        import xml.etree.ElementTree as ET
+        from plexcache import plex
+        ep = ET.Element("Video", {"type": "episode", "title": "Pilot", "grandparentTitle": "Harbour Street"})
+        self.assertEqual(plex.title_of(ep), "Harbour Street · Pilot")
+        self.assertEqual(plex.title_of(ET.Element("Video", {"type": "episode", "title": "Pilot"})), "Pilot")
+        c = PlexClient(PLEX.url, "good-token")
+        with mock.patch.object(c, "_request", lambda *a, **kw: b"\x89PNG poster"):
+            self.assertEqual(c.image("/library/metadata/1/thumb/1"), b"\x89PNG poster")
+        self.assertEqual(c.library_files(plex.Library("9", "Photos", "photo", None)), [])
+        tv = next(lib for lib in c.libraries() if lib.kind == "tv")
+        self.assertEqual(len(c.library_files(tv, limit=2)), 2)
+        with mock.patch.object(plex.urllib.request, "urlopen", mock.Mock(side_effect=urllib.error.URLError("down"))):
+            with self.assertRaises(PlexError) as cm:
+                plex._plextv("POST", "/api/v2/pins", "client-1")
+        self.assertIn("Can’t reach plex.tv", str(cm.exception))
+
     def test_errors(self):
         with self.assertRaises(PlexError):
             PlexClient("", "x")
@@ -3656,6 +4626,7 @@ class FakeOptimizer:
 
     def __init__(self, result="optimized"):
         self.sent, self.done, self.result = [], None, result
+        self.convert_result = "converted"  # or "skipped": what MKV wouldn't keep
         self.claims = {}   # key -> {instance: at}
         self.peers = []
 
@@ -3665,8 +4636,28 @@ class FakeOptimizer:
     def rewrite(self, path):
         return self._done(path, "rewritten", {"path": path, "action": "rewrite"})
 
-    def optimize(self, path, images, force, cover=None):
-        return self._done(path, self.result, {"path": path, "action": "optimize", "images": images, "force": force, "cover": cover})
+    def optimize(self, path, images, force, cover=None, tags="keep"):
+        return self._done(path, self.result, {"path": path, "action": "optimize", "images": images, "force": force, "cover": cover, "tags": tags})
+
+    def convert(self, path, images, cover=None, tags="keep"):
+        """Converts as the real one does: <name>.mkv next to the original, optimized and tagged."""
+        from plexcache.optimize import VERSION
+        self.sent.append({"path": path, "action": "convert", "images": images, "tags": tags})
+        new = os.path.splitext(path)[0] + ".mkv"
+        if self.convert_result == "converted":
+            build_mkv(new, ours={"PLEXCACHE_OPTIMIZER": VERSION})
+            st = os.stat(new)
+            self.done = {"path": path, "result": "converted", "new": new, "finished": time.time() + 1, "verified": "passed",
+                         "tags": {"PLEXCACHE_OPTIMIZER": VERSION}, "version": VERSION, "after": st.st_size,
+                         "file": {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "ino": st.st_ino}}
+        else:
+            self.done = {"path": path, "result": "skipped", "reason": "its chapters wouldn't be kept", "finished": time.time() + 1}
+        return {"started": True}
+
+    def delete_original(self, path, new):
+        self.sent.append({"action": "delete_original", "path": path, "new": new})
+        os.remove(path)
+        return {"deleted": True}
 
     def claim(self, folder, key, instance, release=False):
         mine = self.claims.setdefault(key, {})
@@ -3769,6 +4760,423 @@ class OptimizerTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 opt._copy_meta(st, src, dst, False)
 
+    def test_projection_matches_the_optimizer(self):
+        """Library Health's estimate of an optimized file (projection.py) against what the optimizer
+        really writes, for each choice that changes the layout: cover art kept or taken out, tags kept or
+        stripped, in two record sizes. If the optimizer changes how it lays files out, this fails until
+        the estimate follows it. (A remux repacks the video a little: a few KB of it may move between
+        blocks, so video and what's around it are allowed that much.)"""
+        from plexcache import filemap, projection
+        from plexcache.optimize import tools
+        from plexcache.optimize.optimizer import optimize_file
+        bundle = "/Applications/MKVToolNix.app/Contents/MacOS"
+        if os.path.isdir(bundle) and not os.environ.get("PLEXCACHE_TOOLS_PATH"):
+            os.environ["PLEXCACHE_TOOLS_PATH"] = bundle
+        if tools.missing():
+            self.skipTest("MKVToolNix and ffmpeg aren't installed")
+        d = tempfile.mkdtemp(dir=TMP)
+        v, cover, ch, src = (os.path.join(d, n) for n in ("v.mkv", "cover.jpg", "ch.txt", "src.mkv"))
+        tools.run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=24", "-f", "lavfi", "-i", "sine",
+                  "-t", "12", "-c:v", "mpeg4", "-q:v", "2", "-c:a", "aac", "-metadata", "COMMENT=keep me", v)
+        tools.run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1000x1500", "-frames:v", "1", "-q:v", "1", cover)
+        with open(ch, "w") as fh:
+            fh.write("".join(f"CHAPTER{i:02d}=00:00:{i:02d}.000\nCHAPTER{i:02d}NAME=Chapter {i}\n" for i in range(1, 12)))
+        # as mkvmerge writes it: cover art and chapters in front of the video
+        tools.run("mkvmerge", "-q", "-o", src, "--chapters", ch, "--attachment-mime-type", "image/jpeg", "--attach-file", cover, v)
+        # Plex's poster, larger than the file's own cover art: what it is in the estimate is its real size
+        poster = os.path.join(d, "poster.jpg")
+        tools.run("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1400x2100", "-frames:v", "1", "-q:v", "1", poster)
+        with open(poster, "rb") as fh:
+            plex = fh.read()
+        for images in ("compress", "remove", "plex"):
+            for strip in (False, True):
+                for rec in (64 * 1024, 256 * 1024):
+                    kw = {"images": images, "strip": strip, "record": rec}
+                    f = os.path.join(d, f"{images}-{strip}-{rec}.mkv")
+                    shutil.copy(src, f)
+                    m = filemap.describe(f)
+                    m["mix"] = filemap.cache_mix(f, m, rec)
+                    want = projection.project(m, rec, images, strip, len(plex) if images == "plex" else None)
+                    optimize_file(f, images, cover=plex if images == "plex" else None, tags_mode="strip" if strip else "keep")
+                    got = filemap.describe(f)
+                    got["mix"] = filemap.cache_mix(f, got, rec)
+                    pm, gm = want["mix"], got["mix"]
+                    self.assertEqual(pm["blocks"], gm["blocks"], kw)
+                    self.assertAlmostEqual(want["first_video"], max(0, rec - got["video_start"]), delta=256, msg=kw)
+                    # (Plex's poster is compressed losslessly where a tool for it is installed: a few % smaller)
+                    self.assertAlmostEqual(pm["meta"], gm["meta"], delta=256 + gm["meta"] * (0.08 if images == "plex" else 0.03), msg=kw)
+                    self.assertAlmostEqual(pm["video"], gm["video"], delta=8192, msg=kw)
+                    self.assertAlmostEqual(pm["video_tail"], projection.tail_video(got), delta=8192, msg=kw)   # the end's video, as written
+                    self.assertAlmostEqual(pm["meta_disk"], gm["meta_disk"], delta=4096 + gm["meta_disk"] * 0.05, msg=kw)
+                    if images != "plex":
+                        gone = m["size"] - got["size"]                  # what the file lost, against what was said to go
+                        self.assertAlmostEqual(sum(want["removed"].values()), max(0, gone), delta=8192, msg=kw)
+
+    def test_converting_to_mkv(self):
+        """Converting other containers to MKV: off until a library asks for it, and then only the kinds
+        chosen. A converted file's MKV is put next to it and Plex asked to scan the folder; the original
+        goes only once Plex has the MKV as a version of the same item (and the hold is over) — never
+        while Plex has it as an item of its own. A file that can't be converted without losing something
+        isn't tried again, and Library Health says why."""
+        from plexcache import filechecks
+        app, op, client, d, state = self._app(names=("old.avi", "home.mp4", "film.mkv"))
+        avi, mp4 = os.path.join(d, "old.avi"), os.path.join(d, "home.mp4")
+        for f in app.files:
+            f.rating_key, f.title = "r-" + os.path.basename(f.path), os.path.basename(f.path)
+        scans, items = [], {}
+        plex = types.SimpleNamespace(scan=lambda key, folder: scans.append(folder), item_files=lambda rk: items.get(rk))
+        app.plex = lambda timeout=30: plex
+        self.assertNotIn("convert", op.file_status(avi, "1", {}).get("problems") or [])          # off by default
+        app.settings.update({"optimizer": {"libraries": {"1": {"convert": True, "sync": False}}}})
+        self.assertEqual(op.file_status(avi, "1", {})["problems"], ["convert"])
+        self.assertFalse(op.file_status(mp4, "1", {})["applies"])                                  # MP4 isn't converted by default
+        warn = lambda path: next(c for c in filechecks.check_file(app, None, path, {"format": "stream", "size": 10, "tracks": [{"type": "video"}]},
+                                                                     {}, op.options("1"), None, None) if c["id"] == "container")
+        self.assertIn("converts it", en(warn(avi)["text"]))
+        self.assertIn("this kind of file is off", en(warn(mp4)["text"]))
+        run_job(op)
+        self.assertEqual([x["path"] for x in client.sent if x.get("action") == "convert"], [avi])
+        (e,) = app.conversions.snapshot()["items"]
+        self.assertEqual((e["state"], e["new"], scans), ("waiting", os.path.join(d, "old.mkv"), [d]))
+        self.assertEqual(op.file_status(avi, "1", {})["problems"], [])                             # converted: waiting for Plex
+        self.assertEqual(warn(avi)["status"], "pass")
+        with self.assertRaises(ValueError):
+            app.conversions.act(avi, "delete")                                                     # not before Plex has it
+        # Plex adds it as a second version of the same item: the original waits out the hold
+        items["r-old.avi"] = [avi, os.path.join(d, "old.mkv")]
+        app.conversions.act(avi, "check")
+        self.assertEqual(app.conversions.get(avi)["state"], "seen")
+        app.conversions.tick()
+        self.assertTrue(os.path.exists(avi))                                                       # 7 days by default
+        app.settings.update({"optimizer": {"convert_hold_days": 0}})
+        app.conversions.tick()
+        self.assertEqual((app.conversions.get(avi)["state"], os.path.exists(avi)), ("deleted", False))
+        self.assertEqual(len(scans), 2)                                                            # scanned again after
+        # MP4 chosen too: Plex makes its MKV an item of its own — nothing is deleted
+        app.settings.update({"optimizer": {"convert_types": {"mp4": True}, "convert_hold_days": 0}})
+        app.files.append(types.SimpleNamespace(path=os.path.join(d, "home.mkv"), library_key="1", kind="movie", size=1, kbps=1,
+                                               library="Movies", rating_key="r-new", title="home"))
+        run_job(op)
+        items["r-home.mp4"] = [mp4]
+        app.conversions.act(mp4, "check")
+        self.assertEqual(app.conversions.get(mp4)["state"], "separate")
+        app.conversions.tick()
+        self.assertTrue(os.path.exists(mp4))
+        app.conversions.act(mp4, "keep")                                                           # both files stay
+        self.assertIsNone(app.conversions.get(mp4))
+        # a file that can't be converted without losing something: not tried again, and said why
+        clip = os.path.join(d, "clip.flv")
+        with open(clip, "wb") as fh:
+            fh.write(b"x" * 100)
+        os.utime(clip, (time.time() - 3600, time.time() - 3600))
+        app.files.append(types.SimpleNamespace(path=clip, library_key="1", kind="movie", size=1, kbps=1, library="Movies", rating_key="r-c", title="clip"))
+        client.convert_result = "skipped"
+        run_job(op)
+        self.assertEqual(op.file_status(clip, "1", {})["problems"], [])
+        self.assertIn("chapters wouldn't be kept", en(warn(clip)["text"]))
+        self.assertEqual(len([x for x in client.sent if x.get("action") == "convert" and x["path"] == clip]), 1)
+        run_job(op)
+        self.assertEqual(len([x for x in client.sent if x.get("action") == "convert" and x["path"] == clip]), 1)
+        # music isn't converted, whatever's set
+        app.libraries.append({"key": "2", "title": "Music", "type": "artist", "kind": "audio", "locations": []})
+        app.settings.update({"optimizer": {"libraries": {"2": {"convert": True}}}})
+        self.assertFalse(op.options("2")["convert"])
+        with self.assertRaises(config.SettingsError):
+            app.settings.update({"optimizer": {"convert_types": {"wmv": True}}})
+        with self.assertRaises(config.SettingsError):
+            app.settings.update({"optimizer": {"convert_hold_days": 400}})
+
+    def test_second_plex_server(self):
+        """A second Plex server with the same files: its libraries paired with these by name and kind (or
+        as chosen), a file's path there worked out from its place in its library folder, and converting
+        waits for it too — an original goes once both have the MKV as a version of the same item, or the
+        other doesn't have the file at all (when the paths line up: never on a guess)."""
+        from plexcache import plex as plexmod
+        from plexcache.plex import Library
+        app, op, client, d, state = self._app(names=("old.avi", "b.avi"))
+        avi = os.path.join(d, "old.avi")
+        for f in app.files:
+            f.rating_key, f.title = "r-" + os.path.basename(f.path), os.path.basename(f.path)
+        app.settings.update({"optimizer": {"libraries": {"1": {"convert": True, "sync": False}}, "convert_hold_days": 0}})
+        here = {"r-old.avi": None}
+        app.plex = lambda timeout=30: types.SimpleNamespace(scan=lambda k, f: None, item_files=lambda rk: here.get(rk))
+        there_dir = "/srv/other/Movies"
+        theirs = {there_dir + "/old.avi": "t1", there_dir + "/b.avi": "t2"}
+        items, scans = {"t1": [there_dir + "/old.avi"]}, []
+
+        class Other:
+            def libraries(self):
+                return [Library("7", "Movies", "movie", "movie", [there_dir]), Library("8", "Music", "artist", "audio", ["/srv/other/Music"])]
+
+            def library_files(self, lib):
+                return [types.SimpleNamespace(path=p, rating_key=rk) for p, rk in theirs.items()]
+
+            def item_files(self, rk):
+                return items.get(rk)
+
+            def scan(self, key, folder):
+                scans.append(folder)
+        app.other.client = lambda timeout=30: Other()
+        app.settings.update({"plex2": {"url": "http://10.9.0.2:32400", "token": "tok", "name": "Cabin"}})
+        self.assertEqual({k: (v.key if v else None) for k, v in app.other.pairs().items()}, {"1": "7"})     # by name and kind
+        self.assertEqual(app.other.paths_there("1", avi, app.other.pairs()["1"]), [there_dir + "/old.avi"])
+        app.other.refresh()
+        self.assertEqual(app.other.snapshot()["rates"], {"1": 1.0})
+        run_job(op)
+        here["r-old.avi"] = [avi, os.path.join(d, "old.mkv")]                                    # this server has it…
+        app.conversions.act(avi, "check")
+        e = app.conversions.get(avi)
+        self.assertEqual((e["state"], e["servers"]), ("waiting", {"here": "same", "there": "waiting"}))  # …the other doesn't yet
+        self.assertEqual(scans, [there_dir])                                                    # its folder scanned there
+        items["t1"] = [there_dir + "/old.avi", there_dir + "/old.mkv"]
+        app.conversions.act(avi, "check")
+        self.assertEqual(app.conversions.get(avi)["state"], "seen")
+        app.conversions.tick()
+        self.assertFalse(os.path.exists(avi))
+        # the other server doesn't have a file at all: nothing there to lose (its paths line up)
+        b = os.path.join(d, "b.avi")
+        del theirs[there_dir + "/b.avi"]
+        app.other.indexes.clear()
+        e = {"library": "1", "plex_original": b}
+        self.assertEqual(app.other.where(e, time.time()), "absent")
+        # …but when they don't line up, it's never taken for absent
+        app.other.rates["1"] = 0.4
+        self.assertEqual(app.other.where({"library": "1", "plex_original": b}, time.time()), "unpaired")
+        # unpaired by choice: not watched there
+        app.settings.update({"plex2": {"libraries": {"1": ""}}})
+        self.assertIsNone(app.other.where({"library": "1", "plex_original": b}, time.time()))
+        # plex.tv's list of servers, and the first address that answers as that server
+        got = [{"provides": "server", "clientIdentifier": "abc", "name": "Cabin", "owned": True, "accessToken": "srv",
+                "connections": [{"uri": "https://relay", "relay": True, "local": False}, {"uri": "http://192.168.9.2:32400", "relay": False, "local": True},
+                                {"uri": "https://203.0.113.5:32400", "relay": False, "local": False}]},
+               {"provides": "player", "clientIdentifier": "tv"}]
+        with mock.patch.object(plexmod, "_plextv", lambda *a, **kw: got):
+            (sv,) = plexmod.servers("cid", "acct")
+        self.assertEqual((sv["id"], sv["token"], len(sv["connections"])), ("abc", "srv", 3))
+        tried = []
+
+        def ident(self):
+            tried.append(self.url)
+            if "203.0.113.5" in self.url:
+                return {"machine_id": "abc"}
+            raise plexmod.PlexError("no")
+        with mock.patch.object(plexmod.PlexClient, "identity", ident):
+            self.assertEqual(plexmod.reachable(sv), "https://203.0.113.5:32400")
+        self.assertEqual(tried, ["https://203.0.113.5:32400"])                                   # direct, not on its own network, first
+        # the account's servers are listed with this server's own sign-in: no second sign-in needed
+        from plexcache import plex2 as plex2mod
+        seen = []
+        app.settings.update({"plex": {"token": "this-servers-token"}, "plex2": {"account_token": ""}})
+        with mock.patch.object(plex2mod, "servers", lambda cid, tok: seen.append(tok) or []), mock.patch.object(app.other, "_main_id", lambda: ""):
+            self.assertEqual(app.other.list_servers(), [])
+        self.assertEqual(seen, ["this-servers-token"])
+        self.assertTrue(app.other.snapshot()["signed_in"])
+        app.other.forget()
+        self.assertFalse(app.other.configured())
+
+    def test_convert_with_the_real_tools(self):
+        """The optimizer's converting, with MKVToolNix and ffmpeg: an AVI becomes an optimized MKV next to
+        it (checked against it), the original untouched; an MP4 with an iTunes show and episode is left
+        as it is, saying so; never over an MKV that's there; and an original is deleted only with its MKV."""
+        from plexcache.optimize import convert, mkv, tools
+        from plexcache.optimize.optimizer import Skipped
+        bundle = "/Applications/MKVToolNix.app/Contents/MacOS"
+        if os.path.isdir(bundle) and not os.environ.get("PLEXCACHE_TOOLS_PATH"):
+            os.environ["PLEXCACHE_TOOLS_PATH"] = bundle
+        if tools.missing():
+            self.skipTest("MKVToolNix and ffmpeg aren't installed")
+        d = tempfile.mkdtemp(dir=TMP)
+        src = ["-f", "lavfi", "-t", "4", "-i", "testsrc=size=320x240:rate=25", "-f", "lavfi", "-t", "4", "-i", "sine"]
+        avi, mp4 = os.path.join(d, "a.avi"), os.path.join(d, "b.mp4")
+        tools.run("ffmpeg", "-v", "error", *src, "-c:v", "mpeg4", "-c:a", "mp2", avi)
+        tools.run("ffmpeg", "-v", "error", *src, "-c:v", "mpeg4", "-c:a", "aac", "-metadata", "show=Show", "-metadata", "episode_id=E1", mp4)
+        self.assertEqual(convert.inspect(avi)["reasons"], [])
+        os.utime(avi, (1_600_000_000, 1_600_000_000))
+        before = _sha256(avi)
+        r = convert.convert_file(avi)
+        self.assertEqual((r["result"], r["new"], r["verified"]), ("converted", os.path.join(d, "a.mkv"), "passed"))
+        self.assertTrue(mkv.check(r["new"])["optimized"])
+        self.assertEqual(int(os.stat(r["new"]).st_mtime), 1_600_000_000)                         # the original's timestamps
+        self.assertEqual(_sha256(avi), before)                                                    # the original untouched
+        with self.assertRaises(Skipped) as cm:
+            convert.convert_file(avi)                                                             # its MKV is there
+        self.assertIn("same name", str(cm.exception))
+        with self.assertRaises(Skipped) as cm:
+            convert.convert_file(mp4)
+        self.assertIn("episode_id, show", str(cm.exception))
+        self.assertFalse(os.path.exists(os.path.join(d, "b.mkv")))
+        self.assertFalse([n for n in os.listdir(d) if n.startswith(".plexcache")])               # nothing left behind
+        with self.assertRaises(ValueError):
+            convert.delete_original(mp4, os.path.join(d, "b.mkv"))                                # no MKV
+        with self.assertRaises(ValueError):
+            convert.delete_original(avi, mp4)                                                     # not its MKV
+        convert.delete_original(avi, r["new"])
+        self.assertFalse(os.path.exists(avi))
+
+    def test_estimates_follow_the_settings(self):
+        """Library Health keeps only what was read from each file; the checks and the estimate of an
+        optimized file are worked out from the settings as they are now. Changing a library's cover art
+        choice changes the estimate straight away — the file isn't inspected again, and the library's
+        summary (kept a little while) isn't kept past the change."""
+        from plexcache import filemap
+        app, op, client, d, state = self._app(names=("film.mkv",))
+        path = os.path.join(d, "film.mkv")
+        big = ("cover.jpg", "image/jpeg", b"\xff\xd8" + os.urandom(300_000))
+        build_mkv(path, front_atts=[big, FONT], cluster=os.urandom(3 * 1024 * 1024))
+        os.utime(path, (time.time() - 3600, time.time() - 3600))
+        f = app.files[0]
+        f.poster, f.matched, f.title, f.rating_key, f.size = "/library/metadata/5/thumb/1", True, "Film", "5", os.path.getsize(path)
+        app._library_file = lambda p: f if p == path else None
+        app.record_for = lambda key: 256 * 1024
+        app.file_maps.read(path, force=True)
+        with open(filemap.__file__, encoding="utf-8") as fh:
+            self.assertNotIn("settings", fh.read())                                                  # what's kept of a file is read from it only
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "compress"}}}})
+        before = app.file_view(path)["projected"]
+        self.assertEqual(before["removed"], {})
+        summary = app.library_view("1")["summary"]["projected"]
+        self.assertEqual(summary["removed"], {})
+        rev = app.settings.rev
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "remove"}}}})
+        self.assertEqual(app.settings.rev, rev + 1)
+        after = app.file_view(path)["projected"]
+        self.assertGreater(after["removed"]["image"], 300_000)                                     # straight away, not inspected again
+        self.assertLess(after["mix"]["meta"], before["mix"]["meta"])
+        self.assertGreater(app.library_view("1")["summary"]["projected"]["removed"]["image"], 300_000)
+        # Plex's poster: its real size once it's known (fetched for one file; learnt in the background for a library)
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "plex"}}}})
+        with mock.patch.object(op, "_poster", lambda p: b"p" * 50_000):
+            cover = app.file_view(path)["projected"]["cover"]
+        self.assertEqual((cover["before"] > 300_000, cover["after"], cover["known"]), (True, 50_000, True))
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "plex", "tags": "keep"}}}})
+        self.assertEqual(op.poster_size("/library/metadata/5/thumb/1"), 50_000)                    # kept by its path
+
+    def test_tag_choice(self):
+        """Which files' tags go under each tag choice: never with "keep"; with "excessive" only over
+        256 KB; with "strip" whenever there are any besides ours. The choice is checked where it's set."""
+        from plexcache.optimize import optimizer as opt
+        big, small, ours_only = ({"foreign_tags": True, "tags_size": 300 * 1024}, {"foreign_tags": True, "tags_size": 2000},
+                                 {"foreign_tags": False, "tags_size": 300})
+        self.assertEqual([[opt.strips_tags(m, c) for c in (big, small, ours_only)] for m in opt.TAG_MODES],
+                         [[False, False, False], [True, False, False], [True, True, False]])
+        from plexcache.config import SettingsError, Settings
+        settings = Settings(tempfile.mkdtemp(dir=TMP))
+        settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "tags": "strip"}}}})
+        self.assertEqual(settings.get()["optimizer"]["libraries"]["1"]["tags"], "strip")
+        with self.assertRaises(SettingsError):
+            settings.update({"optimizer": {"libraries": {"1": {"tags": "sometimes"}}}})
+
+    def test_optimizer_guards(self):
+        """The optimizer's own checks, without its tools: a big file's seed takes its end into account; tags
+        that can't be read start afresh; no room for a copy, or a file that changed meanwhile, is skipped;
+        and a conflict copy that differs from the file is kept."""
+        from plexcache.optimize import optimizer as opt
+        from plexcache.optimize.tools import ToolError
+        d = tempfile.mkdtemp(dir=TMP)
+        big = os.path.join(d, "big.mkv")
+        with open(big, "wb") as fh:
+            fh.write(b"\x00" * (3 * MiB))
+        seed = opt.fingerprint_seed(big)
+        with open(big, "r+b") as fh:
+            fh.seek(3 * MiB - 10)
+            fh.write(b"different")
+        self.assertNotEqual(opt.fingerprint_seed(big), seed)                     # (the last MiB counts)
+        with mock.patch.object(opt, "run", mock.Mock(side_effect=ToolError("mkvextract failed: bad file"))):
+            path = opt._global_tags(big, d, {"PLEXCACHE_OPTIMIZER": "0.1.2"})
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn("PLEXCACHE_OPTIMIZER", fh.read())
+        full = types.SimpleNamespace(f_bavail=1, f_frsize=4096)
+        with mock.patch.object(opt.os, "statvfs", lambda folder: full):
+            with self.assertRaises(opt.Skipped) as cm:
+                opt._prepare(big)
+        self.assertIn("not enough free space", str(cm.exception))
+        st = os.stat(big)
+        out = os.path.join(d, "new.mkv")
+        with open(out, "wb") as fh:
+            fh.write(b"new")
+        with open(big, "ab") as fh:                                               # changed meanwhile
+            fh.write(b"more")
+        with mock.patch.object(opt, "_copy_meta", lambda *a: None):
+            with self.assertRaises(opt.Skipped) as cm:
+                opt._swap(st, big, out, d, False)
+        self.assertIn("changed while it was being written again", str(cm.exception))
+        original = os.path.join(d, "Film.mkv")
+        copy = os.path.join(d, "Film.sync-conflict-20261018-120000-ABCDEFG.mkv")
+        for p in (original, copy):
+            build_mkv(p, ours={"PLEXCACHE_OPTIMIZER": "0.1.2"})
+        with mock.patch.object(opt, "stream_hashes", lambda p, *a: p):
+            self.assertEqual(opt.resolve_conflict(copy, original), {"result": "kept", "reason": "the streams differ"})
+        atts = iter([json.dumps({"attachments": [{"file_name": "a.ttf", "size": 1}]}), json.dumps({"attachments": []})])
+        with mock.patch.object(opt, "stream_hashes", lambda p, *a: "same"), mock.patch.object(opt, "run", lambda *a, **kw: next(atts)):
+            self.assertEqual(opt.resolve_conflict(copy, original), {"result": "kept", "reason": "the attachments differ"})
+
+    def test_tools_that_hang_or_cant_run(self):
+        """A tool that hangs is stopped at its time limit — with or without progress being watched,
+        and even when it says nothing — and one that can't run has no version: never a hang."""
+        from plexcache.optimize import tools
+        bin_dir = tempfile.mkdtemp(dir=TMP)
+        for name in ("mkvmerge", "ffmpeg"):
+            with open(os.path.join(bin_dir, name), "w") as fh:
+                fh.write("#!/bin/sh\nexec /bin/sleep 30\n")
+            os.chmod(os.path.join(bin_dir, name), 0o755)
+        with open(os.path.join(bin_dir, "ffprobe"), "wb") as fh:
+            fh.write(b"\x00\x01 not a program")
+        os.chmod(os.path.join(bin_dir, "ffprobe"), 0o755)
+        with mock.patch.dict(os.environ, {"PLEXCACHE_TOOLS_PATH": bin_dir, "PATH": bin_dir}):
+            for kw in ({}, {"lines": lambda line: None}):
+                t0 = time.time()
+                with self.assertRaises(tools.ToolError) as e:
+                    tools.run("mkvmerge", timeout=0.5, **kw)
+                self.assertEqual(str(e.exception), "mkvmerge took too long")
+                self.assertLess(time.time() - t0, 10)
+            self.assertIsNone(tools.version("ffprobe"))
+            with self.assertRaises(tools.ToolError) as e:
+                tools.run("mkvextract")
+            self.assertEqual(str(e.exception), "mkvextract isn't installed")
+
+    def test_claims_tidy_up(self):
+        """Releasing a claim that's gone is fine; other keys' claims, unreadable ones and stale ones
+        (a system that stopped mid-way) aren't counted, and the stale ones are removed."""
+        from plexcache.optimize import claims
+        folder = tempfile.mkdtemp(dir=TMP)
+        now = time.time()
+        self.assertEqual(claims.claim(folder, "key1", "mine", release=True, now=now)["claims"], [])
+        cdir = os.path.join(folder, ".plexcache", "claims")
+        os.makedirs(cdir, exist_ok=True)
+        for name, text in (("otherkey.your.json", '{"instance": "your", "at": %f}' % now), ("key1.brok.json", "{not json"),
+                           ("key1.olds.json", '{"instance": "olds", "at": %f}' % (now - claims.STALE - 60))):
+            with open(os.path.join(cdir, name), "w") as fh:
+                fh.write(text)
+        got = claims.claim(folder, "key1", "mine", now=now)
+        self.assertEqual([c["instance"] for c in got["claims"]], ["mine"])
+        self.assertFalse(os.path.exists(os.path.join(cdir, "key1.olds.json")))
+
+    def test_image_compression_keeps_the_original(self):
+        """Lossless compression keeps the original whenever it can't be sure: the tool failed or wrote
+        nothing, or the pixels couldn't be compared."""
+        from plexcache.optimize import images
+        d = tempfile.mkdtemp(dir=TMP)
+        src, out = os.path.join(d, "cover.jpg"), os.path.join(d, "small.jpg")
+        with open(src, "wb") as fh:
+            fh.write(b"\xff\xd8\xff\xe0" + b"\x00" * 4000)
+
+        def writes(data):
+            def run(*args, **kw):
+                if data is not None:
+                    with open(out, "wb") as fh:
+                        fh.write(data)
+            return run
+        with mock.patch.object(images, "find", lambda name: "/bin/" + name):
+            with mock.patch.object(images, "run", mock.Mock(side_effect=images.ToolError("jpegtran failed: bad"))):
+                self.assertEqual(images.compress(src, out)["why"], "jpegtran failed: bad")
+            with mock.patch.object(images, "run", writes(None)):
+                self.assertEqual(images.compress(src, out)["why"], "jpegtran wrote nothing")
+            with mock.patch.object(images, "run", writes(b"\xff\xd8" + b"\x00" * 100)), \
+                    mock.patch.object(images, "pixels", mock.Mock(side_effect=images.ToolError("ffmpeg failed"))):
+                got = images.compress(src, out)
+            self.assertEqual((got["path"], got["why"]), (src, "couldn't be checked: ffmpeg failed"))
+            self.assertFalse(os.path.exists(out))
+
     def test_file_progress(self):
         """How far through a file: read from mkvmerge's and ffmpeg's own progress lines as they come,
         weighted across the stages, and for a rewrite from the bytes copied and read back."""
@@ -3815,6 +5223,18 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(opt.rewrite_file(p, progress=pct.append)["result"], "rewritten")
         self.assertEqual((pct[0] < 50, pct[-1]), (True, 100.0))
         self.assertEqual(pct, sorted(pct))
+
+    def test_links_are_never_optimized(self):
+        """A link swapped in for a media file is refused: the optimizer works only on the file itself."""
+        from plexcache.optimize import optimizer as opt
+        real = self.path("real.mkv")
+        build_mkv(real)
+        link = os.path.join(os.path.dirname(real), "link.mkv")
+        os.symlink(real, link)
+        for run in (lambda: opt.rewrite_file(link), lambda: opt.optimize_file(link)):
+            with self.assertRaises(opt.Skipped):
+                run()
+        self.assertTrue(os.path.islink(link))
 
     def test_chapters_move_to_the_end(self):
         """Chapters (and attachments) in front of the video move to the end, after the attachments: the
@@ -3979,6 +5399,20 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(optimize_file(keep, force=True)["result"], "optimized")  # written again when asked
         extracted = tools.run("mkvextract", keep, "tags", "-")
         self.assertEqual(extracted.count("PLEXCACHE_OPTIMIZER"), 1)           # still once
+        # the tag choice: the file's own tags are small, so "excessive" leaves them; "strip" takes them
+        # (and the tracks' statistics) out, ours written back; then there's nothing more to strip
+        self.assertTrue(mkv.check(keep)["foreign_tags"])
+        self.assertFalse(opt.strips_tags("excessive", mkv.check(keep)))
+        self.assertEqual(optimize_file(keep, tags_mode="excessive")["result"], "already")
+        self.assertEqual(optimize_file(keep, tags_mode="strip")["result"], "optimized")
+        extracted = tools.run("mkvextract", keep, "tags", "-")
+        self.assertNotIn("keep me", extracted)
+        self.assertEqual(extracted.count("PLEXCACHE_OPTIMIZER"), 1)
+        self.assertFalse(mkv.check(keep)["foreign_tags"])
+        self.assertEqual(optimize_file(keep, tags_mode="strip")["result"], "already")
+        self.assertEqual(stream_hashes(keep), hashes)
+        with self.assertRaises(ValueError):
+            optimize_file(keep, tags_mode="some")
         # small attachments: mkvpropedit would put them before the video, so they're written by us
         self.assertLess(mkv.read_layout(keep)["front"][-1][1], mkv.read_layout(keep)["first_cluster"])
         self.assertNotIn("Attachments", [n for n, _, _ in mkv.read_layout(keep)["front"]])
@@ -4331,7 +5765,11 @@ class OptimizerTests(unittest.TestCase):
         app, op, client, d, state = self._app()
         lib = lambda: op.snapshot()["libraries"]["1"]
         # The defaults: TrueNAS compression & record size on, MKV off, Plex's cover art for unmatched items only
-        self.assertEqual(op.options("1"), {"sync": True, "mkv": False, "images": "unmatched"})
+        self.assertEqual(op.options("1"), {"sync": True, "mkv": False, "images": "unmatched", "tags": "keep", "convert": False})
+        app.libraries.append({"key": "2", "title": "Music", "type": "artist", "kind": "audio", "locations": []})
+        app.settings.update({"optimizer": {"libraries": {"2": {"mkv": True, "images": "remove"}}}})
+        self.assertEqual(op.options("2")["images"], "compress")             # music keeps its cover art, whatever's set
+        app.libraries.pop()
         op.survey()
         # The record has just begun: no file's compression is known yet — every kind of file
         self.assertEqual((lib()["files"], lib()["mkv"], lib()["sync_todo"], lib()["todo"]), (3, 2, 3, 3))
@@ -4364,7 +5802,7 @@ class OptimizerTests(unittest.TestCase):
         client.sent.clear()
         run_job(op)
         sent = [x for x in client.sent if x["action"] == "optimize"]
-        self.assertEqual([(x["images"], x["force"]) for x in sent], [("compress", False)] * 3)
+        self.assertEqual([(x["images"], x["force"], x["tags"]) for x in sent], [("compress", False, "keep")] * 3)
         self.assertEqual(len([x for x in client.sent if x["action"] == "claim" and not x["release"]]), 3)  # remuxes are claimed…
         self.assertTrue(all(not v for v in client.claims.values()))                # …and released
         self.assertEqual((lib()["mkv_done"], lib()["todo"]), (3, 0))
@@ -4509,7 +5947,7 @@ class OptimizerTests(unittest.TestCase):
             fh.write("x")
         with mock.patch.object(svc, "start", lambda *a, **kw: {"started": True, "kw": sorted(kw)}):
             self.assertTrue(c.rewrite(p)["started"])
-            self.assertEqual(c.optimize(p, "plex", False, cover=b"png")["kw"], [])
+            self.assertEqual(c.optimize(p, "plex", False, cover=b"png")["kw"], ["tags"])
             self.assertTrue(c.conflict(p, p)["started"])
         gone = optimizing.OptimizerClient("http://127.0.0.1:9", "a-long-test-token-123456")
         self.assertIn("error", gone.healthz())
@@ -4754,7 +6192,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(open(os.path.join(d, "a.mkv"), "rb").read(), before)        # untouched
         # kept after the job and across a restart, until dismissed
         self.assertEqual(len(jobs.Jobs(app).snapshot()["errors"]), 2)
-        self.assertEqual([en(i["title"]) for i in checks._job_failures(app)], ["2 files weren't optimized"])
+        self.assertEqual([en(i["title"]) for i in checks._job_failures(app)], ["2 files weren’t optimized"])
         app.jobs.dismiss()
         self.assertIsNone(app.jobs.snapshot())
         self.assertEqual(checks._job_failures(app), [])
@@ -4838,6 +6276,8 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(body.decode().splitlines()[0].split(",")[:4], ["type", "event", "time", "job"])
         self.assertNotIn("\ndisk,", body.decode())                                  # in the file's own row
         self.assertTrue(json.loads(log.export("json")[0]))
+        # a name that looks like a formula stays text in a spreadsheet
+        self.assertEqual((joblog._cell("=HYPERLINK(1)"), joblog._cell("-x"), joblog._cell(-5), joblog._cell("a")), ("'=HYPERLINK(1)", "'-x", "-5", "a"))
         # six months, then gone
         old = joblog.JobLog(tempfile.mkdtemp(dir=TMP))
         old.add({"type": "job", "job": "x", "event": "started", "at": time.time() - joblog.KEEP - 60})
@@ -5017,6 +6457,36 @@ class MigrateTests(unittest.TestCase):
         os.utime(os.path.join(root, "Book Two.m4b"), (1_600_000_000, 1_600_000_000))
         return files
 
+    def test_copy_odd_cases(self):
+        """A half-written file from a stopped copy isn't compared; a file that vanishes mid-scan is
+        skipped; a folder that can't be listed is neither empty nor not; no ACL support means no ACL."""
+        from plexcache.optimize import migrate
+        d = tempfile.mkdtemp(dir=TMP)
+        src, dst = os.path.join(d, "Books"), os.path.join(d, "Books-new")
+        self._tree(src)
+        os.mkdir(dst)
+        migrate.copy_tree(src, dst, migrate.Paused())
+        with open(os.path.join(dst, "Book Three.m4b" + migrate.PART), "wb") as fh:
+            fh.write(b"half")
+        self.assertTrue(migrate.compare(src, dst)["same"])
+        real = os.lstat
+
+        def lstat(path, *a, **kw):
+            if path.endswith("Book Two.m4b"):
+                raise FileNotFoundError(path)
+            return real(path, *a, **kw)
+        with mock.patch.object(migrate.os, "lstat", lstat):
+            self.assertTrue(migrate.compare(src, dst)["same"])                  # gone from both sides as far as it knows
+            got = migrate.copy_tree(src, dst, migrate.Paused())               # deleted meanwhile: skipped, not a failure
+            self.assertEqual((got["result"], got["files_total"], got["files_done"]), ("copied", 3, 3))
+        os.remove(os.path.join(dst, "Book Two.m4b"))
+        with mock.patch.object(migrate, "_copy_file", mock.Mock(side_effect=FileNotFoundError("gone"))), \
+                mock.patch.object(migrate.os.path, "lexists", lambda p: not p.endswith("Book Two.m4b")):
+            self.assertEqual(migrate.copy_tree(src, dst, migrate.Paused())["copied"], 0)
+        with mock.patch.object(migrate.os, "listdir", mock.Mock(side_effect=PermissionError("no access"))):
+            self.assertIsNone(migrate.probe(dst)["empty"])
+        self.assertFalse(migrate._has_acl(os.path.join(d, "no-such-file")))
+
     def test_copy(self):
         from plexcache.optimize import migrate
         d = tempfile.mkdtemp(dir=TMP)
@@ -5158,6 +6628,7 @@ class MigrateTests(unittest.TestCase):
         a failure listed with the job; a copy that can't start; and the wizard's errors from the optimizer."""
         from plexcache import jobs, migrating
         app = _new_app()
+        app.run_checks_async = lambda **kw: None  # (Health is told when what's next changes: not this test's)
         statuses, calls = [], []
         folder = "/data/Movies"
 
@@ -5288,8 +6759,13 @@ class MigrateTests(unittest.TestCase):
 
             def dataset_cache_props(self, name):
                 return props.get(name)
+
+            def call(self, method, params=None):
+                calls.append((method, params))
+        calls, opt = [], {"prop": True, "since": 0}
         app.truenas = lambda: TN()
         app.plex = lambda timeout=None: SimpleNamespace(library_count=lambda key: count["n"])
+        app.run_checks_async = lambda **kw: None  # (Health is told when what's next changes: not this test's)
 
         class Client:
             configured = True
@@ -5299,7 +6775,7 @@ class MigrateTests(unittest.TestCase):
                 return True
 
             def status(self, fresh=False):
-                return {"current": None, "results": self.results, "paused": False, "propagation": {d: True}}
+                return {"current": None, "results": self.results, "paused": False, "propagation": {d: opt["prop"]}, "since": opt["since"]}
 
             def _call(self, path, body, timeout=5):
                 a = body["action"]
@@ -5329,6 +6805,10 @@ class MigrateTests(unittest.TestCase):
             self.assertEqual(snap["state"]["step"], "create")
             failing = lambda: [x["id"] for x in mig.refresh()["checks"] if not x["ok"]]
             self.assertEqual(failing(), ["dataset"])                                   # not created yet
+            app.migration = mig
+            (h,) = checks._migration_items(app)                                         # Health says it waits on you
+            self.assertEqual((h["status"], en(h["title"])), ("warn", "Action needed to finish converting Books to a child dataset"))
+            self.assertIn("The new dataset tank/media/Books-new is there", en(h["detail"]))
             with self.assertRaises(ValueError):
                 mig.start_copy()
             # created with the wrong record size, then the wrong compression: still not copied
@@ -5342,36 +6822,74 @@ class MigrateTests(unittest.TestCase):
                 mig.start_copy()
             props["tank/media/Books-new"]["compression"] = "zstd"
             self.assertEqual(failing(), [])
+            # an optimizer without propagation, started before the dataset: it can't see it until it's
+            # restarted — which is done from here, through TrueNAS — and isn't asked for again meanwhile
+            opt["prop"] = False
+            mounted.discard(folder + "-new")
+            (c,) = [x for x in mig.refresh()["checks"] if not x["ok"]]
+            self.assertEqual((c["id"], c["action"]), ("sees", "restart"))
+            self.assertIn("propagation: rslave", c["cmd"])
+            with mock.patch.object(app.optimizing, "_containers", lambda: {"app": "plex-cache"}):
+                mig.restart()
+            self.assertEqual(calls, [("app.redeploy", ["plex-cache"])])
+            c = next(x for x in mig.refresh()["checks"] if x["id"] == "sees")
+            self.assertEqual(c["action"], "")
+            self.assertIn("Restarting Plex Cache", en(c["detail"]))
+            opt["since"] = time.time() + 1                                             # back, and it sees it
+            mounted.add(folder + "-new")
+            self.assertEqual(failing(), [])
+            mounted.discard(folder + "-new")                                           # started after it, yet not seen
+            self.assertIn("has to be inside the folder", en(next(x for x in mig.refresh()["checks"] if x["id"] == "sees")["detail"]))
+            mounted.add(folder + "-new")
+            with mock.patch.object(app.optimizing, "_containers", lambda: None):
+                with self.assertRaises(ValueError):
+                    mig.restart()                                                      # no TrueNAS API: said, not done
             # the copy: a file job, like optimizing
             def wait_job():
                 for _ in range(200):
                     if not app.jobs.busy():
                         return app.jobs.snapshot()
                     time.sleep(0.05)
+            def settled(cond):
+                for _ in range(300):
+                    if cond() and not app.jobs.busy() and not mig.state.get("copying"):
+                        return
+                    time.sleep(0.05)
+                raise AssertionError("the copy didn't settle")
             mig.start_copy()
-            self.assertEqual(wait_job()["kind"], "copy")
-            self.assertEqual(mig.refresh()["state"]["step"], "switch")
-            self.assertTrue(migrate.compare(folder, folder + "-new")["same"])
-            # a file added meanwhile: the last pass copies it and compares both
+            # the copy, then the last pass by itself: both compared, and when
+            settled(lambda: mig.state.get("compare"))
+            st = mig.refresh()["state"]
+            self.assertEqual((st["step"], st["compare"]["same"], st["last_pass"]["copied"]), ("switch", True, 0))
+            self.assertLess(time.time() - st["compare_at"], 60)
+            self.assertEqual(st["plex_before"], 12)
+            # a file added meanwhile: the pass again copies it, compares both, then moves the old folder by itself
             with open(os.path.join(folder, "Late.m4b"), "wb") as fh:
                 fh.write(b"late")
-            with self.assertRaises(ValueError):
-                mig.rename_old()                                                       # not compared yet
-            mig.start_copy(mirror=True)
-            wait_job()
-            st = mig.refresh()["state"]
-            self.assertTrue(st["compare"]["same"])
-            self.assertEqual(st["plex_before"], 12)
-            mig.rename_old()
+            mig.pass_then_move()
+            settled(lambda: mig.state.get("old_path"))
+            st = mig.state
+            self.assertEqual((st["compare"]["same"], st["last_pass"]["copied"]), (True, 1))
+            self.assertTrue(os.path.exists(os.path.join(folder + "-new", "Late.m4b")))
             self.assertTrue(os.path.isdir(os.path.join(d, ".Books.plexcache-old")))
-            mig.undo_rename()                                                          # undo, then again
+            # set aside: other file jobs wait until the dataset is renamed (the copies don't)
+            app.jobs.holds = [mig.hold]
+            self.assertIn("Books", en(app.jobs.hold_reason("optimize")))
+            self.assertIsNone(app.jobs.hold_reason("copy"))
+            mig.undo_rename()                                                          # put back, then again
             self.assertTrue(os.path.isdir(folder))
+            self.assertIsNone(app.jobs.hold_reason("optimize"))
+            mig.state["compare_at"] = time.time() - 3600                               # compared a while ago: not without a last pass
+            with self.assertRaises(ValueError):
+                mig.rename_old()
+            mig.state["compare_at"] = time.time()
             mig.rename_old()
             # you rename the dataset in TrueNAS: it's mounted at the folder's path now
             os.rename(folder + "-new", folder)
             mounted.add(folder)
             props["tank/media/Books"] = props.pop("tank/media/Books-new")
             self.assertEqual(mig.refresh()["state"]["step"], "verify")
+            self.assertIsNone(app.jobs.hold_reason("optimize"))                        # renamed: the hold is lifted
             count["n"] = 11                                                            # Plex hasn't found them all yet
             self.assertEqual(failing(), ["plex"])
             with self.assertRaises(ValueError):
@@ -5495,13 +7013,88 @@ class OptimizerSetupTests(unittest.TestCase):
             containers = None
             hz = {"error": "Name does not resolve"}
             self.assertEqual(ids(), [("yaml", False)])
-            self.assertIn("If it's already there", en(op.setup["steps"][0]["fix"]))
+            self.assertIn("If it’s already there", en(op.setup["steps"][0]["fix"]))
         # Health: ready, or what's left, in one line
         app.optimizing = op
         with mock.patch.object(op, "diagnose", lambda: {"ready": False, "steps": [
-                {"id": "yaml", "ok": True, "title": "In the app's YAML"}, {"id": "running", "ok": False, "title": "The optimizer isn't running"}]}):
+                {"id": "yaml", "ok": True, "title": "In the app’s YAML"}, {"id": "running", "ok": False, "title": "The optimizer isn’t running"}]}):
             it = checks._optimizer_check(app)
-        self.assertEqual((it["status"], en(it["title"]), en(it["detail"])), ("warn", "Optimizer: not working yet", "The optimizer isn't running"))
+        self.assertEqual((it["status"], en(it["title"]), en(it["detail"])), ("warn", "Optimizer: not working yet", "The optimizer isn’t running"))
+
+    def test_setup_edge_steps(self):
+        """Something else answering on the optimizer's port, a health check that keeps failing, tools
+        missing from an old image; TrueNAS that can't be asked, or doesn't list this container; a token
+        that can't be kept; and a background check that fails — each said plainly, never an error."""
+        from plexcache import checks, zfs
+        from plexcache.optimizing import Optimizing
+        app = _new_app()
+        op = Optimizing(app)
+        last = lambda: op.diagnose()["steps"][-1]
+        containers = {"app": "plex-cache", "me": "plex-cache", "optimizer": {"service_name": "plex-cache-optimizer", "state": "running"}}
+        hz = {"service": "web", "version": 1}
+        st = {"missing": ["mkvmerge"], "roots": []}
+        with mock.patch.dict(os.environ, {"PLEXCACHE_OPTIMIZER_URL": ""}), \
+                mock.patch.object(op, "_containers", lambda: containers), \
+                mock.patch.object(op.client, "healthz", lambda: hz), \
+                mock.patch.object(op.client, "status", lambda fresh=False: st), \
+                mock.patch.object(checks, "optimizer_code_mount", lambda: None):
+            self.assertEqual(en(last()["title"]), "Something else answers at " + op.client.url)
+            hz = {"service": "optimizer", "version": 1, "token": True}
+            containers["optimizer"] = {"service_name": "plex-cache-optimizer", "state": "unhealthy", "healthcheck": True}
+            self.assertEqual(en(last()["title"]), "Its health check doesn’t pass")
+            containers["optimizer"]["state"] = "running"
+            self.assertEqual((last()["id"], en(last()["fix"])), ("tools", "In TrueNAS, Apps → plex-cache: update its image to the latest."))
+        # TrueNAS can't be asked, or this container isn't among its apps' containers
+        with mock.patch.object(zfs, "own_container_id", lambda: "f" * 64):
+            with mock.patch.object(app, "truenas", mock.Mock(side_effect=TrueNASError("no key"))):
+                self.assertIsNone(op._containers())
+            tn = mock.MagicMock()
+            tn.__enter__.return_value.apps.return_value = [{"name": "other", "active_workloads": {"container_details": [{"id": "0" * 64}]}}]
+            with mock.patch.object(app, "truenas", lambda: tn):
+                self.assertIsNone(op._containers())
+        # a token that can't be written is made again next time
+        from plexcache.optimizing import TOKEN_FILE
+        os.remove(os.path.join(app.config_dir, TOKEN_FILE))
+        with mock.patch.object(os, "open", mock.Mock(side_effect=PermissionError("read-only"))):
+            self.assertEqual(len(Optimizing(app).client.token), 48)
+        # a check in the background that fails just leaves it as it was
+        op.setup = {"ready": False, "steps": [], "at": 0}
+        with mock.patch.object(op, "diagnose", mock.Mock(side_effect=RuntimeError("boom"))):
+            op.diagnose_soon()
+            self.assertTrue(wait_for(lambda: not op._diagnosing))
+        # an unknown cover art choice (from a newer version, say) falls back to the default
+        app.settings._data["optimizer"]["libraries"] = {"1": {"images": "sparkle"}}
+        self.assertEqual(op.options("1")["images"], "unmatched")
+
+    def test_file_checks_that_cant_go_ahead(self):
+        """A file that's gone, an optimizer that isn't ready, cover art that can't be checked (not an
+        MKV, unreadable, not optimized yet, Plex's poster unavailable), and an ID that can't be kept."""
+        from plexcache.optimize import VERSION
+        from plexcache.optimizing import Optimizing
+        app = _new_app()
+        op = Optimizing(app)
+        app.settings.update({"optimizer": {"libraries": {"1": {"sync": True, "mkv": True, "images": "plex"}}}})
+        self.assertEqual(op.file_status("/no/such/file.mkv", "1", {}), {"applies": False, "missing": True, "mkv": True})
+        with mock.patch.object(op.client, "ready", lambda: False):
+            self.assertFalse(op.start_library("1"))
+        d = tempfile.mkdtemp(dir=TMP)
+        p = os.path.join(d, "film.mkv")
+        build_mkv(p)
+        self.assertIsNone(op._cover_todo(os.path.join(d, "film.mp4"), "1", "/library/metadata/1/thumb/1", True))   # not an MKV
+        self.assertIsNone(op._cover_todo(os.path.join(d, "gone.mkv"), "1", "/library/metadata/1/thumb/1", True))   # can't be read
+        self.assertIsNone(op._cover_todo(p, "1", "/library/metadata/1/thumb/1", True))                          # not optimized yet
+        with mock.patch.object(op, "_mkv_info", lambda path, st: {"ours": {"PLEXCACHE_OPTIMIZER": VERSION}}), \
+                mock.patch.object(op, "_poster", mock.Mock(side_effect=PlexError("Plex is down"))):
+            self.assertIsNone(op._cover_todo(p, "1", "/library/metadata/1/thumb/1", True))
+        # a season's episodes share a poster: kept for the run, but only a few at a time
+        got = []
+        app.plex = lambda timeout=None: types.SimpleNamespace(image=lambda path: got.append(path) or path.encode())
+        for i in range(12):
+            op._poster(f"/library/metadata/{i}/thumb/1")
+        self.assertLessEqual(len(op._posters), 9)
+        # this system's ID for claims, when the config folder can't keep it: a new one each time
+        os.makedirs(os.path.join(app.config_dir, "instance-id"))
+        self.assertEqual(len(op.instance()), 16)
 
     def test_own_container_and_its_app(self):
         from plexcache.optimizing import Optimizing
@@ -5718,7 +7311,7 @@ class CoverArtTests(unittest.TestCase):
         n = len(optimized())
         run_job_mode(op, "covers")
         self.assertEqual([(x["images"], x["force"]) for x in optimized()[n:]], [("remove", True)])
-        # Compress and Embed Plex Cover Art, poster changed: Sync Cover Art puts the new one in
+        # Compress and embed Plex cover art, poster changed: Sync Cover Art puts the new one in
         app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "sync": False, "images": "plex"}}}})
         n = len(optimized())
         run_job_mode(op, "covers")
@@ -5757,6 +7350,17 @@ class HealthBranchTests(unittest.TestCase):
         pools = {"tank": {"name": "tank", "l2_online": 1, "l2_total": 10 ** 11, "cache_devices": [{}]}} if pools is None else pools
         return self.checks._dataset_row(self.app, d, pools, tn_ok)
 
+    def test_dataset_rows_less_common(self):
+        """A non-ZFS folder holding only unticked libraries says nothing more; cache settings TrueNAS
+        didn't return are "couldn't read", with the command to look by hand."""
+        r = self.row(self.ds(dataset=None, pool=None, fstype="nfs", libraries=[], keys=[], off=["Music"]))
+        self.assertIsNone(r["cache"])
+        r = self.row(self.ds(props={"primarycache": None, "secondarycache": "all", "recordsize": 1048576}))
+        self.assertEqual(en(r["cache"]["text"]), "Couldn’t read")
+        (fix,) = r["fixes"]
+        self.assertEqual(en(fix["detail"]), "TrueNAS didn’t return primarycache for tank/x (TV Shows), so this wasn’t checked.")
+        self.assertIn("sudo zfs get primarycache,secondarycache,recordsize tank/x", fix["fix_cmd"])
+
     def test_dataset_rows(self):
         r = self.row(self.ds(libraries=[], keys=[], off=["Music"]))
         self.assertEqual((r["in_use"]["text"], r["cache"]), ("Music · caching off", None))
@@ -5765,9 +7369,13 @@ class HealthBranchTests(unittest.TestCase):
                              props={"primarycache": "metadata", "secondarycache": "all", "recordsize": 131072},
                              blocks={"checked": 10, "single": 0, "sizes": {"1048576": 10}}))
         # the setting itself is a separate check from whether the files use it
-        self.assertEqual((r["cache"], r["l2arc"], r["file_rs"]["status"], r["file_rs"]["badge"]), (None, None, "warn", "Some don't match"))
+        self.assertEqual((r["cache"], r["l2arc"], r["file_rs"]["status"], r["file_rs"]["badge"]), (None, None, "warn", "None match"))
         self.assertEqual(r["fixes"], [])                                  # what to do is in the column's info box
         self.assertEqual(r["file_rs"]["text"], "10 of 10 files in 1M")
+        r = self.row(self.ds(libraries=[], keys=[], off=["Films"], kinds=["movie"],
+                             props={"primarycache": "metadata", "secondarycache": "all", "recordsize": 131072},
+                             blocks={"checked": 10, "single": 0, "sizes": {"1048576": 4, "131072": 6}}))
+        self.assertEqual((r["file_rs"]["badge"], r["file_rs"]["text"]), ("Some don’t match", "4 of 10 files in 1M"))
         # files that all match: nothing to fix here (whether 128K suits the library is under Libraries)
         r = self.row(self.ds(libraries=[], keys=[], off=["Films"], kinds=["movie"],
                              props={"primarycache": "metadata", "secondarycache": "all", "recordsize": 131072},
@@ -5780,7 +7388,7 @@ class HealthBranchTests(unittest.TestCase):
         with mock.patch.object(self.checks, "_shared_record_check",
                                return_value={"needs": [], "move": ["Audiobooks"], "keep": 1024 * 1024}):
             r = self.row(self.ds())
-        self.assertEqual((r["recordsize"]["status"], en(r["recordsize"]["badge"]), r["recordsize"]["text"]), ("warn", "Split Dataset", "1M"))
+        self.assertEqual((r["recordsize"]["status"], en(r["recordsize"]["badge"]), r["recordsize"]["text"]), ("warn", "Split dataset", "1M"))
         self.assertEqual([en(x) for x in r["recordsize"]["lines"]], ["Move Audiobooks to a dataset of its own; 1M suits the rest."])
         # compression: the badge says what's used; ZSTD-3 is all that passes
         self.assertEqual((r["compression"]["status"], r["compression"]["text"]), ("info", "Not checked"))
@@ -5816,7 +7424,7 @@ class HealthBranchTests(unittest.TestCase):
         self.app.zfs = dict(z, truenas_error="connection refused", arc=None)
         zitems = {i["title"]: i for i in self.checks.check_zfs(self.app)["items"]}
         self.assertEqual(zitems["TrueNAS API"]["status"], "fail")
-        self.assertIn("Can't read ZFS statistics", zitems)
+        self.assertIn("Can’t read ZFS statistics", zitems)
         ditems = {i["title"] for i in self.checks.check_datasets(self.app)["items"]}
         self.assertIn("Dataset settings: not checked", ditems)
         self.app.settings.update({"truenas": {"api_key": ""}})
@@ -5828,7 +7436,7 @@ class HealthBranchTests(unittest.TestCase):
         self.app.scan_error = "Plex said no"
         self.app.monitor.last_error = "timed out"
         items = {i["title"]: i for i in self.checks.check_plex(self.app)["items"]}
-        self.assertEqual(items["Couldn't list libraries"]["status"], "fail")
+        self.assertEqual(items["Couldn’t list libraries"]["status"], "fail")
         self.assertEqual(items["Now-playing feed"]["status"], "warn")
         self.app.monitor.last_error = None
 
@@ -5847,7 +7455,7 @@ class HealthBranchTests(unittest.TestCase):
         base = {"result": "ok", "started": 1, "l2_growth": 5e9}
         self.app.activity.runs = [dict(base), dict(base, hit_rate=0.05)]
         g = self.checks.check_effectiveness(self.app)
-        self.assertEqual(g["items"][0]["title"], "Warm-up reads aren't staying cached")
+        self.assertEqual(g["items"][0]["title"], "Warm-up reads aren’t staying cached")
         self.app.activity.runs = [dict(base), dict(base, hit_rate=0.8)]
         self.assertEqual(self.checks.check_effectiveness(self.app)["items"][0]["status"], "pass")
         self.app.activity.runs = [dict(base), dict(base, hit_rate=None)]
@@ -5862,9 +7470,30 @@ class HealthBranchTests(unittest.TestCase):
         self.assertIn("no L2ARC on pool slow", rec["reason"])
         self.app.zfs = z
 
+    def test_optimizer_lines(self):
+        """Health's optimizer lines: ready (with what it can write), Syncthing conflict copies found next
+        to the media, and the test copy's code mount found from the container's mounts."""
+        c = self.checks
+        from plexcache import zfs
+        op = types.SimpleNamespace(
+            diagnose=lambda: {"ready": True, "steps": [{"id": "yaml", "ok": True, "title": "In the app’s YAML"},
+                                                       {"id": "media", "ok": True, "title": "Can write /data"}]},
+            snapshot=lambda: {"libraries": {"1": {"conflicts": [{"copy": "/data/Film.sync-conflict-20261018-ABC.mkv"}]}}})
+        app = types.SimpleNamespace(optimizing=op)
+        ready = c._optimizer_check(app)
+        self.assertEqual((ready["status"], en(ready["title"]), ready["detail"]), ("pass", "Optimizer ready", "Can write /data"))
+        (conflict,) = c._conflict_items(app)
+        self.assertEqual((en(conflict["title"]), en(conflict["detail"])),
+                         ("1 Syncthing conflict copy", "Next to your media: Film.sync-conflict-20261018-ABC.mkv."))
+        here = os.path.dirname(os.path.abspath(c.__file__))
+        mounts = [{"mountpoint": here, "root": "/AppConfigs/plex-cache-dev/src/plexcache", "source": "ssd/apps", "fstype": "zfs",
+                   "options": [], "optional": []}]
+        with mock.patch.object(zfs, "mounts", lambda: mounts), mock.patch.object(zfs, "host_path", lambda p, ml: "/mnt/ssd/AppConfigs/plex-cache-dev/src/plexcache"):
+            self.assertEqual(c.optimizer_code_mount(), "/mnt/ssd/AppConfigs/plex-cache-dev/src/plexcache")
+
     def test_summaries(self):
         c = self.checks
-        names = ("check_plex", "check_media", "check_datasets", "check_zfs", "check_effectiveness")
+        names = ("check_plex", "check_media", "check_datasets", "check_cache_mode", "check_zfs", "check_effectiveness")
         saved = {n: getattr(c, n) for n in names}
         group = lambda *st: {"id": "g", "items": [c.item(x, "t") for x in st]}
         try:
@@ -5873,10 +7502,13 @@ class HealthBranchTests(unittest.TestCase):
             c.check_effectiveness = lambda app: group("warn")       # the "Is it working?" group is added when present
             res = c.run_all(self.app)
             self.assertEqual(len(res["groups"]), 6)
-            self.assertEqual(res["summary"]["text"], "Working, with 1 warning worth a look below.")
+            self.assertEqual(res["summary"]["text"], "Working — the orange items below could be better.")
+            self.assertEqual(res["counts"]["warn"], 1)                       # (the numbers are in the tiles)
             c.check_zfs = lambda app: group("fail", "warn")
-            self.assertEqual(c.run_all(self.app)["summary"]["text"],
-                             "1 problem to fix and 2 warnings — see the red and orange items below.")
+            self.assertEqual(c.run_all(self.app)["summary"]["text"], "Something needs fixing — see the red and orange items below.")
+            c.check_effectiveness = lambda app: group("pass")
+            c.check_zfs = lambda app: group("fail")
+            self.assertEqual(c.run_all(self.app)["summary"]["text"], "Something needs fixing — see the red items below.")
             c.check_effectiveness = lambda app: None
             c.check_zfs = lambda app: group("pass")
             self.assertEqual(c.run_all(self.app)["summary"]["text"], "Everything is OK.")
@@ -5988,6 +7620,33 @@ class LoginTests(unittest.TestCase):
         finally:
             self.authmod.FAIL_DELAY = 0
 
+    def test_lockout_after_wrong_passwords(self):
+        """An address that keeps getting the password wrong is refused for a while, even with the right one."""
+        auth = self.app.auth
+        auth._fails.clear()
+        for _ in range(self.authmod.LOCKOUT_FAILS):
+            self.assertEqual(self.sign_in(pw="nope")[0], 401)
+        status, body, _ = self.req("POST", "/login", {"username": "admin", "password": "hunter2"})
+        self.assertEqual(status, 429)
+        self.assertIn("15 minutes", json.loads(body)["error"]["_t"])
+        # later: a fresh start; and a right password clears the count
+        n, at = auth._fails["127.0.0.1"]
+        auth._fails["127.0.0.1"] = (n, at - self.authmod.LOCKOUT_SECONDS - 1)
+        self.assertEqual(self.sign_in()[0], 200)
+        self.assertNotIn("127.0.0.1", auth._fails)
+        auth.note_attempt("10.0.0.9", False)
+        auth.note_attempt("10.0.0.9", True)
+        self.assertNotIn("10.0.0.9", auth._fails)
+        with mock.patch.object(auth, "_fails", {f"10.{i // 250}.{i % 250}.1": (1, float(i)) for i in range(10001)}):
+            auth.note_attempt("10.200.0.1", False)                                     # many addresses: the oldest forgotten
+            self.assertLess(len(auth._fails), 6000)
+
+    def test_secure_cookie_over_https(self):
+        _, _, headers = self.req("POST", "/login", {"username": "admin", "password": "hunter2"})
+        self.assertNotIn("Secure", headers["Set-Cookie"])
+        _, _, headers = self.req("POST", "/login", {"username": "admin", "password": "hunter2"}, headers={"X-Forwarded-Proto": "https"})
+        self.assertIn("; Secure", headers["Set-Cookie"])
+
     def test_security_headers_and_host(self):
         _, body, headers = self.req("GET", "/")
         csp = headers["Content-Security-Policy"]
@@ -6045,7 +7704,7 @@ class LoginTests(unittest.TestCase):
             self.assertIn("default password", en(body["error"]))
             self.assertIn("PLEXCACHE_PASSWORD", en(body["error"]))
             self.assertIsNone(headers.get("Set-Cookie"))
-            self.assertTrue(any("hasn't been changed" in e["message"] for e in app.activity.snapshot()["events"]))
+            self.assertTrue(any("hasn’t been changed" in e["message"] for e in app.activity.snapshot()["events"]))
             # A wrong guess still just says it doesn't match (nothing given away)
             self.assertEqual(post("plex-cache", "nope")[0], 401)
             # Basic auth and a forged-but-valid session don't get in either
@@ -6117,6 +7776,42 @@ class ValidationTests(unittest.TestCase):
     def bad(self, patch):
         with self.assertRaises(config.SettingsError, msg=patch):
             self.s.update(patch)
+
+    def test_library_choices_are_checked(self):
+        """Per-library choices must be objects keyed by real library keys; null puts a library back
+        to its defaults; and nothing outside the rules can be set at all."""
+        for sec in ("warmup", "optimizer", "nextepisode"):
+            self.bad({sec: {"libraries": "everything"}})
+            self.bad({sec: {"libraries": {"../etc": {}}}})
+        self.s.update({"warmup": {"libraries": {"1": {"schedule": "weekly"}}}, "optimizer": {"libraries": {"1": {"mkv": True}}},
+                       "nextepisode": {"libraries": {"1": {"start": "next"}}}})
+        self.s.update({"warmup": {"libraries": {"1": None}}, "optimizer": {"libraries": {"1": None}},
+                       "nextepisode": {"libraries": {"1": None}}})
+        for sec in ("warmup", "optimizer", "nextepisode"):
+            self.assertNotIn("1", self.s.section(sec)["libraries"])
+        self.s.update({"plex": {"url": ""}})                                  # an empty address just clears it
+        self.assertEqual(self.s.section("plex")["url"], "")
+        with self.assertRaises(config.SettingsError):
+            config._coerce("general", "no_such_setting", 1, None)
+
+    def test_old_settings_are_brought_up_to_date(self):
+        """Settings from earlier versions load as today's: unticked libraries, the whole season near the
+        end, a monthly warm-up, retired choices; a settings file that can't be moved aside is left."""
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "settings.json"), "w") as fh:
+            json.dump({"nextepisode": {"excluded_libraries": [3], "libraries": {"2": {"end": "whole"}}},
+                       "warmup": {"libraries": {"2": {"schedule": "monthly"}}},
+                       "general": {"poll_seconds": 7}}, fh)
+        s = config.Settings(d)
+        ne = s.section("nextepisode")["libraries"]
+        self.assertEqual((ne["3"], ne["2"]["end"]), ({"start": "off", "end": "none"}, "rest"))
+        self.assertEqual(s.section("warmup")["libraries"]["2"]["schedule"], "twice_monthly")
+        self.assertEqual(s.section("general")["poll_seconds"], config.DEFAULTS["general"]["poll_seconds"])
+        with open(os.path.join(d, "settings.json"), "w") as fh:
+            fh.write("{broken")
+        with mock.patch.object(config.os, "replace", mock.Mock(side_effect=OSError("read-only"))):
+            self.assertEqual(s._load(), config.DEFAULTS)
+        self.assertTrue(os.path.exists(os.path.join(d, "settings.json")))                # (left where it was)
 
     def test_every_setting_has_a_rule(self):
         for sec, values in config.DEFAULTS.items():
@@ -6225,9 +7920,9 @@ class ValidationTests(unittest.TestCase):
             music = next(l for l in app.libraries if l["title"] == "Music")
             status, body = post("/api/settings", {"nextepisode": {"libraries": {photos["key"]: {"start": "next"}}}})
             self.assertEqual(status, 400)
-            self.assertIn("doesn't cover", en(body["error"]))
+            self.assertIn("doesn’t cover", en(body["error"]))
             status, body = post("/api/settings", {"nextepisode": {"libraries": {music["key"]: {"start": "next_group"}}}})
-            self.assertIn("isn't a prefetch choice", en(body["error"]))
+            self.assertIn("isn’t a prefetch choice", en(body["error"]))
             self.assertEqual(post("/api/settings", {"nextepisode": {"libraries": {"9999": {"start": "off"}}}})[0], 400)
             self.assertEqual(post("/api/settings", {"nextepisode": {"libraries": {tv["key"]: {"start": "off"}}}})[0], 200)
             self.assertEqual(post("/api/settings", {"nextepisode": {"libraries": {}}})[0], 200)
@@ -6244,6 +7939,34 @@ class ValidationTests(unittest.TestCase):
                 urllib.request.urlopen(base + "/api/plex/pin/1")
             self.assertEqual(cm.exception.code, 404)
             cm.exception.close()
+            # a body length that isn't a number
+            import http.client
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            conn.putrequest("POST", "/api/settings")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", "lots")
+            conn.endheaders()
+            resp = conn.getresponse()
+            self.assertEqual((resp.status, json.loads(resp.read())["error"]), (400, "bad Content-Length"))
+            conn.close()
+
+            def get(path):
+                try:
+                    with urllib.request.urlopen(base + path) as r:
+                        return r.status, r.read()
+                except urllib.error.HTTPError as e:
+                    with e:
+                        return e.code, e.read()
+            # the cache log: exported in full for a look into problems, and started again
+            status, raw = get("/api/cachelog/export")
+            self.assertEqual(status, 200)
+            self.assertIsInstance(json.loads(raw), dict)
+            self.assertEqual(get("/api/coverage")[0], 200)
+            self.assertEqual(post("/api/cachelog/reset", {})[0], 200)
+            self.assertIn("started again", en(app.activity.snapshot()["events"][0]["message"]))
+            # a library file that can't be read now
+            with mock.patch.object(app, "file_view", mock.Mock(side_effect=PermissionError("no access"))):
+                self.assertEqual(get("/api/library/file?path=/x.mkv")[0], 404)
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -6460,10 +8183,10 @@ class MQTTTests(unittest.TestCase):
         """The web pages' summaries say "see below"; Home Assistant has nothing below them."""
         from plexcache.homeassistant import _health_text, _verdict
         rep = {"span": "Last 7 days", "verdict": {"status": "warn", "text": "Last 7 days: 2 things could be better — see below."},
-               "attention": [{"status": "warn", "title": "Preloads aren't staying in RAM (22% still cached)"},
+               "attention": [{"status": "warn", "title": "Preloads aren’t staying in RAM (22% still cached)"},
                              {"status": "info", "title": "Not a problem"},
                              {"status": "warn", "title": "1 next episode not ready in time"}]}
-        self.assertEqual(_verdict(rep), "Last 7 days: Preloads aren't staying in RAM (22% still cached); 1 next episode not ready in time")
+        self.assertEqual(_verdict(rep), "Last 7 days: Preloads aren’t staying in RAM (22% still cached); 1 next episode not ready in time")
         self.assertEqual(_verdict({"verdict": {"status": "ok", "text": "All good."}}), "All good.")
         self.assertEqual(_health_text({"summary": {"status": "fail"}, "counts": {"fail": 1, "warn": 2}}),
                          "1 problem to fix and 2 warnings — open Health in Plex Cache for the details.")
@@ -6592,8 +8315,7 @@ class MQTTTests(unittest.TestCase):
         self.assertLess(len(self.broker.state("plexcache/info")), 20000)
         # Number controls show their value and unit (a slider wouldn't, on the device page)
         numbers = [v for t, v in disc.items() if t.startswith("homeassistant/number/")]
-        manual = self.state()["warmup_pacing_manual"]                                   # (pacing's share only while automatic is off)
-        self.assertEqual(len(numbers), 4 if manual else 3)
+        self.assertEqual(len(numbers), 4)                                               # (pacing's share: unavailable while automatic)
         self.assertTrue(any("/warmup_pacing_auto/" in t for t in disc))
         for n in numbers:
             self.assertEqual(n["mode"], "box")
@@ -6614,13 +8336,13 @@ class MQTTTests(unittest.TestCase):
         # Per library, the two Prefetch choices in the library's own words, Default first
         libs = {v["name"]: v for t, v in disc.items() if "/library_" in t}
         tv = libs["TV Shows Lead-in Cache prefetch"]
-        self.assertEqual(tv["options"], ["Default", "Don't prefetch", "Next episode", "Rest of the season", "Whole season",
+        self.assertEqual(tv["options"], ["Default", "Don’t prefetch", "Next episode", "Rest of the season", "Whole season",
                                          "Next season", "All seasons of the show", "Every show in the library"])
         self.assertEqual(libs["TV Shows Whole File Cache prefetch"]["options"], ["Default", "Nothing", "Next episode", "Rest of the season"])
         self.assertEqual(len(libs["Music Lead-in Cache prefetch"]["options"]), 7)          # no "next album"
         self.assertIn("Next book", libs["Audiobooks Lead-in Cache prefetch"]["options"])
         self.assertEqual(libs["Movies Lead-in Cache prefetch"]["options"],
-                         ["Default", "Don't prefetch", "Next movie in the collection", "Rest of the collection", "Whole collection",
+                         ["Default", "Don’t prefetch", "Next movie in the collection", "Rest of the collection", "Whole collection",
                           "Every movie in the library"])
         # Every template reads a key that exists in the state
         import re as _re
@@ -6630,19 +8352,28 @@ class MQTTTests(unittest.TestCase):
                 self.assertIn(m.group(1), st, t)
 
     def test_commands(self):
+        # (put back whatever happens, so a failure here doesn't spill into the tests after it)
+        self.addCleanup(self.app.settings.update, {"nowplaying": {"enabled": True, "ram_percent": 20},
+                                                   "general": {"poll_seconds": 5, "ram_reserve_gb": 4},
+                                                   "warmup": {"pacing_percent": 10, "pacing_auto": True}})
         self.enable()
         self.assertTrue(wait_for(lambda: self.state() is not None))
         self.assertTrue(wait_for(lambda: any("plexcache/set/#" in c[1] for c in self.broker.clients)))
+        self.broker.inject("plexcache/set/nowplaying_ram_percent", "35")
+        self.assertTrue(wait_for(lambda: self.app.settings.section("nowplaying")["ram_percent"] == 35))
         self.broker.inject("plexcache/set/nowplaying_enabled", "OFF")
         self.assertTrue(wait_for(lambda: not self.app.settings.section("nowplaying")["enabled"]))
         self.assertTrue(wait_for(lambda: (self.state() or {}).get("nowplaying_enabled") == "OFF"))
-        self.broker.inject("plexcache/set/nowplaying_ram_percent", "35")
-        self.assertTrue(wait_for(lambda: self.app.settings.section("nowplaying")["ram_percent"] == 35))
+        self.assertTrue(wait_for(lambda: (self.state() or {}).get("available", {}).get("nowplaying_ram_percent") is False))
+        # its RAM limit doesn't apply while it's off: unavailable in Home Assistant, and a command for it refused
+        self.broker.inject("plexcache/set/nowplaying_ram_percent", "40")
+        self.assertTrue(wait_for(lambda: any("only while Now Playing Cache is on" in e["message"] for e in self.app.activity.snapshot()["events"])))
+        self.assertEqual(self.app.settings.section("nowplaying")["ram_percent"], 35)
         self.broker.inject("plexcache/set/poll_seconds", "10 seconds")
         self.assertTrue(wait_for(lambda: self.app.settings.section("general")["poll_seconds"] == 10))
         tv = next(l for l in self.app.libraries if l["kind"] == "tv")
         libs = lambda: self.app.settings.section("nextepisode")["libraries"]
-        self.broker.inject(f"plexcache/set/library_{tv['key']}_prefetch_start", "Don't prefetch")
+        self.broker.inject(f"plexcache/set/library_{tv['key']}_prefetch_start", "Don’t prefetch")
         self.assertTrue(wait_for(lambda: libs().get(tv["key"], {}).get("start") == "off"))
         self.broker.inject(f"plexcache/set/library_{tv['key']}_prefetch_end", "Rest of the season")
         self.assertTrue(wait_for(lambda: libs().get(tv["key"], {}).get("end") == "rest"))
@@ -6651,10 +8382,14 @@ class MQTTTests(unittest.TestCase):
         self.broker.inject(f"plexcache/set/library_{tv['key']}_prefetch_start", "Next book")
         self.broker.inject("plexcache/set/poll_seconds", "2 seconds")
         self.broker.inject("plexcache/set/nope", "1")
-        self.assertTrue(wait_for(lambda: sum("couldn't do" in e["message"] for e in self.app.activity.snapshot()["events"]) >= 3))
+        self.assertTrue(wait_for(lambda: sum("couldn’t do" in e["message"] for e in self.app.activity.snapshot()["events"]) >= 3))
         self.assertEqual(libs()[tv["key"]], {"start": "off", "end": "rest"})
         # Buttons, numbers and the remaining selects
         calls = []
+        from plexcache import homeassistant as ha
+        everything = mock.patch.object(ha, "control_availability", lambda app, s, wu: {k: True for k in ha.AVAILABLE_WHEN})
+        everything.start()                                                              # (whatever the NAS: L2ARC, warm-up running)
+        self.addCleanup(everything.stop)
         saved = {n: getattr(self.app, n) for n in ("start_warmup", "stop_warmup", "run_checks_async", "run_benchmark")}
         self.app.start_warmup = lambda manual: calls.append("run")
         self.app.stop_warmup = lambda: calls.append("stop")
@@ -6671,9 +8406,9 @@ class MQTTTests(unittest.TestCase):
         # Out of range, not a whole number, or not a number: refused by the same rules as the web UI
         for name, value in (("nowplaying_ram_percent", "95"), ("warmup_pacing_percent", "2"), ("ram_reserve_gb", "6.5"),
                             ("ram_reserve_gb", "nan"), ("poll_seconds", "7")):
-            n = sum("couldn't do" in e["message"] for e in self.app.activity.snapshot()["events"])
+            n = sum("couldn’t do" in e["message"] for e in self.app.activity.snapshot()["events"])
             self.broker.inject(f"plexcache/set/{name}", value)
-            self.assertTrue(wait_for(lambda: sum("couldn't do" in e["message"] for e in self.app.activity.snapshot()["events"]) > n),
+            self.assertTrue(wait_for(lambda: sum("couldn’t do" in e["message"] for e in self.app.activity.snapshot()["events"]) > n),
                             (name, value))
         self.broker.inject("plexcache/set/warmup_pacing_percent", "25")
         self.broker.inject("plexcache/set/ram_reserve_gb", "6")
@@ -6689,8 +8424,42 @@ class MQTTTests(unittest.TestCase):
             self.assertFalse(self.app.settings.section("nowplaying")["enabled"])
         finally:
             self.app.feature_available = saved_fa
+        # automatic L2ARC pacing takes ON or OFF; a Prefetch choice needs a library Plex has
+        self.broker.inject("plexcache/set/warmup_pacing_auto", "OFF")
+        self.assertTrue(wait_for(lambda: self.app.settings.section("warmup")["pacing_auto"] is False))
+        for name, value in (("warmup_pacing_auto", "maybe"), ("library_9999_prefetch_start", "off")):
+            n = sum("couldn’t do" in e["message"] for e in self.app.activity.snapshot()["events"])
+            self.broker.inject(f"plexcache/set/{name}", value)
+            self.assertTrue(wait_for(lambda: sum("couldn’t do" in e["message"] for e in self.app.activity.snapshot()["events"]) > n),
+                            (name, value))
         self.app.settings.update({"nowplaying": {"enabled": True, "ram_percent": 20}, "general": {"poll_seconds": 5, "ram_reserve_gb": 4},
-                                  "warmup": {"pacing_percent": 10}})
+                                  "warmup": {"pacing_percent": 10, "pacing_auto": True}})
+        everything.stop()
+
+    def test_state_details(self):
+        """Warm-up's state as Home Assistant shows it, texts cut to what it keeps, times in ISO, and
+        the health summary when only problems are left."""
+        from plexcache import homeassistant as ha
+        app = _new_app()
+        real = app.state
+        on = mock.patch.object(app, "warmup_schedules", lambda: {"1": "daily"})
+        on.start()
+        self.addCleanup(on.stop)
+        for wu, want in (({"running": True, "progress": {"paused": "a player is buffering"}}, "paused"),
+                         ({"running": True, "progress": {}}, "preparing"), ({"running": True, "progress": {"total": 10}}, "running")):
+            with mock.patch.object(app, "state", lambda wu=wu: dict(real(), warmup=wu)):
+                self.assertEqual(ha.build_state(app)["warmup_state"], want)
+        on.stop()
+        with mock.patch.object(app, "warmup_schedules", lambda: {"1": "none"}):
+            self.assertEqual(ha.build_state(app)["warmup_state"], "off")
+        long = {"summary": {"status": "ok", "text": "x" * 300}, "counts": {}}
+        with mock.patch.object(app, "state", lambda: dict(real(), health=long)):
+            self.assertEqual(len(ha.build_state(app)["health_text"]), 250)
+        self.assertEqual(en(ha._health_text({"summary": {"status": "fail"}, "counts": {"fail": 2}})),
+                         "2 problems to fix — open Health in Plex Cache for the details.")
+        self.assertIsNone(ha._iso("not a time"))
+        self.assertTrue(ha._iso("2026-10-14T03:00").startswith("2026-10-14T03:00"))
+        self.assertEqual(ha.describe("no_such_entity"), "")
 
     def test_watch_only(self):
         self.enable(allow_control=False)
@@ -6730,6 +8499,7 @@ class MQTTTests(unittest.TestCase):
         """Every discovery message follows Home Assistant's MQTT discovery rules
         (https://www.home-assistant.io/integrations/mqtt/)."""
         import re
+        from plexcache import homeassistant as ha
         self.enable()
         self.assertTrue(wait_for(lambda: self.app.ha.status.get("entities") and self.state() is not None, 15))
         state = self.state()
@@ -6757,9 +8527,18 @@ class MQTTTests(unittest.TestCase):
                 # default_entity_id (object_id no longer sets the entity ID)
                 self.assertNotIn("object_id", conf)
                 self.assertRegex(conf["default_entity_id"], r"^" + comp + r"\.[a-z0-9_]+$")
-                # availability: a topic or a list, not both; the payloads as published
+                # availability: a topic or a list, not both; the payloads as published. A control that applies only
+                # sometimes: Plex Cache online AND its condition, read from the state message
                 self.assertFalse("availability_topic" in conf and "availability" in conf)
-                self.assertIn(self.broker.state(conf["availability_topic"]), ("online", b"online"))
+                oid = m.group(3)
+                if oid in ha.AVAILABLE_WHEN:
+                    self.assertEqual(conf["availability_mode"], "all")
+                    first, cond = conf["availability"]
+                    self.assertIn(self.broker.state(first["topic"]), ("online", b"online"))
+                    self.assertEqual(cond["topic"], "plexcache/state")
+                    self.assertIn("value_json.available.%s " % oid, cond["value_template"])
+                else:
+                    self.assertIn(self.broker.state(conf["availability_topic"]), ("online", b"online"))
                 self.assertNotIn("payload_available", conf)                              # (the default, "online")
                 # entity categories: config or diagnostic, and sensors are never config
                 if "entity_category" in conf:
@@ -6820,7 +8599,7 @@ class MQTTTests(unittest.TestCase):
             return (re.search(r'\b(?:range|ramSlider|select|number|checkbox|textInput)\("%s", "%s"' % (sec, key), js) is not None
                     or f'data-set="{sec}.{key}"' in js or f'data-check="{sec}.{key}"' in js
                     or (key == "enabled" and f'toggle("{sec}"' in js))
-        state = {"libraries": {"2": {"name": "TV Shows", "kind": "tv"}}, "warmup_pacing_manual": True}
+        state = {"libraries": {"2": {"name": "TV Shows", "kind": "tv"}}}
         controls = [(c, oid) for c, oid, _ in ha.entities(state, allow_control=True) if c in ("switch", "number", "select")]
         self.assertGreater(len(controls), 5)
         for comp, oid in controls:
@@ -6834,13 +8613,53 @@ class MQTTTests(unittest.TestCase):
                 self.assertTrue(offered(sec, key), f"{sec}.{key} can be changed from Home Assistant but not in the web UI")
         # ...and nothing mapped that isn't published
         self.assertEqual(set(ha.CONTROL_SETTINGS) - {oid for _, oid in controls}, set())
-        # Same conditions: the share-of-disk-time slider only shows while automatic pacing is off, and so does its control
+        # Same conditions: the share-of-disk-time slider only shows while automatic pacing is off (its control: unavailable)
         self.assertIn("var manual = !w.pacing_auto || !rate;", js)
-        auto = [oid for _, oid, _ in ha.entities(dict(state, warmup_pacing_manual=False), allow_control=True)]
-        self.assertNotIn("warmup_pacing_percent", auto)
-        self.assertIn("warmup_pacing_auto", auto)
         # Watch-only: no controls at all
         self.assertFalse([c for c, _, _ in ha.entities(state, allow_control=False) if c in ("switch", "number", "select", "button")])
+
+    def test_every_control_says_when_it_applies(self):
+        """Every Home Assistant control either applies always or says when (AVAILABLE_WHEN); one that
+        doesn't apply shows as unavailable. A new control has to be put in one or the other."""
+        from types import SimpleNamespace
+        from plexcache import homeassistant as ha
+        state = {"libraries": {"2": {"name": "TV Shows", "kind": "tv"}}}
+        controls = {oid for c, oid, _ in ha.entities(state, allow_control=True) if c in ("switch", "number", "select", "button")}
+        for oid in controls:
+            with self.subTest(oid):
+                self.assertTrue(oid in ha.AVAILABLE_WHEN or oid in ha.ALWAYS_AVAILABLE or oid.startswith("library_"),
+                                f"{oid}: add it to AVAILABLE_WHEN (and control_availability) or to ALWAYS_AVAILABLE")
+        self.assertEqual(set(ha.AVAILABLE_WHEN) & ha.ALWAYS_AVAILABLE, set())
+        self.assertEqual((set(ha.AVAILABLE_WHEN) | ha.ALWAYS_AVAILABLE) - controls, set())   # nothing listed that isn't a control
+        # each condition, as the web UI shows it
+        def fake(mode="l2arc", can_run=True, rate=1e8, libs=()):
+            return SimpleNamespace(cache_mode=lambda: mode, feature_available=lambda f: (can_run, ""), l2arc_rate=lambda: rate,
+                                   libraries=[{"key": k, "title": k, "type": "show", "kind": "tv"} for k in libs])
+        s = copy.deepcopy(config.DEFAULTS)
+        s["nowplaying"]["enabled"] = True
+        avail = ha.control_availability(fake(), s, {})
+        self.assertTrue(avail["nowplaying_enabled"] and avail["nowplaying_ram_percent"] and avail["warmup_pacing_auto"])
+        self.assertFalse(avail["warmup_pacing_percent"])                                # automatic pacing, and it works
+        self.assertTrue(avail["run_warmup"])
+        self.assertFalse(avail["stop_warmup"])
+        self.assertFalse(avail["nextepisode_ram_percent"])                              # no library prefetches anything
+        self.assertTrue(ha.control_availability(fake(rate=None), s, {})["warmup_pacing_percent"])   # automatic can't work
+        s["warmup"]["pacing_auto"] = False
+        self.assertTrue(ha.control_availability(fake(), s, {})["warmup_pacing_percent"])
+        running = ha.control_availability(fake(), s, {"running": True})
+        self.assertEqual((running["run_warmup"], running["stop_warmup"]), (False, True))
+        ram = ha.control_availability(fake(mode="ram"), s, {})
+        self.assertFalse(ram["warmup_pacing_auto"] or ram["warmup_pacing_percent"] or ram["run_warmup"])   # no L2ARC
+        s["nowplaying"]["enabled"] = False
+        self.assertFalse(ha.control_availability(fake(), s, {})["nowplaying_ram_percent"])
+        off = ha.control_availability(fake(can_run=False), s, {})
+        self.assertFalse(off["nowplaying_enabled"] or off["nowplaying_ram_percent"])
+        # Prefetch's RAM limit: while something's kept in RAM — whole files, or lead-ins without an L2ARC
+        s["nextepisode"]["libraries"] = {"2": {"start": "next", "end": "none"}}
+        self.assertFalse(ha.control_availability(fake(libs=["2"]), s, {})["nextepisode_ram_percent"])   # lead-ins on the SSD
+        self.assertTrue(ha.control_availability(fake(mode="ram", libs=["2"]), s, {})["nextepisode_ram_percent"])
+        s["nextepisode"]["libraries"] = {"2": {"start": "off", "end": "next"}}
+        self.assertTrue(ha.control_availability(fake(libs=["2"]), s, {})["nextepisode_ram_percent"])
 
     def test_without_discovery(self):
         """For Node-RED and the like: just the state, availability and command topics."""
@@ -6886,7 +8705,7 @@ class MQTTTests(unittest.TestCase):
         self.enable(tls=True)
         self.assertTrue(wait_for(lambda: self.steps()["tls"] == "fail"))
         self.assertEqual(self.steps()["broker"], "ok")
-        self.assertIn("doesn't use TLS", self.app.ha.status["error"])
+        self.assertIn("doesn’t use TLS", self.app.ha.status["error"])
         # Unticking it is picked up straight away, not after the retry delay
         start = time.time()
         self.app.settings.update({"mqtt": {"tls": False}})
@@ -7002,14 +8821,55 @@ class MQTTTests(unittest.TestCase):
         self.assertIn("TLS", str(e))
         e = fail(tls=True, verify_tls=True)  # self-signed certificate
         self.assertEqual(e.step, "tls")
-        self.assertIn("certificate wasn't accepted", str(e))
+        self.assertIn("certificate wasn’t accepted", str(e))
         e = fail(tls=True, verify_tls=False)  # TLS works, but it isn't MQTT
         self.assertEqual(e.step, "login")
         e = MQTTClient("no-such-host.invalid", 1883, timeout=3)
         with self.assertRaises(MQTTError) as cm:
             e.connect()
         self.assertEqual(cm.exception.step, "broker")
-        self.assertIn("can't find", str(cm.exception))
+        self.assertIn("can’t find", str(cm.exception))
+
+    def test_not_a_broker(self):
+        """Something that answers, but not as a broker would, a TLS port that never
+        answers, and a message too big for MQTT: each a clear error, never a hang."""
+        import socket
+        from plexcache import mqttclient
+        from plexcache.mqttclient import MQTTClient, MQTTError
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        port = srv.getsockname()[1]
+
+        def answer():
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                if answer.http:
+                    conn.recv(1024)
+                    conn.sendall(b"\x40\x02\x00\x01")  # a well-formed packet, but not the login's answer
+                answer.open.append(conn)  # (a silent one is kept open: no answer at all)
+        answer.http, answer.open = True, []
+        threading.Thread(target=answer, daemon=True).start()
+        try:
+            with self.assertRaises(MQTTError) as cm:
+                MQTTClient("127.0.0.1", port, timeout=3).connect()
+            self.assertEqual(cm.exception.step, "login")
+            self.assertIn("wasn’t from an MQTT broker — check the port", str(cm.exception))
+            answer.http = False
+            with self.assertRaises(MQTTError) as cm:
+                MQTTClient("127.0.0.1", port, timeout=1, tls=True).connect()
+            self.assertEqual(cm.exception.step, "tls")
+            self.assertIn("no TLS answer on port", str(cm.exception))
+        finally:
+            srv.close()
+            for c in answer.open:
+                c.close()
+        with mock.patch.object(mqttclient, "MAX_LENGTH", 10):
+            with self.assertRaises(ValueError):
+                mqttclient._packet(0x30, b"x" * 11)
 
     def test_reconnect_endpoint(self):
         from plexcache.server import serve
@@ -7110,7 +8970,8 @@ class CacheModeTests(unittest.TestCase):
 
         app = FakeApp(False, "present")
         titles = lambda: {en(i["title"]): i["status"] for i in checks.check_cache_mode(app)["items"]}
-        self.assertEqual(titles(), {"L2ARC caching": "pass", "Choices that need an SSD cache": "pass", "Optimizer": "info"})
+        self.assertEqual(titles(), {"L2ARC caching": "pass", "Choices that need an SSD cache": "pass", "No sign-in": "info",
+                                    "Optimizer": "info"})
         self.assertEqual(en(checks.check_cache_mode(app)["title"]), "Plex Cache")
         app.fallbacks.note("x", M("Prefetch"), "Whole library", "Whole season")
         group = checks.check_cache_mode(app)
@@ -7295,6 +9156,31 @@ class TranslationTests(unittest.TestCase):
         problems = []
         cls.keys = cls.tool.all_keys(problems)
         cls.problems = problems
+
+    def test_house_style(self):
+        """The texts' style (README.md → Writing the texts): typographic apostrophes everywhere,
+        and Title Case for what names a place or an action — page and card titles, and buttons."""
+        self.assertEqual([k for k in self.keys if re.search(r"[A-Za-z]'[A-Za-z]", k)], [])  # ’, not '
+        small = {"a", "an", "the", "and", "but", "or", "nor", "for", "so", "yet", "as", "at", "by", "in", "of", "on", "to",
+                 "up", "via", "from", "with", "into", "per", "vs"}
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        lit = r'"((?:[^"\\]|\\.)+)"'
+        names = set(re.findall(r"<h2[^>]*>' \+ H\(" + lit, src)) | set(re.findall(r"heading\(esc\(T\(" + lit, src))
+        names |= set(re.findall(r'\bbtn\("[a-z_]+", H\(' + lit, src))
+        for m in re.finditer(r'class=\\?"btn[^"\\]*\\?"', src):  # each button's own texts (not its title or label)
+            ends = [e for e in (src.find("</button>", m.end()), src.find("</a>", m.end())) if 0 <= e - m.end() < 600]
+            seg = re.sub(r'(title|aria-label)="\' \+ [HT]\(' + lit + r"\)", "", src[m.end():min(ends)] if ends else "")
+            names |= set(re.findall(r"\b[HT]\(" + lit, seg))
+        checks_src = open(os.path.join(root, "plexcache", "checks.py"), encoding="utf-8").read()
+        names |= set(re.findall(r'"title": M\(' + lit, checks_src))  # the Health page's cards
+        self.assertGreater(len(names), 40)
+        for name in names:
+            words = name.split()
+            for i, w in enumerate(words):
+                if not w[0].isalpha() or w[0].isupper() or (0 < i < len(words) - 1 and w in small):
+                    continue
+                self.fail(f"not Title Case: {name!r} ({w!r})")
 
     def test_texts_extract_cleanly(self):
         # Notes about helpers called on variables are expected (their texts are marked with N());

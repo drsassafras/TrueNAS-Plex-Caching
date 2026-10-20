@@ -50,7 +50,7 @@ class TrueNASClient:
         try:
             self.ws = WebSocket(ws_url(url), verify_tls=verify_tls, timeout=timeout)
         except WebSocketError as e:
-            raise TrueNASError(M("Can't connect to TrueNAS: {why}", why=str(e))) from None
+            raise TrueNASError(M("Can’t connect to TrueNAS: {why}", why=str(e))) from None
         try:
             ok = self.call("auth.login_with_api_key", [api_key])
         except TrueNASError:
@@ -76,7 +76,7 @@ class TrueNASClient:
         except WebSocketError as e:
             raise TrueNASError(M("TrueNAS connection problem: {why}", why=str(e))) from None
         except ValueError:
-            raise TrueNASError(M("TrueNAS sent a reply that isn't JSON")) from None
+            raise TrueNASError(M("TrueNAS sent a reply that isn’t JSON")) from None
 
     def close(self) -> None:
         self.ws.close()

@@ -22,7 +22,9 @@ one file at a time, and reads the result back.
                          /api/status); "pause" / "resume" / "stop"; "compare" {"path", "to"};
                          "rename" {"path", "name"}; "delete" {"path"} — the last two only for the
                          wizard's own .<name>.plexcache-old folders
-    POST /api/optimize   {"path", "images", "cover", "force"}: start optimizing it (one at a time).
+    POST /api/optimize   {"path", "images", "cover", "force", "tags"}: start optimizing it (one at a time).
+    POST /api/convert    {"path", "images", "cover", "tags"}: convert it to <name>.mkv, optimized (convert.py).
+                         "tags": "keep" (default), "excessive" or "strip" (optimizer.strips_tags).
                          "images": "compress" (default), "remove", "plex" or "keep" (see
                          optimizer.py); "cover": Plex's poster for "plex", base64; "force"
                          rewrites it even when its layout is already right, so it picks up the
@@ -59,6 +61,7 @@ MAX_BODY = 48 * 1024 * 1024  # room for a large poster, base64
 class Service:
     def __init__(self, roots: list[str], token: str | None = None, token_file: str | None = None):
         self.roots = [os.path.realpath(r) for r in roots]
+        self.since = time.time()  # when it started: what it mounted is what was there then (no rslave)
         self._token = token or ""
         self.token_file = token_file
         self._read: tuple = (None, "")  # (the file's mtime, its token)
@@ -103,16 +106,17 @@ class Service:
                     # whether a dataset made while this runs shows up here without a restart (rslave)
                     "propagation": {r: migrate.propagates(r) for r in self.roots}, "missing": [n for n in tools.NAMES if not self.versions[n]],
                     "missing_optional": [n for n in tools.OPTIONAL if not self.versions[n]],
-                    "roots": self.roots, "current": dict(self.current) if self.current else None,
+                    "roots": self.roots, "since": self.since, "current": dict(self.current) if self.current else None,
                     "results": list(self.results[-RECENT:]), "uid": os.getuid(), "gid": os.getgid(),
                     "images": imgs.available()}
 
     def start(self, path: str, images: str = "compress", force: bool = False, cover: bytes | None = None,
-              action: str = "optimize") -> dict:
+              action: str = "optimize", tags: str = "keep") -> dict:
         with self.lock:
             if self.current:
                 return {"started": False, "error": "busy", "current": self.current["path"]}
             self.current = {"path": path, "action": action, "images": images, "started": time.time(), "step": "starting"}
+        self.tags = tags  # (for the file in hand: one at a time)
         threading.Thread(target=self._work, args=(path, images, force, cover, action), daemon=True).start()
         return {"started": True}
 
@@ -161,8 +165,12 @@ class Service:
                 res.update(rewrite_file(path, log=step, progress=progress))
             elif action == "conflict":
                 res.update(resolve_conflict(path, cover, log=step))  # cover: the original's path here
+            elif action == "convert":
+                from .convert import convert_file
+                res.update(convert_file(path, images, cover=cover, tags_mode=getattr(self, "tags", "keep"), log=step, progress=progress))
             else:
-                res.update(optimize_file(path, images, cover=cover, force=force, log=step, progress=progress))
+                res.update(optimize_file(path, images, cover=cover, force=force, log=step, progress=progress,
+                                         tags_mode=getattr(self, "tags", "keep")))
         except Skipped as e:
             res.update(result="skipped", reason=str(e))
         except tools.VerifyError as e:
@@ -201,6 +209,9 @@ def folder_action(svc: Service, body: dict) -> tuple[int, dict]:
         if action == "delete":
             migrate.delete_old(path)
             return 200, {"deleted": True}
+        if action == "delete_original":  # a converted file's original, once Plex has its MKV (path: the original, to: the MKV)
+            from .convert import delete_original
+            return 200, delete_original(path, to or "")
         if action == "cleanup":  # a work folder left by an optimizer stopped mid-way (only those)
             from .optimizer import WORK
             if not WORK.match(os.path.basename(path.rstrip("/"))) or not os.path.isdir(path) or os.path.islink(path):
@@ -266,6 +277,9 @@ def make_handler(svc: Service):
                 path = svc.allowed(str(body.get("path") or ""))
                 images = body.get("images") or ("compress" if body.get("keep_images", True) else "remove")
                 force = bool(body.get("force", False))
+                tags = body.get("tags") or "keep"
+                if tags not in ("keep", "excessive", "strip"):
+                    raise ValueError(tags)
                 cover = base64.b64decode(body["cover"], validate=True) if body.get("cover") else None
                 if images not in IMAGE_MODES:
                     raise ValueError(images)
@@ -276,7 +290,9 @@ def make_handler(svc: Service):
             if self.path == "/api/check":
                 return self._send(200, mkv.check(path, images != "remove"))
             if self.path == "/api/optimize":
-                return self._send(200, svc.start(path, images, force, cover))
+                return self._send(200, svc.start(path, images, force, cover, tags=tags))
+            if self.path == "/api/convert":
+                return self._send(200, svc.start(path, images, False, cover, action="convert", tags=tags))
             if self.path == "/api/rewrite":
                 return self._send(200, svc.start(path, action="rewrite"))
             if self.path == "/api/conflict":

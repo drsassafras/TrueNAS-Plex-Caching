@@ -10,7 +10,8 @@ revokes that session on the server too (a copied cookie stops working). Changing
 username or password signs everyone out. Scripts can use HTTP Basic auth instead.
 
 Wrong passwords are answered after a delay, one at a time: guessing in parallel
-doesn't go any faster.
+doesn't go any faster. An address that keeps getting it wrong (LOCKOUT_FAILS in a row) is
+refused for a while (LOCKOUT_SECONDS) — signing in from elsewhere still works.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ COOKIE = "pc_session"
 DEFAULT_PASSWORD = "change-me"
 SESSION_DAYS = 30
 FAIL_DELAY = 1.0  # seconds added to each failed attempt, so passwords can't be guessed quickly
+LOCKOUT_FAILS, LOCKOUT_SECONDS = 10, 15 * 60  # wrong in a row from one address, then refused this long
 
 
 class Auth:
@@ -42,6 +44,7 @@ class Auth:
         self._lock = threading.Lock()  # one failed attempt at a time
         self._revoked_path = os.path.join(config_dir, "signed-out.json") if config_dir else None
         self._revoked: dict[str, int] = self._load_revoked()
+        self._fails: dict[str, tuple[int, float]] = {}  # address -> (wrong in a row, when last)
 
     @classmethod
     def from_env(cls, config_dir: str | None = None) -> "Auth":
@@ -77,6 +80,26 @@ class Auth:
             with self._lock:
                 time.sleep(FAIL_DELAY)
         return bool(ok)
+
+    def locked_out(self, address: str) -> bool:
+        """Has this address got the password wrong too often lately?"""
+        n, at = self._fails.get(address, (0, 0.0))
+        if n >= LOCKOUT_FAILS and time.time() - at < LOCKOUT_SECONDS:
+            return True
+        if n and time.time() - at >= LOCKOUT_SECONDS:
+            self._fails.pop(address, None)  # long enough ago: a fresh start
+        return False
+
+    def note_attempt(self, address: str, ok: bool) -> None:
+        """Count a sign-in attempt from ``address``: a right one clears the count."""
+        if ok:
+            self._fails.pop(address, None)
+            return
+        n, _ = self._fails.get(address, (0, 0.0))
+        self._fails[address] = (n + 1, time.time())
+        if len(self._fails) > 10000:  # (many addresses: forget the oldest)
+            for k in sorted(self._fails, key=lambda k: self._fails[k][1])[:5000]:
+                del self._fails[k]
 
     def _sign(self, expires: int, sid: str) -> str:
         # The password is part of what's signed, so changing it ends every session.
@@ -157,5 +180,6 @@ class Auth:
         return False
 
     @staticmethod
-    def cookie(value: str, max_age: int) -> str:
-        return f"{COOKIE}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict"
+    def cookie(value: str, max_age: int, secure: bool = False) -> str:
+        """The session cookie; ``secure`` when the browser reached the app over HTTPS (a reverse proxy)."""
+        return f"{COOKIE}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict" + ("; Secure" if secure else "")

@@ -49,14 +49,14 @@ cachemode.DYNAMIC["prefetch.end"] = END_DYN
 KIND_DEFAULTS = {"music": {"end": {"ram": "none"}}}
 
 NAMES = {
-    "tv": {"off": M("Don't prefetch"), "none": M("Nothing"), "next": M("Next episode"), "rest": M("Rest of the season"), "whole": M("Whole season"),
+    "tv": {"off": M("Don’t prefetch"), "none": M("Nothing"), "next": M("Next episode"), "rest": M("Rest of the season"), "whole": M("Whole season"),
            "next_group": M("Next season"), "all_groups": M("All seasons of the show"), "library": M("Every show in the library")},
-    "music": {"off": M("Don't prefetch"), "none": M("Nothing"), "next": M("Next track"), "rest": M("Rest of the album"), "whole": M("Whole album"),
-              "all_groups": M("All the artist's albums"), "library": M("All music in the library")},
-    "movies": {"off": M("Don't prefetch"), "none": M("Nothing"), "next": M("Next movie in the collection"), "rest": M("Rest of the collection"),
+    "music": {"off": M("Don’t prefetch"), "none": M("Nothing"), "next": M("Next track"), "rest": M("Rest of the album"), "whole": M("Whole album"),
+              "all_groups": M("All the artist’s albums"), "library": M("All music in the library")},
+    "movies": {"off": M("Don’t prefetch"), "none": M("Nothing"), "next": M("Next movie in the collection"), "rest": M("Rest of the collection"),
                "whole": M("Whole collection"), "library": M("Every movie in the library")},
-    "books": {"off": M("Don't prefetch"), "none": M("Nothing"), "next": M("Next chapter"), "rest": M("Rest of the book"), "whole": M("Whole book"),
-              "next_group": M("Next book"), "all_groups": M("All the author's books"), "library": M("Every book in the library")},
+    "books": {"off": M("Don’t prefetch"), "none": M("Nothing"), "next": M("Next chapter"), "rest": M("Rest of the book"), "whole": M("Whole book"),
+              "next_group": M("Next book"), "all_groups": M("All the author’s books"), "library": M("Every book in the library")},
 }
 
 

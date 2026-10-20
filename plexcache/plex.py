@@ -43,6 +43,8 @@ class MediaFile:
     matched: bool | None = None
     # How Plex names it: "Title (year)", "Show · S01E05", "Album · Track"
     title: str = ""
+    # The Plex item it belongs to (a movie, an episode): a second version of it shares this
+    rating_key: str = ""
 
 
 @dataclass
@@ -144,6 +146,26 @@ def poster_of(item: ET.Element) -> str:
     return item.get("thumb") or ""
 
 
+# The fields Plex locks when you edit them, and compares across servers (Library Sync): each is the
+# item's attribute of the same name
+EDIT_FIELDS = ("title", "titleSort", "originalTitle", "summary", "tagline", "year", "studio", "contentRating", "originallyAvailableAt")
+ART_FIELDS = ("thumb", "art")
+
+
+def item_summary(item: ET.Element) -> dict:
+    """What Library Sync compares of an item (PlexClient.library_items)."""
+    locked = {f.get("name") for f in item.findall("Field") if f.get("locked") in ("1", "true")}
+    return {"key": item.get("ratingKey", ""), "parent": item.get("parentRatingKey", ""), "grandparent": item.get("grandparentRatingKey", ""),
+            "type": item.get("type", ""), "title": item.get("title", ""), "label": title_of(item), "index": _int(item.get("index"), 0),
+            "guid": item.get("guid", ""), "matched": matched_of(item),
+            "files": [(p.get("file"), _int(p.get("size"))) for m in item.findall("Media") for p in m.findall("Part") if p.get("file")],
+            "edition": item.get("editionTitle", ""),
+            "fields": {f: item.get(f, "") for f in EDIT_FIELDS if f in locked},
+            "collections": sorted(c.get("tag", "") for c in item.findall("Collection") if c.get("tag")),
+            "labels": sorted(c.get("tag", "") for c in item.findall("Label") if c.get("tag")),
+            "art_locked": sorted(f for f in ART_FIELDS if f in locked)}
+
+
 class PlexClient:
     def __init__(self, url: str, token: str, timeout: float = 30):
         if not url:
@@ -178,9 +200,24 @@ class PlexClient:
                 raise PlexError(M("Plex rejected the token (401 Unauthorized)")) from None
             raise PlexError(M("Plex returned HTTP {code} for {path}", code=str(e.code), path=path)) from None
         except urllib.error.URLError as e:
-            raise PlexError(M("Can't reach Plex at {url}: {why}", url=self.url, why=str(e.reason))) from None
+            raise PlexError(M("Can’t reach Plex at {url}: {why}", url=self.url, why=str(e.reason))) from None
         except (TimeoutError, OSError) as e:
-            raise PlexError(M("Can't reach Plex at {url}: {why}", url=self.url, why=str(e))) from None
+            raise PlexError(M("Can’t reach Plex at {url}: {why}", url=self.url, why=str(e))) from None
+
+    def scan(self, section_key: str, folder: str) -> None:
+        """Ask Plex to scan one folder of a library now (as its own "Scan Library Files", just
+        there): for libraries scanned by hand, or before Plex notices a change by itself."""
+        self._request(f"/library/sections/{section_key}/refresh", {"path": folder})
+
+    def item_files(self, rating_key: str) -> list[str] | None:
+        """Every file of a Plex item (its versions' parts), or None if Plex has no such item."""
+        try:
+            root = self.get(f"/library/metadata/{rating_key}")
+        except PlexError as e:
+            if "404" in str(e):
+                return None
+            raise
+        return [p.get("file") for item in root for m in item.findall("Media") for p in m.findall("Part") if p.get("file")]
 
     def library_count(self, section_key: str) -> int:
         """How many items a library has (its movies, shows, artists…), as Plex counts them."""
@@ -195,7 +232,7 @@ class PlexClient:
             raise PlexError(M("Plex returned HTTP {code} for {path}", code="404", path=path))
         data = self._request(path, headers={"Accept": "image/*"})
         if len(data) > limit:
-            raise PlexError(M("Plex's poster is too large ({size})", size=f"{len(data) // (1024 * 1024)} MB"))
+            raise PlexError(M("Plex’s poster is too large ({size})", size=f"{len(data) // (1024 * 1024)} MB"))
         return data
 
     def thumb(self, path: str, width: int = 120, height: int = 180) -> bytes:
@@ -210,7 +247,7 @@ class PlexClient:
         try:
             return ET.fromstring(body)
         except ET.ParseError:
-            raise PlexError(M("Plex returned something that isn't XML for {path}", path=path)) from None
+            raise PlexError(M("Plex returned something that isn’t XML for {path}", path=path)) from None
 
     # --------------------------------------------------------------- server
     def identity(self) -> dict:
@@ -221,9 +258,9 @@ class PlexClient:
         try:
             root = ET.fromstring(body)
         except ET.ParseError:
-            raise PlexError(M("Something answered at {url}, but it isn't Plex", url=self.url)) from None
+            raise PlexError(M("Something answered at {url}, but it isn’t Plex", url=self.url)) from None
         if not root.get("machineIdentifier"):
-            raise PlexError(M("Something answered at {url}, but it isn't Plex", url=self.url))
+            raise PlexError(M("Something answered at {url}, but it isn’t Plex", url=self.url))
         return {"version": root.get("version", ""), "machine_id": root.get("machineIdentifier", ""), "ms": ms}
 
     def ping(self) -> dict:
@@ -275,7 +312,30 @@ class PlexClient:
                         path = part.get("file")
                         if path:
                             out.append(MediaFile(path, media_kbps(media, part), _int(part.get("size")), lib.kind, lib.title, lib.key,
-                                                 poster_of(item), matched_of(item), title_of(item)))
+                                                 poster_of(item), matched_of(item), title_of(item), item.get("ratingKey", "")))
+            total = _int(root.get("totalSize"), -1)
+            start += len(items)
+            if not items or len(items) < size or (total >= 0 and start >= total):
+                break
+        return out[:limit] if limit else out
+
+    def library_items(self, section_key: str, leaf: int, limit: int | None = None) -> list[dict]:
+        """A library's items of one type (LEAF_TYPE's numbers: 1 movies, 2 shows, 3 seasons, 4 episodes,
+        8 artists, 9 albums, 10 tracks), paged, with what Library Sync compares: {"key", "parent",
+        "grandparent", "type", "title", "label" (as Plex names it), "guid", "matched", "files":
+        [(path, size)], "edition", "fields": {name: value} for the fields you edited (Plex locks them),
+        "collections", "labels", "art_locked": the poster/background chosen by hand}."""
+        out: list[dict] = []
+        start = 0
+        while True:
+            size = PAGE_SIZE if limit is None else min(PAGE_SIZE, limit - len(out))
+            if size <= 0:
+                break
+            root = self.get(f"/library/sections/{section_key}/all", {"type": leaf, "includeGuids": 1, "includeFields": 1},
+                            {"X-Plex-Container-Start": str(start), "X-Plex-Container-Size": str(size)})
+            items = list(root)
+            for item in items:
+                out.append(item_summary(item))
             total = _int(root.get("totalSize"), -1)
             start += len(items)
             if not items or len(items) < size or (total >= 0 and start >= total):
@@ -403,14 +463,6 @@ class PlexClient:
                         "duration_ms": _int(tr.get("duration")), "files": files})
         return out
 
-    def next_tracks(self, rating_key: str, album_rating_key: str) -> list[dict]:
-        """The tracks after ``rating_key`` on its album (or audiobook), in Plex's order."""
-        tracks = self.album_tracks(album_rating_key)
-        for i, tr in enumerate(tracks):
-            if tr["rating_key"] == rating_key:
-                return tracks[i + 1:]
-        return []
-
     def artist_albums(self, artist_rating_key: str) -> list[str]:
         """Rating keys of an artist's (or author's) albums, in Plex's order."""
         root = self.get(f"/library/metadata/{artist_rating_key}/children")
@@ -424,9 +476,11 @@ class PlexClient:
 PLEX_TV = "https://plex.tv"
 
 
-def _plextv(method: str, path: str, client_id: str, data: bytes | None = None) -> dict:
+def _plextv(method: str, path: str, client_id: str, data: bytes | None = None, token: str = ""):
     req = urllib.request.Request(PLEX_TV + path, data=data, method=method)
     req.add_header("Accept", "application/json")
+    if token:
+        req.add_header("X-Plex-Token", token)
     req.add_header("X-Plex-Product", PRODUCT)
     req.add_header("X-Plex-Version", __version__)
     req.add_header("X-Plex-Client-Identifier", client_id)
@@ -437,7 +491,7 @@ def _plextv(method: str, path: str, client_id: str, data: bytes | None = None) -
         e.close()
         raise PlexError(M("plex.tv returned HTTP {code}", code=str(e.code))) from None
     except (urllib.error.URLError, OSError) as e:
-        raise PlexError(M("Can't reach plex.tv: {why}", why=str(e))) from None
+        raise PlexError(M("Can’t reach plex.tv: {why}", why=str(e))) from None
 
 
 def create_pin(client_id: str) -> dict:
@@ -451,3 +505,34 @@ def create_pin(client_id: str) -> dict:
 def check_pin(client_id: str, pin_id: int) -> str | None:
     pin = _plextv("GET", f"/api/v2/pins/{int(pin_id)}", client_id)
     return pin.get("authToken") or None
+
+
+def servers(client_id: str, token: str) -> list[dict]:
+    """The Plex servers a plex.tv account can use (its own and ones shared with it): [{"id", "name",
+    "owned", "token" (the server's own token for this account), "connections": [{"uri", "local",
+    "relay"}]}], from plex.tv's list of the account's resources."""
+    got = _plextv("GET", "/api/v2/resources?includeHttps=1&includeRelay=1", client_id, token=token) or []
+    out = []
+    for r in got if isinstance(got, list) else []:
+        if "server" not in str(r.get("provides") or ""):
+            continue
+        out.append({"id": r.get("clientIdentifier") or "", "name": r.get("name") or "", "owned": bool(r.get("owned")),
+                    "token": r.get("accessToken") or token,
+                    "connections": [{"uri": c.get("uri") or "", "local": bool(c.get("local")), "relay": bool(c.get("relay"))}
+                                    for c in r.get("connections") or [] if c.get("uri")]})
+    return out
+
+
+def reachable(server: dict, timeout: float = 6) -> str | None:
+    """The first of a server's addresses that answers as that server: direct ones before Plex's relay
+    (slow, and limited), addresses on the network it's on (another site's, unreachable from here)
+    tried too — a VPN may reach them."""
+    order = sorted(server.get("connections") or [], key=lambda c: (c["relay"], c["local"]))
+    for c in order:
+        try:
+            got = PlexClient(c["uri"], server.get("token") or "", timeout=timeout).identity()
+        except PlexError:
+            continue
+        if got.get("machine_id") == server.get("id"):
+            return c["uri"]
+    return None

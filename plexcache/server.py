@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import mimetypes
 import os
 import re
+import threading
+import time
 import urllib.parse
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .auth import SESSION_DAYS, Auth
@@ -19,7 +21,7 @@ from .plex import PlexError, check_pin, create_pin
 
 log = logging.getLogger("plexcache")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
-PAGES = {"/", "/health", "/caching", "/ssd", "/library", "/optimizer", "/processes", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
+PAGES = {"/", "/health", "/caching", "/ssd", "/library", "/optimizer", "/processes", "/sync", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
 MAX_BODY = 1024 * 1024
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
@@ -46,17 +48,55 @@ BUILD = _build_id()
 _ASSET = re.compile(r'(/static/[A-Za-z0-9_.-]+\.(?:js|css))"')
 
 
-# Reachable without signing in: the sign-in page's own files, the container health
-# check, and the record-size script (fetched with curl from the TrueNAS shell).
-OPEN_PATHS = {"/healthz", "/login", "/tools/rewrite_blocks.py"}
+# Reachable without signing in: the sign-in page's own files and the container health check.
+OPEN_PATHS = {"/healthz", "/login"}
+
+
+# The local network: private and link-local addresses, this machine, and the shared range VPNs such as
+# Tailscale use (100.64.0.0/10 is never routed on the internet). Docker's own networks are private too.
+LOCAL_NETS = [ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16", "100.64.0.0/10",
+    "::1/128", "fc00::/7", "fe80::/10")]
+
+
+def local_address(address: str) -> bool:
+    """Is ``address`` (a client's IP) on the local network?"""
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return any(ip in n for n in LOCAL_NETS)
+
+
+def host_allowed(host_header: str | None) -> bool:
+    """Without a sign-in, answer only to this app's IP address or a local name. A public name could be
+    DNS rebinding: someone else's web page pointing its own name at the NAS, so a browser on the
+    network sends the page's requests here. (With a sign-in, such requests carry no session.)"""
+    from .app import _is_local_name
+    h = (host_header or "").strip().lower()
+    if h.startswith("["):
+        h = h[1:h.find("]")] if "]" in h else ""
+    elif h.count(":") == 1:
+        h = h.split(":")[0]
+    if not h:
+        return True  # (HTTP/1.0 sends none: not a browser)
+    proxied = urllib.parse.urlsplit(os.environ.get("PLEXCACHE_URL", "")).hostname
+    return h in ("localhost", proxied) or _is_local_name(h)
 
 
 def _no_constants(name):
     raise ValueError(f"{name} isn't allowed")
 
 
+def _html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def make_handler(app):
     auth = getattr(app, "auth", None) or Auth()
+    refused, refused_lock = {}, threading.Lock()  # address -> when a refusal from it was last logged
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "PlexCache"
@@ -131,6 +171,37 @@ def make_handler(app):
         def do_HEAD(self):
             self.do_GET()
 
+        def _allowed(self, path: str) -> bool:
+            """Refuse what this app shouldn't answer at all: devices outside the local network (when
+            System → Local network only is on), and, without a sign-in, names that aren't local."""
+            if path == "/healthz":
+                return True
+            if app.settings.section("general").get("lan_only") and not local_address(self.client_address[0]):
+                self._refuse(path, M("outside the local network"),
+                             M("Plex Cache only answers devices on your local network. To use it from elsewhere, turn off "
+                               "“Local network only” in System, from a device on your network."))
+                return False
+            if not auth.enabled and not host_allowed(self.headers.get("Host")):
+                self._refuse(path, M("not a local name"),
+                             M("Without a sign-in, Plex Cache only answers to its IP address or a local name. Open it by "
+                               "its IP address, set PLEXCACHE_URL to the address you use, or set PLEXCACHE_USERNAME and "
+                               "PLEXCACHE_PASSWORD in the app’s YAML."))
+                return False
+            return True
+
+        def _refuse(self, path: str, reason, why):
+            # noted in the activity log once an hour per address (so scanners from the internet can't flood it)
+            now, address = time.time(), self.client_address[0]
+            with refused_lock:
+                logged = now - refused.get(address, 0) < 3600
+                refused[address] = refused.get(address, 0) if logged else now
+            if not logged:
+                app.activity.event("settings", M("refused a request from {address}: {why}", address=address, why=reason), "warn")
+            if path in PAGES or path == "/login":
+                page = "<!doctype html><meta charset=utf-8><title>Plex Cache</title><p style=\"font:16px system-ui;margin:3em auto;max-width:36em\">"
+                return self._send(403, (page + _html(str(why)) + "</p>").encode(), "text/html; charset=utf-8")
+            return self._error(why, 403)
+
         def _signed_in(self, path: str) -> bool:
             """Let the request through, or answer it with the sign-in page / a 401."""
             if not auth.enabled or path in OPEN_PATHS or path.startswith("/static/") or auth.request_ok(self.headers):
@@ -143,7 +214,7 @@ def make_handler(app):
 
         def do_GET(self):
             path = self.path.split("?", 1)[0]
-            if not self._signed_in(path):
+            if not self._allowed(path) or not self._signed_in(path):
                 return
             if path in PAGES or path.startswith("/api/"):  # not the open paths (/healthz, /login...)
                 app.note_host(self.headers.get("Host"))
@@ -156,9 +227,6 @@ def make_handler(app):
                 if not re.fullmatch(r"(i18n/)?[a-zA-Z0-9_-][a-zA-Z0-9_.-]*", name):
                     return self._error("not found", 404)
                 return self._file(os.path.join(WEB_DIR, name))
-            if path == "/tools/rewrite_blocks.py":
-                # The re-copy script Health points to, served so it always matches this version.
-                return self._file(os.path.join(os.path.dirname(WEB_DIR), "tools", "rewrite_blocks.py"))
             if path == "/healthz":
                 return self._json({"ok": True, "version": app.version})
             if path == "/api/state":
@@ -245,6 +313,8 @@ def make_handler(app):
 
         def do_POST(self):
             path = self.path.split("?", 1)[0]
+            if not self._allowed(path):
+                return
             if not self._same_origin():
                 return self._error("requests from other sites aren't accepted", 403)
             try:
@@ -257,15 +327,21 @@ def make_handler(app):
                 user, pw = body.get("username", ""), body.get("password", "")
                 if not isinstance(user, str) or not isinstance(pw, str) or len(user) > 256 or len(pw) > 1024:
                     return self._error(M("username and password must be text"), 400)
-                if auth.check_password(user, pw):
+                address = self.client_address[0]
+                if auth.locked_out(address):
+                    return self._error(M("Too many wrong passwords from this device. Try again in 15 minutes."), 429)
+                ok = auth.check_password(user, pw)
+                auth.note_attempt(address, ok)
+                if ok:
                     if auth.default_password:
-                        app.activity.event("settings", M("sign-in refused: the default password hasn't been changed"), "warn")
-                        return self._error(M("The default password can't be used. Set your own PLEXCACHE_PASSWORD (and "
-                                             "username) in the app's YAML in TrueNAS — Apps → Plex Cache → Edit — then sign "
+                        app.activity.event("settings", M("sign-in refused: the default password hasn’t been changed"), "warn")
+                        return self._error(M("The default password can’t be used. Set your own PLEXCACHE_PASSWORD (and "
+                                             "username) in the app’s YAML in TrueNAS — Apps → plex-cache → Edit — then sign "
                                              "in with it."), 403)
                     app.activity.event("settings", M("signed in to the web UI"))
+                    https = (self.headers.get("X-Forwarded-Proto") or "").lower() == "https"
                     return self._send(200, b'{"ok": true}', "application/json",
-                                      {"Set-Cookie": auth.cookie(auth.new_session(), SESSION_DAYS * 86400)})
+                                      {"Set-Cookie": auth.cookie(auth.new_session(), SESSION_DAYS * 86400, secure=https)})
                 app.activity.event("settings", M("failed sign-in from {address}", address=self.address_string()), "warn")
                 return self._error(M("wrong username or password"), 401)
             if path == "/logout":
@@ -316,7 +392,7 @@ def make_handler(app):
                 if path == "/api/cachelog/reset":
                     app.cachelog.reset_stats()
                     app.cachelog.save(force=True)
-                    app.activity.event("settings", M("“How long cached data lasts” started again"))
+                    app.activity.event("settings", M("“How Long Cached Data Lasts” started again"))
                     return self._json({"reset": True})
                 if path == "/api/optimize/library":
                     key = body.get("library")
@@ -327,6 +403,14 @@ def make_handler(app):
                         raise SettingsError(M("mode must be optimize or covers"))
                     got = app.optimizing.queue(key, mode)  # now, or after the jobs before it
                     return self._json({"started": got == "started", "queued": got == "queued"})
+                if path == "/api/conversions":
+                    # A converted file's original (converting.py): {"original", "action": "delete" | "keep" | "check"}
+                    try:
+                        app.conversions.act(str(body.get("original") or ""), str(body.get("action") or ""))
+                    except ValueError as e:
+                        why = e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))
+                        raise SettingsError(why) from None
+                    return self._json(jsonable(app.conversions.snapshot()))
                 if path == "/api/migration":
                     # Turning a library folder into a dataset (migrating.py): one action at a time
                     mig, action = app.migration, body.get("action")
@@ -343,28 +427,34 @@ def make_handler(app):
                         if action == "stop":
                             app.jobs.cancel()
                             return self._json(jsonable(mig.refresh()))
+                        if action == "pass_then_move":
+                            return self._json(jsonable(mig.pass_then_move()))
                         if action == "rename_old":
                             return self._json(jsonable(mig.rename_old()))
                         if action == "undo_rename":
                             return self._json(jsonable(mig.undo_rename()))
                         if action == "delete_old":
                             return self._json(jsonable(mig.delete_old()))
+                        if action == "restart":
+                            return self._json(jsonable(mig.restart()))
                         if action == "cancel":
                             mig.cancel()
                             return self._json({"cancelled": True})
                     except ValueError as e:
-                        raise SettingsError(M("{why}", why=str(e))) from None
+                        why = e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))  # (translated, when it can be)
+                        raise SettingsError(why) from None
                     raise SettingsError(M("unknown action"))
                 if path == "/api/library/survey":
-                    # read the layout of every file in a library (a file job, queued like the others)
+                    # read the layout of a library's files (Library Health): {"library", "force"?, "pause"?}.
+                    # One library at a time: starting one pauses the other, which carries on when started again.
                     key = body.get("library")
                     if not isinstance(key, str) or not app.library_info(key):
                         raise SettingsError(M("unknown library: {key}", key=str(key)))
+                    if body.get("pause"):
+                        app.inspector.pause(key)
+                        return self._json(app.inspector.snapshot())
                     # "force": every file again; otherwise only files new or changed since they were inspected
-                    item = app.jobs.enqueue("survey", {"library": key, "force": bool(body.get("force"))}, library=key, mode="survey",
-                                            title=(app.library_info(key) or {}).get("title"))
-                    started = item is not None and all(q["id"] != item["id"] for q in app.jobs.queued())
-                    return self._json({"started": started, "queued": item is not None and not started})
+                    return self._json(app.inspector.start(key, force=bool(body.get("force"))))
                 if path == "/api/optimizer/check":
                     # The optimizer's setup steps, checked again now (the Optimizer page's "Check again")
                     return self._json(jsonable(app.optimizing.diagnose()))
@@ -387,18 +477,36 @@ def make_handler(app):
                     app.stop_warmup()
                     return self._json({"stopping": True})
                 # Has the Plex sign-in been approved yet? (A POST: it saves the token when it has.)
-                m = re.fullmatch(r"/api/plex/pin/(\d{1,12})", path)
+                # /api/plex2/pin/<id>: the second Plex server's sign-in (its account's token, to list its servers)
+                m = re.fullmatch(r"/api/plex(2?)/pin/(\d{1,12})", path)
                 if m:
                     try:
-                        token = check_pin(app.settings.section("general")["client_id"], int(m.group(1)))
+                        token = check_pin(app.settings.section("general")["client_id"], int(m.group(2)))
                     except PlexError as e:
                         return self._error(msg(e), 502)
-                    if token:
+                    if token and m.group(1):
+                        app.settings.update({"plex2": {"account_token": token}})
+                        app.activity.event("settings", M("signed in with Plex for the second server"))
+                    elif token:
                         app.settings.update({"plex": {"token": token}})
                         app.activity.event("settings", M("signed in with Plex"))
                         app.test_connections_async(then_checks=True, rescan=True)
                     return self._json({"done": bool(token)})
-                if path == "/api/plex/pin":
+                if path in ("/api/plex2/servers", "/api/plex2/use", "/api/plex2/forget", "/api/plex2/refresh"):
+                    # The second Plex server (plex2.py): the account's servers; watch one; stop; read it again
+                    try:
+                        if path == "/api/plex2/servers":
+                            return self._json({"servers": app.other.list_servers()})
+                        if path == "/api/plex2/use":
+                            return self._json(jsonable(app.other.use(str(body.get("id") or ""))))
+                        if path == "/api/plex2/forget":
+                            app.other.forget()
+                        else:
+                            app.other.refresh()
+                        return self._json(jsonable(app.other.snapshot()))
+                    except ValueError as e:
+                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+                if path in ("/api/plex/pin", "/api/plex2/pin"):
                     try:
                         return self._json(create_pin(app.settings.section("general")["client_id"]))
                     except PlexError as e:

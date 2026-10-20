@@ -39,12 +39,14 @@ import urllib.request
 from . import zfs, zfslog
 from .i18n import M, join as join_names, msg
 from .jobs import Job
-from .optimize import VERSION, compare as version_of, mkv
+from .optimize import VERSION, compare as version_of, convert, mkv
+from .optimize.optimizer import strips_tags
 from .optimize.optimizer import COVER_PREFIX, WORK, conflict_original
 from .plex import PlexError
 
 IMAGE_MODES = ("unmatched", "remove", "compress", "plex")
-DEFAULTS = {"sync": True, "mkv": False, "images": "unmatched"}  # each library's choices unless set
+DEFAULTS = {"sync": True, "mkv": False, "images": "unmatched", "tags": "keep", "convert": False}  # each library's choices unless set
+TAG_MODES = ("keep", "excessive", "strip")
 SYNC_PROBLEMS = ("compression", "blocks")  # fixed by writing the file again
 RECORD = "optimized.json"
 ZFS_RECORD = "zfs-record.json"
@@ -52,6 +54,7 @@ ZFS_RECORD = "zfs-record.json"
 # check the web app's port instead, so Docker never sees it healthy)
 HEALTHCHECK_YAML = ('    healthcheck:\n'
                     '      test: ["CMD", "python", "-m", "plexcache.healthcheck"]')
+POSTER_SIZES = "poster-sizes.json"  # Plex's posters' sizes, by their paths (Library Health's estimates)
 RECENT_SECONDS = 600  # files written this recently may still be being imported (Sonarr, Radarr…)
 STATUS_TTL = 15
 
@@ -121,8 +124,17 @@ class OptimizerClient:
     def rewrite(self, path: str) -> dict:
         return self._call("/api/rewrite", {"path": path}, timeout=60)
 
-    def optimize(self, path: str, images: str, force: bool, cover: bytes | None = None) -> dict:
-        body = {"path": path, "images": images, "force": force}
+    def convert(self, path: str, images: str, cover: bytes | None = None, tags: str = "keep") -> dict:
+        body = {"path": path, "images": images, "tags": tags}
+        if cover:
+            body["cover"] = base64.b64encode(cover).decode()
+        return self._call("/api/convert", body, timeout=60)
+
+    def delete_original(self, path: str, new: str) -> dict:
+        return self._call("/api/folder", {"action": "delete_original", "path": path, "to": new}, timeout=60)
+
+    def optimize(self, path: str, images: str, force: bool, cover: bytes | None = None, tags: str = "keep") -> dict:
+        body = {"path": path, "images": images, "force": force, "tags": tags}
         if cover:
             body["cover"] = base64.b64encode(cover).decode()
         return self._call("/api/optimize", body, timeout=60)
@@ -221,15 +233,15 @@ class Optimizing:
             appname = tn["app"] or appname
             opt = tn["optimizer"]
             if not opt:
-                step("yaml", False, M("Add the optimizer to the app's YAML"),
+                step("yaml", False, M("Add the optimizer to the app’s YAML"),
                      M("{app} has no optimizer service.", app=appname),
                      M("In TrueNAS, Apps → {app} → Edit. Paste the lines below under services: (next to {service}), "
                        "and Save. The volumes are filled in from {service}'s own: its settings folder, read-only (the "
-                       "optimizer finds the app's token there), and your media, writable — the optimizer can only change "
-                       "what's mounted, so leave out any folder it shouldn't touch.", app=appname, service=tn["me"] or appname),
+                       "optimizer finds the app’s token there), and your media, writable — the optimizer can only change "
+                       "what’s mounted, so leave out any folder it shouldn’t touch.", app=appname, service=tn["me"] or appname),
                      checks.optimizer_yaml(self.app))
                 return self._done(steps)
-            step("yaml", True, M("In the app's YAML"), M("Service {service}.", service=opt.get("service_name")))
+            step("yaml", True, M("In the app’s YAML"), M("Service {service}.", service=opt.get("service_name")))
             state = str(opt.get("state") or "").lower()
             # TrueNAS shows a running container's health instead while it has one: "starting" until its
             # health check first passes, "unhealthy" when it keeps failing — the program is running either way
@@ -238,10 +250,10 @@ class Optimizing:
                 needs_code = code and opt.get("has_config") and "/app/plexcache" not in opt.get("targets", [])
                 fix = (M("This app runs code mounted over its image (a test copy?). The optimizer needs the same code: "
                          "add this line to its volumes, in Apps → {app} → Edit:", app=appname) if needs_code else
-                       M("Its logs say why: in TrueNAS, Apps → {app} → the optimizer's container → View Logs. Most often "
+                       M("Its logs say why: in TrueNAS, Apps → {app} → the optimizer’s container → View Logs. Most often "
                          "the image is older than the optimizer: update it to the latest.", app=appname))
-                step("running", False, M("The optimizer isn't running"),
-                     M("TrueNAS says it's {state}: it stopped right after starting.", state=state or "?"), fix,
+                step("running", False, M("The optimizer isn’t running"),
+                     M("TrueNAS says it’s {state}: it stopped right after starting.", state=state or "?"), fix,
                      f"      - {code}:/app/plexcache:ro" if needs_code else "")
                 return self._done(steps)
             step("running", True, M("Running"))
@@ -252,40 +264,40 @@ class Optimizing:
         hz = self.client.healthz()
         if hz.get("error"):
             if not tn and not_set_up(hz["error"]):
-                step("yaml", False, M("Add the optimizer to the app's YAML"),
-                     M("Nothing answers at {url}. (With a TrueNAS API key that can see apps, this page can tell whether it's "
+                step("yaml", False, M("Add the optimizer to the app’s YAML"),
+                     M("Nothing answers at {url}. (With a TrueNAS API key that can see apps, this page can tell whether it’s "
                        "in the YAML and running.)", url=self.client.url),
                      M("In TrueNAS, Apps → plex-cache → Edit. Paste the lines below under services: (next to plex-cache), "
-                       "and Save. If it's already there, check it's running: Apps → plex-cache, and its logs."),
+                       "and Save. If it’s already there, check it’s running: Apps → plex-cache, and its logs."),
                      checks.optimizer_yaml(self.app))
             else:
-                step("answers", False, M("The optimizer doesn't answer"),
-                     M("It's running, but the app couldn't reach it at {url}: {why}", url=self.client.url, why=hz["error"]),
+                step("answers", False, M("The optimizer doesn’t answer"),
+                     M("It’s running, but the app couldn’t reach it at {url}: {why}", url=self.client.url, why=hz["error"]),
                      M("It listens on port 8643 inside the app. If you set PLEXCACHE_OPTIMIZER_URL or "
                        "PLEXCACHE_OPTIMIZER_PORT, check they match."))
             return self._done(steps)
         if hz.get("service") != "optimizer":
             step("answers", False, M("Something else answers at {url}", url=self.client.url),
-                 M("It isn't the optimizer: it may run an image older than the optimizer."),
+                 M("It isn’t the optimizer: it may run an image older than the optimizer."),
                  M("In TrueNAS, Apps → {app}: update its image to the latest.", app=appname))
             return self._done(steps)
         step("answers", True, M("Answering"), M("Optimizer version {version}.", version=hz.get("version")))
         if health == "starting" and tn and tn["optimizer"].get("healthcheck"):
             step("health", False, M("Still starting"),
-                 M("It answers, and its health check hasn't run yet. TrueNAS shows the app as deploying until it does."),
+                 M("It answers, and its health check hasn’t run yet. TrueNAS shows the app as deploying until it does."),
                  M("Check again in a minute."))
             return self._done(steps)
         if health and tn and tn["optimizer"].get("healthcheck"):
-            step("health", False, M("Its health check doesn't pass"),
-                 M("The optimizer answers, but TrueNAS says it's {state}.", state=health),
-                 M("Check its health check in the YAML is the one below, and its logs (Apps → {app} → the optimizer's "
+            step("health", False, M("Its health check doesn’t pass"),
+                 M("The optimizer answers, but TrueNAS says it’s {state}.", state=health),
+                 M("Check its health check in the YAML is the one below, and its logs (Apps → {app} → the optimizer’s "
                    "container → View Logs).", app=appname), HEALTHCHECK_YAML)
             return self._done(steps)
         if health:
             # It answers, but Docker's health check doesn't pass: TrueNAS then keeps the app "Deploying"
-            step("health", False, M("Its health check doesn't pass"),
-                 M("The optimizer answers, but TrueNAS says it's {state}: its image's built-in health check looks at the "
-                   "web app's port, not the optimizer's — the image is older than the optimizer. TrueNAS keeps the app "
+            step("health", False, M("Its health check doesn’t pass"),
+                 M("The optimizer answers, but TrueNAS says it’s {state}: its image’s built-in health check looks at the "
+                   "web app’s port, not the optimizer’s — the image is older than the optimizer. TrueNAS keeps the app "
                    "deploying until it passes.", state=health),
                  M("In Apps → {app} → Edit, add these lines to the optimizer service (next to its volumes), or update the "
                    "image to the latest:", app=appname),
@@ -293,33 +305,33 @@ class Optimizing:
             return self._done(steps)
         if not hz.get("token"):
             problem = hz.get("token_problem")
-            why = {"missing": M("There's no {file} in it: the app's settings folder isn't mounted into it at /config.",
+            why = {"missing": M("There’s no {file} in it: the app’s settings folder isn’t mounted into it at /config.",
                                 file=hz.get("token_file") or "/config/optimizer-token"),
-                   "unreadable": M("It can't read {file}: it runs as user {uid}, which can't read files in the app's "
+                   "unreadable": M("It can’t read {file}: it runs as user {uid}, which can’t read files in the app’s "
                                    "settings folder.", file=hz.get("token_file") or "", uid=hz.get("uid")),
                    }.get(problem, M("The token file is empty."))
             fix = (M("In Apps → {app} → Edit, run the optimizer as user 568 (apps), or add it to that group "
                      "(group_add: [\"568\"]).", app=appname) if problem == "unreadable" else
-                   M("In Apps → {app} → Edit, add the app's settings folder to the optimizer's volumes, read-only:", app=appname))
+                   M("In Apps → {app} → Edit, add the app’s settings folder to the optimizer’s volumes, read-only:", app=appname))
             config = zfs.host_path(self.app.config_dir) or "/mnt/tank/apps/plex-cache"
-            step("token", False, M("The optimizer doesn't have the app's token"), why, fix,
+            step("token", False, M("The optimizer doesn’t have the app’s token"), why, fix,
                  "" if problem == "unreadable" else f"      - {config}:/config:ro")
             return self._done(steps)
         st = self.client.status(fresh=True)
         if st.get("error"):
             wrong = "401" in st["error"] or "nauthorized" in st["error"]
-            step("token", False, M("The optimizer has a different token") if wrong else M("The optimizer doesn't answer"),
+            step("token", False, M("The optimizer has a different token") if wrong else M("The optimizer doesn’t answer"),
                  M("It reads a token, but not the one this app uses: PLEXCACHE_OPTIMIZER_TOKEN is set in one service only, "
-                   "or its settings folder isn't this app's.") if wrong else str(st["error"]),
+                   "or its settings folder isn’t this app’s.") if wrong else str(st["error"]),
                  M("In Apps → {app} → Edit: mount the same settings folder in both services, and remove "
                    "PLEXCACHE_OPTIMIZER_TOKEN (or set it the same in both).", app=appname) if wrong else "")
             return self._done(steps)
-        step("token", True, M("Has the app's token"))
+        step("token", True, M("Has the app’s token"))
         if st.get("missing"):
             step("tools", False, M("The optimizer is missing tools"),
-                 M("It can't find {tools}: its image is older than the optimizer.", tools=join_names(st["missing"])),
+                 M("It can’t find {tools}: its image is older than the optimizer.", tools=join_names(st["missing"])),
                  # in a test copy the code is mounted over the image, but programs like these come only with the image
-                 M("This app's code is mounted over its image (a test copy), but MKVToolNix and ffmpeg come with the image "
+                 M("This app’s code is mounted over its image (a test copy), but MKVToolNix and ffmpeg come with the image "
                    "itself, not the code: it needs an image built from this code. Then, in TrueNAS, Apps → {app}: update "
                    "its image.", app=appname) if code else
                  M("In TrueNAS, Apps → {app}: update its image to the latest.", app=appname))
@@ -328,8 +340,8 @@ class Optimizing:
         roots = st.get("roots") or []
         if not roots:
             step("media", False, M("The optimizer has no media to work on"),
-                 M("No media folder is mounted into it writable, so it can't change any file."),
-                 M("In Apps → {app} → Edit, add your media folders to the optimizer's volumes, the same as {app}'s but "
+                 M("No media folder is mounted into it writable, so it can’t change any file."),
+                 M("In Apps → {app} → Edit, add your media folders to the optimizer’s volumes, the same as {app}'s but "
                    "without :ro.", app=appname))
             return self._done(steps)
         step("media", True, M("Can write {roots}", roots=join_names(roots)))
@@ -361,12 +373,41 @@ class Optimizing:
 
     # ------------------------------------------------------------ per file
     def options(self, library_key: str) -> dict:
-        """The library's choices: {"sync", "mkv", "images"} (DEFAULTS for what isn't set)."""
+        """The library's choices: {"sync", "mkv", "images", "tags"} (DEFAULTS for what isn't set;
+        an audio library's cover art is always kept)."""
         lib = (self.app.settings.section("optimizer")["libraries"] or {}).get(str(library_key)) or {}
         out = dict(DEFAULTS, **{k: v for k, v in lib.items() if k in DEFAULTS})
         if out["images"] not in IMAGE_MODES:
             out["images"] = DEFAULTS["images"]
+        if out["tags"] not in TAG_MODES:
+            out["tags"] = DEFAULTS["tags"]
+        out["convert"] = out["convert"] is True
+        info = getattr(self.app, "library_info", lambda k: None)(library_key) or {}
+        if info.get("kind") == "audio":
+            # music and audiobooks: the file is the place for cover art (players, other libraries and
+            # iTunes read it there; Plex's own lookups for music are thin) — always kept, compressed
+            out["images"] = "compress"
+            out["convert"] = False  # (converting is for video)
         return out
+
+    def convert_types(self) -> dict:
+        """Which kinds of container are converted to MKV, in the libraries that convert."""
+        return dict(convert.DEFAULT_TYPES, **(self.app.settings.section("optimizer").get("convert_types") or {}))
+
+    def converts(self, path: str, opts: dict) -> str | None:
+        """The file's container type (convert.TYPES) if its library converts that kind, else None."""
+        kind = convert.type_of(path)
+        return kind if kind and opts.get("convert") and self.convert_types().get(kind) else None
+
+    def convert_skipped(self, path: str, st: os.stat_result) -> str | None:
+        """Why the optimizer last left this file unconverted (what MKV wouldn't keep), while the file is
+        unchanged since; None otherwise."""
+        with self.lock:
+            e = self.record.get(path) or {}
+        skip = e.get("convert_skip") or {}
+        if (skip.get("size"), skip.get("mtime_ns"), skip.get("ino")) == (st.st_size, st.st_mtime_ns, st.st_ino):
+            return skip.get("reason")
+        return None
 
     @staticmethod
     def cover_for(images: str, poster: str, matched: bool | None) -> str:
@@ -400,11 +441,12 @@ class Optimizing:
         ident = (st.st_size, st.st_mtime_ns, st.st_ino)
         with self.lock:
             cached = self.record.get(path)
-        if cached and (cached.get("size"), cached.get("mtime_ns"), cached.get("ino")) == ident and "ours" in cached:
+        if cached and (cached.get("size"), cached.get("mtime_ns"), cached.get("ino")) == ident and "foreign_tags" in cached:
             return cached
         c = mkv.check(path, True)
         info = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "ino": st.st_ino, "ours": c.get("ours") or {},
-                "problems": [p for p in c.get("problems") or [] if p != "images"], "images": c.get("images") or 0}
+                "problems": [p for p in c.get("problems") or [] if p != "images"], "images": c.get("images") or 0,
+                "tags_size": c.get("tags_size", 0), "foreign_tags": c.get("foreign_tags", False)}
         with self.lock:
             self.record[path] = dict(cached or {}, **info)
         return info
@@ -413,18 +455,30 @@ class Optimizing:
         """{"applies", "mkv", "problems", "compression"} for one file under its library's choices.
 
         Optimize MKV files: "new" (not tagged by the optimizer), "version" (by an older
-        optimizer: 0.1 → 0.2), "layout" (tagged, but no longer laid out right — remuxed since by
+        optimizer: 0.1 → 0.2), "tags" (tags the library's tag choice strips), "layout" (tagged, but no longer laid out right — remuxed since by
         something else). A file tagged by a newer optimizer is left alone. TrueNAS compression &
         record size: "compression" (the ZFS record says Unknown or NotOptimal), "blocks" (not in
         blocks of the dataset's record size)."""
         opts = self.options(library_key)
         is_mkv = path.lower().endswith(mkv.MKV_EXT)
-        if not (opts["sync"] or (opts["mkv"] and is_mkv)) or conflict_original(path):
+        kind = None if is_mkv else self.converts(path, opts)
+        if not (opts["sync"] or (opts["mkv"] and is_mkv) or kind) or conflict_original(path):
             return {"applies": False, "mkv": is_mkv}
         try:
             st = os.stat(path)
         except OSError:
             return {"applies": False, "missing": True, "mkv": is_mkv}
+        if kind:
+            # converted already (waiting for Plex, or by another system sharing the files): nothing to do
+            # here — it goes once Plex has its MKV
+            conv = self.app.conversions.get(path) if hasattr(self.app, "conversions") else None
+            if conv or os.path.exists(convert.target_of(path)):
+                return {"applies": True, "mkv": False, "problems": [], "converted": (conv or {}).get("state") or "there"}
+            why = self.convert_skipped(path, st)
+            if not why:
+                return {"applies": True, "mkv": False, "problems": ["convert"], "convert": kind}
+            if not opts["sync"]:
+                return {"applies": True, "mkv": False, "problems": [], "convert_skipped": why}
         problems, comp = [], None
         if opts["mkv"] and is_mkv:
             info = self._mkv_info(path, st)
@@ -435,6 +489,8 @@ class Optimizing:
                 problems.append("version")
             elif v == "same" and info.get("problems"):
                 problems.append("layout")
+            elif v == "same" and strips_tags(opts["tags"], info):
+                problems.append("tags")  # tags the library's choice strips
         if opts["sync"]:
             comp = self.zfs.status(path, st.st_ino, rec.get("dataset"))
             if comp in zfslog.NEEDS_WORK:
@@ -487,7 +543,7 @@ class Optimizing:
                                        for r in records.values() if r.get("dataset")})
             out: dict[str, dict] = {}
             seen, dirs = set(), {}
-            # Every library that isn't unticked in Media mappings: optimizing doesn't depend on caching
+            # Every library that isn't unticked in Media Mappings: optimizing doesn't depend on caching
             off = {str(lib["key"]) for lib in getattr(self.app, "libraries", []) or [] if lib.get("excluded")}
             for f in list(self.app.files):
                 key = str(f.library_key)
@@ -559,9 +615,14 @@ class Optimizing:
                          result=result, sha256=r.get("sha256") or entry.get("sha256"))
             if result in ("optimized", "already"):
                 entry.update(ours=r.get("tags") or {}, problems=[], images=r.get("images_after", entry.get("images", 0)))
+                if r.get("tags_stripped"):
+                    entry.update(foreign_tags=False, tags_size=0)  # (only ours left: as good as nothing)
             self.record[path] = entry
         if result in ("optimized", "rewritten"):
             self.zfs.written(path, ident["ino"], rec.get("dataset"), rec.get("compression"))
+            maps = getattr(self.app, "file_maps", None)
+            if maps is not None:
+                maps.keep_before(path)  # (Library Health: what caching took before, against now)
         self.zfs.save()
         self.save()
 
@@ -571,9 +632,6 @@ class Optimizing:
         self.app._save_json(RECORD, data)
 
     # ------------------------------------------------------------ the job
-    def busy(self) -> bool:
-        return self.app.jobs.busy()
-
     def start_library(self, library_key: str, mode: str = "optimize", resumed: dict | None = None) -> bool:
         """Do every file of a library that needs it under its choices, one at a time, in the
         background, as a file job (jobs.py: progress, pause, resume after a restart, one at a time).
@@ -594,9 +652,6 @@ class Optimizing:
         if item is None:
             return None
         return "started" if all(q["id"] != item["id"] for q in self.app.jobs.queued()) else "queued"
-
-    def stop(self) -> None:
-        self.app.jobs.cancel()
 
     def set_paused(self, paused: bool) -> bool:
         return self.app.jobs.pause(paused)
@@ -688,11 +743,11 @@ class Optimizing:
                 if result["result"] == "cancelled":
                     break  # not tried: listed as cancelled, counted as not done
                 size = int(item.get("size") or 0)
-                kind = {"optimized": "optimized", "already": "optimized", "rewritten": "rewritten",
+                kind = {"optimized": "optimized", "already": "optimized", "converted": "optimized", "rewritten": "rewritten",
                         "skipped": "skipped"}.get(result["result"], "failed")
-                job.file_done(size, kind, time.time() - t0 if result["result"] in ("optimized", "rewritten") else None,
+                job.file_done(size, kind, time.time() - t0 if result["result"] in ("optimized", "rewritten", "converted") else None,
                               (path, str(result.get("reason") or "failed")) if kind == "failed" else None)
-                if result["result"] in ("optimized", "rewritten", "already"):
+                if result["result"] in ("optimized", "rewritten", "already", "converted"):
                     with self.lock:
                         lib = self.summary.get(key)
                         if lib and lib.get("todo"):
@@ -838,14 +893,15 @@ class Optimizing:
         """One file in the job log: how long, its size, the verification, its record size and
         compression before and after, whether it was laid out again, and its cover art."""
         res = r.get("result")
-        wrote = res in ("optimized", "rewritten")
+        wrote = res in ("optimized", "rewritten", "converted")
+        written = r.get("new") if res == "converted" else path  # (a converted file: what's said after is its MKV's)
         try:
-            st = os.stat(path)
+            st = os.stat(written)
             after = {"size": st.st_size, "rs": st.st_blksize if st.st_size > st.st_blksize else None}
         except OSError:
             after = {}
         cover, b, a = None, None, None
-        if res == "optimized":
+        if res in ("optimized", "converted"):
             b, a = r.get("images_before") or 0, r.get("images_after") or 0
             cover = ("Plex poster added" if r.get("cover") and not b else "replaced by Plex's poster" if r.get("cover")
                      else f"{b - a} removed" if a < b else "compressed" if r.get("images_saved") else "kept" if a else None)
@@ -855,14 +911,14 @@ class Optimizing:
                 rs_before=before.get("rs"), rs_after=after.get("rs") if wrote else before.get("rs"),
                 compression_before=before.get("compression") or "unknown",
                 compression_after=rec.get("compression") if wrote else before.get("compression") or "unknown",
-                layout=res == "optimized", cover=cover, poster=poster or None, label=self.app.title_of(path) or None,
-                version=r.get("version") if res == "optimized" else None, version_before=before.get("version"),
-                images_before=b, images_after=a, images_saved=r.get("images_saved") or None,
-                poster_added=bool(r.get("cover") and not b) if res == "optimized" else None, disk_before=before.get("disk"))
+                layout=res in ("optimized", "converted"), cover=cover, poster=poster or None, label=self.app.title_of(path) or None,
+                version=r.get("version") if res in ("optimized", "converted") else None, version_before=before.get("version"),
+                images_before=b, images_after=a, images_saved=r.get("images_saved") or None, new=r.get("new"),
+                poster_added=bool(r.get("cover") and not b) if res in ("optimized", "converted") else None, disk_before=before.get("disk"))
         if wrote:
             # its space on the pool once ZFS has written it out (compressed): known a little later
             def disk_after():
-                got = settled_blocks(path)
+                got = settled_blocks(written)
                 if got is not None:
                     self.app.jobs.log.add({"type": "disk", "job": job_id, "file": path, "disk_after": got})
             threading.Thread(target=disk_after, name="disk-after", daemon=True).start()
@@ -903,6 +959,48 @@ class Optimizing:
         job = self.app.jobs.job
         return job.stop_event if job and job.state.get("running") else threading.Event()
 
+    def poster_size(self, poster: str, fetch: bool = False) -> int | None:
+        """The size of Plex's poster as Plex has it (before the optimizer compresses it), kept by its
+        path — which changes when the poster does. ``fetch``: downloaded now if it isn't known."""
+        sizes = self._poster_sizes()
+        if not poster or poster in sizes or not fetch:
+            return sizes.get(poster)
+        try:
+            n = len(self._poster(poster))
+        except PlexError:
+            return None
+        with self.lock:
+            sizes[poster] = n
+            while len(sizes) > 50000:
+                sizes.pop(next(iter(sizes)))
+        self.app._save_json(POSTER_SIZES, sizes)
+        return n
+
+    def _poster_sizes(self) -> dict:
+        with self.lock:
+            if not hasattr(self, "_psizes"):
+                got = self.app._load_json(POSTER_SIZES)
+                self._psizes = got if isinstance(got, dict) else {}
+            return self._psizes
+
+    def poster_sizes_soon(self, posters: list) -> None:
+        """Learn the sizes of these posters in the background, one at a time (Library Health's estimates
+        for a library whose cover art becomes Plex's poster)."""
+        todo = [p for p in dict.fromkeys(posters) if p and p not in self._poster_sizes()]
+        with self.lock:
+            if not todo or getattr(self, "_psizing", False):
+                return
+            self._psizing = True
+
+        def work():
+            try:
+                for p in todo:
+                    self.poster_size(p, fetch=True)
+            finally:
+                with self.lock:
+                    self._psizing = False
+        threading.Thread(target=work, name="poster-sizes", daemon=True).start()
+
     def _poster(self, path: str) -> bytes:
         """Plex's poster, kept for the run: a season's episodes share one."""
         cache = self.__dict__.setdefault("_posters", {})
@@ -925,9 +1023,18 @@ class Optimizing:
         opts = self.options(key)
         problems = item.get("problems") or []
         try:
-            if item.get("cover"):  # Sync Cover Art: written again with the new cover art
+            if "convert" in problems:  # converted to MKV (and optimized), next to the original
+                images = self.images_mode(opts["images"], poster, item.get("matched"), {})
+                cover = None
+                if images == "plex":
+                    try:
+                        cover = self._poster(poster)
+                    except PlexError as e:
+                        return {"result": "failed", "reason": msg(e)}
+                send = lambda: self.client.convert(path, images, cover, opts["tags"])
+            elif item.get("cover"):  # Sync Cover Art: written again with the new cover art
                 cover = self._poster(poster) if item["cover"] == "plex" else None
-                send = lambda: self.client.optimize(path, item["cover"], True, cover)
+                send = lambda: self.client.optimize(path, item["cover"], True, cover, opts["tags"])
             elif any(p not in SYNC_PROBLEMS for p in problems):
                 info = self._mkv_info(path, st)
                 images = self.images_mode(opts["images"], poster, item.get("matched"), info.get("ours"))
@@ -937,7 +1044,7 @@ class Optimizing:
                         cover = self._poster(poster)
                     except PlexError as e:
                         return {"result": "failed", "reason": msg(e)}
-                send = lambda: self.client.optimize(path, images, False, cover)
+                send = lambda: self.client.optimize(path, images, False, cover, opts["tags"])
             else:
                 send = lambda: self.client.rewrite(path)
         except PlexError as e:
@@ -945,6 +1052,17 @@ class Optimizing:
         r = self._send(path, send, st.st_size)
         if r.get("result") in ("optimized", "already", "rewritten"):
             self.note(path, key, r, rec)
+        elif r.get("result") == "converted" and r.get("new"):
+            self.note(r["new"], key, dict(r, result="optimized"), rec)  # (the MKV: optimized, written with the dataset's settings)
+            f = next((x for x in list(self.app.files) if self.app.map_path(x.path) == path), None)
+            if f is not None:
+                self.app.conversions.add(f, path, r["new"])
+        elif "convert" in problems and r.get("result") == "skipped":
+            # what MKV wouldn't keep: not tried again while the file stays as it is
+            with self.lock:
+                self.record[path] = dict(self.record.get(path) or {}, convert_skip={
+                    "reason": r.get("reason"), "size": st.st_size, "mtime_ns": st.st_mtime_ns, "ino": st.st_ino})
+            self.save()
         return r
 
     def _send(self, path: str, start, size: int) -> dict:
