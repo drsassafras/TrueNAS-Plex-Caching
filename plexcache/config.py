@@ -33,6 +33,8 @@ DEFAULTS: dict = {
     # Library Sync (sync.py): whether this server has a mirror ("mirrors": "unknown" until chosen —
     # "none", or "plex2", the server watched), and what a sync would do. Nothing acts without a review:
     # "approved" holds the settings as last reviewed; changed since, applying stays paused.
+    # Library Health (libhealth.py): which checks run, by id ({id: true/false}; the ids are libhealth.CHECKS)
+    "library_health": {"checks": {}},
     "sync": {
         "mirrors": "unknown",
         "discover": True,        # look for mirrors among the account's servers, weekly
@@ -336,6 +338,12 @@ def _coerce(section: str, key: str, value, current):
         return _text(section, key, value, 255, spaces=False)
     if (section, key) in (("plex2", "name"), ("plex2", "machine_id")):
         return _text(section, key, value, 200)
+    if (section, key) == ("library_health", "checks"):
+        from .libhealth import CHECKS
+        ids = {c["id"] for cat in CHECKS.values() for c in cat}
+        if not isinstance(value, dict) or any(k not in ids or not isinstance(v, bool) for k, v in value.items()):
+            raise SettingsError(M("library_health.checks must set each of {ids} to true or false", ids=", ".join(sorted(ids))))
+        return {k: v for k, v in value.items()}
     if (section, key) == ("sync", "what"):
         if not isinstance(value, dict) or any(k not in DEFAULTS["sync"]["what"] or not isinstance(v, bool) for k, v in value.items()):
             raise SettingsError(M("sync.what must set each of {keys} to true or false", keys=", ".join(DEFAULTS["sync"]["what"])))

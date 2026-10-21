@@ -81,7 +81,12 @@ def check_file(app, f, path: str, m: dict | None, rec: dict, opts: dict, info: d
     record = bs or rec.get("rs") or 1024 * 1024
     audio = {t.get("type") for t in m.get("tracks") or []} == {"audio"}
     if vs is not None and size > record:
-        if vs <= 0.4 * record:
+        movable = [p for p in m.get("parts") or [] if p["part"] in ("chapters", "index", "tags") and p["pos"] < vs] if mkv else []
+        if vs <= 0.4 * record and movable:
+            # it fits, but what could sit at the end (where it compresses) takes room the video's start could have
+            add("front", "pass", M("{size} in front of the video: the first block holds it with the video’s start, "
+                                   "but it has metadata that belongs at the end. Optimize Now moves it there.", size=_size(vs)))
+        elif vs <= 0.4 * record:
             add("front", "ideal", M("{size} in front of the audio: the first block holds it with the audio’s start.", size=_size(vs)) if audio
                 else M("{size} in front of the video: the first block holds it with the video’s start.", size=_size(vs)))
         elif mkv:

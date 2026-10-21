@@ -532,7 +532,7 @@ h2 .mode-ic{vertical-align:-3px}
 /* the parts every file starts with (header, segment, table of contents, file info, track list): one colour */
 .lp-head{fill:#7C8781;background:#7C8781}
 /* a padding row in a block's list sits under its part, like a sub-item */
-.tbl td.lpadrow{padding-left:30px}
+.lpadgap{display:inline-block;width:22px}
 /* the block picked in a file's view grows, to show its smaller slices (the list above stays to scale) */
 .lblk.big.sel{flex-grow:2.5}
 .lsummary{margin:4px 0 10px;font-size:14px}
@@ -568,10 +568,10 @@ h2 .mode-ic{vertical-align:-3px}
 .optkinds{display:block;margin:0 0 4px 24px}
 /* Library Health: the always-cached blocks compared — the rows' names once, Streamed and Cached side by side;
    each bar with a bar above it as long as what's kept, with its total */
-.lcgrid{display:grid;grid-template-columns:auto auto minmax(0,1fr);gap:3px 14px;align-items:end;margin:6px 0 2px}
-.lcgroup{font-size:13px;font-weight:600;align-self:center;white-space:nowrap}
+.lcgrid{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 10px;align-items:end;margin:6px 0 2px}
+.lcgroup{grid-column:1/-1;font-size:13px;font-weight:600;white-space:nowrap;margin-top:2px}
 .lcgap{grid-column:1/-1;height:6px}
-.lclbl{font-size:12px;align-self:end;padding-bottom:3px;white-space:nowrap}
+.lclbl{font-size:12px;align-self:end;padding-bottom:3px;white-space:nowrap;cursor:help}
 .lccell{min-width:0}
 .lcline{position:relative;display:flex;height:4px;margin:16px 0 3px}
 .lcline>span{display:block;height:4px}
@@ -580,9 +580,10 @@ h2 .mode-ic{vertical-align:-3px}
 .lclr{background:#A9B2AD}
 .lcline em{position:absolute;bottom:6px;transform:translateX(-100%);font-style:normal;font-size:11px;color:var(--soft);white-space:nowrap;line-height:12px}
 .lcbar{display:flex;height:20px;border-radius:3px;overflow:hidden}
-.lcbar>span{display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;white-space:nowrap;overflow:hidden;min-width:1px;cursor:default}
+.lcbar>span{display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;white-space:nowrap;overflow:hidden;min-width:1px;padding:0;letter-spacing:-.01em;cursor:default}
 .lcvidend{background:#8F9792}
 .lcout{background:#D45D8A}
+.lcround{background:repeating-linear-gradient(45deg,#B9BFBB 0 3px,#DDE1DD 3px 6px);color:var(--ink)}
 .lclegend{margin:2px 0 4px}
 /* Library Health: each part's ⓘ at the front of its line (a slot where it has none), its checks after it */
 .lblkinfo td>.info:first-child{margin:0 6px 0 0}
@@ -591,3 +592,84 @@ h2 .mode-ic{vertical-align:-3px}
 .lcheck .badge{margin:0}
 .lcheck .info{margin-left:2px}
 .lcountn{cursor:default}
+/* Library → Sync: each item, both servers side by side, what applying would copy between them */
+.ssitem{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:10px 16px;padding:12px 0;border-top:1px solid var(--line2);align-items:start}
+.ssnotes{grid-column:1/-1;font-size:14px}
+.ssnotes>div{margin-top:4px}
+.sslbl{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-top:6px}
+.ssitem.warn{background:var(--guide-bg);margin:0 -8px;padding:12px 8px;border-radius:8px}
+.ssside .sshead{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:4px}
+.ssside.src .sshead{color:var(--ink)}
+.ssbody{display:flex;gap:10px;align-items:flex-start}
+.ssposter{flex:none;width:48px;height:72px;border-radius:4px;object-fit:cover;background:var(--line2)}
+.ssposter.none{border:1px dashed var(--line)}
+.ssinfo{min-width:0}
+.ssarrow{align-self:center;font-size:26px;color:var(--muted);padding:0 4px}
+.note.warn{background:var(--guide-bg);border-color:var(--guide-line)}
+@media (max-width:760px){.ssitem{grid-template-columns:minmax(0,1fr)}.ssarrow{transform:rotate(90deg);justify-self:center}}
+/* Library → Sync: items closed to a line, opened to both servers side by side */
+.ssrow{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;width:100%;padding:8px 6px;border:0;border-top:1px solid var(--line2);background:none;font:inherit;color:inherit;text-align:left;cursor:pointer}
+.ssrow:hover{background:var(--line2)}
+.ssrow.warn{background:var(--guide-bg)}
+.ssitem{position:relative}
+.ssclose{position:absolute;right:0;top:12px;font-size:12px}
+.ssval{font-size:13px;margin:2px 0;overflow-wrap:anywhere;cursor:default}
+
+/* the Sync comparison: each side its own card, what's about neither underneath, the servers named once over the list */
+.sshdr{position:sticky;top:0;z-index:5;display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:0 16px;padding:8px 0;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:600}
+.sshdr>div:nth-child(2){width:34px}
+.sstop{grid-column:1/-1;display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+.sstop .what{font-weight:600}
+.ssitem .ssclose{position:static}
+.sscard{border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--panel);min-width:0}
+.ssnotes{border:1px dashed var(--line);border-radius:8px;padding:8px 10px;background:var(--line2);display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
+.sschips{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0}
+.sschip{cursor:pointer;border:1px solid transparent;font:inherit;font-size:12px}
+.sschip.on{border-color:currentColor}
+@media (max-width:760px){.sshdr{display:none}}
+.ssitem+.ssitem{margin-top:14px}
+.b-grey{background:var(--line2);color:var(--muted)}
+.ssposter.p-hand{box-shadow:0 0 0 4px var(--ok-bg)}
+.ssposter.p-match{box-shadow:0 0 0 4px var(--line2)}
+.ssposter.p-warn{box-shadow:0 0 0 4px var(--warn-bg)}
+.sspeekwrap{position:relative}
+.sspeek{display:none;position:absolute;left:0;top:100%;z-index:20;width:min(340px,80vw);gap:10px;padding:10px;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.16);font-size:13px}
+.sspeek img{flex:none;width:60px;height:90px;object-fit:cover;border-radius:4px;background:var(--line2)}
+.sspeek .det{display:block;margin-top:4px}
+.sspeekwrap:hover .sspeek{display:flex}
+.ssposter.p-hand,.ssposter.p-match,.ssposter.p-warn{margin:5px}
+.ssitem>.sscard{align-self:stretch}
+.ssfiles{font-family:var(--mono,monospace);font-size:11px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere}
+.ssstack{display:flex;flex-direction:column;gap:8px;min-width:0}
+/* every item its own box; its warnings beside its title (on the next line when there's no room) */
+.ssitem{background:var(--guide-bg);border:0;border-radius:8px;padding:12px 10px;margin:0 -2px}
+.ssitem+.ssitem{margin-top:14px}
+.ssitem.warn{margin:0 -2px;padding:12px 10px}
+.ssitem.warn+.ssitem,.ssitem+.ssitem.warn{margin-top:14px}
+.sstop{flex-wrap:wrap;align-items:center}
+.sswarn{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}
+.ssfiles>div{padding-left:0}
+.ssnotes .ssfiles{margin-top:0}
+/* Library → Health: the checks by category, each with its switch and count */
+.lhgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px 28px;margin:8px 0 12px}
+.lhgrid>*{min-width:0}
+.lhchk{align-items:center;gap:6px}
+.lhchk .badge{margin-left:auto}
+/* Library → Sync: the row's files, numbered to match the File chips; under the one card when only one side has records */
+.ssfilelist.only-src{grid-column:1}
+.ssfilelist.only-dst{grid-column:3}
+.ssfn{display:inline-block;min-width:1.4em;text-align:right;color:var(--ink);font-weight:600}
+/* Tools: the introduction's cards, and the tools' row on each tool's page */
+.toolcard h2 a{color:inherit;text-decoration:none}
+.toolcard p{color:var(--soft);font-size:14px;margin:6px 0 12px}
+.seg a[role=tab]{display:inline-flex;align-items:center;font:inherit;font-size:13px;font-weight:600;text-decoration:none;color:var(--soft);border-radius:8px;padding:0 10px;min-height:32px}
+.seg a[role=tab][aria-selected=true]{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.sstick{width:16px;height:16px;accent-color:var(--accent);vertical-align:-2px;margin-right:4px}
+/* the tools, under Tools in the menu while one of their pages is open */
+.toolsub{display:flex;flex-direction:column;gap:2px;margin:-2px 0 4px 44px}
+.toolsub a.subnav{display:block;padding:6px 10px;border-radius:6px;color:var(--side-ink);text-decoration:none;font-size:13px;opacity:.85}
+.toolsub a.subnav:hover{background:#2A302D;color:#fff;opacity:1}
+.toolsub a.subnav.on{background:#2F3833;color:#fff;font-weight:600;opacity:1}
+.shell.collapsed .toolsub{display:none}
+/* Library Health's checks: the ⓘ before the checkbox, where the eye lands first */
+.lhchk > .info{margin-left:0;margin-right:-8px}

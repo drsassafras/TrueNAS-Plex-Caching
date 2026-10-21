@@ -192,11 +192,10 @@ class Job:
                                 cancelled=self.stopped, paused_by=None, paused_why=None)
                     if self.logged:  # (an inspection isn't a job to report: the last real one stays)
                         self.jobs.last = {k: v for k, v in self.state.items() if not k.startswith("_")}
+                        self.app._save_json(LAST_FILE, self.jobs.last)  # its counts and failures stay until dismissed
                 s = self.state
                 self.log(type="job", event="cancelled" if self.stopped else "finished", done=s["done"], total=s["total"],
                          counts={k: s.get(k) for k in ("optimized", "rewritten", "skipped", "failed", "conflicts")})
-                if self.logged:
-                    self.app._save_json(LAST_FILE, self.jobs.last)  # its counts and failures stay until dismissed
                 threading.Thread(target=self.jobs.start_next, daemon=True).start()  # the next in the queue
 
 
@@ -216,11 +215,7 @@ class Jobs:
         self.last: dict | None = app._load_json(LAST_FILE) or None  # the last job that ended (until dismissed)
         if self.last and self.last.get("kind") == "survey":
             self.last = None  # kept by an earlier version: an inspection isn't one to report
-        self.log = JobLog(app.config_dir)  # what every job did, file by file (Processes page), six months
-        try:
-            self.log.prune()
-        except OSError:
-            pass
+        self.log = JobLog(app.config_dir)  # what every job did, file by file (Processes page), kept for good
         self._resilver: dict[str, tuple[float, str | None]] = {}
 
     def register(self, kind: str, make, removed=None) -> None:

@@ -1,4 +1,4 @@
-"""The job log (Processes page): what every file job did, kept six months.
+"""The job log (Processes page): what every file job did, kept for good.
 
 One line of JSON per entry, appended as it happens (job-log.jsonl in the config folder), so a
 restart loses nothing:
@@ -11,12 +11,17 @@ restart loses nothing:
   what happened to its cover art;
 * a written file's space on the pool, once ZFS has compressed it ("disk", a little later);
 * the files a job set out to do ("plan", once it has checked which need it — again when it carries
-  on after a restart), so its list shows the ones not tried yet too.
+  on after a restart), so its list shows the ones not tried yet too;
+* a written file's always-cached blocks before and after ("mix_before", "mix_after":
+  filehistory.snapshot), for its chart;
+* the files found optimized elsewhere (Syncthing brought them from another NAS): "discovered", one
+  job a day per library, each with its before and after (filehistory.py).
 
 Each job's tally (jobs()) adds its files up as it goes: record sizes and compression put right,
 space saved, posters removed, added and compressed.
 
-Entries older than six months are dropped (prune()). export() gives every entry as CSV or JSON.
+Nothing is dropped: it's the history of every file optimized (the Metrics page's sums come from
+filehistory.py). export() gives every entry as CSV or JSON.
 """
 
 from __future__ import annotations
@@ -29,7 +34,6 @@ import threading
 import time
 
 LOG = "job-log.jsonl"
-KEEP = 182 * 24 * 3600
 FILE_FIELDS = ("at", "job", "kind", "library", "file", "label", "result", "seconds", "size_before", "size_after",
                "disk_before", "disk_after", "verified", "reason", "rs_before", "rs_after", "compression_before",
                "compression_after", "layout", "version_before", "version", "cover", "images_before", "images_after",
@@ -42,7 +46,7 @@ def _pct(b, a):
 
 
 # The files list, sorted by a column (stable, so the order done within each)
-RESULT_ORDER = {"failed": 0, "skipped": 1, "rewritten": 2, "converted": 3, "optimized": 3, "already": 4, "copied": 5}
+RESULT_ORDER = {"failed": 0, "skipped": 1, "rewritten": 2, "converted": 3, "optimized": 3, "discovered": 3, "already": 4, "copied": 5}
 SORTS = {
     # by title (each edition's files together, in file order), the default
     "file": lambda f: ((f.get("label") or os.path.basename(f.get("file") or "")).lower(), f.get("file") or ""),
@@ -137,6 +141,8 @@ class JobLog:
                 continue
             if e.get("type") == "file":
                 files.setdefault(jid, {})[e.get("file")] = e
+                if j["kind"] == "discovered":  # (found, not run: done as each file is found)
+                    j.update(status="finished", ended=e.get("at"))
                 continue
             j["events"].append({k: e.get(k) for k in ("event", "at", "done", "total", "why", "counts") if e.get(k) is not None})
             for k in ("mode", "library", "title"):
@@ -190,22 +196,6 @@ class JobLog:
     def _disk(rows: list[dict]) -> dict:
         """(job, file) -> its space on the pool once written (logged a little after the file)."""
         return {(e.get("job"), e.get("file")): e.get("disk_after") for e in rows if e.get("type") == "disk"}
-
-    def prune(self, now: float | None = None) -> int:
-        """Drop entries older than six months. How many were dropped."""
-        cut = (now or time.time()) - KEEP
-        rows = self.entries()
-        keep = [e for e in rows if (e.get("at") or 0) >= cut]
-        if len(keep) == len(rows):
-            return 0
-        tmp = self.path + ".tmp"
-        with self.lock:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                for e in keep:
-                    fh.write(json.dumps(e, separators=(",", ":"), default=str) + "\n")
-            os.replace(tmp, self.path)
-            self._cache = None
-        return len(rows) - len(keep)
 
     def export(self, fmt: str = "csv") -> tuple[bytes, str]:
         """Every entry: JSON (everything), or CSV (the files, one row each, plus the jobs' events)."""

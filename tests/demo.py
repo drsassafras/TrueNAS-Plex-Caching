@@ -27,6 +27,29 @@ SHOW, AUTHOR = "Harbour Street", "E. M. Hollis"
 EPISODES = ["Low Tide", "The Night Shift", "Breakwater", "Fog Bells", "Signal Fires", "Undertow", "Mooring", "Slack Water"]
 for m, title in zip(cat["movies"], MOVIES):
     m["title"] = title
+    m["year"] = 2010 + cat["movies"].index(m)
+    m["duration"] = 5400000 + 60000 * cat["movies"].index(m)
+    m["guid"] = f"plex://movie/demo{cat['movies'].index(m)}"
+    m["guids"] = [f"tmdb://{4000 + cat['movies'].index(m)}"]
+# the Tools pages: "Glass Harbour" on a second record too (the same match); "Paper Moons" with a copy of its
+# file beside it on one record; two films loose in the library folder itself
+import shutil as _sh
+_m2, _m3 = cat["movies"][2], cat["movies"][3]
+_dup = os.path.join(media, "Movies", "Glass Harbour (2012) [copy].mkv")
+_sh.copy(_m2["path"], _dup)
+cat["movies"].append({"path": _dup, "size": _m2["size"], "kbps": _m2["kbps"], "key": "190", "title": _m2["title"], "year": _m2["year"], "guid": _m2["guid"], "guids": _m2["guids"]})
+cat["movies"][2]["locked"] = ["title", "summary"]
+_copy = os.path.join(os.path.dirname(_m3["path"]), "Paper Moons (2013) - copy.mkv")
+_sh.copy(_m3["path"], _copy)
+_m3["more"] = [_copy]
+for _i in (10, 11):
+    _m = cat["movies"][_i]
+    _loose = os.path.join(media, "Movies", os.path.basename(_m["path"]).replace("Movie", _m["title"]))
+    os.rename(_m["path"], _loose)
+    with open(os.path.splitext(_loose)[0] + ".en.srt", "w") as _fh:
+        _fh.write("1\n")
+    _sh.rmtree(os.path.dirname(_m["path"]))
+    _m["path"] = _loose
 for ep in cat["episodes"]:
     ep["title"] = EPISODES[(ep["episode"] - 1) % len(EPISODES)]
 # TV is on its own child dataset (set up well); the rest share the parent (left at metadata/128K).

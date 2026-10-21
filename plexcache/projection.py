@@ -4,8 +4,14 @@ it compresses, and the file written in the dataset's record size — and so what
 of it then, against now. Nothing is read: each kind of metadata's size, as it is and compressed,
 was measured when the file was inspected.
 
-Only MKV files the optimizer would rewrite are projected. A Plex poster the optimizer would put in
-isn't counted (its size isn't known until it's fetched): a file's own cover art stands in for it.
+MKV files the optimizer would lay out again are projected as it would lay them out; any other file
+it would write again (to take its dataset's compression and record size: rewrite) as it is, in the
+new blocks. A Plex poster the optimizer would put in isn't counted (its size isn't known until it's
+fetched): a file's own cover art stands in for it.
+
+Compression is estimated by family (family()): "zstd" (zlib standing in for ZSTD and gzip), "lz4"
+(an LZ4 estimate, filemap.lz4_size: TrueNAS's default, taken for a file whose compression isn't
+known) and "off".
 """
 
 from __future__ import annotations
@@ -14,10 +20,35 @@ from . import layout
 from .filemap import MIX_KEYS, store
 
 
-def _ratio(kinds: dict, kind: str) -> float:
-    """How well a kind of metadata compressed when the file was inspected (1: not measured)."""
-    raw, packed = (kinds.get(kind) or [0, 0])[:2]
-    return packed / raw if raw else 1.0
+def family(compression: str | None) -> str:
+    """A ZFS compression setting as the estimates know it: "off", "lz4" (lz4, and the other light
+    ones — lzjb, zle), or "zstd" (ZSTD and gzip at any level). Not known: "lz4", TrueNAS's default."""
+    c = str(compression or "").lower()
+    if c in ("off", "none"):
+        return "off"
+    if c.startswith(("zstd", "gzip")) or c == "on":
+        return "zstd" if c != "on" else "lz4"
+    return "lz4"
+
+
+def existing(mix: dict, fam: str) -> dict:
+    """A file's mix (filemap.cache_mix: as ZSTD would store it) as it's stored with ``fam``."""
+    if fam == "zstd" or not mix:
+        return mix
+    if fam == "off":
+        return dict(mix, meta_disk=mix.get("meta", 0), unused_disk=mix.get("unused", 0), round_disk=0)
+    alt = mix.get("lz4")
+    return dict(mix, **alt) if alt else mix  # (inspected before LZ4 was measured: as ZSTD, until read again)
+
+
+def _ratio(kinds: dict, kind: str, fam: str = "zstd") -> float:
+    """How well a kind of metadata compressed when the file was inspected, with ``fam`` (1: not measured)."""
+    got = kinds.get(kind) or [0, 0]
+    raw = got[0]
+    if fam == "off" or not raw:
+        return 1.0
+    packed = got[2] if fam == "lz4" and len(got) > 2 else got[1]
+    return packed / raw
 
 
 def removed(m: dict, images: str, strip_tags: bool) -> dict:
@@ -66,30 +97,46 @@ def layout_after(m: dict, images: str, strip_tags: bool, cover_size: int | None 
     return front, tail
 
 
-def project(m: dict, record: int, images: str, strip_tags: bool, cover_size: int | None = None) -> dict | None:
+def project(m: dict, record: int, images: str, strip_tags: bool, cover_size: int | None = None, comp: str = "zstd",
+            rewrite: bool = False, comp_now: str = "zstd") -> dict | None:
     """The file as the optimizer would write it, in blocks of ``record``: {"mix" (as cache_mix
     gives it), "removed", "first_video" (video in its first block), "first_video_now"}. ``images``:
     what's done with its cover art (Optimizing.images_mode: "remove" takes it out); ``strip_tags``:
     whether its tags go; ``cover_size``: Plex's poster's size, when the cover art becomes it (unknown:
-    the file's own cover art stands in). None if the file wasn't measured (inspected by an older version)."""
+    the file's own cover art stands in). ``comp``: the compression it's written with (family()).
+    ``rewrite``: written again as it is (any kind of file), not laid out again; ``comp_now``: the
+    compression it's stored with now (what's taken out, as stored now). None if the file
+    wasn't measured (inspected by an older version)."""
+    from .filemap import pieces
     mix = m.get("mix")
-    if not mix or "kinds" not in mix or m.get("format") != "mkv" or not record:
+    if not mix or "kinds" not in mix or not record or (m.get("format") != "mkv" and not rewrite):
         return None
     kinds = mix["kinds"]
-    front, tail = layout_after(m, images, strip_tags, cover_size)
-    video = max(0, (m.get("video_end") or m.get("size") or 0) - (m.get("video_start") or 0))
     # where each byte goes: [(start, end, "video" | "padding" | a kind of metadata)]
     spans, at = [], 0
-    for kind, n in front:
-        spans.append((at, at + n, kind))
-        at += n
-    head = at
-    spans.append((at, at + video, "video"))
-    at += video
-    for kind, n in tail:
-        spans.append((at, at + n, kind))
-        at += n
-    size = at
+    if rewrite:
+        images, strip_tags = "keep", False
+        parts = pieces(m)
+        if not parts:
+            return None
+        spans = [(p["pos"], p["pos"] + p["size"], p["kind"]) for p in parts]  # (as it is: cache_mix's pieces)
+        head, size = m.get("video_start") or 0, m.get("size") or 0
+        video = max(0, (m.get("video_end") or size) - head)
+        front = [(k, b - a) for a, b, k in spans if k != "video" and a < head]
+        tail = [(k, b - a) for a, b, k in spans if k != "video" and a >= head]
+    else:
+        front, tail = layout_after(m, images, strip_tags, cover_size)
+        video = max(0, (m.get("video_end") or m.get("size") or 0) - (m.get("video_start") or 0))
+        for kind, n in front:
+            spans.append((at, at + n, kind))
+            at += n
+        head = at
+        spans.append((at, at + video, "video"))
+        at += video
+        for kind, n in tail:
+            spans.append((at, at + n, kind))
+            at += n
+        size = at
     out = dict.fromkeys(MIX_KEYS, 0)
     out.update(blocks=0, record=record)
     first = max(1, -(-layout.min_head(head, record, size) // record))
@@ -111,20 +158,20 @@ def project(m: dict, record: int, images: str, strip_tags: bool, cover_size: int
                 unused += got
             else:
                 meta += got
-                packed += int(got * _ratio(kinds, kind))
+                packed += int(got * _ratio(kinds, kind, comp))
         unused += record - max(0, min(b, size) - a)
         store(out, record, v, meta, packed, unused)
     rs_now = mix.get("record") or record
-    gone = removed(m, images, strip_tags)
+    gone = {} if rewrite else removed(m, images, strip_tags)
     # what's taken out, as it's stored now: each kind as well as it compressed when inspected (a JPEG
     # hardly at all, tags well)
-    gone_disk = int(sum(n * _ratio(kinds, k) for k, n in gone.items()))
+    gone_disk = int(sum(n * _ratio(kinds, k, comp_now) for k, n in gone.items()))
     out.setdefault("video_tail", 0)
     kept = {}
     for kind, n in front + tail:
         if kind != "padding":
             kept[kind] = kept.get(kind, 0) + n
-    return {"mix": out, "kinds": kept, "removed": gone, "removed_disk": gone_disk, "images": images, "strip_tags": strip_tags,
+    return {"mix": out, "kinds": kept, "removed": gone, "removed_disk": gone_disk, "images": images, "strip_tags": strip_tags, "rewrite": rewrite,
             "has_images": any(a.get("image") for a in m.get("attachments") or []),
             "cover": {"before": sum(a["size"] for a in m.get("attachments") or [] if a.get("image")),
                       "after": dict(tail).get("image", 0), "known": images != "plex" or bool(cover_size)},
@@ -169,9 +216,11 @@ def view(mix: dict, kinds: dict, tail: int | None, out: dict | None = None, out_
     still = 0 if gone else out_raw  # (now, what's to go is part of what's cached)
     stream = {"lead": video - tail, "tail": tail, "meta": max(0, mix.get("meta", 0) - still), "out": out_raw}
     cache = {"lead": video - tail, "tail": tail,
-             "meta": max(0, mix.get("meta_disk", 0) + mix.get("unused_disk", 0) - (0 if gone else out_disk)), "out": out_disk}
+             "meta": max(0, mix.get("meta_disk", 0) + mix.get("unused_disk", 0) - (0 if gone else out_disk)), "out": out_disk,
+             "round": mix.get("round_disk", 0)}  # (ZFS rounding: each compressed block's last sector, filled up)
+    stream["round"] = 0
     for v in (stream, cache):
-        v["total"] = v["lead"] + v["tail"] + v["meta"] + (0 if gone else v["out"])
+        v["total"] = v["lead"] + v["tail"] + v["meta"] + v["round"] + (0 if gone else v["out"])
     kept = {k: n for k, n in (kinds or {}).items() if n}
     if not gone:  # (now: what's to go, out of the metadata it's part of)
         for k, n in out.items():
@@ -212,15 +261,16 @@ def add_view(a: dict | None, b: dict) -> dict:
     return a
 
 
-def views(m: dict, pr: dict | None, before: dict | None = None) -> dict:
-    """A file's rows: "now", and "after" (once optimized: ``pr``, project()'s) or "before" (what it was
-    before the optimizer wrote it, as kept then)."""
-    mix = m.get("mix") or {}
+def views(m: dict, pr: dict | None, before: dict | None = None, comp_now: str = "zstd") -> dict:
+    """A file's rows: "now", and "after" (once optimized: ``pr``, project()'s) or "before" (the file
+    when first seen, before the optimizer touched it: a row, filehistory.row)."""
+    mix = existing(m.get("mix") or {}, comp_now)
     out = (pr or {}).get("removed") or {}
     now = view(mix, (mix.get("kinds") and {k: v[0] for k, v in mix["kinds"].items()}) or {}, tail_video(m), out, (pr or {}).get("removed_disk", 0))
     got = {"now": now}
     if pr:
         got["after"] = view(pr["mix"], pr.get("kinds") or {}, pr["mix"].get("video_tail", 0), out, pr.get("removed_disk", 0), gone=True)
+        got["rewrite"] = bool(pr.get("rewrite"))  # (already laid out right: only written again, for its dataset's settings)
     elif before:
-        got["before"] = view(before, {k: v[0] for k, v in (before.get("kinds") or {}).items()}, None)
+        got["before"] = before
     return got

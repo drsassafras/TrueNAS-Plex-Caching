@@ -1259,9 +1259,9 @@ class LayoutTests(unittest.TestCase):
             st, ca = row["stream"], row["cache"]
             self.assertEqual(st["lead"] + st["tail"], mix["video"])
             self.assertEqual(st["total"], st["lead"] + st["tail"] + st["meta"] + (st["out"] if out else 0))
-            self.assertEqual(ca["total"], ca["lead"] + ca["tail"] + ca["meta"] + (ca["out"] if out else 0))
+            self.assertEqual(ca["total"], ca["lead"] + ca["tail"] + ca["meta"] + ca["round"] + (ca["out"] if out else 0))
         self.assertEqual(now["stream"]["total"], m["mix"]["video"] + m["mix"]["meta"])             # every byte of the cached blocks a play reads
-        self.assertEqual(now["cache"]["total"], m["mix"]["video_disk"] + m["mix"]["meta_disk"] + m["mix"]["unused_disk"])
+        self.assertEqual(now["cache"]["total"], m["mix"]["video_disk"] + m["mix"]["meta_disk"] + m["mix"]["unused_disk"] + m["mix"]["round_disk"])
         self.assertEqual(now["stream"]["out"], sum(gone["removed"].values()))
         self.assertEqual(now["stream"]["meta"], m["mix"]["meta"] - sum(gone["removed"].values()))   # (what's to go: apart)
         self.assertEqual((now["gone"], after["gone"]), (False, True))
@@ -1727,7 +1727,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(get("/api/processes/nope")[0], 404)
         # posters: only Plex's own paths, through the app
         self.assertEqual(get("/api/poster?path=/etc/passwd")[0], 404)
-        with mock.patch.object(app, "poster_thumb", lambda p: b"jpeg"):
+        with mock.patch.object(app, "poster_thumb", lambda p, server="": b"jpeg"):
             code, body, headers = get("/api/poster?path=/library/metadata/5/thumb/17")
         self.assertEqual((code, body, headers["Content-Type"]), (200, b"jpeg", "image/jpeg"))
         with mock.patch.object(app, "poster_thumb", mock.Mock(side_effect=OSError("no"))):
@@ -4295,6 +4295,83 @@ class SmallModuleTests(unittest.TestCase):
         self.assertIn("attachments already", str(cm.exception))
 
 class PageStructureTests(unittest.TestCase):
+    def test_every_page_starts_with_a_description(self):
+        """Every page opens with its title and a short description under it (top()'s second argument):
+        what the page is for, in a sentence or two, before anything else."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        pages = re.findall(r"\n  function (page[A-Z]\w*)\(\) \{(.*?)(?=\n  function |\n  var |\Z)", src, re.S)
+        self.assertGreater(len(pages), 10)
+        for name, body in pages:
+            m = re.search(r"\btop\(([^,]+),\s*(.+)", body)
+            self.assertIsNotNone(m, f"{name} doesn't call top(title, description)")
+            desc = m.group(2).strip()
+            self.assertFalse(desc.startswith('""') or desc.startswith("''"), f"{name} opens without a description")
+            self.assertTrue(desc.startswith(("H(", "T(", "esc(", "(", "LIB.", "libs", "S.", "ST.", "op.", "sy.")) or '"' in desc, f"{name}: {desc[:60]}")
+
+    def _js_fn(self, name):
+        """A pure function marked "// @testable: <name>" in app.js, as its source."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        m = re.search(r"// @testable: " + re.escape(name) + r"\b.*?\n(  function .*?)\n  // @end", src, re.S)
+        self.assertIsNotNone(m, name)
+        return m.group(1)
+
+    def _node(self, code):
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        got = subprocess.run([node, "-e", code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(got.returncode, 0, got.stderr)
+        return json.loads(got.stdout)
+
+    def test_library_and_tool_pages_scan_by_themselves(self):
+        """The Library page starts the view's job by itself — inspecting the files for Caching and
+        Health, comparing with the mirror for Sync — pausing the other; once the view's job is done the
+        other carries on, so it's ready when that view is opened; a job paused by hand stays paused.
+        A tool's page scans the library opened once by itself. (libAutoPlan and toolAutoPlan, run in node.)"""
+        fn = self._js_fn("libAutoPlan") + "\n" + self._js_fn("toolAutoPlan")
+        cases = [
+            # landing on Caching with files to inspect: inspected
+            ["caching", {"inspect": {"needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, ["inspect:start"]],
+            # the files to inspect not known yet (the library's data still loading): nothing
+            ["caching", {"inspect": {"needed": False, "known": False}, "sync": {"on": True, "needed": True, "known": True}}, []],
+            # Health is the same job
+            ["health", {"inspect": {"needed": True, "known": True}, "sync": {"on": True, "needed": False, "known": True}}, ["inspect:start"]],
+            # switching to Sync while inspecting: the compare started, the inspection paused
+            ["sync", {"inspect": {"running": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, ["sync:start", "inspect:pause"]],
+            # back on Caching while the compare runs: the inspection resumed, the compare paused
+            ["caching", {"inspect": {"paused": True, "needed": True, "known": True}, "sync": {"on": True, "running": True, "needed": True, "known": True}}, ["inspect:start", "sync:pause"]],
+            # the view's job running: left alone
+            ["caching", {"inspect": {"running": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, []],
+            # the view's job done: the other carries on, even though its view isn't open
+            ["caching", {"inspect": {"needed": False, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, ["sync:start"]],
+            ["sync", {"inspect": {"paused": True, "needed": True, "known": True}, "sync": {"on": True, "needed": False, "known": True}}, ["inspect:start"]],
+            # everything done: nothing
+            ["sync", {"inspect": {"needed": False, "known": True}, "sync": {"on": True, "needed": False, "known": True}}, []],
+            # no mirror: nothing to compare, the inspection goes on
+            ["sync", {"inspect": {"needed": True, "known": True}, "sync": {"on": False, "needed": True, "known": True}}, ["inspect:start"]],
+            # paused by hand: stays paused; the other may run
+            ["caching", {"inspect": {"paused": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}, "hold": {"inspect": True}}, ["sync:start"]],
+            # a compare waiting its turn (another library's first) isn't started again
+            ["sync", {"inspect": {"needed": False, "known": True}, "sync": {"on": True, "queued": True, "needed": True, "known": True}}, []],
+        ]
+        tools = [
+            ["1", {"running": False, "scan": None}, {}, "scan"],
+            ["1", {"running": False, "scan": {"library": "1"}}, {}, None],       # scanned already: Scan Again is yours
+            ["1", {"running": False, "scan": {"library": "2"}}, {}, "scan"],     # another library's scan shown: this one's
+            ["1", {"running": True, "scan": None}, {}, None],
+            ["1", {"running": False, "scan": None}, {"1": True}, None],          # tried once (it failed, say): not again by itself
+            ["", {"running": False, "scan": None}, {}, None],
+        ]
+        got = self._node(fn + "\nconsole.log(JSON.stringify({lib: " + json.dumps([c[:2] for c in cases]) + ".map(function (c) { return libAutoPlan(c[0], c[1]); }), tools: " +
+                         json.dumps([t[:3] for t in tools]) + ".map(function (t) { return toolAutoPlan(t[0], t[1], t[2]); })}));")
+        for c, out in zip(cases, got["lib"]):
+            self.assertEqual(out, c[2], c)
+        for t, out in zip(tools, got["tools"]):
+            self.assertEqual(out, t[3], t)
+
     def test_no_info_button_inside_another(self):
         """An ⓘ's text opens in a pop-up, so an ⓘ inside that text can't be reached. Nothing passed to
         info(), to a card heading's explanation (heading's second argument: it goes behind an ⓘ when
@@ -4659,6 +4736,12 @@ class FakeOptimizer:
         os.remove(path)
         return {"deleted": True}
 
+    def file_action(self, action, path, to="", root=""):
+        from plexcache.optimize import files
+        self.sent.append({"action": action, "path": path, "to": to, "root": root})
+        return {"set_aside": lambda: files.set_aside(root, path), "restore": lambda: files.put_back(root, path), "purge": lambda: files.purge(root, path),
+                "link": lambda: files.link(path, to), "unlink": lambda: files.unlink(path, to)}[action]()
+
     def claim(self, folder, key, instance, release=False):
         mine = self.claims.setdefault(key, {})
         if release:
@@ -4701,6 +4784,9 @@ class FakeOptimizer:
                      "cover": bool(cover), "sha256": digest, "version": VERSION, "images_after": 0 if sent.get("images") == "remove" else 1,
                      "file": {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "ino": st.st_ino} if st else {}}
         return {"started": True}
+
+    def healthz(self):
+        return {"ok": True, "service": "optimizer", "token": True, "token_problem": None, "roots": 1, "uid": 0, "gid": 0}
 
     def status(self, fresh=False):
         return {"current": None, "results": [self.done] if self.done else []}
@@ -5014,9 +5100,10 @@ class OptimizerTests(unittest.TestCase):
                          {"key": "2", "title": "TV", "type": "show", "kind": "tv", "locations": ["/data/TV"]}]
         app.map_path = lambda p: p
         app.files = [types.SimpleNamespace(path="/data/Movies/A/a.mkv", library_key="1"), types.SimpleNamespace(path="/data/TV/S/e1.mkv", library_key="2")]
-        item = lambda key, title, files=(), guid="plex://x", fields=None, parent="", grandparent="", edition="", colls=(), labels=(), art=(), typ="movie": dict(
+        item = lambda key, title, files=(), guid="plex://x", fields=None, parent="", grandparent="", edition="", colls=(), labels=(), art=(), typ="movie", summary=True: dict(
             key=key, parent=parent, grandparent=grandparent, type=typ, title=title, label=title, index=0, guid=guid, matched=not guid.startswith("local://"),
-            files=[(f, 1) for f in files], edition=edition, fields=fields or {}, collections=sorted(colls), labels=sorted(labels), art_locked=sorted(art))
+            files=[(f, 1) for f in files], edition=edition, fields=fields or {}, collections=sorted(colls), labels=sorted(labels), art_locked=sorted(art),
+            summary=summary and not guid.startswith("local://"), thumb="/library/metadata/%s/thumb/1" % key, year="2001")
         here = {("1", 1): [item("10", "A", ["/data/Movies/A/a.mkv", "/data/Movies/A/a2.mkv"], fields={"title": "A!"}, colls=["Best"], art=["thumb"], edition="Extended"),
                            item("11", "B", ["/data/Movies/B/b.mkv"], guid="plex://b"),
                            item("12", "C", ["/data/Movies/C/c.mkv"], guid="local://12")],
@@ -5030,7 +5117,8 @@ class OptimizerTests(unittest.TestCase):
         mk = lambda data: types.SimpleNamespace(library_items=lambda key, leaf: list(data.get((str(key), leaf), [])),
                                                 libraries=lambda: [Library("7", "Movies", "movie", "movie", ["/srv/Movies"]), Library("8", "TV", "show", "tv", ["/srv/TV"])],
                                                 item_files=lambda rk: None, scan=lambda k, f: None, library_files=lambda lib, limit=None: [],
-                                                identity=lambda: {"machine_id": "abc"})
+                                                identity=lambda: {"machine_id": "abc"},
+                                                item_detail=lambda key: next((it for its in data.values() for it in its if it["key"] == str(key)), None))
         app.plex = lambda timeout=30: mk(here)
         app.other.client = lambda timeout=30: mk(there)
         app.run_checks_async = lambda **kw: None
@@ -5047,15 +5135,49 @@ class OptimizerTests(unittest.TestCase):
         rep = app.sync.compare()
         m = rep["libraries"]["1"]
         self.assertEqual((m["matched"], m["total"]), (3, 3))
-        by = {}
-        for it in m["items"]:
-            by.setdefault(it["kind"], []).append(it["title"])
-        self.assertEqual(by["missing"], ["A"])                                                  # a2.mkv isn't listed there
-        self.assertEqual(sorted(by["match"]), ["B", "C"])                                       # another entry; unmatched here, matched there
-        self.assertEqual((by["edits"], by["art"], by["collections"], by["editions"]), (["A"], ["A"], ["A"], ["A"]))
-        self.assertIn("title", en(next(it["detail"] for it in m["items"] if it["kind"] == "edits")))
+        rows = {it["title"]: it for it in m["items"]}
+        self.assertEqual(sorted(rows["A"]["kinds"]), ["art", "collections", "editions", "edits", "missing"])   # a2.mkv isn't listed there, and the rest
+        self.assertEqual((rows["B"]["kinds"], rows["C"]["kinds"]), (["match"], ["match"]))      # another entry; unmatched here, matched there
+        self.assertEqual(next(c for c in rows["A"]["changes"] if c["kind"] == "edits"), {"kind": "edits", "from": "title: A!", "to": "title: A"})
+        self.assertEqual((rows["A"]["src"]["label"], rows["A"]["dst"]["key"], rows["A"]["src"]["art"]), ("A", "70", ["thumb"]))
+        # C is unmatched here with no description, matched there: copying it over would replace metadata with none
+        self.assertEqual((rows["C"]["warn"], rows["A"]["warn"], rows["B"]["warn"]), (True, False, False))
+        self.assertEqual(en(next(c for c in rows["C"]["changes"] if c["kind"] == "match")["from"]), "unmatched")
+        self.assertEqual(rep["names"]["mirror"], "Cabin")
+        # edits on the other server the source doesn't have (tag fields too): listed as lost
+        here[("1", 1)][2]["locked"] = []
+        there[("7", 1)][2]["locked"] = ["title", "genre", "writer"]
+        there[("7", 1)][2]["fields"] = {"title": "Carmen"}
+        rep_l = app.sync.compare()
+        c_row = next(it for it in rep_l["libraries"]["1"]["items"] if it["title"] == "C")
+        lost = next(c for c in c_row["changes"] if "would be lost" in en(c["to"]))
+        self.assertEqual(en(lost["to"]), "edited: title, genre, writer — these edits would be lost")
+        self.assertEqual(c_row["dst"]["locked"], ["title", "genre", "writer"])
+        here[("1", 1)][2]["locked"] = there[("7", 1)][2]["locked"] = []
+        there[("7", 1)][2]["fields"] = {}
+        self.assertEqual(c_row["src"]["files"], ["c.mkv"])                                      # (the file's name, where the match is in question)
+        # an edit the listing doesn't show, only the item's own page: found all the same (the listed
+        # items' pages are read from both servers)
+        detail_there = dict(there[("7", 1)][1], locked=["studio"], fields={})
+        mk_there = mk(there)
+        mk_there.item_detail = lambda key: detail_there if str(key) == "71" else next((it for its in there.values() for it in its if it["key"] == str(key)), None)
+        app.other.client = lambda timeout=30: mk_there
+        rep_d = app.sync.compare()
+        b_row = next(it for it in rep_d["libraries"]["1"]["items"] if it["title"] == "B")
+        self.assertIn("studio", en(next(c["to"] for c in b_row["changes"] if c["kind"] == "edits")))
+        self.assertEqual(b_row["dst"]["locked"], ["studio"])
+        app.other.client = lambda timeout=30: mk(there)
+        # a field edited the same on both: not a difference
+        here[("1", 1)][1]["locked"] = there[("7", 1)][1]["locked"] = ["title", "genre"]
+        here[("1", 1)][1]["fields"] = there[("7", 1)][1]["fields"] = {"title": "B"}
+        rep_s = app.sync.compare()
+        b_row = next(it for it in rep_s["libraries"]["1"]["items"] if it["title"] == "B")
+        self.assertEqual([c["kind"] for c in b_row["changes"]], ["match"])
+        here[("1", 1)][1]["locked"] = there[("7", 1)][1]["locked"] = []
+        here[("1", 1)][1]["fields"] = there[("7", 1)][1]["fields"] = {}
+        app.sync.compare()                                                                      # (the report as before)
         t = rep["libraries"]["2"]
-        self.assertEqual((t["matched"], {it["kind"] for it in t["items"]}), (3, {"labels"}))    # the show matched through its episode; its labels differ
+        self.assertEqual((t["matched"], {k for it in t["items"] for k in it["kinds"]}), (3, {"labels"}))    # the show matched through its episode; its labels differ
         self.assertEqual(rep["totals"]["labels"], 1)
         self.assertEqual(app.sync.snapshot()["report"]["libraries"]["1"]["counts"]["edits"], 1)
         self.assertEqual(app.sync.differences("2")["title"], "TV")
@@ -5063,10 +5185,10 @@ class OptimizerTests(unittest.TestCase):
         app.settings.update({"sync": {"source": "mirror"}})
         rep2 = app.sync.compare()
         self.assertEqual(rep2["source"], "mirror")
-        by2 = {}
-        for it in rep2["libraries"]["1"]["items"]:
-            by2.setdefault(it["kind"], []).append(it["title"])
-        self.assertEqual((by2.get("grouping"), by2.get("missing")), (["A"], None))               # seen from the mirror: this server's A has a file more
+        rows2 = {it["title"]: it for it in rep2["libraries"]["1"]["items"]}
+        self.assertIn("grouping", rows2["A"]["kinds"])                                          # seen from the mirror: this server's A has a file more
+        self.assertNotIn("missing", rows2["A"]["kinds"])
+        self.assertFalse(rows2["C"]["warn"])                                                    # the matched side as the source: fine
         self.assertEqual(rep2["libraries"]["2"]["counts"]["labels"], 1)
         # what's compared can be narrowed
         app.settings.update({"sync": {"what": {"edits": False, "collections": False, "editions": False, "art": False}}})
@@ -5082,7 +5204,29 @@ class OptimizerTests(unittest.TestCase):
         self.assertTrue(app.sync.review_needed())
         self.assertTrue(any("changed since" in en(x["title"]) for x in checks._sync_items(app)))
         self.assertTrue(any("differences between" in en(x["title"]) for x in checks._sync_items(app)))
-        # due every compare_hours, unless off
+        # one library at a time, as inspecting: starting one pauses the other (which picks up when
+        # started again), and each library's result shows as soon as it's done
+        gate = threading.Event()
+        slow = mk(here)
+        slow_items = slow.library_items
+        slow.library_items = lambda key, leaf: (gate.wait(5), slow_items(key, leaf))[1]
+        app.plex = lambda timeout=30: slow
+        app.sync.report = None
+        app.sync.start("1")
+        self.assertTrue(wait_for(lambda: app.sync.snapshot()["libs"]["1"]["running"]))
+        app.sync.start("2")                                                                     # (1 paused, 2 next)
+        gate.set()
+        self.assertTrue(wait_for(lambda: app.sync.snapshot()["libs"]["2"].get("finished")))
+        self.assertIn("2", app.sync.report["libraries"])
+        self.assertTrue(app.sync.snapshot()["libs"]["1"]["paused"])
+        app.sync.start("1")
+        self.assertTrue(wait_for(lambda: app.sync.snapshot()["libs"]["1"].get("finished")))
+        self.assertEqual(set(app.sync.report["libraries"]), {"1", "2"})
+        self.assertEqual(app.sync.differences("1")["job"]["pct"], 100)
+        self.assertIsNone(app.sync.snapshot()["progress"])
+        app.plex = lambda timeout=30: mk(here)
+        # due every compare_hours, unless off (once the worker has let go: it clears "running" after the result is in)
+        self.assertTrue(wait_for(lambda: not app.sync.running))
         self.assertFalse(app.sync.due())
         self.assertTrue(app.sync.due(now=time.time() + 7 * 3600))
         app.settings.update({"sync": {"mode": "off"}})
@@ -5106,6 +5250,140 @@ class OptimizerTests(unittest.TestCase):
             (c,) = app.sync.discover()
         self.assertEqual((c["name"], c["rate"], c["libraries"][0]["found"], c["libraries"][0]["of"]), ("Cabin", 0.5, 1, 2))
         self.assertEqual(app.sync.snapshot()["candidates"][0]["id"], "zzz")
+        # a report made by an older version isn't shown as current: compared again
+        app.sync.report["version"] = 1
+        app.sync.save()
+        self.assertIsNone(sync.Sync(app).report)
+        self.assertEqual(sync.Sync(app).candidates[0]["id"], "zzz")
+
+    def test_library_sync_grouping_shapes(self):
+        """Versions grouped differently on the two servers, in every shape: one item here split into
+        several there, several here merged into one there, a tangle of several on both sides, an item's
+        files partly missing there, one not there at all, one only there, and a file renamed on one side
+        (paired by its online entry). Each group is one row with every record of both sides, so nothing
+        is reported twice or lost — and the Plex checks tag the records whose versions look wrongly added."""
+        from plexcache import libhealth, sync
+        it = lambda key, files, guid="plex://x", locked=None: dict(key=key, parent="", grandparent="", type="movie", title=key, label=key, index=0, guid=guid,
+                                                                     matched=not guid.startswith("local://"), files=[("/a/" + f, 1) for f in files], edition="",
+                                                                     fields={}, locked=locked, collections=[], labels=[], art_locked=[], summary=True, tags={})
+        here = [it("S1", ["Big (2000)/Big (2000) 1080p.mkv", "Big (2000)/Big (2000) 4K.mkv", "Big (2000)/Big (2000) 720p.mkv", "Big (2000)/Big (2000) a.mkv",
+                         "Big (2000)/Big (2000) b.mkv", "Big (2000)/Big (2000) c.mkv", "Big (2000)/Big (2000) d.mkv"], "plex://big"),  # 7 files → 3 items there
+                it("M1", ["Two (2001)/Two (2001).mkv"], "plex://two"), it("M2", ["Two (2001)/Two (2001) x.mkv"], "plex://two2"), it("M3", ["Two (2001)/Two (2001) y.mkv"], "plex://two3"),  # 3 → 1
+                it("T1", ["Tangle/p.mkv", "Tangle/q.mkv"], "plex://t1"), it("T2", ["Tangle/r.mkv", "Tangle/s.mkv"], "plex://t2"),  # 2 ↔ 2, crossed
+                it("P1", ["Part (2002)/Part (2002).mkv", "Part (2002)/Part (2002) extra.mkv"], "plex://part"),  # one file not there
+                it("G1", ["Gone (2003)/Gone (2003).mkv"], "plex://gone"),  # not there at all
+                it("R1", ["Renamed (2004)/Renamed (2004) old.mkv"], "plex://ren"),  # named otherwise there: paired by its entry
+                it("W1", ["Wrong (2005)/Wrong (2005).mkv", "Wrong (2005)/Other Film (1999).mkv"], "plex://wrong")]  # a version from another film
+        there = [it("D1", ["Big (2000)/Big (2000) 1080p.mkv", "Big (2000)/Big (2000) 4K.mkv"], "plex://big"), it("D2", ["Big (2000)/Big (2000) 720p.mkv", "Big (2000)/Big (2000) a.mkv", "Big (2000)/Big (2000) b.mkv"], "plex://big"),
+                 it("D3", ["Big (2000)/Big (2000) c.mkv", "Big (2000)/Big (2000) d.mkv"], "plex://big"),
+                 it("DM", ["Two (2001)/Two (2001).mkv", "Two (2001)/Two (2001) x.mkv", "Two (2001)/Two (2001) y.mkv"], "plex://two"),
+                 it("DT1", ["Tangle/p.mkv", "Tangle/r.mkv"], "plex://t1"), it("DT2", ["Tangle/q.mkv", "Tangle/s.mkv"], "plex://t2"),
+                 it("DP", ["Part (2002)/Part (2002).mkv"], "plex://part"),
+                 it("DR", ["Renamed (2004)/Renamed (2004) new.mkv"], "plex://ren"),
+                 it("DX", ["Only There (2006)/Only There (2006).mkv"], "plex://only"),
+                 it("DW", ["Wrong (2005)/Wrong (2005).mkv", "Wrong (2005)/Other Film (1999).mkv"], "plex://wrong2")]  # (matched otherwise: a row; identical pairs have none)
+        src, dst = sync._Side(here, ["/a"]), sync._Side(there, ["/a"])
+        got = sync.compare_library(src, dst, {}, libhealth.enabled({}))
+        rows = {r["title"]: r for r in got["items"]}
+        self.assertEqual(rows["S1"]["shape"], "split")
+        self.assertEqual(([x["key"] for x in rows["S1"]["src_items"]], sorted(x["key"] for x in rows["S1"]["dst_items"])), (["S1"], ["D1", "D2", "D3"]))
+        self.assertIn("merge them into one", en(rows["S1"]["changes"][0]["to"]))
+        self.assertEqual((rows["M1"]["shape"], sorted(x["key"] for x in rows["M1"]["src_items"]), [x["key"] for x in rows["M1"]["dst_items"]]), ("merge", ["M1", "M2", "M3"], ["DM"]))
+        self.assertIn("split it into 3", en(rows["M1"]["changes"][0]["to"]))
+        self.assertNotIn("M2", rows)                                                            # (one row for the group, not one per item)
+        self.assertEqual((rows["T1"]["shape"], len(rows["T1"]["src_items"]), len(rows["T1"]["dst_items"])), ("regroup", 2, 2))
+        self.assertIn("too tangled", en(rows["T1"]["changes"][0]["to"]))
+        self.assertEqual((rows["P1"]["shape"], rows["P1"]["kinds"]), ("pair", ["missing"]))
+        self.assertIn("extra.mkv", rows["P1"]["changes"][0]["from"])
+        self.assertEqual((rows["G1"]["shape"], rows["G1"]["dst"]), ("missing", None))
+        self.assertEqual((rows["R1"]["shape"], rows["R1"]["dst"]["key"], rows["R1"]["kinds"]), ("pair", "DR", ["missing", "grouping"]))   # paired by its entry; its file isn’t there under that name, and the item there has one more
+        self.assertEqual((rows["DX"]["shape"], rows["DX"]["src"], rows["DX"]["kinds"]), ("extra", None, ["extra"]))
+        self.assertEqual(got["counts"]["grouping"], 4)                                           # split, merge, tangle, and the renamed file’s item having one more
+        self.assertEqual(got["counts"]["extra"], 1)
+        # the Plex check on the records: W1/DW's versions are named for two films — tagged on both sides
+        self.assertEqual([t["id"] for t in rows["W1"]["tags"]["src"][0]], ["versions_named_differently"])
+        self.assertEqual([t["id"] for t in rows["W1"]["tags"]["dst"][0]], ["versions_named_differently"])
+        self.assertEqual(rows["S1"]["tags"]["src"][0], [])                                      # (7 versions of the one film: fine)
+        self.assertEqual(len(rows["S1"]["tags"]["dst"]), 3)
+        # the checks turned off: no tags
+        got_off = sync.compare_library(src, dst, {}, {c["id"]: False for cat in libhealth.CHECKS.values() for c in cat})
+        self.assertEqual({t["id"] for r in got_off["items"] for side in ("src", "dst") for ts in r["tags"][side] for t in ts}, set())
+
+    def test_library_health_file_checks(self):
+        """The file checks: no audio; a spoken film with no subtitles (not one whose audio is zxx); subtitles
+        on a zxx film unless forced. Each can be turned off."""
+        from plexcache import libhealth
+        on = libhealth.enabled({})
+        v = {"type": "video", "codec": "V_X"}
+        au = lambda lang: {"type": "audio", "codec": "A_X", "language": lang}
+        sub = lambda lang, forced=False: {"type": "subtitles", "codec": "S_X", "language": lang, "forced": forced}
+        ids = lambda m: [r["id"] for r in libhealth.file_checks(m, on)]
+        self.assertEqual(ids({"tracks": [v]}), ["no_audio"])
+        self.assertEqual(ids({"tracks": [v, au("eng")]}), ["no_subtitles"])
+        self.assertEqual(ids({"tracks": [v, au("eng"), sub("eng")]}), [])
+        self.assertEqual(ids({"tracks": [v, au("zxx")]}), [])                                  # no speech: no subtitles wanted
+        self.assertEqual(ids({"tracks": [v, au("zxx"), sub("eng", forced=True)]}), [])          # forced: written content, belongs
+        self.assertEqual(ids({"tracks": [v, au("zxx"), sub("eng")]}), ["subtitles_on_zxx"])
+        self.assertEqual(ids({"tracks": [v, au("zxx"), au("fra")]}), ["no_subtitles"])          # one spoken track: speech
+        self.assertEqual(ids({"tracks": [au("eng")]}), [])                                      # music: not a video file
+        self.assertEqual(ids(None), [])
+        off = dict(on, no_subtitles=False)
+        self.assertEqual([r["id"] for r in libhealth.file_checks({"tracks": [v, au("eng")]}, off)], [])
+
+    def test_library_health_duplicate_checks(self):
+        """The duplicate checks: the same file (running time and size) twice on one item — a link to one
+        file, or two copies — and the same file under two items. Another bitrate isn't a duplicate."""
+        from plexcache import libhealth
+        on = libhealth.enabled({})
+        f = lambda path, dur, size, ino=0: {"path": path, "duration": dur, "size": size, "ino": ino}
+        got = libhealth.duplicate_checks({"A": [f("/m/A/a.mkv", 7200000, 4e9, 1), f("/m/a.mkv", 7200000, 4e9, 1)],
+                                          "B": [f("/m/b 1080p.mkv", 5400000, 3e9), f("/m/b 4K.mkv", 5400000, 9e9)],
+                                          "C": [f("/m/c.mkv", 6000000, 2e9, 5)], "D": [f("/m/sub/c.mkv", 6000500, 2e9 + 1000, 6)]}, on)
+        self.assertEqual([r["id"] for r in got["A"]], ["duplicate_versions"])
+        self.assertIn("a link to one file", en(got["A"][0]["text"]))
+        self.assertNotIn("B", got)                                                              # two bitrates: not duplicates
+        self.assertEqual(([r["id"] for r in got["C"]], [r["id"] for r in got["D"]]), (["duplicate_items"], ["duplicate_items"]))
+        self.assertIn("two copies", en(got["C"][0]["text"]))
+        off = dict(on, duplicate_items=False)
+        self.assertNotIn("C", libhealth.duplicate_checks({"C": [f("/m/c.mkv", 6000000, 2e9)], "D": [f("/m/d.mkv", 6000000, 2e9)]}, off))
+
+    def test_library_health_plex_checks(self):
+        """The Plex checks: versions named for different titles or years; a locked field with nothing in it
+        (read from an item's own page). Each can be turned off."""
+        from plexcache import libhealth
+        on = libhealth.enabled({})
+        self.assertEqual(libhealth.file_title_year("/m/Alcina - Vienna State Opera (2010) Handel Blu-ray 1080i.mkv"), ("alcina vienna state opera", "2010"))
+        self.assertEqual(libhealth.file_title_year("/m/The.Thing.1982.1080p.mkv"), ("the thing", "1982"))
+        self.assertEqual(libhealth.file_title_year("/m/Home video.mkv"), ("home video", ""))
+        ids = lambda item: [r["id"] for r in libhealth.plex_checks(item, on)]
+        self.assertEqual(ids({"files": ["/m/Big (2000) 1080p.mkv", "/m/Big (2000) 4K.mkv"]}), [])
+        self.assertEqual(ids({"files": ["/m/Big (2000).mkv", "/m/Big (2001).mkv"]}), ["versions_named_differently"])
+        self.assertEqual(ids({"files": ["/m/Big (2000).mkv", "/m/Small (2000).mkv"]}), ["versions_named_differently"])
+        self.assertEqual(ids({"files": ["/m/Big (2000) a.mkv", "/m/Big (2000) b.mkv"], "durations": [7200000, 7260000]}), [])          # a minute apart: cuts of one film
+        self.assertEqual(ids({"files": ["/m/Big (2000) a.mkv", "/m/Big (2000) b.mkv"], "durations": [7200000, 5400000]}), ["versions_differ_in_length"])
+        self.assertIn("1:30, 2:00", en(libhealth.plex_checks({"files": ["/m/Big (2000) a.mkv", "/m/Big (2000) b.mkv"], "durations": [7200000, 5400000]}, on)[0]["text"]))   # shortest first
+        self.assertEqual(ids({"files": ["/m/Big (2000) a.mkv", "/m/Big (2000) b.mkv"], "durations": [7200000, 0]}), [])                # (a length not known: not judged)
+        self.assertEqual(ids({"files": ["/m/Big (2000).mkv"], "locked": ["title", "genre"], "fields": {"title": ""}, "tags": {}}), ["locked_empty"])
+        self.assertEqual(ids({"files": ["/m/Big (2000).mkv"], "locked": ["title", "genre"], "fields": {"title": "Big"}, "tags": {"genre": ["Drama"]}}), [])
+        self.assertEqual(ids({"files": ["/m/Big (2000).mkv"], "locked": None}), [])              # (its page not read: not judged)
+        off = dict(on, versions_named_differently=False)
+        self.assertEqual([r["id"] for r in libhealth.plex_checks({"files": ["/m/Big (2000).mkv", "/m/Big (2001).mkv"]}, off)], [])
+
+    def test_every_library_health_check_has_a_preference(self):
+        """Each check — file or Plex — has a switch in the settings, is on by default, and can be turned
+        off; an unknown id is refused."""
+        from plexcache import libhealth
+        settings = config.Settings(tempfile.mkdtemp(dir=TMP))
+        on = libhealth.enabled(settings.get())
+        for cat, checks in libhealth.CHECKS.items():
+            self.assertIn(cat, ("file", "plex"))
+            for c in checks:
+                self.assertTrue(on[c["id"]], c["id"])
+                settings.update({"library_health": {"checks": {c["id"]: False}}})
+                self.assertFalse(libhealth.enabled(settings.get())[c["id"]], f"{cat}: {c['id']} can't be turned off")
+                self.assertTrue(c.get("name") and c.get("help"), c["id"])
+        with self.assertRaises(config.SettingsError):
+            settings.update({"library_health": {"checks": {"made_up": True}}})
 
     def test_convert_with_the_real_tools(self):
         """The optimizer's converting, with MKVToolNix and ffmpeg: an AVI becomes an optimized MKV next to
@@ -5169,6 +5447,8 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(before["removed"], {})
         summary = app.library_view("1")["summary"]["projected"]
         self.assertEqual(summary["removed"], {})
+        views = app.library_view("1")["summary"]["views"]                                          # one chart: now, and once optimized
+        self.assertEqual((sorted(views), views["after"]["gone"], views["all"]["gone"]), (["after", "all", "rewrite"], True, False))
         rev = app.settings.rev
         app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "remove"}}}})
         self.assertEqual(app.settings.rev, rev + 1)
@@ -6330,8 +6610,136 @@ class OptimizerTests(unittest.TestCase):
         self.assertIsNone(app.jobs.snapshot())
         self.assertEqual(checks._job_failures(app), [])
 
+    def test_compression_estimates(self):
+        """What caching keeps of a file is estimated with the compression it's stored with: its dataset's
+        (ZSTD here) once the optimizer wrote it, LZ4 — TrueNAS's default — when that isn't known. A file
+        laid out right already, but not written with its dataset's compression, gets an Optimized row too:
+        written again as it is."""
+        from plexcache import filemap, projection
+        self.assertEqual([projection.family(c) for c in ("zstd", "zstd-3", "gzip-9", "lz4", "LZ4", None, "off", "zle")],
+                         ["zstd", "zstd", "zstd", "lz4", "lz4", "lz4", "off", "lz4"])
+        self.assertLessEqual(filemap.lz4_size(b"\0" * 100_000), 500)                                # zeros: next to nothing
+        rnd = os.urandom(50_000)
+        self.assertGreaterEqual(filemap.lz4_size(rnd), len(rnd))                                    # noise: no smaller
+        text = (" ".join(str(i) for i in range(20_000))).encode()
+        import zlib
+        self.assertLess(len(zlib.compress(text, 6)), filemap.lz4_size(text))                        # between zlib and as it is
+        self.assertLess(filemap.lz4_size(text), len(text))
+        p = self.path("tags.mkv")
+        build_mkv(p, cluster=os.urandom(3 * 1024 * 1024), tail=("Cues", "Tags"), ours={"PLEXCACHE_OPTIMIZER": "9", "NOTES": text.decode()[:200_000]})
+        m = filemap.describe(p)
+        m["mix"] = mix = filemap.cache_mix(p, m, 1024 * 1024)  # (as in 1M records: this folder's are 4K, too small to show compression)
+        self.assertIn("lz4", mix)
+        self.assertEqual(len(mix["kinds"]["tags"]), 3)                                             # as it is, ZSTD, LZ4
+        lz4, off = projection.existing(mix, "lz4"), projection.existing(mix, "off")
+        stored = lambda x: x["meta_disk"] + x["unused_disk"]
+        self.assertLessEqual(stored(mix), stored(lz4))
+        self.assertLessEqual(stored(lz4), stored(off))
+        pr = projection.project(m, mix["record"], "keep", False, comp="zstd", rewrite=True, comp_now="lz4")
+        self.assertTrue(pr["rewrite"])
+        self.assertEqual((pr["mix"]["video"], pr["removed"]), (mix["video"], {}))                  # the same file, written again
+        self.assertLess(pr["mix"]["meta_disk"], lz4["meta_disk"])                                  # ZSTD keeps less than LZ4 did
+        v = projection.views(m, pr, None, "lz4")
+        self.assertTrue(v["rewrite"])
+        self.assertEqual(v["now"]["stream"]["total"], v["after"]["stream"]["total"])               # streamed: unchanged
+        self.assertLess(v["after"]["cache"]["total"], v["now"]["cache"]["total"])
+
+    def test_file_history(self):
+        """Each file's history with the optimizer, kept for good: its original (when first seen) against
+        now for the Metrics page, and in the job log each written file's mix just before and after. A
+        file brought back still tagged keeps its history (Syncthing); laid out differently, it's logged
+        as found optimized elsewhere; untagged, it's a new download and starts again; one first seen
+        tagged has no known original and is left out (counted)."""
+        import shutil
+        from types import SimpleNamespace
+        from plexcache import filehistory, optimizing
+        from plexcache.optimize import VERSION
+        app, op, client, d, state = self._app(names=("a.mkv", "b.mp4"))
+        a, b = os.path.join(d, "a.mkv"), os.path.join(d, "b.mp4")
+        build_mkv(a, front_atts=[("cover.jpg", "image/jpeg", b"\xff\xd8" + os.urandom(5000)), FONT])
+        os.utime(a, (time.time() - 3600, time.time() - 3600))
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "remove"}}}})
+        everything = {a, b}
+        app.history_pass("1", everything)
+        self.assertEqual(app.history.files, {})                                     # not inspected yet: nothing to go by
+        for p in (a, b):
+            app.file_maps.read(p)
+        app.history_pass("1", everything)
+        first = app.history.files[a]["original"]
+        self.assertEqual((app.history.files[a]["origin"], app.history.files[a]["runs"], app.history_metrics()), ("seen", 0, []))
+        with mock.patch.object(optimizing, "DISK_SETTLE", 0), mock.patch.object(optimizing, "DISK_EVERY", 0):
+            run_job(op)
+        # the job log: each written file's always-cached blocks just before and after, for its chart
+        (j,) = app.jobs.log.jobs()
+        row = next(f for f in app.jobs.log.files(j["job"])["files"] if f["file"] == a)
+        self.assertEqual(row["mix_before"], first)
+        self.assertGreater(row["mix_before"]["mix"]["meta"], row["mix_after"]["mix"]["meta"])   # the cover art's gone
+        views = filehistory.file_views(row["mix_before"], row["mix_after"])
+        self.assertGreater(views["before"]["stream"]["total"], views["after"]["stream"]["total"])
+        e = app.history.files[a]
+        self.assertEqual((e["runs"], e["original"], e["now"]), (1, first, row["mix_after"]))
+        (lib,) = app.history_metrics()
+        self.assertEqual((lib["key"], lib["files"], lib["unknown"]), ("1", 2, 0))
+        self.assertGreater(lib["original"]["stream"]["total"], lib["now"]["stream"]["total"])
+        self.assertIs(app.history_metrics(), app.history_metrics())                  # kept until the history changes
+        # Library: once optimized (est.) only while something's still to optimize
+        self.assertIsNone(app._health_summary("1", {})["views"]["after"])
+        # brought back by Syncthing as it was (a new inode, the same file): its history carries on
+        shutil.copy2(a, a + ".sync")
+        os.replace(a + ".sync", a)
+        app.file_maps.read(a)
+        self.assertEqual(app.observe_history(a, "1"), "synced")
+        self.assertEqual((app.history.files[a]["original"], app.history.files[a]["runs"]), (first, 1))
+        # optimized differently on another NAS: found, logged with its before and after, the original kept
+        build_mkv(a + ".new", tail=("Attachments", "Cues", "Tags"), ours={"PLEXCACHE_OPTIMIZER": VERSION, "PLEXCACHE_COVER": "plex:abc"},
+                  tail_atts=[("cover.jpg", "image/jpeg", b"\xff\xd8" + os.urandom(9000))])
+        os.replace(a + ".new", a)
+        app.file_maps.read(a)
+        self.assertEqual(app.observe_history(a, "1"), "discovered")
+        found = next(x for x in app.jobs.log.jobs() if x["kind"] == "discovered")
+        self.assertEqual((found["status"], found["files"], found["library"]), ("finished", 1, "1"))
+        frow = app.jobs.log.files(found["job"])["files"][0]
+        self.assertEqual((frow["result"], frow["mix_before"]["mix"], frow["version"]), ("discovered", row["mix_after"]["mix"], VERSION))
+        self.assertIsNotNone(frow["disk_after"])
+        self.assertEqual((app.history.files[a]["original"], app.history.files[a]["runs"]), (first, 2))
+        # a new download in its place (not tagged): its history starts again — no longer an optimized file
+        build_mkv(a + ".new")
+        os.replace(a + ".new", a)
+        app.file_maps.read(a)
+        self.assertEqual(app.observe_history(a, "1"), "replaced")
+        self.assertEqual((app.history.files[a]["runs"], app.history_metrics()[0]["files"]), (0, 1))
+        # a file first seen already optimized (somewhere else): its origin isn't known, so it's left out, and counted
+        c = os.path.join(d, "c.mkv")
+        build_mkv(c, ours={"PLEXCACHE_OPTIMIZER": VERSION})
+        app.files.append(SimpleNamespace(path=c, library_key="1", kind="movie", size=1, kbps=1, library="Movies"))
+        app.file_maps.read(c)
+        app.history_pass("1", everything | {c})
+        self.assertEqual((app.history.files[c]["origin"], app.history_metrics()[0]["unknown"]), ("unknown", 1))
+        # gone from the libraries: kept, but left out until it comes back
+        app.history_pass("1", {a, c})
+        self.assertTrue(app.history.files[b]["gone"])
+        self.assertEqual(app.history_metrics()[0]["files"], 0)
+        app.history_pass("1", {a, b, c})
+        self.assertEqual(app.history_metrics()[0]["files"], 1)
+        # saved, and read back after a restart
+        app.history.save()
+        again = filehistory.FileHistory(app.config_dir)
+        self.assertEqual(again.files, json.loads(json.dumps(app.history.files)))
+        # a file optimized before the history was kept: its mix then (kept with its layout) is its original
+        maps = app.file_maps
+        maps.files[c]["before"] = first["mix"]
+        maps.dirty = True
+        maps.save()
+        os.remove(again.path)
+        fresh = filehistory.FileHistory(app.config_dir)
+        for p, entry in maps.files.items():
+            fresh.seed(p, "", entry.get("before"), entry.get("map"), entry.get("id"))
+        self.assertEqual((fresh.files[c]["original"]["mix"], fresh.files[c]["runs"], list(fresh.files)), (first["mix"], 1, [c]))
+        self.assertEqual(fresh.observe(c, "1", maps.files[c]["map"], maps.files[c]["id"], {"PLEXCACHE_OPTIMIZER": VERSION}), None)
+        self.assertEqual((fresh.files[c]["lib"], fresh.library("1")["files"]), ("1", 1))
+
     def test_job_log(self):
-        """What each job did, file by file, kept six months, for the Processes page and its export."""
+        """What each job did, file by file, kept for good, for the Processes page and its export."""
         from plexcache import joblog, jobs
         app, op, client, d, state = self._app(names=("a.mkv", "b.mp4"))
         app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "remove"}}}})
@@ -6411,15 +6819,16 @@ class OptimizerTests(unittest.TestCase):
         self.assertTrue(json.loads(log.export("json")[0]))
         # a name that looks like a formula stays text in a spreadsheet
         self.assertEqual((joblog._cell("=HYPERLINK(1)"), joblog._cell("-x"), joblog._cell(-5), joblog._cell("a")), ("'=HYPERLINK(1)", "'-x", "-5", "a"))
-        # six months, then gone
+        # kept for good: nothing's dropped, however old
         old = joblog.JobLog(tempfile.mkdtemp(dir=TMP))
-        old.add({"type": "job", "job": "x", "event": "started", "at": time.time() - joblog.KEEP - 60})
+        old.add({"type": "job", "job": "x", "event": "started", "at": time.time() - 3 * 365 * 86400})
         old.add({"type": "job", "job": "y", "event": "started"})
-        self.assertEqual((old.prune(), [e["job"] for e in old.entries()]), (1, ["y"]))
+        self.assertFalse(hasattr(old, "prune"))
+        self.assertEqual([e["job"] for e in old.entries()], ["x", "y"])
         # a line cut short (a crash mid-write) is skipped
         with open(old.path, "a") as fh:
             fh.write('{"type": "fil')
-        self.assertEqual(len(old.entries()), 1)
+        self.assertEqual(len(old.entries()), 2)
 
     def test_optimizer_busy_or_restarted(self):
         from plexcache import optimizing
@@ -9403,3 +9812,383 @@ class TranslationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ToolsTests(unittest.TestCase):
+    """The Tools pages' tools (tools/): Merge Duplicates, Duplicate Versions, Organize Folders — and
+    the trash the file ones set aside into (trash.py)."""
+
+    def _app(self, mirror=False):
+        """An app on a Plex of its own (its records get changed), with the fake optimizer for the file
+        actions — and, asked, a second Plex with the same films as the mirrored server."""
+        from plexcache.optimizing import Optimizing
+        d = tempfile.mkdtemp(dir=TMP)
+        cat = fakes.make_media(d, movies=4, seasons=1, episodes=1, tracks=1)
+        for i, m in enumerate(cat["movies"]):
+            m.update(title=f"Film {i}", year=2010 + i, guid=f"plex://movie/{i}", guids=[f"tmdb://{100 + i}"], duration=5400000 + i * 1000)
+        plex = fakes.FakePlex(cat)
+        self.addCleanup(plex.close)
+        app = _new_app(plex={"url": plex.url, "token": "good-token"}, sync={"mirrors": "none"}, optimizer={"convert_hold_days": 0})
+        client = FakeOptimizer()
+        app.optimizing = Optimizing(app, client)
+        other = None
+        if mirror:
+            cat2 = {"movies": [dict(m) for m in cat["movies"]], "episodes": [], "tracks": [], "tracks_b": [], "root": d}
+            other = fakes.FakePlex(cat2, token="other-token")
+            self.addCleanup(other.close)
+            app.settings.update({"plex2": {"url": other.url, "token": "other-token", "name": "Starlit", "machine_id": "xyz"}, "sync": {"mirrors": "plex2"}})
+        app.scan_library()
+        return app, plex, client, cat, other
+
+    def _run(self, tool, started):
+        self.assertTrue(started)
+        for _ in range(400):
+            if not tool.running:
+                return tool.snapshot()
+            time.sleep(0.05)
+        raise AssertionError("the tool didn't finish")
+
+    def test_merge_duplicates(self):
+        """The same film on two records (the same match; or unmatched, files named for the same title
+        and year): the record with the most edited fields is kept, the others merged into it with Plex's
+        own Merge — and the same records on the mirrored server too. No file is touched."""
+        from plexcache.tools.merge import group_key
+        app, plex, client, cat, other = self._app(mirror=True)
+        tool = app.tools["merge"]
+        # a second record of Film 1, with its own file; Film 1's first record has edits (kept)
+        copy = os.path.join(cat["root"], "Movies", "Film 1 (2011) [copy].mkv")
+        fakes.make_mkv(copy, 1024 * 1024)
+        for c in (plex.cat, other.cat):
+            c["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000})
+        plex.cat["movies"][1]["locked"] = ["title"]
+        # unmatched records are the same film when their files are named for the same title and year
+        self.assertEqual(group_key({"matched": False, "files": [("/m/The Film (1999) 1080p.mkv", 1)]}), group_key({"matched": False, "files": [("/m/the.film.1999.mkv", 1)]}))
+        self.assertNotEqual(group_key({"matched": True, "guid": "a", "files": []}), group_key({"matched": True, "guid": "b", "files": []}))
+        snap = self._run(tool, tool.scan_async("1"))
+        (row,) = snap["scan"]["rows"]
+        self.assertEqual((row["why"], row["keep"]["key"], [o["key"] for o in row["others"]], row["keep"]["locked"]), ("matched", "101", ["190"], ["title"]))
+        self.assertEqual(row["id"], "rec:101")
+        self.assertEqual((row["kinds"], snap["scan"]["records"]), (["edits"], 5))                     # (the kept record's edit: said as what the other lacks)
+        self.assertFalse(tool.apply_async(["nothing"]))
+        snap = self._run(tool, tool.apply_async([row["id"]]))
+        self.assertEqual((plex.merged, getattr(other, "merged", [])), ([("101", "190")], []))     # (the mirror's records are its own: untouched)
+        (res,) = snap["results"]
+        self.assertEqual((res["result"], res["merged"]), ("done", 1))
+        self.assertEqual(snap["scan"]["rows"], [])                                                    # done: off the list
+        self.assertTrue(os.path.exists(copy))
+        self.assertEqual(client.sent, [])
+        self.assertEqual(sorted(m["key"] for m in plex.cat["movies"]), ["100", "101", "102", "103"])
+        self.assertEqual(plex.cat["movies"][1]["more"], [copy])                                       # a version of the kept record now
+        # another edition isn't a duplicate (unless it's the very same file); nor is a film of another length
+        from plexcache.tools import merge as mg
+        rec = lambda key, **kw: dict({"key": key, "files": [("/m/%s.mkv" % key, 100 + int(key))], "durations": [5400000], "edition": "", "locked": []}, **kw)
+        self.assertTrue(mg.duplicates(rec("1"), rec("2")))
+        self.assertFalse(mg.duplicates(rec("1"), rec("2", edition="Director’s Cut")))
+        self.assertTrue(mg.duplicates(rec("1"), rec("2", edition="Director’s Cut", files=[("/m/1.mkv", 101)])))  # (the same file: one film)
+        self.assertFalse(mg.duplicates(rec("1"), rec("2", durations=[5400000 + 5 * 60000], files=[("/m/2.mkv", 7)])))
+        self.assertTrue(mg.duplicates(rec("1"), rec("2", durations=[5400000 + 20000], files=[("/m/2.mkv", 7)])))     # (a few seconds: fine)
+        self.assertEqual([w for w, _ in mg.clusters([rec("1", guid="g", matched=True), rec("2", guid="g", matched=True, durations=[9000000]), rec("3", guid="g", matched=True)])], ["matched"])
+        # the very same file (a link, a copy) on two records matched to different entries — or one unmatched: one film
+        same = [rec("1", guid="g", matched=True), rec("2", guid="local://2", matched=False, files=[("/other/1.mkv", 101)])]
+        self.assertEqual([(w, [r["key"] for r in c]) for w, c in mg.clusters(same)], [("file", ["1", "2"])])
+        # only movie and TV libraries
+        snap = self._run(tool, tool.scan_async("3"))
+        self.assertIn("Only movie and TV", snap["error"])
+        # a scan saved by an older version (rows of another shape) is dropped when the app starts
+        from plexcache.tools.merge import MergeDuplicates
+        app._save_json("tools-merge.json", {"scan": {"library": "1", "rows": [{"id": "x", "keep": {"key": "1"}}]}, "results": []})
+        self.assertIsNone(MergeDuplicates(app).scan_result)
+        self.assertEqual(MergeDuplicates(app).scan_version, 2)
+
+    def test_duplicate_versions_and_the_trash(self):
+        """One record holding the same file twice (the same running time and size): the copy in a folder
+        of its own is kept, the other set aside in the library's .plexcache-trash through the optimizer,
+        and Plex asked to scan. It's deleted for good once Plex no longer lists it and the hold is over —
+        or put back, or kept set aside. Health says when one is held too long."""
+        from plexcache import checks, trash as trash_mod
+        app, plex, client, cat, _ = self._app()
+        tool, tr = app.tools["versions"], app.trash
+        m = cat["movies"][0]
+        loose = os.path.join(cat["root"], "Movies", "Film 0 (2010).mkv")
+        shutil.copy(m["path"], loose)
+        m["more"] = [loose]
+        os.utime(loose, (time.time(), time.time()))  # (newer: still not kept — the one in its own folder is)
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1"))
+        (row,) = snap["scan"]["rows"]
+        self.assertEqual((row["keep"]["path"], [x["path"] for x in row["extras"]], row["extras"][0]["linked"], row["keep"]["sub"]), (m["path"], [loose], False, True))
+        self.assertEqual((snap["scan"]["items"], snap["scan"]["frees"], snap["scan"]["mirror"]), (1, os.path.getsize(loose), None))  # (one item with several files)
+        snap = self._run(tool, tool.apply_async([row["id"]]))
+        (res,) = snap["results"]
+        self.assertEqual((res["result"], res["set_aside"]), ("done", 1))
+        trashed = os.path.join(cat["root"], "Movies", ".plexcache-trash", "Film 0 (2010).mkv")
+        self.assertTrue(os.path.exists(trashed) and not os.path.exists(loose))
+        self.assertTrue(os.path.exists(os.path.join(cat["root"], "Movies", ".plexcache-trash", ".plexignore")))
+        self.assertEqual(client.sent[-1]["action"], "set_aside")
+        self.assertEqual(plex.scanned, [os.path.join(cat["root"], "Movies")])
+        self.assertIn("PUT /library/sections/1/emptyTrash", plex.requests)
+        (e,) = tr.snapshot()["items"]
+        self.assertEqual((e["state"], e["trashed"], e["here"]), ("waiting", trashed, False))
+        # Plex still lists it: not purged, even with no hold
+        tr.tick()
+        self.assertEqual((tr.items[0]["state"], os.path.exists(trashed)), ("waiting", True))
+        # held too long: Health says so
+        tr.items[0]["at"] -= trash_mod.STUCK_AFTER + 1
+        tr.items[0]["checked"] = 0
+        tr.tick()
+        self.assertTrue(tr.items[0]["stuck"])
+        self.assertIn("can’t be deleted yet", en(next(i for i in checks._tool_items(app) if "set-aside" in en(i["title"]))["title"]))
+        # Plex let go of it (a scan), the hold is 0: purged
+        m.pop("more")
+        app.scan_library()
+        tr.items[0]["checked"] = 0
+        tr.tick()
+        self.assertEqual((tr.items[0]["state"], os.path.exists(trashed), os.listdir(os.path.dirname(trashed))), ("purged", False, [".plexignore"]))  # (the trash folder stays, empty)
+        self.assertEqual(tr.snapshot()["items"], [])
+        # a second path Plex doesn't list (a hard link in the library folder; Plex skips a file it already has),
+        # and an identical copy: each a row, the listed file kept
+        link = os.path.join(cat["root"], "Movies", "Film 2 (2012) link.mkv")
+        os.link(cat["movies"][2]["path"], link)
+        twin = os.path.join(cat["root"], "Movies", "twin.mkv")
+        with open(cat["movies"][3]["path"], "r+b") as fh:  # (the sample films are alike byte for byte: this one made its own)
+            fh.seek(-16, os.SEEK_END)
+            fh.write(b"FILM3-ITS-OWN-ND")
+        shutil.copy(cat["movies"][3]["path"], twin)
+        snap = self._run(tool, tool.scan_async("1"))
+        by = {r["id"]: r for r in snap["scan"]["rows"]}
+        self.assertEqual(sorted(by), ["disk:" + link, "disk:" + twin])
+        self.assertEqual((by["disk:" + link]["keep"]["path"], by["disk:" + link]["extras"][0]["linked"], by["disk:" + link]["extras"][0]["unlisted"], by["disk:" + link]["frees"]),
+                         (cat["movies"][2]["path"], True, True, 0))
+        self.assertEqual((by["disk:" + twin]["keep"]["path"], by["disk:" + twin]["extras"][0]["linked"], by["disk:" + twin]["frees"]), (cat["movies"][3]["path"], False, os.path.getsize(twin)))
+        snap = self._run(tool, tool.apply_async(["disk:" + link]))
+        self.assertEqual(snap["results"][0]["result"], "done")
+        self.assertFalse(os.path.exists(link))
+        self.assertTrue(os.path.exists(cat["movies"][2]["path"]))
+        os.remove(twin)
+        # put back instead
+        shutil.copy(m["path"], loose)
+        m["more"] = [loose]
+        app.scan_library()
+        self._run(tool, tool.scan_async("1"))
+        self._run(tool, tool.apply_async([row["id"]]))
+        self.assertFalse(os.path.exists(loose))
+        tr.act(loose, "restore")
+        self.assertTrue(os.path.exists(loose))
+        self.assertEqual(tr.items[-1]["state"], "restored")
+        with self.assertRaises(ValueError):
+            tr.act("/nowhere", "keep")
+
+    def test_organize_folders(self):
+        """A loose film (in the library folder itself) moved into "Title (Year)" — with its subtitles;
+        {edition-…} for an edition; {tmdb-…} only when two films share a title and year — by linking the
+        new path first, waiting for Plex to list it, merging the record Plex makes into the original,
+        and only then removing the old path. Clean Up renames a film's folder whose name doesn't carry
+        the title and year; one that does is left as it is."""
+        from plexcache.tools import folders as fo
+        app, plex, client, cat, _ = self._app()
+        tool = app.tools["folders"]
+        self.assertEqual(fo.folder_name({"title": "Alien: Covenant", "year": 2017}), "Alien Covenant (2017)")
+        self.assertEqual(fo.folder_name({"title": "Blade Runner", "year": 1982, "edition": "Final Cut"}), "Blade Runner (1982) {edition-Final Cut}")
+        self.assertEqual(fo.id_tag({"guids": ["imdb://tt1", "tmdb://55"]}), "{imdb-tt1}")
+        self.assertTrue(fo._named_for("Film 2 (2012) Director's Cut", {"title": "Film 2", "year": 2012}))
+        self.assertFalse(fo._named_for("Movie & Friends 2 (2012)", {"title": "Film 2", "year": 2012}))
+        root = os.path.join(cat["root"], "Movies")
+        m = cat["movies"][0]
+        loose = os.path.join(root, "Film 0 (2010) 1080p.mkv")
+        os.rename(m["path"], loose)
+        shutil.rmtree(os.path.dirname(m["path"]))
+        m["path"] = loose
+        with open(os.path.join(root, "Film 0 (2010) 1080p.en.srt"), "w") as fh:
+            fh.write("1\n")
+        # Film 3 shares Film 2's title and year: both get their id in the folder name
+        cat["movies"][3].update(title="Film 2", year=2012)
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1"))
+        self.assertEqual([r["kind"] for r in snap["scan"]["rows"]], ["loose"])                      # (no Clean Up: folders left)
+        snap = self._run(tool, tool.scan_async("1", {"cleanup": True}))
+        rows = {r["id"]: r for r in snap["scan"]["rows"]}
+        self.assertEqual(sorted(r["kind"] for r in rows.values()), ["loose", "rename", "rename", "rename"])
+        self.assertEqual(sorted(r["folder"] for r in rows.values() if r["kind"] == "rename"), ["Film 1 (2011)", "Film 2 (2012) {tmdb-102}", "Film 2 (2012) {tmdb-103}"])
+        row = rows["loose:" + loose]
+        self.assertEqual(row["folder"], "Film 0 (2010)")
+        self.assertEqual([(mv["to"], mv["media"]) for mv in row["moves"]],
+                         [(os.path.join(root, "Film 0 (2010)", "Film 0 (2010) 1080p.mkv"), True), (os.path.join(root, "Film 0 (2010)", "Film 0 (2010) 1080p.en.srt"), False)])
+        new = row["moves"][0]["to"]
+        # Plex, asked to scan the new folder, lists the new path as a record of its own
+        def on_scan(folder):
+            if folder == os.path.dirname(new) and os.path.exists(new) and not any(x["path"] == new for x in cat["movies"]):
+                cat["movies"].append({"path": new, "size": m["size"], "kbps": 1, "key": "999", "title": "Film 0", "year": 2010, "guid": m["guid"]})
+        plex.on_scan = on_scan
+        fo.WAIT, fo.POLL = 5, 0.1
+        snap = self._run(tool, tool.apply_async([row["id"]]))
+        (res,) = snap["results"]
+        self.assertEqual((res["result"], res["moved"], res["merged"]), ("done", 2, True), res)
+        self.assertTrue(os.path.exists(new) and os.path.exists(row["moves"][1]["to"]))
+        self.assertFalse(os.path.exists(loose) or os.path.exists(os.path.join(root, "Film 0 (2010) 1080p.en.srt")))
+        self.assertEqual(plex.merged, [("100", "999")])                                               # the new record folded into the original
+        self.assertEqual([x["action"] for x in client.sent], ["link", "link", "unlink", "unlink"])
+        self.assertEqual(plex.scanned, [os.path.dirname(new), root])
+        self.assertEqual(snap["extra"], {})                                                           # (no mirror: nothing followed)
+        # a folder renamed: everything in it moves, and the old folder goes
+        row = rows["folder:" + os.path.join(root, "Movie & Friends 1 (2011)")]
+        old_folder = os.path.join(root, "Movie & Friends 1 (2011)")
+        new1 = row["moves"][0]["to"]
+        plex.on_scan = lambda folder: cat["movies"].append({"path": new1, "size": 1, "kbps": 1, "key": "998", "title": "Film 1", "year": 2011}) if folder == os.path.dirname(new1) and not any(x["path"] == new1 for x in cat["movies"]) else None
+        snap = self._run(tool, tool.apply_async([row["id"]]))
+        self.assertEqual(snap["results"][0]["result"], "done", snap["results"][0])
+        self.assertTrue(os.path.exists(new1) and not os.path.exists(old_folder))
+        # Plex never lists the new path: undone, the old path untouched
+        row = rows["folder:" + os.path.join(root, "Movie & Friends 2 (2012)")]
+        plex.on_scan = None
+        fo.WAIT = 0.3
+        snap = self._run(tool, tool.apply_async([row["id"]]))
+        self.assertEqual(snap["results"][0]["result"], "failed")
+        self.assertIn("didn’t list", en(snap["results"][0]["reason"]))
+        self.assertTrue(os.path.exists(row["moves"][0]["from"]) and not os.path.exists(row["moves"][0]["to"]))
+        self.assertEqual(len(snap["scan"]["rows"]), 2)                                                # still to do
+
+    def test_organize_folders_follows_the_mirror(self):
+        """With a mirrored server, a moved film is followed there: the synced folder brings the files, and
+        once its Plex lists the new path under a record of its own, that record is merged into the old
+        one there. Not picked up for days: Health says so."""
+        from plexcache import checks
+        from plexcache.tools import folders as fo
+        app, plex, client, cat, other = self._app(mirror=True)
+        tool = app.tools["folders"]
+        root = os.path.join(cat["root"], "Movies")
+        m = cat["movies"][0]
+        loose = os.path.join(root, "Film 0 (2010).mkv")
+        os.rename(m["path"], loose)
+        shutil.rmtree(os.path.dirname(m["path"]))
+        m["path"] = loose
+        other.cat["movies"][0]["path"] = loose
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1"))
+        (row,) = snap["scan"]["rows"]
+        self.assertEqual(snap["scan"]["mirror"], {"name": "Starlit"})
+        new = row["moves"][0]["to"]
+        plex.on_scan = lambda folder: cat["movies"].append({"path": new, "size": 1, "kbps": 1, "key": "999", "title": "Film 0"}) if folder == os.path.dirname(new) and not any(x["path"] == new for x in cat["movies"]) else None
+        fo.WAIT, fo.POLL = 5, 0.1
+        snap = self._run(tool, tool.apply_async([row["id"]]))
+        self.assertEqual(snap["results"][0]["result"], "done", snap["results"][0])
+        (p,) = snap["extra"]["pending"]
+        self.assertEqual((p["old"], p["new"], p["title"]), ([loose], [new], "Film 0 (2010)"))
+        self.assertTrue(tool.waiting())
+        # not there yet: its folder scanned there, and waited for
+        tool.tick()
+        self.assertEqual(other.scanned, [os.path.dirname(new)])
+        self.assertEqual(len(tool.extra["pending"]), 1)
+        # the mirror's Plex lists the new path as a record of its own, the old one still there: merged
+        other.cat["movies"].append({"path": new, "size": 1, "kbps": 1, "key": "777", "title": "Film 0"})
+        tool.tick()
+        self.assertEqual(other.merged, [("100", "777")])
+        self.assertEqual(len(tool.extra["pending"]), 1)                                               # (the old path still listed there)
+        other.cat["movies"][0]["path"] = new
+        other.cat["movies"][0].pop("more", None)
+        tool.tick()
+        self.assertEqual((tool.extra["pending"], tool.results[-1]["mirror"], tool.waiting()), ([], True, False))
+        # never picked up: said on Health
+        tool.extra["pending"] = [dict(p, at=time.time() - fo.MIRROR_GIVE_UP - 1, scanned=time.time())]
+        other.cat["movies"][0]["path"] = loose
+        tool.tick()
+        self.assertTrue(tool.stuck())
+        self.assertIn("hasn’t picked up", en(next(i for i in checks._tool_items(app) if "moved" in en(i["title"]))["title"]))
+
+    def test_tool_api_and_state(self):
+        """The Tools API: a scan and an apply started through it, each tool's state in the app's state,
+        and a set-aside file acted on."""
+        app, plex, client, cat, _ = self._app()
+        from plexcache.server import serve
+        srv = serve(app, "127.0.0.1", 0)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        def post(path, body):
+            req = urllib.request.Request(base + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read())
+        got = post("/api/tools/merge", {"action": "scan", "library": "1"})
+        self.assertTrue(got["started"])
+        self._run(app.tools["merge"], True)
+        st = json.loads(urllib.request.urlopen(base + "/api/state", timeout=10).read())
+        self.assertEqual(sorted(st["tools"]), ["folders", "merge", "versions"])
+        self.assertEqual((st["tools"]["merge"]["scan"]["library"], st["trash"]["items"], st["trash"]["hold_days"]), ("1", [], 0))
+        with self.assertRaises(urllib.error.HTTPError):
+            post("/api/tools/nothing", {"action": "scan", "library": "1"})
+        with self.assertRaises(urllib.error.HTTPError):
+            post("/api/trash", {"path": "/nowhere", "action": "keep"})
+        self.assertFalse(post("/api/tools/merge", {"action": "apply", "ids": []})["started"])
+
+    def test_library_sync_apply_and_undo(self):
+        """Library Sync, applying: the differences ticked made true on the other server — edited fields
+        (set and locked as the source has them), the match, a poster chosen by hand (uploaded),
+        collections, several items there merged into one — only with the mode "apply" and after a
+        review; each change logged with what the item had before, and undone from the log."""
+        from plexcache import sync as sync_mod
+        app, plex, client, cat, other = self._app(mirror=True)
+        sy = app.sync
+        # this server (the source): Film 1's title edited and in a collection; Film 2 matched to another entry;
+        # Film 3's poster chosen by hand; Film 0 one record here, two on the mirror
+        cat["movies"][1].update(title="Film One", locked=["title"], collections=["Best"])
+        other.cat["movies"][2]["guid"] = "plex://movie/other"
+        cat["movies"][3]["locked"] = ["thumb"]
+        copy = os.path.join(cat["root"], "Movies", "Film 0 (2010) [copy].mkv")
+        fakes.make_mkv(copy, 1024 * 1024)
+        cat["movies"][0]["more"] = [copy]
+        other.cat["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 0", "year": 2010, "guid": "plex://movie/0", "duration": 5400000})
+        app.settings.update({"sync": {"libraries": {"2": False, "3": False, "4": False, "5": False}}})  # (the films only)
+        app.scan_library()
+        sy.compare()
+        rows = {r["title"]: r for r in sy.report["libraries"]["1"]["items"]}
+        self.assertEqual(sorted((t, r["shape"], r["kinds"]) for t, r in rows.items()),
+                         [("Film 0 (2010)", "split", ["grouping"]), ("Film 2 (2012)", "pair", ["match"]), ("Film 3 (2013)", "pair", ["art"]), ("Film One (2011)", "pair", ["edits", "collections"])])
+        # not without the mode, nor before a review
+        with self.assertRaises(ValueError):
+            sy.applier.apply_async("1", [rows["Film One (2011)"]["id"]])
+        app.settings.update({"sync": {"mode": "apply"}})
+        self.assertIn("reviewed", en(sy.applier.allowed()))
+        sy.approve()
+        self.assertIsNone(sy.applier.allowed())
+        self.assertFalse(sy.applier.apply_async("1", ["nothing"]))
+        self.assertTrue(sy.applier.apply_async("1", [r["id"] for r in rows.values()]))
+        for _ in range(400):
+            if not sy.applier.running:
+                break
+            time.sleep(0.05)
+        snap = sy.snapshot()["apply"]
+        self.assertFalse(snap["running"])
+        log = {e["title"]: e for e in snap["log"]}
+        self.assertEqual({t: (e["result"], e["done"]) for t, e in log.items()},
+                         {"Film 0 (2010)": ("done", ["grouping"]), "Film 2 (2012)": ("done", ["match"]), "Film 3 (2013)": ("done", ["art"]), "Film One (2011)": ("done", ["edits", "collections"])})
+        puts = [(p, q) for p, q in other.puts]
+        self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "title.value": "Film One", "title.locked": "1"}), puts)
+        self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "collection[0].tag.tag": "Best"}), puts)
+        self.assertIn(("/library/metadata/102/match", {"guid": "plex://movie/2", "name": "Film 2 (2012)"}), puts)
+        self.assertEqual(other.posts, [("/library/metadata/103/posters", b"IMG")])
+        self.assertEqual(other.merged, [("100", "190")])
+        self.assertEqual((other.cat["movies"][1]["title"], other.cat["movies"][1]["locked"], other.cat["movies"][2]["guid"]), ("Film One", ["title"], "plex://movie/2"))
+        self.assertEqual(sy.report["libraries"]["1"]["items"], [])                                  # applied: off the report
+        self.assertEqual(sum(sy.report["totals"].values()), 0)
+        self.assertEqual(log["Film 3 (2013)"]["before"]["art"], {"thumb": "upload://posters/old"})
+        self.assertIn("can’t be undone", en(log["Film 0 (2010)"]["notes"][0]))
+        # compared again: in step (but Film 0's merge, which the fake's listing shows as the other's own record now)
+        sy.compare()
+        self.assertEqual([r["title"] for r in sy.report["libraries"]["1"]["items"]], [])
+        # undone: the title back, unlocked; the collection taken off; the match back; the poster chosen before chosen again
+        other.puts = []
+        for e in log.values():
+            sy.applier.undo(e["id"])
+        puts = [(p, q) for p, q in other.puts]
+        self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "title.value": "Film 1", "title.locked": "0"}), puts)
+        self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "collection[].tag.tag-": "Best"}), puts)
+        self.assertIn(("/library/metadata/102/match", {"guid": "plex://movie/other", "name": "Film 2 (2012)"}), puts)
+        self.assertIn(("/library/metadata/103/poster", {"url": "upload://posters/old"}), puts)
+        self.assertEqual((other.cat["movies"][1]["title"], other.cat["movies"][1]["locked"]), ("Film 1", []))
+        undone = {e["title"]: e for e in sy.snapshot()["apply"]["log"]}
+        self.assertTrue(all(e["undone"] for e in undone.values()))
+        self.assertIn("split the item", en(undone["Film 0 (2010)"]["left"][0]))
+        with self.assertRaises(ValueError):
+            sy.applier.undo(log["Film One (2011)"]["id"])                                          # (already undone)
+        sy.compare()  # (the poster chosen again counts as chosen by hand there too: no art difference any more)
+        self.assertEqual(sorted(r["title"] for r in sy.report["libraries"]["1"]["items"]), ["Film 2 (2012)", "Film One (2011)"])

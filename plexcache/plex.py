@@ -45,6 +45,7 @@ class MediaFile:
     title: str = ""
     # The Plex item it belongs to (a movie, an episode): a second version of it shares this
     rating_key: str = ""
+    duration_ms: int = 0  # the file's running time, as Plex has it
 
 
 @dataclass
@@ -150,6 +151,7 @@ def poster_of(item: ET.Element) -> str:
 # item's attribute of the same name
 EDIT_FIELDS = ("title", "titleSort", "originalTitle", "summary", "tagline", "year", "studio", "contentRating", "originallyAvailableAt")
 ART_FIELDS = ("thumb", "art")
+TAG_FIELDS = {"genre": "Genre", "writer": "Writer", "director": "Director", "producer": "Producer", "country": "Country", "collection": "Collection", "label": "Label"}
 
 
 def item_summary(item: ET.Element) -> dict:
@@ -157,10 +159,17 @@ def item_summary(item: ET.Element) -> dict:
     locked = {f.get("name") for f in item.findall("Field") if f.get("locked") in ("1", "true")}
     return {"key": item.get("ratingKey", ""), "parent": item.get("parentRatingKey", ""), "grandparent": item.get("grandparentRatingKey", ""),
             "type": item.get("type", ""), "title": item.get("title", ""), "label": title_of(item), "index": _int(item.get("index"), 0),
-            "guid": item.get("guid", ""), "matched": matched_of(item),
+            "guid": item.get("guid", ""), "matched": matched_of(item), "year": item.get("year", ""),
+            "guids": [g.get("id", "") for g in item.findall("Guid") if g.get("id")],  # its ids at the sites (tmdb://…, imdb://…)
+            "summary": bool((item.get("summary") or "").strip()), "summary_text": (item.get("summary") or "").strip()[:400], "thumb": item.get("thumb", ""),
+            # the tag fields' values (genres, writers…): what an edit of them holds
+            "tags": {f: [t.get("tag", "") for t in item.findall(tag) if t.get("tag")] for f, tag in TAG_FIELDS.items() if item.findall(tag)},
             "files": [(p.get("file"), _int(p.get("size"))) for m in item.findall("Media") for p in m.findall("Part") if p.get("file")],
-            "edition": item.get("editionTitle", ""),
+            "durations": [_int(p.get("duration") or m.get("duration")) for m in item.findall("Media") for p in m.findall("Part") if p.get("file")],
+            "edition": item.get("editionTitle", ""), "art_path": item.get("art", ""),
             "fields": {f: item.get(f, "") for f in EDIT_FIELDS if f in locked},
+            "values": {f: item.get(f, "") for f in EDIT_FIELDS if item.get(f)},  # every field's value, edited or not (what applying puts back)
+            "locked": sorted(n for n in locked if n and n not in ART_FIELDS),  # every edited field: the tag ones too (genre, writer…)
             "collections": sorted(c.get("tag", "") for c in item.findall("Collection") if c.get("tag")),
             "labels": sorted(c.get("tag", "") for c in item.findall("Label") if c.get("tag")),
             "art_locked": sorted(f for f in ART_FIELDS if f in locked)}
@@ -180,10 +189,10 @@ class PlexClient:
 
     # ------------------------------------------------------------------ http
     def _request(self, path: str, params: dict | None = None, headers: dict | None = None,
-                 auth: bool = True) -> bytes:
+                 auth: bool = True, method: str = "GET", data: bytes | None = None) -> bytes:
         query = urllib.parse.urlencode(params or {})
         url = f"{self.url}{path}" + (f"?{query}" if query else "")
-        req = urllib.request.Request(url)
+        req = urllib.request.Request(url, method=method, data=data)
         req.add_header("Accept", "application/xml")
         req.add_header("X-Plex-Product", PRODUCT)
         req.add_header("X-Plex-Version", __version__)
@@ -208,6 +217,60 @@ class PlexClient:
         """Ask Plex to scan one folder of a library now (as its own "Scan Library Files", just
         there): for libraries scanned by hand, or before Plex notices a change by itself."""
         self._request(f"/library/sections/{section_key}/refresh", {"path": folder})
+
+    def merge(self, keep: str, others: list[str]) -> None:
+        """Several items made one (Plex's own "Merge"): ``others`` become versions of ``keep``, whose
+        metadata (edits, poster, collections, watched state) is the one kept."""
+        if others:
+            self._request(f"/library/metadata/{keep}/merge", {"ids": ",".join(str(k) for k in others)}, method="PUT")
+
+    # ---------------------------------------------------------- edits (Library Sync, applying)
+    def edit(self, section_key: str, type_no: int, rating_key: str, values: dict) -> None:
+        """An item's fields set as Plex's own editor does: ``values`` {"title.value": "…", "title.locked": 1,
+        "genre[0].tag.tag": "Drama", "genre[].tag.tag-": "Old", "genre.locked": 1}."""
+        self._request(f"/library/sections/{section_key}/all", dict({"type": type_no, "id": rating_key}, **values), method="PUT")
+
+    def set_tags(self, section_key: str, type_no: int, rating_key: str, field: str, tags: list[str], remove: list[str] = (), locked: bool | None = None) -> None:
+        """A tag field (genre, director, collection, label…) given ``tags`` (added) and ``remove`` taken off."""
+        values: dict = {f"{field}[{i}].tag.tag": t for i, t in enumerate(tags)}
+        for t in remove:
+            values[f"{field}[].tag.tag-"] = t if f"{field}[].tag.tag-" not in values else values[f"{field}[].tag.tag-"] + "," + t
+        if locked is not None:
+            values[f"{field}.locked"] = 1 if locked else 0
+        if values:
+            self.edit(section_key, type_no, rating_key, values)
+
+    def match(self, rating_key: str, guid: str, name: str = "") -> None:
+        """An item matched to an online entry (its guid, as Plex gives it: plex://movie/…)."""
+        self._request(f"/library/metadata/{rating_key}/match", {"guid": guid, "name": name}, method="PUT")
+
+    def unmatch(self, rating_key: str) -> None:
+        self._request(f"/library/metadata/{rating_key}/unmatch", method="PUT")
+
+    def images(self, rating_key: str, kind: str = "posters") -> list[dict]:
+        """The posters (or backgrounds: "arts") Plex has for an item: [{"id", "selected", "thumb"}]; "id" is
+        what set_image() takes."""
+        root = self.get(f"/library/metadata/{rating_key}/{kind}")
+        return [{"id": p.get("ratingKey", ""), "selected": p.get("selected") in ("1", "true"), "thumb": p.get("thumb", "")} for p in root]
+
+    def set_image(self, rating_key: str, image_id: str, kind: str = "poster") -> None:
+        """One of an item's images (images()) chosen as its poster (or background: "art")."""
+        self._request(f"/library/metadata/{rating_key}/{kind}", {"url": image_id}, method="PUT")
+
+    def upload_image(self, rating_key: str, data: bytes, kind: str = "posters") -> None:
+        """An image added to an item as its poster (or background: "arts"), chosen at once."""
+        self._request(f"/library/metadata/{rating_key}/{kind}", method="POST", data=data, headers={"Content-Type": "image/jpeg"})
+
+    def empty_trash(self, section_key: str) -> None:
+        """Items whose files are gone dropped from a library (Plex's "Empty Trash"; done by itself
+        after a scan unless that's turned off)."""
+        self._request(f"/library/sections/{section_key}/emptyTrash", method="PUT")
+
+    def items_titled(self, section_key: str, leaf: int, title: str) -> list[dict]:
+        """The items of one type named ``title`` (as item_summary gives them): a few, so quick to poll
+        while Plex picks up a moved file."""
+        root = self.get(f"/library/sections/{section_key}/all", {"type": leaf, "title": title, "includeGuids": 1, "includeFields": 1})
+        return [item_summary(it) for it in root]
 
     def item_files(self, rating_key: str) -> list[str] | None:
         """Every file of a Plex item (its versions' parts), or None if Plex has no such item."""
@@ -312,7 +375,8 @@ class PlexClient:
                         path = part.get("file")
                         if path:
                             out.append(MediaFile(path, media_kbps(media, part), _int(part.get("size")), lib.kind, lib.title, lib.key,
-                                                 poster_of(item), matched_of(item), title_of(item), item.get("ratingKey", "")))
+                                                 poster_of(item), matched_of(item), title_of(item), item.get("ratingKey", ""),
+                                                 _int(part.get("duration") or media.get("duration"))))
             total = _int(root.get("totalSize"), -1)
             start += len(items)
             if not items or len(items) < size or (total >= 0 and start >= total):
@@ -341,6 +405,18 @@ class PlexClient:
             if not items or len(items) < size or (total >= 0 and start >= total):
                 break
         return out[:limit] if limit else out
+
+    def item_detail(self, rating_key: str) -> dict | None:
+        """One item's own page (/library/metadata/<key>): what the listings leave out — which fields are
+        locked (edited), the summary — as item_summary() gives it; None if Plex has no such item."""
+        try:
+            root = self.get(f"/library/metadata/{rating_key}", {"includeGuids": 1})
+        except PlexError as e:
+            if "404" in str(e):
+                return None
+            raise
+        items = list(root)
+        return item_summary(items[0]) if items else None
 
     # -------------------------------------------------------------- playback
     def sessions(self) -> list[Session]:

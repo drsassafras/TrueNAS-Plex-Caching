@@ -23,7 +23,7 @@ from .layout import _element, _pread
 from .i18n import M
 
 STORE = "file-maps.json"
-MAP_VERSION = 4  # what's read from each file; a map from an older version is read again (2: JPEG tables, 3: mix, 4: audio files)
+MAP_VERSION = 7  # what's read from each file; a map from an older version is read again (2: JPEG tables, 3: mix, 4: audio files, 5: LZ4, 6: ZFS rounding apart, 7: track flags)
 LAYOUT_VERSION = 2  # the oldest map still shown while it waits to be read again (it lacks only the mix)
 MAX_PARTS = 512  # top-level parts to read from either end before giving up
 MAX_TRACKS = 128
@@ -71,7 +71,7 @@ def _tracks(buf: bytes) -> list[dict]:
     for eid, a, b in _children(buf, 0, len(buf)):
         if eid != 0xAE or len(out) >= MAX_TRACKS:
             continue
-        t = {"number": None, "type": None, "codec": "", "language": "", "name": "", "compression": None}
+        t = {"number": None, "type": None, "codec": "", "language": "", "name": "", "compression": None, "forced": False, "default": True}
         bcp47 = ""
         for cid, ca, cb in _children(buf, a, b):
             v = buf[ca:cb]
@@ -87,6 +87,10 @@ def _tracks(buf: bytes) -> list[dict]:
                 bcp47 = v.decode("ascii", "replace")
             elif cid == 0x536E:
                 t["name"] = v.decode("utf-8", "replace")
+            elif cid == 0x55AA:  # FlagForced: a subtitle track for the written content of an otherwise spoken-language film
+                t["forced"] = bool(_uint(v))
+            elif cid == 0x88:  # FlagDefault
+                t["default"] = bool(_uint(v))
             elif cid == 0xE0:  # Video: its size
                 for vid, va, vb in _children(buf, ca, cb):
                     if vid == 0xB0:
@@ -420,8 +424,36 @@ def describe(path: str) -> dict:
     return out
 
 
-MIX_KEYS = ("video", "meta", "unused", "video_disk", "meta_disk", "unused_disk")
+MIX_KEYS = ("video", "meta", "unused", "video_disk", "meta_disk", "unused_disk", "round_disk")
 HEAD_KINDS = ("header", "segment", "seekhead", "info", "tracks", "checksum", "id3", "flac")  # what a player reads first
+
+
+def lz4_size(data: bytes) -> int:
+    """About how many bytes LZ4 (ZFS's lz4, TrueNAS's default compression) makes of ``data``: its
+    block format, greedy matching of 4 bytes or more within 64 KB, skipping ahead faster the longer
+    nothing matches (as LZ4 does) — so data that doesn't compress (cover art) is passed over quickly."""
+    n = len(data)
+    if n < 13:
+        return n + 1
+    table: dict[bytes, int] = {}
+    out, anchor, i, misses, limit = 0, 0, 0, 0, n - 5
+    while i < limit:
+        key = data[i:i + 4]
+        cand = table.get(key)
+        table[key] = i
+        if cand is None or i - cand > 65535:
+            misses += 1
+            i += 1 + (misses >> 6)
+            continue
+        misses = 0
+        j = i + 4
+        while j < n - 5 and data[j] == data[cand + j - i]:
+            j += 1
+        lits, mlen = i - anchor, j - i - 4
+        out += 1 + lits + ((lits - 15) // 255 + 1 if lits >= 15 else 0) + 2 + ((mlen - 15) // 255 + 1 if mlen >= 15 else 0)
+        anchor = i = j
+    lits = n - anchor
+    return out + 1 + lits + ((lits - 15) // 255 + 1 if lits >= 15 else 0)
 
 
 def store(mix: dict, record: int, video: int, meta: int, packed: int, unused: int) -> None:
@@ -435,7 +467,9 @@ def store(mix: dict, record: int, video: int, meta: int, packed: int, unused: in
     mix["unused"] += unused
     mix["video_disk"] += video
     if record - (video + packed) >= record // 8:
-        mix["meta_disk"] += max(0, -(-(video + packed) // 4096) * 4096 - video)
+        # (the last sector's unused rest: ZFS rounding, kept apart from the metadata it follows)
+        mix["meta_disk"] += packed
+        mix["round_disk"] = mix.get("round_disk", 0) + -(-(video + packed) // 4096) * 4096 - video - packed
     else:
         mix["meta_disk"] += meta
         mix["unused_disk"] += unused
@@ -446,8 +480,10 @@ def cache_mix(path: str, m: dict, record: int) -> dict | None:
     lead-in) hold: video (the streams), metadata, and unused room (padding, and the zeros past the end
     of the file) — as they are, and as ZFS stores them (``*_disk``, store()). Only the metadata is
     read: video doesn't compress, and zeros compress away. zlib stands in for ZFS's ZSTD (similar on
-    metadata). ``kinds``: each kind of metadata's bytes, as they are and compressed — what the
-    optimizer's result is estimated from (projection.py)."""
+    metadata). ``kinds``: each kind of metadata's bytes, as they are, compressed, and compressed with
+    LZ4 — what the optimizer's result is estimated from (projection.py). ``lz4``: the blocks as
+    stored with LZ4 instead ({"meta_disk", "unused_disk"}: TrueNAS's default, for a file not known
+    to be written with the dataset's compression)."""
     import zlib
     size = m.get("size") or 0
     bm = block_map(m, size, {"floor": layout.min_head(m.get("video_start"), record, size), "start": 0}, record)
@@ -456,6 +492,7 @@ def cache_mix(path: str, m: dict, record: int) -> dict | None:
     parts = pieces(m)
     out = dict.fromkeys(MIX_KEYS, 0)
     out.update(blocks=0, record=record)
+    lz4 = dict.fromkeys(MIX_KEYS, 0)
     kinds: dict[str, list[int]] = {}
     with open(path, "rb") as fh:
         for b in bm["start"] + bm["end"]:
@@ -475,12 +512,15 @@ def cache_mix(path: str, m: dict, record: int) -> dict | None:
                     fh.seek(lo)
                     got = fh.read(hi - lo)
                     data += got
-                    k = kinds.setdefault(p["kind"], [0, 0])
+                    k = kinds.setdefault(p["kind"], [0, 0, 0])
                     k[0] += len(got)
                     k[1] += len(zlib.compress(got, 6))
+                    k[2] += lz4_size(got)
             unused += record - b["data"]
             store(out, record, video, record - video - unused, len(zlib.compress(data, 6)) if data else 0, unused)
+            store(lz4, record, video, record - video - unused, lz4_size(data) if data else 0, unused)
     out["kinds"] = kinds
+    out["lz4"] = {"meta_disk": lz4["meta_disk"], "unused_disk": lz4["unused_disk"], "round_disk": lz4["round_disk"]}
     return out
 
 
@@ -592,7 +632,9 @@ def estimate_blocks(path: str, numbers: list[int], record: int, size: int) -> li
             raw = data + b"\0" * (record - len(data))
             packed = len(zlib.compress(raw, 6))
             stored = record if packed > record - record // 8 else -(-packed // 4096) * 4096
-            out.append({"n": n, "data": len(data), "stored": stored, "compressed": stored < record})
+            # rounding: the rest of its last 4K sector, which ZFS stores but holds nothing
+            out.append({"n": n, "data": len(data), "stored": stored, "compressed": stored < record,
+                        "rounding": stored - packed if stored < record else 0})
     return out
 
 
@@ -640,19 +682,10 @@ class FileMaps:
         return got
 
     def before(self, path: str) -> dict | None:
-        """The file's mix before it was optimized (keep_before), or None."""
+        """The file's mix before it was first optimized, as versions before file-history.json kept it
+        with its layout (what that history starts from: filehistory.FileHistory.seed), or None."""
         with self.lock:
             return (self.files.get(path) or {}).get("before")
-
-    def keep_before(self, path: str) -> None:
-        """The optimizer has just rewritten the file: its mix as last read is what it was before (kept
-        through later reads; the first optimizing's, if it's optimized again)."""
-        with self.lock:
-            e = self.files.get(path)
-            mix = ((e or {}).get("map") or {}).get("mix")
-            if e and mix and not e.get("before"):
-                e["before"] = mix
-                self.dirty = True
 
     def known(self, paths) -> int:
         with self.lock:
@@ -715,6 +748,7 @@ class Inspector:
                 paths = [app.map_path(f.path) for f in list(app.files) if str(f.library_key) == key]
                 todo = paths if force else [p for p in paths if not self._current(maps, p)]
                 if not todo and st:
+                    self._history_soon(key, paths)
                     return self.snapshot_locked()  # nothing new since: the last inspection stands
                 st = self.libs[key] = {"todo": todo, "done": 0, "total": len(todo), "read": 0, "paused": False,
                                        "finished": None if todo else time.time(), "force": bool(force)}
@@ -777,12 +811,28 @@ class Inspector:
                 since_save = 0
         maps.save()
 
+    def _history_soon(self, key: str, paths: list) -> None:
+        """Files inspected before their history was kept (filehistory.py): put in it, in the background."""
+        history = getattr(self.app, "history", None)
+        if history is None or getattr(self, "_history_busy", False) or history.known(paths) >= len(paths):
+            return
+        self._history_busy = True
+
+        def work():
+            try:
+                self.app.history_pass(key)
+            finally:
+                self._history_busy = False
+        threading.Thread(target=work, name="history", daemon=True).start()
+
     def _finished(self, key: str, read: int) -> None:
         app, maps = self.app, self.app.file_maps
         everything = {app.map_path(f.path) for f in list(app.files)}
         if everything:  # (not when the library list is empty for now: that's Plex unreachable, not every file gone)
             maps.forget_missing(everything)  # files no longer in any library: their entries go
         maps.save()
+        if getattr(app, "history", None) is not None:
+            app.history_pass(key, everything)  # each file as it is now, in its history with the optimizer
         title = (app.library_info(key) or {}).get("title") or key
         # (the files actually read: not the missing ones)
         app.activity.event("library health", M("inspected {n} files in {library}", one="inspected {n} file in {library}",

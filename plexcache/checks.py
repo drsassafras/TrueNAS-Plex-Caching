@@ -575,6 +575,7 @@ def check_cache_mode(app) -> dict:
     items.extend(_conflict_items(app))
     items.extend(_migration_items(app))
     items.extend(_sync_items(app))
+    items.extend(_tool_items(app))
     items.extend(_job_failures(app))
     return {"id": "mode", "title": M("Plex Cache"),
             "hint": M("How caching runs here — with an SSD cache (L2ARC) or RAM only — who can use the app, and the optimizer service."), "items": items}
@@ -641,7 +642,27 @@ def _sync_items(app) -> list[dict]:
     if sync.review_needed() and s.get("mode") != "off" and sync.decided() == "plex2":
         out.append(dict(item("info", M("Sync settings changed since they were reviewed"),
                              M("Applying stays paused until the differences are looked at again and approved. Comparing goes on."),
-                             M("Review & Approve on the Sync page.")), link=link))
+                             M("Press I’ve Reviewed These on the Sync page once you have: it applies nothing.")), link=link))
+    return out
+
+
+def _tool_items(app) -> list[dict]:
+    """The tools' leftovers that wait on you: a set-aside file that never met the conditions for its
+    deletion (the mirror keeps listing it, say), a moved film the mirror's Plex hasn't picked up."""
+    trash = getattr(app, "trash", None)
+    out = []
+    stuck = trash.stuck() if trash else []
+    if stuck:
+        out.append(dict(item("warn", M("{n} set-aside files can’t be deleted yet", one="{n} set-aside file can’t be deleted yet", n=len(stuck)),
+                             M("Plex here, or the mirrored server’s, still lists them after {days} days: {files}.", days=14, files=[os.path.basename(e["path"]) for e in stuck[:3]]),
+                             M("On the Duplicate Versions page: delete it now, put it back, or keep it set aside.")),
+                        link={"href": "/versions", "text": M("Open Duplicate Versions")}))
+    folders = (getattr(app, "tools", None) or {}).get("folders")
+    late = folders.stuck() if folders else []
+    if late:
+        out.append(dict(item("warn", M("{n} moved films the mirrored server hasn’t picked up", one="{n} moved film the mirrored server hasn’t picked up", n=len(late)),
+                             M("Its Plex doesn’t list the new folder after {days} days: {titles}. Is the folder synced there?", days=3, titles=[e["title"] for e in late[:3]])),
+                        link={"href": "/folders", "text": M("Open Organize Folders")}))
     return out
 
 
@@ -663,7 +684,7 @@ def _migration_items(app) -> list[dict]:
                       M("Next: {what}. {more}", what=what, more=more),
                       help=M("Turning a library folder into a dataset of its own goes step by step, and some steps are yours — in "
                              "TrueNAS, or a button on the Optimizer page. Until then nothing moves on; the folder and Plex are as they were.")),
-                 link={"href": "/optimizer#child-dataset", "text": M("Carry on, on the Optimizer page")})]
+                 link={"href": "/dataset", "text": M("Carry on, on its Tools page")})]
 
 
 def _conflict_items(app) -> list[dict]:

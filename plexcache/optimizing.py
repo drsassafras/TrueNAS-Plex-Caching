@@ -43,6 +43,7 @@ from .optimize import VERSION, compare as version_of, convert, mkv
 from .optimize.optimizer import strips_tags
 from .optimize.optimizer import COVER_PREFIX, WORK, conflict_original
 from .plex import PlexError
+from .projection import family
 
 IMAGE_MODES = ("unmatched", "remove", "compress", "plex")
 DEFAULTS = {"sync": True, "mkv": False, "images": "unmatched", "tags": "keep", "convert": False}  # each library's choices unless set
@@ -132,6 +133,11 @@ class OptimizerClient:
 
     def delete_original(self, path: str, new: str) -> dict:
         return self._call("/api/folder", {"action": "delete_original", "path": path, "to": new}, timeout=60)
+
+    def file_action(self, action: str, path: str, to: str = "", root: str = "") -> dict:
+        """The tools' file actions (optimize/files.py): "set_aside" / "restore" / "purge" (``root``: the
+        library folder, whose trash it is), "link" (``to``: the new path), "unlink" (``to``: the path kept)."""
+        return self._call("/api/folder", {"action": action, "path": path, "to": to, "root": root}, timeout=120)
 
     def optimize(self, path: str, images: str, force: bool, cover: bytes | None = None, tags: str = "keep") -> dict:
         body = {"path": path, "images": images, "force": force, "tags": tags}
@@ -620,9 +626,6 @@ class Optimizing:
             self.record[path] = entry
         if result in ("optimized", "rewritten"):
             self.zfs.written(path, ident["ino"], rec.get("dataset"), rec.get("compression"))
-            maps = getattr(self.app, "file_maps", None)
-            if maps is not None:
-                maps.keep_before(path)  # (Library Health: what caching took before, against now)
         self.zfs.save()
         self.save()
 
@@ -729,7 +732,7 @@ class Optimizing:
                 self.run_retries(job)  # a failed file to try again: after the file in hand, before the next
                 job.update(current=os.path.basename(path), current_file=path, step=None, file_pct=None, poster=poster or None, current_title=app.title_of(path) or None)
                 t0 = time.time()
-                before = self._before(path)
+                before = dict(self._before(path), layout=self._layout_before(path, key), comp=self.app.compression_of(path))
                 if self._needs_claim(item):
                     ok, why = claims.take(path)
                     if not ok:
@@ -739,7 +742,7 @@ class Optimizing:
                         claims.release(path)
                 else:
                     result = self._one(path, key, item, rec, poster)
-                self._log_file(job.log, job.state["id"], path, rec, item, result, time.time() - t0, before, poster)
+                self._log_file(job.log, job.state["id"], path, rec, item, result, time.time() - t0, before, poster, key)
                 if result["result"] == "cancelled":
                     break  # not tried: listed as cancelled, counted as not done
                 size = int(item.get("size") or 0)
@@ -761,6 +764,9 @@ class Optimizing:
                                               skipped=j["skipped"], failed=j["failed"]),
                                "warn" if j["failed"] else "info")
         finally:
+            history = getattr(app, "history", None)
+            if history is not None:
+                history.save()  # (saved every half minute or so as files are done: the rest now)
             self.survey()  # before the job ends, so the counts shown then are already the new ones
 
     # ------------------------------------------------------------ retries
@@ -827,7 +833,7 @@ class Optimizing:
         poster, matched = (getattr(f, "poster", ""), getattr(f, "matched", None)) if f else ("", None)
         if job:
             job.update(current=os.path.basename(path), current_file=path, step=None, file_pct=None, poster=poster or None, current_title=app.title_of(path) or None)
-        t0, before = time.time(), self._before(path)
+        t0, before = time.time(), dict(self._before(path), layout=self._layout_before(path, key), comp=self.app.compression_of(path))
         item = None
         if f is None or not os.path.exists(path):
             result = {"result": "failed", "reason": "no longer in the library"}
@@ -849,7 +855,7 @@ class Optimizing:
         # logged as the failed job's: its result replaces the failure there
         log = lambda **e: app.jobs.log.add(dict(e, job=it["job"], kind="optimize", mode=mode, library=key,
                                                 title=it.get("title"), retried=True))
-        self._log_file(log, it["job"], path, rec, item or {}, result, time.time() - t0, before, poster)
+        self._log_file(log, it["job"], path, rec, item or {}, result, time.time() - t0, before, poster, key)
         app.jobs.retried(it["job"], path, result)
         if result.get("result") in ("optimized", "rewritten", "already"):
             with self.lock:
@@ -888,8 +894,40 @@ class Optimizing:
                 "version": (known.get("ours") or {}).get("PLEXCACHE_OPTIMIZER") if same else None,
                 "images": known.get("images") if same else None}
 
+    def _layout_before(self, path: str, key: str) -> dict | None:
+        """The file's layout before the optimizer writes it (read now if it changed since it was
+        inspected), the file as it is then put in its history (filehistory.py)."""
+        maps = getattr(self.app, "file_maps", None)
+        if maps is None or getattr(self.app, "history", None) is None:
+            return None
+        try:
+            m = maps.read(path)
+            self.app.observe_history(path, key, m)
+            return m
+        except OSError:
+            return None
+
+    def _history(self, path: str, key: str, written: str, before: dict | None, comp_before: str | None = None,
+                 comp_after: str | None = None) -> tuple[dict | None, dict | None]:
+        """A file the optimizer has just written, in its history: its layout before and after (read now),
+        as kept there (filehistory.snapshot) — for its line in the job log."""
+        from .filehistory import snapshot
+        maps, history = getattr(self.app, "file_maps", None), getattr(self.app, "history", None)
+        if maps is None or history is None:
+            return None, None
+        try:
+            st = os.stat(written)
+            after = maps.read(written)
+            ours = self._mkv_info(written, st).get("ours") or {} if after.get("format") == "mkv" else {}
+        except Exception:  # noqa: BLE001 — not readable now: its history waits for the next inspection
+            return snapshot(before, comp_before), None
+        history.processed(path, key, before, after, [st.st_size, st.st_mtime_ns, st.st_ino], ours,
+                          new_path=written if written != path else None, comp_before=comp_before, comp_after=comp_after)
+        history.save_soon()
+        return snapshot(before, comp_before), snapshot(after, comp_after)
+
     def _log_file(self, log, job_id: str, path: str, rec: dict, item: dict, r: dict, seconds: float, before: dict,
-                  poster: str = "") -> None:
+                  poster: str = "", key: str = "") -> None:
         """One file in the job log: how long, its size, the verification, its record size and
         compression before and after, whether it was laid out again, and its cover art."""
         res = r.get("result")
@@ -905,7 +943,9 @@ class Optimizing:
             b, a = r.get("images_before") or 0, r.get("images_after") or 0
             cover = ("Plex poster added" if r.get("cover") and not b else "replaced by Plex's poster" if r.get("cover")
                      else f"{b - a} removed" if a < b else "compressed" if r.get("images_saved") else "kept" if a else None)
-        log(type="file", file=path, result=res, seconds=round(seconds, 1), reason=r.get("reason"),
+        mix_before, mix_after = self._history(path, str(key), written, before.get("layout"), before.get("comp"),
+                                              family(rec.get("compression"))) if wrote else (None, None)
+        log(type="file", file=path, result=res, seconds=round(seconds, 1), reason=r.get("reason"), mix_before=mix_before, mix_after=mix_after,
                 size_before=before.get("size"), size_after=after.get("size") if wrote else before.get("size"),
                 verified=r.get("verified") or ("not needed" if res == "already" else None),
                 rs_before=before.get("rs"), rs_after=after.get("rs") if wrote else before.get("rs"),

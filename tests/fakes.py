@@ -164,6 +164,31 @@ class FakePlex:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def do_PUT(self):
+                fake.requests.append("PUT " + self.path)
+                if self.headers.get("X-Plex-Token") != fake.token:
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                ok = fake.put(self.path)
+                self.send_response(200 if ok else 404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n) if n else b""
+                fake.requests.append("POST " + self.path)
+                fake.posts = getattr(fake, "posts", []) + [(self.path, body)]
+                parts = self.path.split("?")[0].split("/")
+                if len(parts) == 5 and parts[4] in ("posters", "arts"):  # an image uploaded: chosen by hand now
+                    m = next((m for m in fake.cat["movies"] if m["key"] == parts[3]), None)
+                    if m is not None:
+                        m["locked"] = sorted(set(m.get("locked", [])) | {"thumb" if parts[4] == "posters" else "art"})
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
@@ -178,8 +203,61 @@ class FakePlex:
         size = item["size"]
         media_br = f' bitrate="{item["kbps"]}"' if item["kbps"] else ""
         dur = item.get("duration", 0)
-        return (f'<Media id="1"{media_br} duration="{dur}"><Part id="1" file={quoteattr(item["path"])} size="{size}"'
-                f' duration="{dur}"/></Media>{extra}')
+        out = (f'<Media id="1"{media_br} duration="{dur}"><Part id="1" file={quoteattr(item["path"])} size="{size}"'
+               f' duration="{dur}"/></Media>')
+        for i, p in enumerate(item.get("more", [])):  # more versions (paths) on the same record
+            out += f'<Media id="{i + 2}"{media_br} duration="{dur}"><Part id="{i + 2}" file={quoteattr(p)} size="{size}" duration="{dur}"/></Media>'
+        return out + extra
+
+    def put(self, path) -> bool:
+        """Plex's PUTs: a merge (the others' files become versions of the one kept), empty trash; an
+        edit (fields and locks taking effect on the record), a match, a poster chosen."""
+        from urllib.parse import parse_qs, urlparse
+        u = urlparse(path)
+        q = parse_qs(u.query)
+        parts = u.path.split("/")
+        self.puts = getattr(self, "puts", []) + [(u.path, {k: v if len(v) > 1 else v[0] for k, v in q.items()})]
+        if u.path.startswith("/library/sections/") and u.path.endswith("/all") and q.get("id"):  # an edit
+            m = next((m for m in self.cat["movies"] if m["key"] == q["id"][0]), None)
+            if m is None:
+                return False
+            for k, v in q.items():
+                if k.endswith(".value"):
+                    m[k[:-6]] = v[0] if k[:-6] != "year" else int(v[0])
+                elif k.endswith(".locked") and "[" not in k:
+                    f, locked = k[:-7], set(m.get("locked", []))
+                    (locked.add if v[0] == "1" else locked.discard)(f)
+                    m["locked"] = sorted(locked)
+                elif k.endswith("].tag.tag") or k.endswith("].tag.tag-"):  # a tag field: "collection[0].tag.tag" added, "collection[].tag.tag-" taken off
+                    field, plural = k.split("[")[0], {"collection": "collections", "label": "labels"}
+                    lst = m.setdefault(plural.get(field, field), [])
+                    for t in v[0].split(","):
+                        if k.endswith("-"):
+                            [lst.remove(t) for _ in range(lst.count(t))]
+                        elif t not in lst:
+                            lst.append(t)
+                    lst.sort()
+            return True
+        if len(parts) == 5 and parts[1:3] == ["library", "metadata"] and parts[4] in ("match", "unmatch"):
+            m = next((m for m in self.cat["movies"] if m["key"] == parts[3]), None)
+            if m is None:
+                return False
+            m["guid"] = q["guid"][0] if parts[4] == "match" else f"local://{m['key']}"
+            return True
+        if len(parts) == 5 and parts[1:3] == ["library", "metadata"] and parts[4] in ("poster", "art"):
+            return True
+        if len(parts) == 5 and parts[1:3] == ["library", "metadata"] and parts[4] == "merge":
+            keep = next((m for m in self.cat["movies"] if m["key"] == parts[3]), None)
+            if keep is None:
+                return False
+            for k in q.get("ids", [""])[0].split(","):
+                other = next((m for m in self.cat["movies"] if m["key"] == k and m is not keep), None)
+                if other is not None:
+                    keep.setdefault("more", []).extend([other["path"]] + other.get("more", []))
+                    self.cat["movies"].remove(other)
+            self.merged = getattr(self, "merged", []) + [(parts[3], q.get("ids", [""])[0])]
+            return True
+        return len(parts) == 5 and parts[1:3] == ["library", "sections"] and parts[4] == "emptyTrash"
 
     def _episode_xml(self, ep, extra_attrs=""):
         return (f'<Video type="episode" ratingKey="{ep["key"]}" grandparentRatingKey="500" grandparentTitle={quoteattr(self.show_name)} '
@@ -201,11 +279,24 @@ class FakePlex:
                 for k, t, ty, loc in self.libraries
             )
             return f"<MediaContainer>{dirs}</MediaContainer>"
+        if u.path.startswith("/library/sections/") and u.path.endswith("/refresh"):  # a folder scanned: noted
+            self.scanned = getattr(self, "scanned", []) + [q.get("path", [""])[0]]
+            if getattr(self, "on_scan", None):  # (a test's Plex "finding" files there)
+                self.on_scan(q.get("path", [""])[0])
+            return "<MediaContainer/>"
         if u.path.startswith("/library/sections/") and u.path.endswith("/all"):
             key = u.path.split("/")[3]
             typ = q.get("type", [""])[0]
             if key == "1" and typ == "1":
-                items = [f'<Video type="movie" ratingKey="{m["key"]}" title={quoteattr(m.get("title", "Movie"))}>{self._part(m)}</Video>' for m in self.cat["movies"]]
+                movies = [m for m in self.cat["movies"] if not q.get("title") or m.get("title", "Movie") == q["title"][0]]
+                items = [f'<Video type="movie" ratingKey="{m["key"]}" title={quoteattr(m.get("title", "Movie"))}'
+                         + (f' year="{m["year"]}"' if m.get("year") else "") + (f' guid={quoteattr(m["guid"])}' if m.get("guid") else "")
+                         + (f' editionTitle={quoteattr(m["edition"])}' if m.get("edition") else "")
+                         + (f' thumb="/library/metadata/{m["key"]}/thumb/1"' if m.get("guid") else "") + ">"
+                         + "".join(f'<Guid id={quoteattr(g)}/>' for g in m.get("guids", []))
+                         + "".join(f'<Field locked="1" name="{n}"/>' for n in m.get("locked", []))
+                         + "".join(f'<Collection tag={quoteattr(c)}/>' for c in m.get("collections", [])) + "".join(f'<Label tag={quoteattr(c)}/>' for c in m.get("labels", []))
+                         + f"{self._part(m)}</Video>" for m in movies]
             elif key == "2" and typ == "4":
                 items = [self._episode_xml(e) for e in self.cat["episodes"]]
             elif key == "3" and typ == "10":
@@ -232,7 +323,14 @@ class FakePlex:
             return "<MediaContainer>" + "".join(
                 f'<Video type="movie" ratingKey="{m["key"]}" title="Part {i + 1}">{self._part(m)}</Video>'
                 for i, m in enumerate(self.cat["movies"][:3])) + "</MediaContainer>"
+        if u.path.startswith("/library/metadata/") and u.path.endswith("/thumb/1"):  # a poster's bytes
+            return "IMG"
+        if u.path.startswith("/library/metadata/") and u.path.endswith(("/posters", "/arts")):  # an item's images, the chosen one first
+            return '<MediaContainer><Photo ratingKey="upload://posters/old" selected="1" thumb="/library/metadata/x/thumb/1"/><Photo ratingKey="metadata://posters/other" thumb="/t2"/></MediaContainer>'
         movie = next((m for m in self.cat["movies"] if u.path == f'/library/metadata/{m["key"]}'), None)
+        if movie is not None and movie.get("guid"):  # (a test's own records: their page as the listing gives it)
+            from urllib.parse import quote
+            return self.route("/library/sections/1/all?type=1&title=" + quote(movie.get("title", "Movie")), headers)
         if movie is not None:
             tag = '<Collection id="77" tag="Trilogy"/>' if self.cat["movies"].index(movie) < 3 else ""
             return f'<MediaContainer><Video type="movie" ratingKey="{movie["key"]}" title="Movie">{self._part(movie)}{tag}</Video></MediaContainer>'

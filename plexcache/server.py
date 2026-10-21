@@ -14,6 +14,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import filehistory
 from .auth import SESSION_DAYS, Auth
 from .config import SettingsError
 from .i18n import M, jsonable, msg
@@ -21,7 +22,7 @@ from .plex import PlexError, check_pin, create_pin
 
 log = logging.getLogger("plexcache")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
-PAGES = {"/", "/health", "/caching", "/ssd", "/library", "/optimizer", "/processes", "/sync", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
+PAGES = {"/", "/health", "/caching", "/ssd", "/library", "/tools", "/optimizer", "/convert", "/dataset", "/merge", "/versions", "/folders", "/processes", "/sync", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
 MAX_BODY = 1024 * 1024
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
@@ -250,6 +251,11 @@ def make_handler(app):
                     except (ValueError, OSError) as e:
                         return self._error(str(e), 400)
                     return self._json({"blocks": got}) if got is not None else self._error("not found", 404)
+                if path == "/api/library/health":  # Library Health: one library's items through the content checks
+                    from .libhealth import library_health
+                    if not app.library_info(arg("key")):
+                        return self._error("not found", 404)
+                    return self._json(jsonable(library_health(app, arg("key"))))
                 if path == "/api/library/differences":  # Library Sync: one library's differences, as last compared
                     got = app.sync.differences(arg("key"))
                     return self._json(jsonable(got)) if got else self._error("not found", 404)
@@ -260,13 +266,26 @@ def make_handler(app):
                         return self._error(str(e), 404)
                     return self._json(jsonable(got)) if got else self._error("not found", 404)
                 return self._error("not found", 404)
+            if path == "/api/match":
+                # a Plex match (plex://…), looked up on Plex's metadata service: what it is, and its poster
+                qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                try:
+                    got = app.match_info((qs.get("guid") or [""])[0], image=bool((qs.get("image") or [""])[0]))
+                except Exception:  # noqa: BLE001 — plex.tv unreachable, or no such entry
+                    return self._error("not found", 404)
+                if got is None:
+                    return self._error("not found", 404)
+                if isinstance(got, bytes):
+                    return self._send(200, got, "image/jpeg", {"Cache-Control": "private, max-age=86400"})
+                return self._json(got)
             if path == "/api/poster":
                 # a small poster beside a file or what plays (from Plex, through this app: the browser has no Plex token)
-                p = (urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "").get("path") or [""])[0]
+                qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                p = (qs.get("path") or [""])[0]
                 if not re.fullmatch(r"/library/metadata/\d+/(thumb|art)/\d+", p):
                     return self._error("not found", 404)
                 try:
-                    data = app.poster_thumb(p)
+                    data = app.poster_thumb(p, "mirror" if (qs.get("server") or [""])[0] == "mirror" else "")
                 except Exception:  # noqa: BLE001 — Plex unreachable, or no such poster: no thumbnail
                     return self._error("not found", 404)
                 return self._send(200, data, "image/jpeg", {"Cache-Control": "private, max-age=86400"})
@@ -282,6 +301,8 @@ def make_handler(app):
                     except ValueError:
                         return self._error("bad request", 400)
                     d = app.jobs.log.files(arg("job"), off, lim, sort=arg("sort") or "file", fill=lambda rows: app.optimizing.describe(rows, arg("job")))
+                    for f in d["files"]:  # each written file's chart: what caching keeps of it, just before and after
+                        f["views"] = filehistory.file_views(f.pop("mix_before", None), f.pop("mix_after", None))
                     return self._json(d)
                 if path == "/api/processes/export":
                     fmt = "json" if arg("format") == "json" else "csv"
@@ -410,18 +431,48 @@ def make_handler(app):
                     # Library Sync (sync.py): compare now, look for mirrors, approve the settings as reviewed
                     try:
                         if path == "/api/sync/compare":
-                            if app.sync.decided() != "plex2":
-                                raise ValueError(M("No mirror to compare with: choose one on the Sync page."))
                             return self._json({"started": app.sync.compare_async()})
+                        if path == "/api/sync/start":  # one library (opened on the Library page): {"library", "pause"?}
+                            key = str(body.get("library") or "")
+                            if body.get("pause"):
+                                app.sync.pause(key)
+                                return self._json(jsonable(app.sync.snapshot()))
+                            return self._json(jsonable(app.sync.start(key, force=bool(body.get("force")))))
                         if path == "/api/sync/discover":
                             app.sync.discover_async()
                             return self._json({"started": True})
                         if path == "/api/sync/approve":
                             app.sync.approve()
                             return self._json(jsonable(app.sync.snapshot()))
+                        if path == "/api/sync/apply":  # the differences ticked, made true on the other server: {"library", "ids"}
+                            started = app.sync.applier.apply_async(str(body.get("library") or ""), [str(i) for i in body.get("ids") or []])
+                            return self._json(dict(jsonable(app.sync.snapshot()), started=started))
+                        if path == "/api/sync/undo":  # a logged change put back: {"id"}
+                            app.sync.applier.undo(str(body.get("id") or ""))
+                            return self._json(jsonable(app.sync.snapshot()))
                     except ValueError as e:
                         raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
                     raise SettingsError(M("unknown action"))
+                if path.startswith("/api/tools/"):
+                    # a tool (tools/): {"action": "scan", "library", "options"} or {"action": "apply", "ids": [...]}
+                    tool = app.tools.get(path[len("/api/tools/"):])
+                    if tool is None:
+                        raise SettingsError(M("unknown tool"))
+                    action = body.get("action")
+                    if action == "scan":
+                        started = tool.scan_async(str(body.get("library") or ""), body.get("options") if isinstance(body.get("options"), dict) else {})
+                    elif action == "apply":
+                        started = tool.apply_async([str(i) for i in body.get("ids") or []])
+                    else:
+                        raise SettingsError(M("unknown action"))
+                    return self._json(dict(jsonable(tool.snapshot()), started=started))
+                if path == "/api/trash":
+                    # a file a tool set aside (trash.py): {"path", "action": "purge" | "restore" | "keep"}
+                    try:
+                        app.trash.act(str(body.get("path") or ""), str(body.get("action") or ""))
+                    except ValueError as e:
+                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+                    return self._json(jsonable(app.trash.snapshot()))
                 if path == "/api/conversions":
                     # A converted file's original (converting.py): {"original", "action": "delete" | "keep" | "check"}
                     try:

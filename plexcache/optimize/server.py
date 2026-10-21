@@ -17,7 +17,9 @@ one file at a time, and reads the result back.
                          answer lists every claim on that file and the other systems seen there
     POST /api/conflict   {"copy", "original"}: a Syncthing conflict copy next to a file: deleted
                          if it's one of ours — both tagged by the optimizer, every stream the same
-    POST /api/folder     turning a library folder into a dataset (optimize/migrate.py), by "action":
+    POST /api/folder     the tools' file actions (optimize/files.py): "set_aside" / "restore" / "purge" {"path",
+                         "root"}, "link" / "unlink" {"path", "to"}; and
+                         turning a library folder into a dataset (optimize/migrate.py), by "action":
                          "probe" {"path"}; "copy" {"path", "to", "mirror"} (a job: progress in
                          /api/status); "pause" / "resume" / "stop"; "compare" {"path", "to"};
                          "rename" {"path", "name"}; "delete" {"path"} — the last two only for the
@@ -195,9 +197,18 @@ def folder_action(svc: Service, body: dict) -> tuple[int, dict]:
         return 200, {"ok": True}
     path = svc.allowed(str(body.get("path") or ""))
     to = svc.allowed(str(body.get("to") or "")) if body.get("to") else None
-    if not path or (body.get("to") and not to):
+    root = svc.allowed(str(body.get("root") or "")) if body.get("root") else None
+    if not path or (body.get("to") and not to) or (body.get("root") and not root):
         return 403, {"error": "path is outside the media folders"}
     try:
+        if action in ("set_aside", "restore", "purge", "link", "unlink"):  # the tools' file actions (files.py)
+            from . import files
+            if action in ("set_aside", "restore", "purge") and not root:
+                return 400, {"error": "root is needed"}
+            if action in ("link", "unlink") and not to:
+                return 400, {"error": "to is needed"}
+            return 200, {"set_aside": lambda: files.set_aside(root, path), "restore": lambda: files.put_back(root, path),
+                         "purge": lambda: files.purge(root, path), "link": lambda: files.link(path, to), "unlink": lambda: files.unlink(path, to)}[action]()
         if action == "probe":
             return 200, migrate.probe(path)
         if action == "copy":
