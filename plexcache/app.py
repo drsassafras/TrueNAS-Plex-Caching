@@ -1219,8 +1219,10 @@ class App:
                          "size": f.size, "kbps": f.kbps, "kind": kind, "missing": st is None, "read": bool(m),
                          "saved": f.size - m["disk"] if m and m.get("disk") is not None else None,
                          "plan": plan, "blocks": block_map(m, f.size, plan, rec)})
+        from .paging import page_ranges
         return {"library": key, "total": len(files), "surveyed": self.file_maps.current(paths), "record": record,
-                "offset": offset, "files": rows, "summary": self._health_summary(key, lrec)}
+                "offset": offset, "files": rows, "summary": self._health_summary(key, lrec),
+                "pages": page_ranges([getattr(f, "title", "") or os.path.basename(f.path) for f in files], limit)}
 
     def _health_summary(self, key: str, lrec: dict) -> dict:
         """Every inspected file of the library through its checks (filechecks.summarize), kept a little

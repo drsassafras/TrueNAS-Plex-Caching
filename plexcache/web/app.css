@@ -133,7 +133,7 @@ h2{font-size:17px;margin:0 0 4px;font-weight:600}
 .legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px;color:var(--soft)}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px}
 .note{margin-top:16px;background:var(--note-bg);border:1px solid var(--note-line);border-radius:10px;padding:12px 14px;font-size:14px;color:var(--note-ink)}
-.chk{display:flex;flex-wrap:wrap;gap:8px 18px;font-size:14px}
+.chk{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;font-size:14px}  /* a row's texts and buttons on the checkbox's line */
 .chk label{display:flex;align-items:center;gap:8px;font-weight:400;min-height:32px}
 .chk input{width:18px;height:18px;accent-color:var(--accent)}
 .meter{height:12px;border-radius:6px;background:var(--track);overflow:hidden;margin:10px 0 6px}
@@ -217,7 +217,8 @@ h2 .info{vertical-align:2px}
 .infopop{position:absolute;z-index:50;max-width:min(340px,calc(100vw - 32px));background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px;font-weight:400;line-height:1.5;box-shadow:0 6px 20px rgba(0,0,0,.16);text-transform:none;letter-spacing:0}
 .infopop[hidden]{display:none}
 .infopop .mono{font-family:var(--mono);font-size:12px}
-.chk > .info{align-self:center;margin-left:-12px}  /* sit next to the checkbox's label, not a full gap away */
+.chk > .info,.convtype > .info{align-self:center;margin-left:0;margin-right:-8px}  /* the ⓘ first in every row, in one column; the box right after it */
+.info.gap{visibility:hidden;cursor:default}  /* a row without an ⓘ keeps its place, so the boxes line up too */
 .sizing .tbl tr.sum th,.sizing .tbl tr.sum td{font-weight:600;border-top:1px solid var(--line)}
 .sizing .tbl th[scope=row]{text-align:left;text-transform:none;letter-spacing:0;font-size:14px;color:var(--ink)}
 /* "Back to default" button beside a changed setting */
@@ -680,8 +681,9 @@ h2 .mode-ic{vertical-align:-3px}
 .lhhdr{grid-template-columns:minmax(0,1fr) 34px minmax(0,1.2fr)}
 .lhflags{min-width:0}
 .lhchk select.sel.sm{font-size:12px;padding:2px 6px;min-height:0;max-width:140px}
-.lhchk .lhlang{flex-basis:100%;display:flex;align-items:center;gap:8px;margin:-4px 0 2px 36px;font-size:13px;color:var(--soft)}
-.lhchk.lhsub{margin-left:36px;font-size:13px}
+.lhchk .lhlang{flex-basis:100%;display:flex;align-items:center;gap:8px;margin:-4px 0 2px 42px;font-size:13px;color:var(--soft)}
+.lhchk.lhsub{font-size:13px}
+.lhchk.lhsub label{margin-left:18px}  /* the row keeps its ⓘ in the column; the box and its name step in a little */
 .lhacts{margin-top:6px}
 .lhquiet .what{color:var(--muted)}
 .ssval.muted{color:var(--muted)}
@@ -700,5 +702,19 @@ button.mgarrow:hover{border-color:var(--accent);color:var(--accent)}
 .meter.busy>div{width:30%;animation:busy 1.1s ease-in-out infinite alternate}
 @keyframes busy{from{margin-left:0}to{margin-left:70%}}
 @media (prefers-reduced-motion:reduce){.meter.busy>div{animation:none;width:100%;opacity:.4}}
-.lhchk.lhsub{flex-wrap:nowrap;align-items:flex-start}
+.lhchk.lhsub{align-items:flex-start}  /* (wraps: the language select takes the line under the name) */
+.lhchk.lhsub > .info{flex:none}
 .lhchk.lhsub label{flex:1 1 auto;min-width:0;align-items:flex-start}
+/* a card's controls greyed out where they can't apply (not TrueNAS): there to see, not to use */
+fieldset.plain{border:0;padding:0;margin:0;min-width:0}
+fieldset.greyed{opacity:.5;filter:grayscale(1)}
+fieldset.greyed *{cursor:not-allowed}
+.note.pitch{margin:10px 0 12px;font-weight:500}
+/* the pages of a long list, each a span of what it holds */
+.pager{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;margin-top:10px}
+.pager .pgcount{margin-right:6px}
+.pager .pg{font:inherit;font-size:13px;padding:2px 6px;border-radius:6px}
+.pager button.pg{background:none;border:1px solid var(--line);cursor:pointer;color:var(--accent)}
+.pager button.pg:hover{border-color:var(--accent)}
+.pager .pg.cur{border:1px solid transparent;background:var(--line2);color:var(--ink);font-weight:600}
+.pager .pgdots{color:var(--muted)}

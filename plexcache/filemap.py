@@ -486,6 +486,8 @@ def cache_mix(path: str, m: dict, record: int) -> dict | None:
     to be written with the dataset's compression)."""
     import zlib
     size = m.get("size") or 0
+    if not m.get("parts"):
+        return None  # (no layout read: nothing to say of what the blocks hold — block_map still draws them as one piece)
     bm = block_map(m, size, {"floor": layout.min_head(m.get("video_start"), record, size), "start": 0}, record)
     if not bm:
         return None
@@ -582,9 +584,11 @@ def block_map(m: dict | None, size: int, plan: dict, record: int | None) -> dict
     video and 60% of a block of video; at its end, every block holding metadata — each with what's in
     it (bytes per part, and past the end of the file the block's unused, zero-filled rest). The lead-in
     adds more blocks of video after the first ones (``lead_blocks``)."""
-    if not m or not m.get("parts") or not record or not size:
+    if not m or not record or not size:
         return None
-    parts = pieces(m)
+    # a file whose layout isn't read (a format the inspector doesn't open: "stream") still takes blocks —
+    # one, for most music — drawn as one piece of unmapped content
+    parts = pieces(m) if m.get("parts") else [{"kind": "other", "pos": 0, "size": size}]
 
     def block(n: int) -> dict:
         a, b = n * record, (n + 1) * record
@@ -608,11 +612,12 @@ def block_map(m: dict | None, size: int, plan: dict, record: int | None) -> dict
         lo = max(first, min(o for o, _ in end_ranges) // record)
         hi = (max(o + n for o, n in end_ranges) - 1) // record
         end = [block(n) for n in range(lo, hi + 1)]
-    lead = max(0, -(-plan["start"] // record) - len(start))
+    total = -(-size // record)
+    lead = max(0, min(total, -(-plan["start"] // record)) - len(start))  # (never more blocks than the file has)
     kinds = {t.get("type") for t in m.get("tracks") or []}
-    streams = [k for k in ("video", "audio", "subtitles") if k in kinds] or ["video"]  # (MP4: not read, so just "video")
+    streams = [k for k in ("video", "audio", "subtitles") if k in kinds] or (["audio"] if m.get("format") in ("mp3", "flac", "stream") and not m.get("video_start") else ["video"])  # (MP4: not read, so just "video")
     return {"record": record, "start": start, "end": end, "lead_blocks": lead, "streams": streams,
-            "total_blocks": -(-size // record), "video": max(0, (m.get("video_end") or size) - vs)}
+            "total_blocks": total, "video": max(0, (m.get("video_end") or size) - vs)}
 
 
 def estimate_blocks(path: str, numbers: list[int], record: int, size: int) -> list[dict]:

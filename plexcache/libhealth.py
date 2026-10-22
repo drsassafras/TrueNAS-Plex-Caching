@@ -38,11 +38,13 @@ LOSSLESS = ("flac", "alac", "pcm", "truehd", "dts-hd", "mlp", "ape", "wavpack", 
 UNCOMPRESSED = ("pcm",)  # (WAV and AIFF hold PCM)
 # codecs that fall short of today's at any bitrate — the listening tests collected by Hydrogenaudio put
 # AAC, Opus and Vorbis well ahead of these at equal bitrates, and MP3 can't go above 320 kbps at all
-OUTDATED = {"mp3": M("MP3 (1993): pre-echo on sharp sounds, a 16 kHz low-pass at most settings, and nothing above 320 kbps; AAC and Opus sound better at every bitrate."),
-            "mp2": M("MPEG-1 Layer II (1991), a broadcast codec: needs 256 kbps or more to be clean."),
-            "wma": M("WMA (1999): behind AAC at every bitrate, and its players are few outside Windows."),
-            "ac3": M("Dolby Digital AC-3 (1991), a cinema delivery codec: wasteful for music, and poor below 192 kbps a pair."),
-            "ra": M("RealAudio: a streaming codec of the dial-up years, poor by any standard now.")}
+OUTDATED = {
+    "mp3": M("MP3 — MPEG-1 Layer III, from 1993, the codec that made music files small enough to share. Its psychoacoustic model is a generation behind: sharp sounds (a drum hit, a plucked string) get a smear of noise just before them (pre-echo), most encoders cut everything above 16 kHz to save bits, and the format can’t go above 320 kbps however good the source. In the listening tests Hydrogenaudio has collected, AAC and Opus are preferred to MP3 at every bitrate; at the same quality they need about a third less space."),
+    "mp2": M("MPEG-1 Layer II, from 1991: the codec of digital radio and DVD audio, built to be cheap to decode on the hardware of its day rather than to sound good per bit. It needs 256 kbps or more to be clean; AAC does the same at half that."),
+    "wma": M("Windows Media Audio, from 1999: Microsoft’s answer to MP3. It never caught up with AAC in listening tests, few players outside Windows read it well, and Microsoft itself has moved on. Keeping it means keeping a format with a shrinking future."),
+    "ac3": M("Dolby Digital AC-3, from 1991: a cinema delivery codec, designed for six channels of film sound on a disc, not for music. For a stereo file it spends bits poorly — below 192 kbps a pair it falls audibly short — and AAC or Opus give the same quality in half the space."),
+    "ra": M("RealAudio: the streaming codec of the dial-up years, made to squeeze through a modem, poor by any standard now, and read by almost nothing current.")}
+VIDEO_AUDIO_OK = ("ac3",)  # (a film's AC-3 track is the normal thing: not outdated there)
 OUTDATED_LINK = "https://wiki.hydrogenaud.io/index.php?title=Lossy_codec_comparison"
 CHECKS = {
     "file": [
@@ -54,12 +56,12 @@ CHECKS = {
          "help": M("Narrows No subtitles: a film needs a subtitle track in a text format — SRT, ASS or SSA — not only bitmap ones (PGS, VobSub). With a language chosen above as well, that language’s subtitle must be the text one. Text subtitles can be searched, styled and resized by every player, and are tiny. Off unless you turn it on.")},
         {"id": "subtitles_on_zxx", "name": M("Subtitles on a film without speech"), "applies": VIDEO,
          "help": M("A file whose audio is marked zxx (no linguistic content) yet holds subtitles that aren’t forced ones. One of three things is wrong: the audio’s language is tagged wrongly (it does have speech); the subtitles don’t belong to this file, or are empty; or they translate text shown on screen and should be marked forced. Forced subtitles carry written content and belong.")},
-        {"id": "audio_low_bitrate", "name": M("Audio below its codec’s floor"), "applies": AUDIO,
+        {"id": "audio_low_bitrate", "name": M("Poor Audio Bitrate"), "applies": AUDIO,
          "help": M("A lossy track encoded below what its codec needs for the quality level chosen beside this, per channel (stereo: twice). Each codec has its own floor — MP3 needs the most, Opus the least — and the level scales them all alike: “Only clearly poor” (as it ships) flags MP3 under 128 kbps stereo, AAC or Vorbis under 85, Opus under 64; “Fair” MP3 192, AAC 128, Opus 96; “Good” and “Transparent” raise the bar further. Lossless codecs — FLAC, ALAC, PCM — are never flagged. The bitrate is the file’s, as Plex reads it; the codec from the file itself or its extension.")},
-        {"id": "audio_outdated", "name": M("Flag codecs that fall short at any bitrate"), "default": False, "of": "audio_low_bitrate", "applies": AUDIO, "link": OUTDATED_LINK,
-         "help": M("Narrows nothing: adds a finding for files in a codec that today’s codecs beat at every bitrate — MP3, MPEG Layer II, WMA, AC-3, RealAudio. In the public listening tests collected by Hydrogenaudio, AAC, Opus and Vorbis come out clearly ahead of MP3 at equal bitrates, MP3 shows pre-echo on sharp sounds and a low-pass at most settings, and it can’t go above 320 kbps at all. Off unless you turn it on: a well-made 320 kbps MP3 is fine for most ears, and the files are what they are unless you still have the source.")},
-        {"id": "audio_uncompressed", "name": M("Uncompressed audio"), "applies": AUDIO,
-         "help": M("PCM audio — WAV, AIFF, a raw PCM track: the sound as it is, not compressed at all. A lossless codec holds the very same sound, bit for bit, in about half the space, and every player and Plex read them: FLAC (.flac), Apple Lossless (.m4a, ALAC) or WavPack (.wv). Re-encoding to one loses nothing. Lossy files (MP3, AAC) aren’t flagged: a lossless file of them would only be bigger.")},
+        {"id": "audio_outdated", "name": M("Outdated Codec"), "default": False, "applies": ALL, "link": OUTDATED_LINK,
+         "help": M("An audio track in a codec that today’s codecs beat at every bitrate — MP3, MPEG Layer II, WMA, RealAudio, and in music libraries AC-3 (a film’s AC-3 track is the normal thing and isn’t flagged). Each finding says what the codec is and where it falls short. In the public listening tests collected by Hydrogenaudio, AAC, Opus and Vorbis come out clearly ahead of MP3 at equal bitrates. Off unless you turn it on: a well-made 320 kbps MP3 is fine for most ears, and the files are what they are unless you still have the source.")},
+        {"id": "audio_uncompressed", "name": M("Uncompressed audio"), "applies": ALL,
+         "help": M("PCM audio — WAV, AIFF, a raw PCM track, the LPCM track of a Blu-ray rip: the sound as it is, not compressed at all. A lossless codec holds the very same sound, bit for bit, in about half the space, and every player and Plex read them: FLAC (.flac, and inside an MKV), Apple Lossless (.m4a, ALAC) or WavPack (.wv). Re-encoding to one loses nothing. Lossy tracks (MP3, AAC, AC-3) aren’t flagged: a lossless copy of them would only be bigger.")},
         {"id": "duplicate_versions", "name": M("The same file twice on one item"), "applies": ALL,
          "help": M("Two versions on one Plex item that are the same file: the same size and running time, and the same bytes at both ends — not another bitrate of the film. A hard link or symlink counts as a second path to one file, and is said so.")},
         {"id": "duplicate_items", "name": M("The same file on different items"), "applies": ALL,
@@ -68,9 +70,9 @@ CHECKS = {
     "plex": [
         {"id": "versions_named_differently", "name": M("Versions named for different titles"), "applies": VIDEO,
          "help": M("Several files on one Plex item (versions) whose file names carry different titles or years: a version added to the wrong item, most likely.")},
-        {"id": "versions_differ_in_length", "name": M("Versions of different lengths"), "applies": ALL,
+        {"id": "versions_differ_in_length", "name": M("Different length versions"), "applies": ALL,
          "help": M("Several files on one Plex item (versions) whose running times differ by more than a little — {leeway}% or {secs} seconds, whichever is more: two cuts of the same film can differ a little; two films do by far more.", leeway=LEEWAY_PCT, secs=LEEWAY_SECS)},
-        {"id": "locked_empty", "name": M("Locked field with nothing in it"), "applies": ALL,
+        {"id": "locked_empty", "name": M("Empty field locked"), "applies": ALL,
          "help": M("A field you edited (Plex locks it) that holds nothing — so Plex’s agents can’t fill it in either. Read from an item’s own page: items a Library Sync comparison has read, or opened here.")},
     ],
 }
@@ -124,21 +126,28 @@ def audio_floor(codec: str, level: str = DEFAULT_AUDIO_LEVEL, channels: int = 2)
     return int(round(LOW_KBPS[codec] * AUDIO_LEVELS.get(level, 1.0) * max(1, channels) / 8) * 8)
 
 
-def audio_checks(m: dict | None, on: dict, path: str, kbps: int | None, channels: int = 2, level: str = DEFAULT_AUDIO_LEVEL) -> list[dict]:
-    """The checks on an audio library's file: its codec and bitrate (the file's, as Plex reads it)."""
+def audio_checks(m: dict | None, on: dict, path: str, kbps: int | None, channels: int = 2, level: str = DEFAULT_AUDIO_LEVEL, kind: str = "audio") -> list[dict]:
+    """The checks on a file's audio: an audio library's file (its codec and bitrate — the file's, as Plex
+    reads it), or a video's audio tracks (their codecs: a video's bitrate is mostly its picture, so
+    the bitrate check is for audio libraries alone)."""
     tracks = (m or {}).get("tracks") or []
     audio = [t for t in tracks if t.get("type") == "audio"]
-    codec = audio_codec(audio[0] if audio else None, path)
     out = []
-    floor = audio_floor(codec, level, channels)
-    if on.get("audio_low_bitrate") and floor and kbps and kbps < floor:
-        out.append({"id": "audio_low_bitrate", "category": "file", "status": "warn",
-                    "text": M("{codec} at {kbps} kbps: below the {floor} kbps this codec needs for {ch} channels at the chosen level.", codec=codec.upper(), kbps=kbps, floor=floor, ch=max(1, channels))})
-    if on.get("audio_outdated") and codec in OUTDATED:
-        out.append({"id": "audio_outdated", "category": "file", "status": "warn", "text": OUTDATED[codec]})
-    if on.get("audio_uncompressed") and codec in UNCOMPRESSED:
-        out.append({"id": "audio_uncompressed", "category": "file", "status": "warn",
-                    "text": M("Uncompressed {codec}: FLAC (.flac) or Apple Lossless (.m4a) would hold the same sound, bit for bit, in about half the space.", codec=codec.upper())})
+    if kind == "audio":
+        codec = audio_codec(audio[0] if audio else None, path)
+        floor = audio_floor(codec, level, channels)
+        if on.get("audio_low_bitrate") and floor and kbps and kbps < floor:
+            out.append({"id": "audio_low_bitrate", "category": "file", "status": "warn",
+                        "text": M("{codec} at {kbps} kbps: below the {floor} kbps this codec needs for {ch} channels at the chosen level.", codec=codec.upper(), kbps=kbps, floor=floor, ch=max(1, channels))})
+        codecs = [codec] if codec else []
+    else:
+        codecs = sorted({audio_codec(t, "") for t in audio if audio_codec(t, "")})
+    for codec in codecs:
+        if on.get("audio_outdated") and codec in OUTDATED and not (kind != "audio" and codec in VIDEO_AUDIO_OK):
+            out.append({"id": "audio_outdated", "category": "file", "status": "warn", "text": OUTDATED[codec]})
+        if on.get("audio_uncompressed") and codec in UNCOMPRESSED:
+            out.append({"id": "audio_uncompressed", "category": "file", "status": "warn",
+                        "text": M("Uncompressed {codec}: FLAC (.flac, or inside the MKV) or Apple Lossless (.m4a) would hold the same sound, bit for bit, in about half the space.", codec=codec.upper())})
     return out
 
 
@@ -359,9 +368,8 @@ def library_health(app, key: str) -> dict:
                     languages.add(str(t["language"]).lower().split("-")[0])
             for r in file_checks(m, on, lang):
                 results.append(dict(r, file=os.path.basename(path)))
-            if kind == "audio":
-                for r in audio_checks(m, on, path, getattr(f, "kbps", 0) or 0, level=level):
-                    results.append(dict(r, file=os.path.basename(path)))
+            for r in audio_checks(m, on, path, getattr(f, "kbps", 0) or 0, level=level, kind=kind or "movie"):
+                results.append(dict(r, file=os.path.basename(path)))
         item = {"files": [f.path for f in group], "durations": [getattr(f, "duration_ms", 0) for f in group], "locked": None}
         sd = sync_sides.get(rk)
         if sd:

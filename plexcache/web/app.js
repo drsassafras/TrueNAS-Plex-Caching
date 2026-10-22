@@ -667,8 +667,12 @@ PCI18N.ready.then(function () {
 
   function checkbox(sec, key, label, help) {
     var h = splitHelp(help);
-    return '<div class="chkblk"><div class="chk"><label><input type="checkbox" data-check="' + sec + "." + key + '"' + (S[sec][key] ? " checked" : "") + ">" + esc(label) + "</label>" + info(h.more, label) + revertBtn(sec, key, "") + "</div>" +
+    return '<div class="chkblk"><div class="chk">' + infoOrGap(h.more, label) + '<label><input type="checkbox" data-check="' + sec + "." + key + '"' + (S[sec][key] ? " checked" : "") + ">" + esc(label) + "</label>" + revertBtn(sec, key, "") + "</div>" +
       helpDiv(h) + "</div>";
+  }
+  // every row of checks starts with its ⓘ, so they line up in one column; a row without one keeps the space
+  function infoOrGap(html, about) {
+    return html ? info(html, about) : '<span class="info gap" aria-hidden="true"></span>';
   }
 
   // ---- L2ARC Cache Settings (SSD Cache page): how all caching that needs an L2ARC behaves —
@@ -1283,7 +1287,7 @@ PCI18N.ready.then(function () {
           "<strong>" + H("How converting handles it") + "</strong><br>" + H(t[4]);
         var d = ((ST.optimizer_defaults || {}).convert_types || {})[t[0]];
         var rv = d === undefined || !!types[t[0]] === d ? "" : ' <button type="button" class="revert" data-convtype-revert="' + t[0] + '" title="' + H("Back to the default ({value})", { value: d ? T("on") : T("off") }) + '">↺</button>';
-        return '<div class="convtype"><label><input type="checkbox" data-convtype="' + t[0] + '"' + (types[t[0]] ? " checked" : "") + "> " + esc(T(t[1])) + "</label>" + info(help, T(t[1])) + rv + "</div>";
+        return '<div class="convtype">' + info(help, T(t[1])) + '<label><input type="checkbox" data-convtype="' + t[0] + '"' + (types[t[0]] ? " checked" : "") + "> " + esc(T(t[1])) + "</label>" + rv + "</div>";
       }).join("") + "</div>";
     out += '<div class="row"><div class="grow"><div class="what">' + H("Keep each original after Plex has its MKV") + '</div><div class="det">' +
       H("Counted from when Plex has it — both servers, with a second one watched (<a href=\"/sync#plex2\" data-nav>Sync → Second Plex Server</a>). Time lets any other copy of the files catch up first: another server that isn’t watched, or a backup. With every server watched, none is needed.") + "</div></div>" +
@@ -1441,6 +1445,26 @@ PCI18N.ready.then(function () {
     api("/api/processes/files?job=" + encodeURIComponent(id) + "&offset=" + (offset || 0) + "&limit=200" + (procSort[id] ? "&sort=" + encodeURIComponent(procSort[id]) : "")).then(function (d) {
       procFiles[id] = d; procOffset[id] = offset || 0; if (page === "processes") render();
     });
+  }
+  // The pages of a long list, each a span of what it holds ("A–Be"): the one open is plain text, the others open on a click.
+  // At most PAGER_MAX spans around the open one; past them, Beginning and End reach the rest. Every paged list uses this.
+  var PAGER_MAX = 12;
+  function pager(d, offset, perPage, act) {
+    var pages = d.pages || [], total = d.total || 0;
+    if (!pages.length || total <= perPage) return "";
+    var cur = 0;
+    pages.forEach(function (p, i) { if (p.offset <= offset) cur = i; });
+    var lo = Math.max(0, cur - Math.floor(PAGER_MAX / 2)), hi = Math.min(pages.length, lo + PAGER_MAX);
+    lo = Math.max(0, hi - PAGER_MAX);
+    var chip = function (p, i) {
+      var label = p.from === p.to ? p.from : p.from + "–" + p.to;
+      return i === cur ? '<span class="pg cur" aria-current="page">' + esc(label) + "</span>"
+        : '<button class="link pg" type="button" ' + act + ' data-offset="' + p.offset + '" title="' + esc(T("Items {from}–{to}", { from: fmtNum(p.offset + 1), to: fmtNum(Math.min(p.offset + perPage, total)) })) + '">' + esc(label) + "</button>";
+    };
+    return '<div class="pager det"><span class="pgcount">' + H("{from}–{to} of {total}", { from: fmtNum(offset + 1), to: fmtNum(Math.min(offset + perPage, total)), total: fmtNum(total) }) + "</span>" +
+      (lo > 0 ? '<button class="link pg" type="button" ' + act + ' data-offset="0">' + H("Beginning") + "</button><span class=\"pgdots\">…</span>" : "") +
+      pages.slice(lo, hi).map(function (p, k) { return chip(p, lo + k); }).join("") +
+      (hi < pages.length ? '<span class="pgdots">…</span><button class="link pg" type="button" ' + act + ' data-offset="' + pages[pages.length - 1].offset + '">' + H("End") + "</button>" : "") + "</div>";
   }
   function fmtWhen(t) { return t ? new Date(t * 1000).toLocaleString(LOCALE, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"; }
   function fmtBytesShort(n) {
@@ -1621,10 +1645,7 @@ PCI18N.ready.then(function () {
         mixChart([[T("Before"), f.views.before], [T("After"), f.views.after]]) + "</div></td></tr>";
     });
     out += "</tbody></table></div>";
-    var off = procOffset[id] || 0;
-    if (d.total > 200) out += '<div class="det">' + H("{from}–{to} of {total}", { from: fmtNum(off + 1), to: fmtNum(Math.min(off + 200, d.total)), total: fmtNum(d.total) }) + " " +
-      (off > 0 ? '<button class="link" type="button" data-act="proc-page" data-job="' + esc(id) + '" data-offset="' + (off - 200) + '">' + H("Previous") + "</button> " : "") +
-      (off + 200 < d.total ? '<button class="link" type="button" data-act="proc-page" data-job="' + esc(id) + '" data-offset="' + (off + 200) + '">' + H("Next") + "</button>" : "") + "</div>";
+    out += pager(d, procOffset[id] || 0, 200, 'data-act="proc-page" data-job="' + esc(id) + '"');
     return out;
   }
 
@@ -1634,7 +1655,7 @@ PCI18N.ready.then(function () {
   // video and 60% of a block of video; at its end, every block holding metadata. Every block the
   // same size, filled in proportion with what's in it. Layouts come from Read the Files (filemap.py);
   // a file opened shows its blocks larger: click one for what's in it and how ZFS might store it.
-  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, hold: { inspect: {}, sync: {} }, rev: null, view: "health", diff: {}, health: {} };
+  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, hold: { inspect: {}, sync: {} }, finishedSeen: {}, rev: null, view: "health", diff: {}, health: {} };
   var PART_NAMES = { header: N("Matroska header"), segment: N("Segment start"), seekhead: N("Table of contents"), info: N("File info"), tracks: N("Track list"), chapters: N("Chapters"),
     attachments: N("Attachments list"), tags: N("Tags"), index: N("Index"), padding: N("Padding"), checksum: N("Checksum"), video: N("Video"),
     other: N("Other"), image: N("Cover art"), font: N("Fonts"), attachment: N("Attachment"), empty: N("Unused"), head: N("File header"),
@@ -1667,6 +1688,7 @@ PCI18N.ready.then(function () {
     api("/api/library?key=" + encodeURIComponent(LIB.key) + "&offset=" + LIB.offset + "&limit=100" + (LIB.q ? "&q=" + encodeURIComponent(LIB.q) : ""))
       .then(function (d) {
         LIB.data = d;
+        LIB.finishedSeen[d.library] = libJob(d.library).finished;  // (the inspection as it stood when these files were fetched)
         if (page === "library") libAutoDrive();  // (the files to inspect are known now)
         var q = document.activeElement && document.activeElement.id === "lib-q" ? document.activeElement : null;
         if (page === "library" && (q || !editing())) {
@@ -1722,7 +1744,7 @@ PCI18N.ready.then(function () {
   // The inspection of a library: {running, paused (with files left), done, total}
   function libJob(key) {
     var j = ((ST.inspect || {}).libs || {})[key] || {};
-    return { running: !!j.running, paused: !!j.paused && j.done < j.total, done: j.done || 0, total: j.total || 0 };
+    return { running: !!j.running, paused: !!j.paused && j.done < j.total, done: j.done || 0, total: j.total || 0, finished: j.finished || 0 };
   }
   function libDetailFetch(path) {
     api("/api/library/file?path=" + encodeURIComponent(path)).then(function (d) {
@@ -1779,7 +1801,7 @@ PCI18N.ready.then(function () {
   // A file's blocks: the start's, then the video (its size, not to scale), then the end's
   function libBlocks(row, big, path) {
     var bm = row.blocks;
-    if (!bm) return '<span class="muted det">' + (row.missing ? H("File not found") : row.read ? H("Too small to have blocks") : H("Not read yet")) + "</span>";
+    if (!bm) return '<span class="muted det">' + (row.missing ? H("File not found") : row.read ? H("Record size not known yet") : H("Not read yet")) + "</span>";
     var sel = (LIB.block[path] || null);
     var est = big ? LIB.est[path] : null;
     var draw = function (list) { return libRuns(list).map(function (r) { return libBlock(r.b, path, big, sel === r.b.n, r.count, est); }).join(""); };
@@ -2391,7 +2413,7 @@ PCI18N.ready.then(function () {
         var rv = dflt[c.id] !== undefined && c.on !== dflt[c.id] ? ' <button type="button" class="revert" data-lhcheck-revert="' + c.id + '" title="' + H("Back to the default ({value})", { value: dflt[c.id] ? T("on") : T("off") }) + '">↺</button>' : "";
         var help = esc(msg(c.help)) + (c.link ? '<p><a href="' + esc(c.link) + '" target="_blank" rel="noopener">' + H("The research behind it ↗") + "</a></p>" : "");
         return '<div class="chk lhchk' + (sub ? " lhsub" : "") + '">' + info(help, msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
-          (sub ? (c.on && n ? badge("warn", fmtNum(n)) : "") : c.on ? (n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : '<span class="muted det">' + esc(T("off")) + "</span>") +
+          (sub ? (c.on && n ? badge("warn", fmtNum(n)) : "") : c.on ? (n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : "") +
           (c.id === "subtitles_language" ? '<div class="lhlang"><span>' + H("Language") + "</span>" + langSel +
             (d.language !== ((ST.library_health_defaults || {}).subtitle_language || "en") ? ' <button type="button" class="revert" data-lhlang-revert title="' + H("Back to the default ({value})", { value: "English" }) + '">↺</button>' : "") + "</div>" : "") +
           (c.id === "audio_low_bitrate" && c.on ? '<div class="lhlang"><span>' + H("Quality level") + "</span>" + qualSel +
@@ -2452,6 +2474,8 @@ PCI18N.ready.then(function () {
     var lj = LIB.key ? libJob(LIB.key) : {}, job = lj.running || lj.paused ? lj : null;
     if (lj.running) LIB.inspecting = true;
     else if (LIB.inspecting) { LIB.inspecting = false; libFetch(true); }  // just finished (or paused): the files as they are now
+    // an inspection that ended since the files were fetched (even one that began and ended between two refreshes): fetched again
+    if (lj.finished && LIB.data && LIB.data.library === LIB.key && LIB.finishedSeen[LIB.key] !== lj.finished) libFetch(true);
     // one button: Pause while inspecting, Resume when paused, otherwise inspect every file again
     var btn = !LIB.key ? "" : lj.running ? '<button class="btn" type="button" data-act="lib-survey" data-how="pause">' + H("Pause") + "</button>"
       : lj.paused ? '<button class="btn" type="button" data-act="lib-survey" data-how="resume">' + H("Resume") + "</button>"
@@ -2508,9 +2532,7 @@ PCI18N.ready.then(function () {
       if (openHere && !more) { out += '<tr class="ldrow"><td colspan="4">' + libDetail(openHere) + "</td></tr>"; openHere = null; }
     });
     out += "</tbody></table></div>";
-    if (d.total > 100) out += '<div class="det">' + H("{from}–{to} of {total}", { from: fmtNum(d.offset + 1), to: fmtNum(Math.min(d.offset + 100, d.total)), total: fmtNum(d.total) }) + " " +
-      (d.offset > 0 ? '<button class="link" type="button" data-act="lib-page" data-offset="' + (d.offset - 100) + '">' + H("Previous") + "</button> " : "") +
-      (d.offset + 100 < d.total ? '<button class="link" type="button" data-act="lib-page" data-offset="' + (d.offset + 100) + '">' + H("Next") + "</button>" : "") + "</div>";
+    out += pager(d, d.offset, 100, 'data-act="lib-page"');
     return out + "</section></div>";
   }
   var libTyping = null;
@@ -3475,7 +3497,7 @@ PCI18N.ready.then(function () {
       ["editions", T("Editions"), T("A movie’s edition name (Director’s Cut…): Plex doesn’t carry these between servers.")]];
     out += '<div class="what" style="margin-top:12px">' + H("What’s compared") + "</div>" + WHAT.map(function (w) {
       var rv = dw[w[0]] === undefined || !!what[w[0]] === dw[w[0]] ? "" : ' <button type="button" class="revert" data-syncwhat-revert="' + w[0] + '" title="' + H("Back to the default ({value})", { value: dw[w[0]] ? T("on") : T("off") }) + '">↺</button>';
-      return '<div class="chk"><label><input type="checkbox" data-syncwhat="' + w[0] + '"' + (what[w[0]] ? " checked" : "") + ">" + esc(w[1]) + "</label>" + (w[2] ? info(esc(w[2]), w[1]) : "") + rv + "</div>";
+      return '<div class="chk">' + infoOrGap(w[2] ? esc(w[2]) : "", w[1]) + '<label><input type="checkbox" data-syncwhat="' + w[0] + '"' + (what[w[0]] ? " checked" : "") + ">" + esc(w[1]) + "</label>" + rv + "</div>";
     }).join("") + "</section>";
     // ---- the differences
     out += '<section class="card"><h2>' + H("Library Differences") + "</h2>";
@@ -3563,20 +3585,23 @@ PCI18N.ready.then(function () {
     out += '<section class="card" id="truenas"><h2>TrueNAS <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional, recommended") + "</span></h2>" +
       // where this is running: TrueNAS for certain (the API, or the host's version file), or another Linux host
       '<div class="lights">' + light(pf.truenas ? "ok" : pf.truenas === false ? "off" : "warn", T("Platform"), esc(msg(pf.label || "")) +
-        (pf.truenas === null || pf.truenas === undefined ? " · " + esc(T("Connect the API, or mount the host’s /etc/version at /host/etc/version in the app’s YAML, to be sure")) : ""), false) + "</div>" +
+        (pf.truenas === null || pf.truenas === undefined ? " · " + esc(T("Connect the API, or mount the host’s /etc/version at /host/etc/version in the app’s YAML, to be sure")) : pf.how === "kernel" ? " · " + esc(T("told by the kernel; the API would add the version")) : ""), false) + "</div>" +
+      // not TrueNAS: the fields are there to see, greyed out, with the pitch
+      (pf.truenas === false ? '<div class="note pitch">' + H("Not running on TrueNAS, so there’s no API to connect here. Upgrade your server to TrueNAS to supercharge it with caching: SSD speeds from regular HDDs!") + "</div>" : "") +
+      '<fieldset class="plain' + (pf.truenas === false ? " greyed" : "") + '"' + (pf.truenas === false ? " disabled" : "") + ">" +
       '<p class="hint">' + H("Read-only: checks cache devices and dataset settings.") + info(H("It’s also how the app sizes the L2ARC, pauses for scrubs and resilvers, and checks the optimizer’s service. It never changes anything."), "TrueNAS") + "</p>" +
       '<div class="lights">' + lightFor(c.truenas_server, "TrueNAS", testing) + lightFor(c.truenas_key, T("API key"), testing) + "</div>" +
       '<div class="grid">' +
       textInput("truenas", "url", T("TrueNAS address"), "s-turl", H("https:// is used automatically — TrueNAS revokes API keys sent over plain http."), guessTn) +
       secretInput("truenas", "api_key", T("API key"), "s-tkey") + "</div>" +
-      '<div class="chk" style="margin-top:12px"><label><input type="checkbox" data-check="truenas.verify_tls"' + (S.truenas.verify_tls ? " checked" : "") +
+      '<div class="chk" style="margin-top:12px">' + infoOrGap("", "") + '<label><input type="checkbox" data-check="truenas.verify_tls"' + (S.truenas.verify_tls ? " checked" : "") +
       ">" + H("Verify the TLS certificate (leave off for TrueNAS’s self-signed certificate)") + "</label>" + revertBtn("truenas", "verify_tls", "") + "</div>" +
       details("apikey", H("How to create an API key"),
         "<ol style=\"margin:8px 0 0;padding-left:20px\"><li>" + H("In TrueNAS, open your user menu (top right) → <strong>API Keys</strong>.") + "</li>" +
         "<li>" + H("Choose <strong>Add</strong>, name it “plex-cache”, and save.") + "</li>" +
         "<li>" + H("Copy the key it shows (it’s only shown once) and paste it above.") + "</li></ol>",
         !(c.truenas_key && c.truenas_key.status === "ok")) +
-      "</section>";
+      "</fieldset></section>";
 
     // ---- Media Mappings
     out += mappingsCard();
@@ -3584,10 +3609,9 @@ PCI18N.ready.then(function () {
     // ---- Updates
     var g = S.general;
     out += '<section class="card" id="updates"><h2>' + H("Updates") + '</h2>' +
-      '<div class="chk" style="margin-top:8px"><label><input type="checkbox" data-check="general.update_check"' + (g.update_check ? " checked" : "") +
-      ">" + H("Check GitHub for new versions") + info(H("Every 6 hours the app downloads one small file from GitHub (the version number on the main branch) " +
-        "and, when there’s a newer version, says so under the app’s name and in Home Assistant’s update entity. Nothing about your setup is sent. " +
-        "Updating is still done in TrueNAS."), T("update check")) + "</label>" + revertBtn("general", "update_check", "") + updateLine() + "</div></section>";
+      '<div class="chk" style="margin-top:8px">' + info(H("Every 6 hours the app asks GitHub for the branch’s newest finished build — a small download, nothing about your setup is sent — " +
+        "and, when there’s a newer one, says so under the app’s name and in Home Assistant’s update entity. Check Now asks straight away; Update Now has TrueNAS pull it."), T("update check")) +
+      '<label><input type="checkbox" data-check="general.update_check"' + (g.update_check ? " checked" : "") + ">" + H("Check GitHub for new versions") + "</label>" + revertBtn("general", "update_check", "") + updateLine() + "</div></section>";
     out += diskSpeedCard();
     out += mqttCard();
     out += "</div>";
@@ -3601,7 +3625,8 @@ PCI18N.ready.then(function () {
     if (UPDATING || u.updating) return "updating";
     if (!u.checked && !u.error) return "checking";  // (just started: GitHub asked in a moment)
     if (!u.available) return "";
-    return (ST.platform || {}).truenas && ((ST.connections || {}).truenas_key || {}).status === "ok" ? "button" : "link";
+    if (!(ST.platform || {}).truenas) return "link";
+    return ((ST.connections || {}).truenas_key || {}).status === "ok" ? "button" : "needkey";  // (TrueNAS could do it, with a key)
   }
   function updateLine() {
     var u = ST.updates || {};
@@ -3613,7 +3638,8 @@ PCI18N.ready.then(function () {
       (stage === "button" ? ' <button class="btn sm pri" type="button" data-act="updates-apply">' + H("Update Now") + "</button>" : "");
     var line = "";
     if (stage === "checking") line = H("Checking GitHub…");
-    else if (u.available) line = u.latest && u.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} is available.", { version: u.latest }) : H("A newer dev build is available (dev is at {head}).", { head: u.latest_commit });
+    else if (u.available) line = (u.latest && u.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} is available.", { version: u.latest }) : H("A newer dev build is available (dev is at {head}).", { head: u.latest_commit })) +
+      (stage === "needkey" ? " " + H("To install it from here, add a TrueNAS API key in <a href=\"/system#truenas\" data-nav>System → TrueNAS</a>; TrueNAS will pull the image and restart the app.") : "");
     else if (u.checked) line = H("Up to date (checked {when}).", { when: ago(u.checked) });
     else if (u.error) line = H("Couldn’t check: {why}", { why: u.error });
     return build + '<span class="muted" style="font-size:13px">' + line + "</span>" + btn;
@@ -3659,7 +3685,7 @@ PCI18N.ready.then(function () {
         "“Allow control” for a watch-only connection. Broker ACLs can limit this login to the <code>{base}/#</code> and <code>{prefix}/#</code> topics.",
         { base: M.base_topic, n: M.interval, prefix: M.discovery_prefix }), "MQTT") + "</p>" +
       '<div class="lights">' + mqttLights() + "</div>" + mqttRetryLine() +
-      '<div class="chk" style="margin-top:12px"><label><input type="checkbox" data-check="mqtt.enabled"' + (on ? " checked" : "") + ">" + H("Publish over MQTT") + "</label></div>";
+      '<div class="chk" style="margin-top:12px">' + infoOrGap("", "") + '<label><input type="checkbox" data-check="mqtt.enabled"' + (on ? " checked" : "") + ">" + H("Publish over MQTT") + "</label></div>";
     if (!on) return out + "</section>";
     out += '<div class="grid">' +
       textInput("mqtt", "host", T("Broker address"), "s-mhost", H("For Home Assistant’s Mosquitto add-on, Home Assistant’s IP."), "192.168.1.20") +
@@ -3671,10 +3697,10 @@ PCI18N.ready.then(function () {
       select("mqtt", "language", T("Language in Home Assistant"), PCI18N.LANGUAGES.map(function (l) { return [l[0], l[0] === "en" ? T("{name} — original", { name: l[1] }) : l[1]]; }),
         { s: H("Names, descriptions and status text."), more: H("Home Assistant doesn’t tell MQTT devices which language it uses, so pick it here. " +
           "Entity IDs stay the same in every language, so automations keep working when you change it. This page follows your browser instead (menu at the top right).") }) + "</div>" +
-      '<div class="chk" style="margin-top:12px"><label><input type="checkbox" data-check="mqtt.tls"' + (M.tls ? " checked" : "") + ">" + H("Use TLS") + "</label>" + revertBtn("mqtt", "tls", "") +
-      (M.tls ? '<label><input type="checkbox" data-check="mqtt.verify_tls"' + (M.verify_tls ? " checked" : "") + ">" + H("Verify the broker’s certificate") +
-        info(H("Leave off for a self-signed certificate, or when connecting by IP to a broker whose certificate names a domain (such as a Let’s Encrypt one). " +
-          "The connection is still encrypted; on, it also proves it’s really your broker."), T("Verify")) + "</label>" + revertBtn("mqtt", "verify_tls", "") : "") +
+      '<div class="chk" style="margin-top:12px">' + infoOrGap("", "") + '<label><input type="checkbox" data-check="mqtt.tls"' + (M.tls ? " checked" : "") + ">" + H("Use TLS") + "</label>" + revertBtn("mqtt", "tls", "") +
+      (M.tls ? info(H("Leave off for a self-signed certificate, or when connecting by IP to a broker whose certificate names a domain (such as a Let’s Encrypt one). " +
+          "The connection is still encrypted; on, it also proves it’s really your broker."), T("Verify")) +
+        '<label><input type="checkbox" data-check="mqtt.verify_tls"' + (M.verify_tls ? " checked" : "") + ">" + H("Verify the broker’s certificate") + "</label>" + revertBtn("mqtt", "verify_tls", "") : "") +
       '<label><input type="checkbox" data-check="mqtt.discovery"' + (M.discovery ? " checked" : "") + ">" + H("Home Assistant discovery") +
       info(H("Publishes Home Assistant’s discovery messages, so the “Plex Cache” device and its entities appear on their own. openHAB and Domoticz can read them too. " +
         "Off: only the state, availability and command topics, for tools that don’t use discovery. Turning it off removes the entities from Home Assistant."), T("Home Assistant discovery")) + "</label>" + revertBtn("mqtt", "discovery", "") +
@@ -4148,6 +4174,7 @@ PCI18N.ready.then(function () {
       (stage === "updating" ? '<span class="update quiet">' + H("Updating…") + "</span>"
         : stage === "checking" ? '<span class="update quiet">' + H("checking…") + "</span>"
         : stage === "button" ? '<button type="button" class="update" data-act="updates-apply">' + H("Update now") + "</button>"
+        : stage === "needkey" ? '<a class="update" href="/system#truenas" data-nav>' + H("Update available · add a TrueNAS API key to install it") + "</a>"
         : stage === "link" ? '<a class="update" href="' + esc(up.repo) + (up.channel === "dev" ? "/commits/dev" : "/releases") + '" target="_blank" rel="noopener">' +
           (up.latest && up.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} available ↗", { version: up.latest }) : H("newer dev build ↗")) + "</a>" : "");
     var bar = document.getElementById("userbar");
@@ -4187,6 +4214,13 @@ PCI18N.ready.then(function () {
     if (target) return target.scrollIntoView({ block: "start" });
     if ((tries || 0) < 30) setTimeout(function () { scrollToSoon(id, (tries || 0) + 1); }, 100);
   }
+  // A click under way (the button pressed, not yet released — and a moment after, while its click lands): redrawing
+  // then would swap the element out from under the pointer and lose the click, so the refresh waits
+  var POINTER_AT = 0;
+  document.addEventListener("pointerdown", function () { POINTER_AT = Date.now() + 1e9; }, true);
+  document.addEventListener("pointerup", function () { POINTER_AT = Date.now(); }, true);
+  document.addEventListener("pointercancel", function () { POINTER_AT = Date.now(); }, true);
+  function interacting() { return Date.now() - POINTER_AT < 400; }
   // Text selected on the page (to copy): redrawing would lose it, so the refresh waits until it's gone
   function selecting() {
     var sel = window.getSelection && window.getSelection();
@@ -4211,7 +4245,7 @@ PCI18N.ready.then(function () {
       ST = st;
       retriesChanged(st);
       if (!Object.keys(pending).length) S = st.settings;
-      if (!editing() && !selecting()) render();
+      if (!editing() && !selecting() && !interacting()) render();
     }).catch(function () {
       if (!ST) main.innerHTML = '<p class="muted">' + H("Can’t reach the Plex Cache service. Retrying…") + "</p>";
       else if (UPDATING || (ST.updates || {}).updating) render();  // (away while it restarts: still "Updating…")
@@ -4869,6 +4903,7 @@ PCI18N.ready.then(function () {
     var checks = JSON.parse(JSON.stringify((S.library_health || {}).checks || {}));
     checks[el.dataset.lhcheck] = el.checked;
     queueSave("library_health", "checks", checks, true);
+    render();  // (the findings are all there: the view follows the switch at once)
   });
   // Sync: what's compared
   document.addEventListener("change", function (e) {

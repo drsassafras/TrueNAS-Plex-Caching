@@ -307,6 +307,10 @@ def check_zfs(app) -> dict:
         if pf.get("truenas") is False:  # (another Linux host: there's no TrueNAS API to connect)
             items.append(item("info", M("Not running on TrueNAS"),
                               M("{label}. Datasets are read from ZFS directly; the checks that need the TrueNAS API — cache devices, pool layout, scrubs — are left out.", label=pf.get("label") or "")))
+        elif pf.get("truenas"):  # (on TrueNAS for certain: the key is what's missing)
+            items.append(item("warn", M("TrueNAS API key needed"),
+                              M("This is TrueNAS, but no API key is set. With one, Plex Cache checks each dataset’s settings and cache devices, sizes the L2ARC, pauses for scrubs and resilvers — and can update itself from the page when a new build is out."),
+                              M("Add a read-only key with app management allowed in [System → TrueNAS](/system#truenas).")))
         else:
             items.append(item("info", M("TrueNAS API not connected"),
                               M("Add an API key to check each dataset’s settings and cache devices, and to size the L2ARC."),

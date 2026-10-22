@@ -190,7 +190,9 @@ class JobLog:
             fill(rows)
         if sort in SORTS:
             rows = sorted(rows, key=SORTS[sort])  # (stable: the order done, within each)
-        return {"total": len(rows), "failed": failed, "files": rows[offset:offset + limit]}
+        from .paging import page_ranges
+        label = (lambda r: str(r.get("result") or "")) if sort == "result" else (lambda r: str(r.get("title") or os.path.basename(str(r.get("file") or ""))))
+        return {"total": len(rows), "failed": failed, "files": rows[offset:offset + limit], "pages": page_ranges([label(r) for r in rows], limit)}
 
     @staticmethod
     def _disk(rows: list[dict]) -> dict:

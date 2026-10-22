@@ -1103,6 +1103,12 @@ class LayoutTests(unittest.TestCase):
         self.assertTrue({"image", "font", "index", "tags"} <= kinds)
         self.assertEqual(bm["total_blocks"], -(-size // rec))
         self.assertIsNone(filemap.block_map(None, size, plan, rec))
+        # a file whose layout isn't read (a format the inspector doesn't open) is still one block or more: shown as one piece
+        small = filemap.block_map({"format": "stream", "size": 7 * 1024 * 1024, "parts": [], "tracks": []}, 7 * 1024 * 1024, plan, rec)
+        self.assertEqual((len(small["start"]), small["total_blocks"], small["streams"]), (1, 7 * 1024 * 1024 // rec + (1 if (7 * 1024 * 1024) % rec else 0), ["audio"]))
+        self.assertEqual([p["kind"] for p in small["start"][0]["pieces"]][:1], ["other"])
+        tiny = filemap.block_map({"format": "stream", "size": 10000, "parts": [], "tracks": []}, 10000, {"floor": rec, "start": 40 * rec}, rec)
+        self.assertEqual((len(tiny["start"]), tiny["lead_blocks"], tiny["total_blocks"]), (1, 0, 1))  # (a lead-in longer than the file: no blocks it hasn't got)
         # how ZFS might store them: the last block's zeros compress away; random data (video) doesn't
         est = filemap.estimate_blocks(p, [1, last["n"], 999999], rec, size)
         self.assertEqual([e["n"] for e in est], [1, last["n"]])                     # (past the end: none)
@@ -4295,6 +4301,47 @@ class SmallModuleTests(unittest.TestCase):
         self.assertIn("attachments already", str(cm.exception))
 
 class PageStructureTests(unittest.TestCase):
+    def test_info_buttons_line_up(self):
+        """Every ⓘ in a row of checks is the row's first thing, and no style indents such a row: a
+        sub-option indents its box and name (the label), so the ⓘ of every row sit in one column."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        css = open(os.path.join(root, "plexcache", "web", "app.css"), encoding="utf-8").read()
+        rows = list(re.finditer(r"<div class=\"(chk|convtype)(?: [^\"]*)?\"[^>]*>", js))
+        self.assertGreater(len(rows), 5)
+        for m in rows:
+            seg = js[m.end():m.end() + 400]
+            label, inf = seg.find("<label"), re.search(r"\b(info|infoOrGap)\(", seg)
+            self.assertIsNotNone(inf, f"a row of checks without an ⓘ (or its gap): {seg[:80]!r}")
+            self.assertTrue(label < 0 or inf.start() < label, f"a row of checks puts its ⓘ after the label: {seg[:100]!r}")
+        for m in re.finditer(r"([^{}]*)\{([^}]*)\}", css):
+            sel, body = m.group(1).strip(), m.group(2)
+            if re.search(r"\.(chk|lhchk|lhsub)\b", sel) and not re.search(r"\b(label|lhlang|info|badge|select)\b", sel.split(",")[-1]):
+                self.assertNotRegex(body, r"(margin|padding)-left\s*:\s*[1-9]", f"{sel} indents a whole row (its ⓘ would leave the column)")
+
+    def test_paged_lists_use_the_pager(self):
+        """Every list shown a page at a time uses the one pager(): spans of what each page holds (its
+        first and last entry cut to what tells it from its neighbours), the open page plain, Beginning
+        and End only when pages lie beyond the spans shown. No list draws Next/Previous of its own."""
+        from plexcache.paging import page_ranges
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        body = js[js.index("  function pager("):]
+        body = body[:body.index("\n  function ", 10)]
+        self.assertNotRegex(js.replace(body, ""), r'H\("(Next|Previous)"\)', "a list pages with Next/Previous of its own: use pager()")
+        for m in re.finditer(r'data-offset="', js.replace(body, "")):
+            self.fail(f"a list draws its own page links: {js[m.start() - 80:m.start() + 40]!r}")
+        self.assertGreaterEqual(js.count("pager(d"), 2)  # (the Library files and a job's files)
+        # the spans: shortest prefixes that tell the pages apart
+        labels = [f"{c}{i:02d}" for c in "ABCD" for i in range(5)]  # A00…A04, B00…
+        self.assertEqual(page_ranges(labels, 5), [{"offset": 0, "from": "A", "to": "A"}, {"offset": 5, "from": "B", "to": "B"},
+                                                  {"offset": 10, "from": "C", "to": "C"}, {"offset": 15, "from": "D", "to": "D"}])
+        got = page_ranges(["Alpha", "Alps", "Amber", "Beta"], 2)
+        self.assertEqual(got, [{"offset": 0, "from": "A", "to": "Al"}, {"offset": 2, "from": "Am", "to": "B"}])  # ("Al" already tells Alps from Amber)
+        self.assertEqual(page_ranges(["x"], 10), [{"offset": 0, "from": "x", "to": "x"}])
+        self.assertEqual(page_ranges([], 10), [])
+        self.assertEqual(page_ranges(["", "b"], 1)[0]["from"], "…")
+
     def test_internal_links_reach_their_place(self):
         """Wherever a text names a place in the app, it's a link — and every internal link points at a page
         that exists and, with a fragment, at an element on it with that id, so it scrolls there. Links in
@@ -5395,7 +5442,8 @@ class OptimizerTests(unittest.TestCase):
         audio_on = libhealth.for_kind(on, "audio")
         self.assertFalse(audio_on["no_subtitles"] or audio_on["no_audio"] or audio_on["versions_named_differently"])
         self.assertTrue(audio_on["duplicate_items"] and audio_on["audio_low_bitrate"] and audio_on["audio_uncompressed"])
-        self.assertFalse(libhealth.for_kind(on, "movie")["audio_low_bitrate"])
+        self.assertFalse(libhealth.for_kind(on, "movie")["audio_low_bitrate"])                      # (a video's bitrate is its picture)
+        self.assertTrue(libhealth.for_kind(on, "movie")["audio_uncompressed"])                      # (its audio tracks are checked, though)
         # the audio checks: a lossy track below its codec's floor (per channel), uncompressed PCM
         ac = lambda m, path, kbps, ch=2, level="fair": [r["id"] for r in libhealth.audio_checks(m, audio_on, path, kbps, ch, level)]
         mp3 = {"tracks": [{"type": "audio", "codec": "A_MPEG/L3"}]}
@@ -5415,6 +5463,14 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in libhealth.audio_checks(mp3, dated, "/m/a.mp3", 320)], ["audio_outdated"])
         self.assertEqual([r["id"] for r in libhealth.audio_checks({"tracks": []}, dated, "/m/a.opus", 320)], [])
         self.assertIn("link", next(c for c in libhealth.CHECKS["file"] if c["id"] == "audio_outdated"))
+        self.assertIn("pre-echo", en(libhealth.audio_checks(mp3, dated, "/m/a.mp3", 320)[0]["text"]))      # (each codec its own reasons)
+        self.assertIn("Microsoft", en(libhealth.audio_checks({"tracks": []}, dated, "/m/a.wma", 320)[0]["text"]))
+        # a video's audio tracks: outdated and uncompressed codecs flagged by track (AC-3 is normal in a film); no bitrate check
+        film = {"tracks": [{"type": "video", "codec": "V_X"}, {"type": "audio", "codec": "A_AC3"}, {"type": "audio", "codec": "A_MPEG/L3"}, {"type": "audio", "codec": "A_PCM/INT/LIT"}]}
+        video_on = dict(libhealth.for_kind(on, "movie"), audio_outdated=True)
+        self.assertEqual([r["id"] for r in libhealth.audio_checks(film, video_on, "/m/f.mkv", 15000, kind="movie")], ["audio_outdated", "audio_uncompressed"])
+        self.assertIn("inside the MKV", en(libhealth.audio_checks(film, video_on, "/m/f.mkv", 15000, kind="movie")[1]["text"]))
+        self.assertEqual([r["id"] for r in libhealth.audio_checks({"tracks": [{"type": "video"}, {"type": "audio", "codec": "A_AC3"}]}, video_on, "/m/f.mkv", 15000, kind="movie")], [])
         self.assertEqual(ac({"tracks": [{"type": "audio", "codec": "A_FLAC"}]}, "/m/a.flac", 40), [])  # (lossless: never low)
         self.assertEqual(ac({"tracks": []}, "/m/a.wav", 1411), ["audio_uncompressed"])
         self.assertEqual(ac({"tracks": [{"type": "audio", "codec": "A_PCM/INT/LIT"}]}, "/m/a.mka", 1411), ["audio_uncompressed"])
@@ -5433,10 +5489,16 @@ class OptimizerTests(unittest.TestCase):
         with mock.patch.object(platform, "HOST_FILES", (os.path.join(d, "version"),)), mock.patch.dict(os.environ, {"PLEXCACHE_PLATFORM": ""}):
             got = platform.detect(None)
             self.assertEqual((got["truenas"], got["how"], got["version"]), (True, "host", "24.10.2"))
-        with mock.patch.object(platform, "HOST_FILES", ()), mock.patch.dict(os.environ, {"PLEXCACHE_PLATFORM": ""}):
+        with mock.patch.object(platform, "HOST_FILES", ()), mock.patch.dict(os.environ, {"PLEXCACHE_PLATFORM": ""}), \
+                mock.patch.object(platform, "kernel_release", lambda: "6.8.12-amd64"):
             got = platform.detect(None)                                                          # (the test's fake /proc has ZFS)
             self.assertEqual((got["name"], got["truenas"]), ("linux-zfs", None))
             self.assertIn("not detected", en(got["label"]))
+        # TrueNAS's own kernel, seen from inside the container: TrueNAS for certain, no key or mount needed
+        with mock.patch.object(platform, "HOST_FILES", ()), mock.patch.dict(os.environ, {"PLEXCACHE_PLATFORM": ""}), \
+                mock.patch.object(platform, "kernel_release", lambda: "6.18.52-debug+truenas"):
+            got = platform.detect(None)
+            self.assertEqual((got["name"], got["truenas"], got["how"], en(got["label"])), ("truenas", True, "kernel", "TrueNAS"))
         with mock.patch.dict(os.environ, {"PLEXCACHE_PLATFORM": "linux"}):
             self.assertIs(platform.detect(None)["truenas"], False)
         app = _new_app(truenas={"url": "", "api_key": ""})  # (no API connected)
@@ -5446,6 +5508,9 @@ class OptimizerTests(unittest.TestCase):
         app.zfs = {"platform": {"truenas": None, "label": "x"}}
         self.assertIn("TrueNAS API not connected", en(tn()["title"]))
         self.assertIn("[System → TrueNAS](/system#truenas)", en(tn()["fix"]))
+        app.zfs = {"platform": {"truenas": True, "label": "TrueNAS"}}                            # (TrueNAS for certain: the key is asked for)
+        self.assertEqual((en(tn()["title"]), tn()["status"]), ("TrueNAS API key needed", "warn"))
+        self.assertIn("update itself", en(tn()["detail"]))
 
     def test_library_view_with_an_older_mix(self):
         """A file inspected before a mix key existed (round_disk came later) still adds up on the
@@ -8242,7 +8307,8 @@ class HealthBranchTests(unittest.TestCase):
         self.assertIn("Dataset settings: not checked", ditems)
         self.app.settings.update({"truenas": {"api_key": ""}})
         zitems = {i["title"] for i in self.checks.check_zfs(self.app)["items"]}
-        self.assertIn("TrueNAS API not connected", zitems)
+        # (on TrueNAS for certain — this app's probe said so through the fake API — the key is asked for; elsewhere it's an offer)
+        self.assertTrue({"TrueNAS API key needed", "TrueNAS API not connected"} & zitems, zitems)
         self.app.zfs = z
 
     def test_plex_problems(self):
