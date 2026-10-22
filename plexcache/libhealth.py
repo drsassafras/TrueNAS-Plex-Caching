@@ -25,13 +25,13 @@ LEEWAY_PCT, LEEWAY_SECS = 3, 120  # how far versions' running times may differ b
 CHECKS = {
     "file": [
         {"id": "no_audio", "name": M("No audio"), "help": M("A video file with no audio track at all.")},
-        {"id": "no_subtitles", "name": M("No subtitles"), "help": M("A film with spoken audio and no subtitle track. Files whose audio is marked as having no linguistic content (zxx) aren’t flagged.")},
-        {"id": "subtitles_language", "name": M("No subtitles in the chosen language"), "default": False,
-         "help": M("A film with spoken audio and no subtitle track in the language chosen beside this check (any format). Off unless you turn it on.")},
-        {"id": "subtitles_text", "name": M("Subtitles that aren’t SRT or ASS"), "default": False,
-         "help": M("A film whose subtitle tracks are all bitmap ones (PGS, VobSub) or another format that isn’t SRT, ASS or SSA text: text subtitles can be searched, styled and resized by every player, and are tiny. Off unless you turn it on.")},
+        {"id": "no_subtitles", "name": M("No subtitles"), "help": M("A film with spoken audio and no subtitle track — any language, any format. Files whose audio is marked as having no linguistic content (zxx) aren’t flagged. The two options under it narrow what counts: a subtitle in one language, or one in a text format.")},
+        {"id": "subtitles_language", "name": M("Must include the chosen language"), "default": False, "of": "no_subtitles",
+         "help": M("Narrows No subtitles: a film needs a subtitle track in the language chosen beside this (any format, unless SRT/ASS is required too). Off unless you turn it on.")},
+        {"id": "subtitles_text", "name": M("Must include SRT or ASS"), "default": False, "of": "no_subtitles",
+         "help": M("Narrows No subtitles: a film needs a subtitle track in a text format — SRT, ASS or SSA — not only bitmap ones (PGS, VobSub). With a language chosen above as well, that language’s subtitle must be the text one. Text subtitles can be searched, styled and resized by every player, and are tiny. Off unless you turn it on.")},
         {"id": "subtitles_on_zxx", "name": M("Subtitles on a film without speech"),
-         "help": M("A file whose audio is marked zxx (no linguistic content) with subtitles that aren’t forced ones. Forced subtitles carry written content and belong; others are probably for another film.")},
+         "help": M("A file whose audio is marked zxx (no linguistic content) yet holds subtitles that aren’t forced ones. One of three things is wrong: the audio’s language is tagged wrongly (it does have speech); the subtitles don’t belong to this file, or are empty; or they translate text shown on screen and should be marked forced. Forced subtitles carry written content and belong.")},
         {"id": "duplicate_versions", "name": M("The same file twice on one item"),
          "help": M("Two versions on one Plex item that are the same file — the same running time and size, so not another bitrate of the film. A hard link or symlink counts as a second path to one file, and is said so.")},
         {"id": "duplicate_items", "name": M("The same file on different items"),
@@ -94,16 +94,18 @@ def file_checks(m: dict | None, on: dict, lang: str = DEFAULT_LANGUAGE) -> list[
     speech = bool(audio) and any(lang not in NO_SPEECH for lang in langs)
     if on.get("no_audio") and not audio:
         out.append({"id": "no_audio", "category": "file", "status": "warn", "text": M("No audio track.")})
-    if on.get("no_subtitles") and speech and not subs:
-        out.append({"id": "no_subtitles", "category": "file", "status": "warn",
-                    "text": M("Spoken audio ({langs}) and no subtitle track.", langs=", ".join(sorted(language_label(l) for l in langs if l)))})
-    if on.get("subtitles_language") and speech and lang and not any(same_language(t.get("language"), lang) for t in subs):
-        out.append({"id": "subtitles_language", "category": "file", "status": "warn",
-                    "text": M("No {lang} subtitles ({have}).", lang=language_name(lang) or lang,
-                              have=", ".join(sorted({language_label(t.get("language") or "?") for t in subs})) or M("none at all"))})
-    if on.get("subtitles_text") and speech and subs and not any(str(t.get("codec") or "").lower() in TEXT_SUBS for t in subs):
-        out.append({"id": "subtitles_text", "category": "file", "status": "warn",
-                    "text": M("No SRT or ASS subtitles: {have}.", have=", ".join(sorted({str(t.get("codec") or "?") for t in subs})))})
+    if on.get("no_subtitles") and speech:
+        # any subtitle — narrowed, when asked, to one in the chosen language, in a text format, or both
+        want_lang, want_text = bool(on.get("subtitles_language") and lang), bool(on.get("subtitles_text"))
+        fit = [t for t in subs if (not want_lang or same_language(t.get("language"), lang)) and (not want_text or str(t.get("codec") or "").lower() in TEXT_SUBS)]
+        if not fit:
+            spoken = ", ".join(sorted(language_label(l) for l in langs if l))
+            have = ", ".join(sorted({language_label(t.get("language") or "?") + (" " + str(t.get("codec") or "") if want_text else "") for t in subs}))
+            what = (M("{lang} SRT/ASS", lang=language_name(lang) or lang) if want_lang and want_text else M("{lang}", lang=language_name(lang) or lang) if want_lang
+                    else M("SRT/ASS") if want_text else "")
+            out.append({"id": "no_subtitles", "category": "file", "status": "warn",
+                        "text": M("Spoken audio ({langs}) and no subtitle track.", langs=spoken) if not subs
+                        else M("Spoken audio ({langs}) and no {what} subtitle track (has: {have}).", langs=spoken, what=what, have=have)})
     if on.get("subtitles_on_zxx") and audio and not speech:
         odd = [t for t in subs if not t.get("forced")]
         if odd:

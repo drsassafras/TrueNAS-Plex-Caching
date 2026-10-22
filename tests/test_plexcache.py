@@ -4337,23 +4337,24 @@ class PageStructureTests(unittest.TestCase):
             ["caching", {"inspect": {"needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, ["inspect:start"]],
             # the files to inspect not known yet (the library's data still loading): nothing
             ["caching", {"inspect": {"needed": False, "known": False}, "sync": {"on": True, "needed": True, "known": True}}, []],
-            # Health is the same job
-            ["health", {"inspect": {"needed": True, "known": True}, "sync": {"on": True, "needed": False, "known": True}}, ["inspect:start"]],
+            # Health (the view the page opens on) runs no job of its own — and pauses one left running
+            ["health", {"inspect": {"needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, []],
+            ["health", {"inspect": {"running": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, ["inspect:pause"]],
             # switching to Sync while inspecting: the compare started, the inspection paused
             ["sync", {"inspect": {"running": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, ["sync:start", "inspect:pause"]],
             # back on Caching while the compare runs: the inspection resumed, the compare paused
             ["caching", {"inspect": {"paused": True, "needed": True, "known": True}, "sync": {"on": True, "running": True, "needed": True, "known": True}}, ["inspect:start", "sync:pause"]],
             # the view's job running: left alone
             ["caching", {"inspect": {"running": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, []],
-            # the view's job done: the other carries on, even though its view isn't open
-            ["caching", {"inspect": {"needed": False, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, ["sync:start"]],
-            ["sync", {"inspect": {"paused": True, "needed": True, "known": True}, "sync": {"on": True, "needed": False, "known": True}}, ["inspect:start"]],
+            # the view's job done: the other isn't started off its own view
+            ["caching", {"inspect": {"needed": False, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, []],
+            ["sync", {"inspect": {"paused": True, "needed": True, "known": True}, "sync": {"on": True, "needed": False, "known": True}}, []],
             # everything done: nothing
             ["sync", {"inspect": {"needed": False, "known": True}, "sync": {"on": True, "needed": False, "known": True}}, []],
-            # no mirror: nothing to compare, the inspection goes on
-            ["sync", {"inspect": {"needed": True, "known": True}, "sync": {"on": False, "needed": True, "known": True}}, ["inspect:start"]],
-            # paused by hand: stays paused; the other may run
-            ["caching", {"inspect": {"paused": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}, "hold": {"inspect": True}}, ["sync:start"]],
+            # no mirror: nothing to compare; an inspection left running is paused all the same
+            ["sync", {"inspect": {"running": True, "needed": True, "known": True}, "sync": {"on": False, "needed": True, "known": True}}, ["inspect:pause"]],
+            # paused by hand: stays paused
+            ["caching", {"inspect": {"paused": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}, "hold": {"inspect": True}}, []],
             # a compare waiting its turn (another library's first) isn't started again
             ["sync", {"inspect": {"needed": False, "known": True}, "sync": {"on": True, "queued": True, "needed": True, "known": True}}, []],
         ]
@@ -5334,18 +5335,25 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(ids(None), [])
         off = dict(on, no_subtitles=False)
         self.assertEqual([r["id"] for r in libhealth.file_checks({"tracks": [v, au("eng")]}, off)], [])
-        # off unless turned on: subtitles in the chosen language (any code for it), and text subtitles (SRT, ASS)
+        # off unless turned on, each narrowing "No subtitles": one in the chosen language (any code for it), one in a
+        # text format (SRT, ASS) — both: that language's must be the text one. One finding either way.
         self.assertFalse(on["subtitles_language"] or on["subtitles_text"])
-        more = dict(on, subtitles_language=True, subtitles_text=True)
-        ids2 = lambda m, lang="en": [r["id"] for r in libhealth.file_checks(m, more, lang)]
         srt = lambda lang: dict(sub(lang), codec="S_TEXT/UTF8")
-        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("eng")]}), [])
-        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("en-US")]}), [])                        # ("en", "eng", "en-US": one language)
-        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("fra")]}), ["subtitles_language"])
-        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("fra")]}, "fr"), [])
-        self.assertEqual(ids2({"tracks": [v, au("eng"), dict(sub("eng"), codec="S_HDMV/PGS")]}), ["subtitles_text"])
-        self.assertEqual(ids2({"tracks": [v, au("eng")]}), ["no_subtitles", "subtitles_language"])     # (no text check without any subtitles: said once)
-        self.assertEqual(ids2({"tracks": [v, au("zxx"), dict(sub("eng"), codec="S_HDMV/PGS")]}), ["subtitles_on_zxx"])  # (no speech: neither)
+        pgs = lambda lang: dict(sub(lang), codec="S_HDMV/PGS")
+        res = lambda m, lang="en", **opts: libhealth.file_checks(m, dict(on, **opts), lang)
+        ids2 = lambda m, lang="en", **opts: [r["id"] for r in res(m, lang, **opts)]
+        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("eng")]}, subtitles_language=True, subtitles_text=True), [])
+        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("en-US")]}, subtitles_language=True), [])          # ("en", "eng", "en-US": one language)
+        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("fra")]}, subtitles_language=True), ["no_subtitles"])
+        self.assertIn("no English subtitle track (has: French (fra))", en(res({"tracks": [v, au("eng"), srt("fra")]}, subtitles_language=True)[0]["text"]))
+        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("fra")]}, "fr", subtitles_language=True), [])
+        self.assertEqual(ids2({"tracks": [v, au("eng"), pgs("eng")]}, subtitles_text=True), ["no_subtitles"])
+        self.assertIn("no SRT/ASS subtitle track", en(res({"tracks": [v, au("eng"), pgs("eng")]}, subtitles_text=True)[0]["text"]))
+        self.assertEqual(ids2({"tracks": [v, au("eng"), pgs("eng"), srt("fra")]}, subtitles_text=True), [])        # (any language's text one will do)
+        self.assertEqual(ids2({"tracks": [v, au("eng"), pgs("eng"), srt("fra")]}, subtitles_text=True, subtitles_language=True), ["no_subtitles"])  # (English must be the text one)
+        self.assertEqual(ids2({"tracks": [v, au("eng")]}, subtitles_language=True, subtitles_text=True), ["no_subtitles"])
+        self.assertEqual(ids2({"tracks": [v, au("eng"), pgs("fra")]}, subtitles_language=True, no_subtitles=False), [])  # (the options narrow the check: off with it)
+        self.assertEqual(ids2({"tracks": [v, au("zxx"), pgs("eng")]}, subtitles_language=True, subtitles_text=True), ["subtitles_on_zxx"])  # (no speech)
         self.assertTrue(libhealth.same_language("eng", "en") and not libhealth.same_language("eng", "fra") and not libhealth.same_language("", "en"))
 
     def test_library_health_duplicate_checks(self):

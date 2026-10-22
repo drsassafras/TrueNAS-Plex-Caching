@@ -580,9 +580,7 @@ PCI18N.ready.then(function () {
     table += '<tr class="sum"><th scope="row">' + H("Lead-ins") + info(H("What the lead-ins take: in RAM without an L2ARC, or on the SSD with one."), T("Lead-ins")) + "</th>" + blank + four(function (x) { return x.bytes; }, "lead") + "</tr>" +
       "<tr><td>" + H("System buffer") + info(H("Room on the SSD for everything else ZFS caches. This size decides how quickly the L2ARC is emptied: it reuses its space oldest first, so the larger the buffer, the longer cached files stay cached. Set it with the slider above."), T("System buffer")) + "</td>" + blank +
       four(function () { return buffer; }) + "</tr>" +
-      '<tr class="sum"><th scope="row">' + H("L2ARC size") + info(why, T("L2ARC sizing")) + "</th>" + blank + four(function (x) { return x.bytes + buffer; }, "l2") + "</tr>" +
-      '<tr><td>' + H("RAM used by the L2ARC") + info(H("The L2ARC keeps about {n} bytes of RAM for every record it holds, so larger records need less. Counted for the lead-ins; what the system buffer holds depends on what else is cached.", { n: L2_HEADER }), T("RAM used by the L2ARC")) + "</td>" + blank +
-      four(function (x) { return x.recs * L2_HEADER; }, "ram") + "</tr></tbody></table></div>";
+      '<tr class="sum"><th scope="row">' + H("L2ARC size") + info(why, T("L2ARC sizing")) + "</th>" + blank + four(function (x) { return x.bytes + buffer; }, "l2") + "</tr></tbody></table></div>";
     // With an L2ARC, the bar above says whether it fits; without one, this says what to add
     var l2 = ST.zfs.l2_total, need = tot.your.bytes + buffer, head = "";
     if (ST.l2arc === "absent" || !l2) {
@@ -638,7 +636,7 @@ PCI18N.ready.then(function () {
     var c = document.querySelector('[data-estcell="' + el.dataset.est + '"]');
     if (c && r) c.innerHTML = estCell(r);
     var t = sizeTotals().target, buf = ST.plan.reserve;
-    [["lead", t.bytes], ["l2", t.bytes + buf], ["ram", t.recs * L2_HEADER]].forEach(function (x) {
+    [["lead", t.bytes], ["l2", t.bytes + buf]].forEach(function (x) {
       var td = document.querySelector('[data-est' + x[0] + '="target"]');
       if (td) td.textContent = fmtBytes(x[1]);
     });
@@ -1629,7 +1627,7 @@ PCI18N.ready.then(function () {
   // video and 60% of a block of video; at its end, every block holding metadata. Every block the
   // same size, filled in proportion with what's in it. Layouts come from Read the Files (filemap.py);
   // a file opened shows its blocks larger: click one for what's in it and how ZFS might store it.
-  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, hold: { inspect: {}, sync: {} }, rev: null, view: "caching", diff: {}, health: {} };
+  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, hold: { inspect: {}, sync: {} }, rev: null, view: "health", diff: {}, health: {} };
   var PART_NAMES = { header: N("Matroska header"), segment: N("Segment start"), seekhead: N("Table of contents"), info: N("File info"), tracks: N("Track list"), chapters: N("Chapters"),
     attachments: N("Attachments list"), tags: N("Tags"), index: N("Index"), padding: N("Padding"), checksum: N("Checksum"), video: N("Video"),
     other: N("Other"), image: N("Cover art"), font: N("Font"), attachment: N("Attachment"), empty: N("Unused"), head: N("File header"),
@@ -1673,8 +1671,8 @@ PCI18N.ready.then(function () {
       }).catch(function () { LIB.at = 0; });
   }
   // What the Library page does by itself for the library opened (libAutoPlan, pure): the view's job — inspecting
-  // the files (Caching, Health) or comparing with the mirror (Sync) — started when it's needed, the other one
-  // paused; once the view's job is done, the other carries on, so it's ready when that view is opened.
+  // the files (Caching) or comparing with the mirror (Sync) — started when it's needed, and any other job paused:
+  // only the view you're on, only the library opened (Health runs no job: it reads what's been inspected).
   // A job paused by hand (Pause) stays paused until Resume, or the library is opened again.
   var LIB_DRIVE = { at: 0, last: "" };
   function libAutoDrive() {
@@ -1695,26 +1693,22 @@ PCI18N.ready.then(function () {
       if (a === "sync:pause") api("/api/sync/start", { library: key, pause: true }).then(function () { load(); }).catch(function () {});
     });
   }
-  // @testable: libAutoPlan — pure: the actions for the library opened, given the view ("caching" | "health" | "sync")
+  // @testable: libAutoPlan — pure: the actions for the library opened, given the view ("health" | "caching" | "sync")
   // and each job's state {running, paused, needed, known} (sync: also on, queued; hold: paused by hand).
-  // Returns ["inspect:start" | "inspect:pause" | "sync:start" | "sync:pause"…].
+  // Returns ["inspect:start" | "inspect:pause" | "sync:start" | "sync:pause"…]: the view's own job started when it's
+  // needed and known, every other job paused while it runs — nothing runs off its own view.
   function libAutoPlan(view, st) {
-    var acts = [], ins = st.inspect, sy = st.sync, hold = st.hold || {};
-    var mine = view === "sync" ? "sync" : "inspect", other = mine === "sync" ? "inspect" : "sync";
-    var job = { inspect: ins, sync: sy };
+    var acts = [], job = { inspect: st.inspect, sync: st.sync }, hold = st.hold || {};
+    var mine = view === "sync" ? "sync" : view === "caching" ? "inspect" : null;
     var wants = function (name) {  // a job that should run: needed (or paused with work left), not held, and — sync — a mirror watched
       var j = job[name];
       if (!j || hold[name] || (name === "sync" && !j.on)) return false;
-      return j.needed || j.paused;
+      return !!(j.needed || j.paused);
     };
+    var running = function (name) { var j = job[name]; return !!(j && j.running); };
     var busy = function (name) { var j = job[name]; return !!(j && (j.running || j.queued)); };
-    if (!job[mine] || !job[mine].known) return acts;  // (the view's state isn't in yet: nothing until it is)
-    if (wants(mine)) {
-      if (!busy(mine) && job[mine].known) acts.push(mine + ":start");
-      if (busy(other)) acts.push(other + ":pause");  // (one at a time: the view's first)
-    } else if (wants(other) && !busy(other) && job[other].known && !(job[mine] && job[mine].running)) {
-      acts.push(other + ":start");  // (the view's is done: the other carries on, ready for when it's opened)
-    }
+    if (mine && job[mine] && job[mine].known && wants(mine) && !busy(mine)) acts.push(mine + ":start");
+    Object.keys(job).forEach(function (name) { if (name !== mine && running(name)) acts.push(name + ":pause"); });
     return acts;
   }
   // @end
@@ -2366,13 +2360,19 @@ PCI18N.ready.then(function () {
       return '<option value="' + esc(l.code) + '"' + (l.code === d.language ? " selected" : "") + ">" + esc(l.name) + "</option>";
     }).join("") + "</select>";
     out += '<div class="lhgrid">' + Object.keys(cats).map(function (cat) {
-      return '<div class="lhcat"><div class="what">' + esc(cats[cat][0]) + '</div><div class="det">' + esc(cats[cat][1]) + "</div>" + (d.checks[cat] || []).map(function (c) {
-        var n = (d.counts || {})[c.id] || 0;
+      var all = d.checks[cat] || [], byId = {};
+      all.forEach(function (c) { byId[c.id] = c; });
+      var row = function (c) {
+        var n = (d.counts || {})[c.id] || 0, sub = !!c.of;
         var rv = dflt[c.id] !== undefined && c.on !== dflt[c.id] ? ' <button type="button" class="revert" data-lhcheck-revert="' + c.id + '" title="' + H("Back to the default ({value})", { value: dflt[c.id] ? T("on") : T("off") }) + '">↺</button>' : "";
-        return '<div class="chk lhchk">' + info(esc(msg(c.help)), msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
-          (c.on ? (n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : '<span class="muted det">' + esc(T("off")) + "</span>") +
-          (c.id === "subtitles_language" ? '<div class="lhlang"><span>' + H("Language") + "</span>" + langSel +
+        return '<div class="chk lhchk' + (sub ? " lhsub" : "") + '">' + info(esc(msg(c.help)), msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
+          (sub ? "" : c.on ? (n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : '<span class="muted det">' + esc(T("off")) + "</span>") +
+          (c.id === "subtitles_language" && c.on ? '<div class="lhlang"><span>' + H("Language") + "</span>" + langSel +
             (d.language !== ((ST.library_health_defaults || {}).subtitle_language || "en") ? ' <button type="button" class="revert" data-lhlang-revert title="' + H("Back to the default ({value})", { value: "English" }) + '">↺</button>' : "") + "</div>" : "") + "</div>";
+      };
+      // a check's options (c.of) under it, only while it's on
+      return '<div class="lhcat"><div class="what">' + esc(cats[cat][0]) + '</div><div class="det">' + esc(cats[cat][1]) + "</div>" + all.filter(function (c) { return !c.of; }).map(function (c) {
+        return row(c) + (c.on ? all.filter(function (o) { return o.of === c.id; }).map(row).join("") : "");
       }).join("") + "</div>";
     }).join("") + "</div>";
     if (!(d.items || []).length) return out + '<p class="muted">' + H("Nothing flagged.") + "</p>";
@@ -2420,7 +2420,7 @@ PCI18N.ready.then(function () {
       : lj.paused ? '<button class="btn" type="button" data-act="lib-survey" data-how="resume">' + H("Resume") + "</button>"
       : '<button class="btn" type="button" data-act="lib-survey" data-how="again">' + H("Inspect Files Again") + "</button>";
     var syncOn = (ST.sync || {}).decided === "plex2";
-    if (LIB.view === "sync" && !syncOn) LIB.view = "caching";
+    if (LIB.view === "sync" && !syncOn) LIB.view = "health";
     var out = top(T("Library"), LIB.view === "sync" ? H("How this library differs from the mirrored server’s, as last compared. Nothing is changed by itself.")
       : LIB.view === "health" ? H("The content itself: what’s in each file, and how Plex has each item. Each check can be turned off.")
       : H("What’s where in each file — its start, the video, and the metadata at its end — the blocks they land on, and what caching keeps of it.") +
@@ -2435,7 +2435,7 @@ PCI18N.ready.then(function () {
       return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(LIB.key)) + '" data-act="lib-tab" data-key="' + esc(l.key) + '">' + libIcon(l.key) + esc(l.title) + "</button>";
     }).join("") + "</div>" +
       // the views: caching health (the files' blocks), and, with a mirror watched, how the library differs from it
-      '<div class="seg small" role="tablist" aria-label="' + H("View") + '">' + [["caching", T("Caching")], ["health", T("Health")]].concat(syncOn ? [["sync", T("Sync")]] : []).map(function (v) {
+      '<div class="seg small" role="tablist" aria-label="' + H("View") + '">' + [["health", T("Health")], ["caching", T("Caching")]].concat(syncOn ? [["sync", T("Sync")]] : []).map(function (v) {
         return '<button role="tab" type="button" aria-selected="' + (LIB.view === v[0]) + '" data-act="lib-view" data-view="' + v[0] + '">' + esc(v[1]) + "</button>";
       }).join("") + "</div></div>";
     if (LIB.view === "sync") return out + libSyncView() + "</section></div>";
@@ -4058,16 +4058,20 @@ PCI18N.ready.then(function () {
   function render() {
     if (!ST) return;
     document.querySelectorAll(".nav").forEach(function (a) {
-      var on = a.dataset.page === page || (a.dataset.page === "tools" && TOOL_PAGES[page]);
-      a.classList.toggle("on", on);
-      if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+      var on = a.dataset.page === page || (a.dataset.page === "tools" && !!TOOL_PAGES[page]);
+      if (a.classList.contains("on") !== on) a.classList.toggle("on", on);
+      if (on && a.getAttribute("aria-current") !== "page") a.setAttribute("aria-current", "page");
+      else if (!on && a.hasAttribute("aria-current")) a.removeAttribute("aria-current");
     });
     // the tools, under Tools in the menu while one of their pages is open
     var sub = document.getElementById("toolsub");
     if (sub) {
       var onTools = page === "tools" || !!TOOL_PAGES[page];
-      sub.hidden = !onTools;
-      if (onTools) sub.innerHTML = TOOLS.map(function (t) { return '<a class="subnav' + (page === t[0] ? " on" : "") + '" href="/' + t[0] + '" data-nav' + (page === t[0] ? ' aria-current="page"' : "") + ">" + esc(T(t[1])) + "</a>"; }).join("");
+      if (sub.hidden !== !onTools) sub.hidden = !onTools;
+      if (onTools && sub.dataset.for !== page) {
+        sub.dataset.for = page;
+        sub.innerHTML = TOOLS.map(function (t) { return '<a class="subnav' + (page === t[0] ? " on" : "") + '" href="/' + t[0] + '" data-nav' + (page === t[0] ? ' aria-current="page"' : "") + ">" + esc(T(t[1])) + "</a>"; }).join("");
+      }
     }
     var dot = document.getElementById("dot-health");
     var c = ST.health ? ST.health.counts : null;
@@ -4112,6 +4116,13 @@ PCI18N.ready.then(function () {
     if (target) return target.scrollIntoView({ block: "start" });
     if ((tries || 0) < 30) setTimeout(function () { scrollToSoon(id, (tries || 0) + 1); }, 100);
   }
+  // Text selected on the page (to copy): redrawing would lose it, so the refresh waits until it's gone
+  function selecting() {
+    var sel = window.getSelection && window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+    var node = sel.getRangeAt(0).commonAncestorContainer;
+    return main.contains(node);
+  }
   function editing() {
     if (main.querySelector(".pick.open")) return true;  // a dropdown is open
     var a = document.activeElement;
@@ -4129,7 +4140,7 @@ PCI18N.ready.then(function () {
       ST = st;
       retriesChanged(st);
       if (!Object.keys(pending).length) S = st.settings;
-      if (!editing()) render();
+      if (!editing() && !selecting()) render();
     }).catch(function () {
       if (!ST) main.innerHTML = '<p class="muted">' + H("Can’t reach the Plex Cache service. Retrying…") + "</p>";
     });
