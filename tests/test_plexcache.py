@@ -4891,10 +4891,9 @@ class OptimizerTests(unittest.TestCase):
                     # (cover art — the file's own, or Plex's poster — is compressed losslessly where a tool for it is
                     # installed: a few % smaller than the estimate, which can't know the tool's gain, so the
                     # estimate may be a block over, never under)
-                    if images == "remove":
-                        self.assertEqual(pm["blocks"], gm["blocks"], kw)
-                    else:
-                        self.assertIn(pm["blocks"], (gm["blocks"], gm["blocks"] + 1), kw)
+                    # (a remux also repacks the video a little — another mkvmerge version, another few KB — so the
+                    # tail may cross a block boundary either way: one block of leeway)
+                    self.assertIn(pm["blocks"], (gm["blocks"] - 1, gm["blocks"], gm["blocks"] + 1), kw)
                     self.assertAlmostEqual(want["first_video"], max(0, rec - got["video_start"]), delta=256, msg=kw)
                     slack = 0 if images == "remove" else rec  # (smaller cover art: what's cached shifts by up to a block)
                     self.assertAlmostEqual(pm["meta"], gm["meta"], delta=256 + gm["meta"] * 0.03 + slack, msg=kw)
