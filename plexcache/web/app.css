@@ -695,3 +695,10 @@ button.mgarrow{background:none;border:1px solid var(--line);border-radius:8px;pa
 button.mgarrow:hover{border-color:var(--accent);color:var(--accent)}
 .brand small .update.quiet{color:#A3ABA6;cursor:default}
 .tbl.mid td{vertical-align:middle}  /* rows with a field in them: the text on the field's line */
+/* a view loading: an indeterminate bar */
+.loading{margin:14px 0}
+.meter.busy>div{width:30%;animation:busy 1.1s ease-in-out infinite alternate}
+@keyframes busy{from{margin-left:0}to{margin-left:70%}}
+@media (prefers-reduced-motion:reduce){.meter.busy>div{animation:none;width:100%;opacity:.4}}
+.lhchk.lhsub{flex-wrap:nowrap;align-items:flex-start}
+.lhchk.lhsub label{flex:1 1 auto;min-width:0;align-items:flex-start}

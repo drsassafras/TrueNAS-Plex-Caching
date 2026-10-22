@@ -7,9 +7,14 @@
   are named for different titles or years — a version added to the wrong item, most likely; a field
   you locked that holds nothing.
 
-Each check can be turned off (settings "library_health.checks"). The Plex checks also run on both
-servers' items in a Library Sync comparison, marking the items whose data looks bad before anything
-would be copied.
+* **Audio** libraries get checks of their own: a lossy track at a bitrate too low for its codec to
+  sound right (LOW_KBPS: kbps per channel, by codec), and uncompressed audio (PCM, WAV, AIFF) that
+  FLAC would hold losslessly in half the space.
+
+Each check says which libraries it applies to ("applies": movie, tv, audio) — the page shows a
+library only its own, and only those run — and can be turned off (settings "library_health.checks").
+The Plex checks also run on both servers' items in a Library Sync comparison, marking the items whose
+data looks bad before anything would be copied.
 """
 
 from __future__ import annotations
@@ -22,27 +27,50 @@ from .languages import language_label, language_name
 from .plex import EDIT_FIELDS, TAG_FIELDS
 
 LEEWAY_PCT, LEEWAY_SECS = 3, 120  # how far versions' running times may differ before they're flagged
+VIDEO, AUDIO, ALL = ("movie", "tv"), ("audio",), ("movie", "tv", "audio")
+# a lossy codec's "fair" bitrate, in kbps per channel (stereo: twice) — where it stops falling audibly
+# short: MP3 needs the most, Opus the least; a lossless codec never does. The quality level chosen
+# scales every codec's floor alike (AUDIO_LEVELS), so the bar moves but the codecs stay comparable.
+LOW_KBPS = {"mp3": 96, "aac": 64, "vorbis": 64, "opus": 48, "wma": 80, "ac3": 64, "eac3": 48, "dts": 128, "mp2": 96}
+AUDIO_LEVELS = {"poor": 2 / 3, "fair": 1.0, "good": 4 / 3, "best": 5 / 3}  # (×LOW_KBPS; "poor" ships: only clearly poor files)
+DEFAULT_AUDIO_LEVEL = "poor"
+LOSSLESS = ("flac", "alac", "pcm", "truehd", "dts-hd", "mlp", "ape", "wavpack", "tta", "dsd")
+UNCOMPRESSED = ("pcm",)  # (WAV and AIFF hold PCM)
+# codecs that fall short of today's at any bitrate — the listening tests collected by Hydrogenaudio put
+# AAC, Opus and Vorbis well ahead of these at equal bitrates, and MP3 can't go above 320 kbps at all
+OUTDATED = {"mp3": M("MP3 (1993): pre-echo on sharp sounds, a 16 kHz low-pass at most settings, and nothing above 320 kbps; AAC and Opus sound better at every bitrate."),
+            "mp2": M("MPEG-1 Layer II (1991), a broadcast codec: needs 256 kbps or more to be clean."),
+            "wma": M("WMA (1999): behind AAC at every bitrate, and its players are few outside Windows."),
+            "ac3": M("Dolby Digital AC-3 (1991), a cinema delivery codec: wasteful for music, and poor below 192 kbps a pair."),
+            "ra": M("RealAudio: a streaming codec of the dial-up years, poor by any standard now.")}
+OUTDATED_LINK = "https://wiki.hydrogenaud.io/index.php?title=Lossy_codec_comparison"
 CHECKS = {
     "file": [
-        {"id": "no_audio", "name": M("No audio"), "help": M("A video file with no audio track at all.")},
-        {"id": "no_subtitles", "name": M("No subtitles"), "help": M("A film with spoken audio and no subtitle track — any language, any format. Files whose audio is marked as having no linguistic content (zxx) aren’t flagged. The two options under it narrow what counts: a subtitle in one language, or one in a text format.")},
-        {"id": "subtitles_language", "name": M("Must include the chosen language"), "default": False, "of": "no_subtitles",
+        {"id": "no_audio", "name": M("No audio"), "applies": VIDEO, "help": M("A video file with no audio track at all.")},
+        {"id": "no_subtitles", "name": M("No subtitles"), "applies": VIDEO, "help": M("A film with spoken audio and no subtitle track — any language, any format. Files whose audio is marked as having no linguistic content (zxx) aren’t flagged. The two options under it narrow what counts: a subtitle in one language, or one in a text format.")},
+        {"id": "subtitles_language", "name": M("Must include the chosen language"), "default": False, "of": "no_subtitles", "applies": VIDEO,
          "help": M("Narrows No subtitles: a film needs a subtitle track in the language chosen beside this (any format, unless SRT/ASS is required too). Off unless you turn it on.")},
-        {"id": "subtitles_text", "name": M("Must include SRT or ASS"), "default": False, "of": "no_subtitles",
+        {"id": "subtitles_text", "name": M("Must include SRT or ASS"), "default": False, "of": "no_subtitles", "applies": VIDEO,
          "help": M("Narrows No subtitles: a film needs a subtitle track in a text format — SRT, ASS or SSA — not only bitmap ones (PGS, VobSub). With a language chosen above as well, that language’s subtitle must be the text one. Text subtitles can be searched, styled and resized by every player, and are tiny. Off unless you turn it on.")},
-        {"id": "subtitles_on_zxx", "name": M("Subtitles on a film without speech"),
+        {"id": "subtitles_on_zxx", "name": M("Subtitles on a film without speech"), "applies": VIDEO,
          "help": M("A file whose audio is marked zxx (no linguistic content) yet holds subtitles that aren’t forced ones. One of three things is wrong: the audio’s language is tagged wrongly (it does have speech); the subtitles don’t belong to this file, or are empty; or they translate text shown on screen and should be marked forced. Forced subtitles carry written content and belong.")},
-        {"id": "duplicate_versions", "name": M("The same file twice on one item"),
+        {"id": "audio_low_bitrate", "name": M("Audio below its codec’s floor"), "applies": AUDIO,
+         "help": M("A lossy track encoded below what its codec needs for the quality level chosen beside this, per channel (stereo: twice). Each codec has its own floor — MP3 needs the most, Opus the least — and the level scales them all alike: “Only clearly poor” (as it ships) flags MP3 under 128 kbps stereo, AAC or Vorbis under 85, Opus under 64; “Fair” MP3 192, AAC 128, Opus 96; “Good” and “Transparent” raise the bar further. Lossless codecs — FLAC, ALAC, PCM — are never flagged. The bitrate is the file’s, as Plex reads it; the codec from the file itself or its extension.")},
+        {"id": "audio_outdated", "name": M("Flag codecs that fall short at any bitrate"), "default": False, "of": "audio_low_bitrate", "applies": AUDIO, "link": OUTDATED_LINK,
+         "help": M("Narrows nothing: adds a finding for files in a codec that today’s codecs beat at every bitrate — MP3, MPEG Layer II, WMA, AC-3, RealAudio. In the public listening tests collected by Hydrogenaudio, AAC, Opus and Vorbis come out clearly ahead of MP3 at equal bitrates, MP3 shows pre-echo on sharp sounds and a low-pass at most settings, and it can’t go above 320 kbps at all. Off unless you turn it on: a well-made 320 kbps MP3 is fine for most ears, and the files are what they are unless you still have the source.")},
+        {"id": "audio_uncompressed", "name": M("Uncompressed audio"), "applies": AUDIO,
+         "help": M("PCM audio — WAV, AIFF, a raw PCM track: the sound as it is, not compressed at all. A lossless codec holds the very same sound, bit for bit, in about half the space, and every player and Plex read them: FLAC (.flac), Apple Lossless (.m4a, ALAC) or WavPack (.wv). Re-encoding to one loses nothing. Lossy files (MP3, AAC) aren’t flagged: a lossless file of them would only be bigger.")},
+        {"id": "duplicate_versions", "name": M("The same file twice on one item"), "applies": ALL,
          "help": M("Two versions on one Plex item that are the same file: the same size and running time, and the same bytes at both ends — not another bitrate of the film. A hard link or symlink counts as a second path to one file, and is said so.")},
-        {"id": "duplicate_items", "name": M("The same file on different items"),
+        {"id": "duplicate_items", "name": M("The same file on different items"), "applies": ALL,
          "help": M("The same file under two Plex items — the same size and running time, and the same bytes at both ends: a copy or link that slipped in, a file in a subfolder and one in the root, say.")},
     ],
     "plex": [
-        {"id": "versions_named_differently", "name": M("Versions named for different titles"),
+        {"id": "versions_named_differently", "name": M("Versions named for different titles"), "applies": VIDEO,
          "help": M("Several files on one Plex item (versions) whose file names carry different titles or years: a version added to the wrong item, most likely.")},
-        {"id": "versions_differ_in_length", "name": M("Versions of different lengths"),
+        {"id": "versions_differ_in_length", "name": M("Versions of different lengths"), "applies": ALL,
          "help": M("Several files on one Plex item (versions) whose running times differ by more than a little — {leeway}% or {secs} seconds, whichever is more: two cuts of the same film can differ a little; two films do by far more.", leeway=LEEWAY_PCT, secs=LEEWAY_SECS)},
-        {"id": "locked_empty", "name": M("Locked field with nothing in it"),
+        {"id": "locked_empty", "name": M("Locked field with nothing in it"), "applies": ALL,
          "help": M("A field you edited (Plex locks it) that holds nothing — so Plex’s agents can’t fill it in either. Read from an item’s own page: items a Library Sync comparison has read, or opened here.")},
     ],
 }
@@ -69,6 +97,49 @@ def enabled(settings: dict) -> dict:
 def defaults() -> dict:
     """Each check's switch as shipped (the page's ↺ buttons)."""
     return {c["id"]: c.get("default", True) for cat in CHECKS.values() for c in cat}
+
+
+def for_kind(on: dict, kind: str | None) -> dict:
+    """The switches with the checks that don't apply to a library of this kind turned off."""
+    return {c["id"]: bool(on.get(c["id"])) and (not kind or kind in c.get("applies", ALL)) for cat in CHECKS.values() for c in cat}
+
+
+def audio_codec(track: dict | None, path: str) -> str:
+    """A short name for an audio track's codec — "mp3", "aac", "flac", "pcm"… — from the track as the
+    file says it (A_MPEG/L3, A_FLAC, A_PCM/INT/LIT), else from the file's extension."""
+    c = str((track or {}).get("codec") or "").upper()
+    for key, name in (("MPEG/L3", "mp3"), ("MPEG/L2", "mp2"), ("AAC", "aac"), ("FLAC", "flac"), ("ALAC", "alac"), ("PCM", "pcm"), ("VORBIS", "vorbis"), ("OPUS", "opus"),
+                      ("EAC3", "eac3"), ("AC3", "ac3"), ("TRUEHD", "truehd"), ("DTS/LOSSLESS", "dts-hd"), ("DTS", "dts"), ("MLP", "mlp"), ("WAVPACK", "wavpack"), ("TTA", "tta"), ("WMA", "wma")):
+        if key in c:
+            return name
+    ext = os.path.splitext(path)[1].lower()
+    return {".mp3": "mp3", ".m4a": "aac", ".m4b": "aac", ".aac": "aac", ".flac": "flac", ".ogg": "vorbis", ".oga": "vorbis", ".opus": "opus", ".wav": "pcm", ".aif": "pcm", ".aiff": "pcm",
+            ".wma": "wma", ".ape": "ape", ".wv": "wavpack", ".dsf": "dsd", ".ac3": "ac3", ".dts": "dts"}.get(ext, "")
+
+
+def audio_floor(codec: str, level: str = DEFAULT_AUDIO_LEVEL, channels: int = 2) -> int | None:
+    """The bitrate (kbps) a lossy codec needs at a quality level for this many channels, to the nearest 8; None for a lossless one."""
+    if codec not in LOW_KBPS:
+        return None
+    return int(round(LOW_KBPS[codec] * AUDIO_LEVELS.get(level, 1.0) * max(1, channels) / 8) * 8)
+
+
+def audio_checks(m: dict | None, on: dict, path: str, kbps: int | None, channels: int = 2, level: str = DEFAULT_AUDIO_LEVEL) -> list[dict]:
+    """The checks on an audio library's file: its codec and bitrate (the file's, as Plex reads it)."""
+    tracks = (m or {}).get("tracks") or []
+    audio = [t for t in tracks if t.get("type") == "audio"]
+    codec = audio_codec(audio[0] if audio else None, path)
+    out = []
+    floor = audio_floor(codec, level, channels)
+    if on.get("audio_low_bitrate") and floor and kbps and kbps < floor:
+        out.append({"id": "audio_low_bitrate", "category": "file", "status": "warn",
+                    "text": M("{codec} at {kbps} kbps: below the {floor} kbps this codec needs for {ch} channels at the chosen level.", codec=codec.upper(), kbps=kbps, floor=floor, ch=max(1, channels))})
+    if on.get("audio_outdated") and codec in OUTDATED:
+        out.append({"id": "audio_outdated", "category": "file", "status": "warn", "text": OUTDATED[codec]})
+    if on.get("audio_uncompressed") and codec in UNCOMPRESSED:
+        out.append({"id": "audio_uncompressed", "category": "file", "status": "warn",
+                    "text": M("Uncompressed {codec}: FLAC (.flac) or Apple Lossless (.m4a) would hold the same sound, bit for bit, in about half the space.", codec=codec.upper())})
+    return out
 
 
 def file_title_year(path: str) -> tuple[str, str]:
@@ -236,8 +307,15 @@ def library_health(app, key: str) -> dict:
     {id: n}, "items": [{"label", "file", "results": [...]}], "checked", "unread" (files not inspected
     yet)}. The Plex "locked field" check needs an item's own page: run for the items a Library Sync
     comparison has read."""
-    on = enabled(app.settings.get())
-    lang = (app.settings.get().get("library_health") or {}).get("subtitle_language") or DEFAULT_LANGUAGE
+    lib = app.library_info(key) or {}
+    kind = lib.get("kind")
+    # every check that applies to this kind of library runs, switched on or not: the page keeps the findings
+    # and shows those of the checks switched on, so a switch changes nothing but the view
+    on = for_kind({c["id"]: True for cat in CHECKS.values() for c in cat}, kind)
+    on_all = enabled(app.settings.get())  # (each switch as set, for the page)
+    lh = app.settings.get().get("library_health") or {}
+    lang = lh.get("subtitle_language") or DEFAULT_LANGUAGE
+    level = lh.get("audio_quality") or DEFAULT_AUDIO_LEVEL
     languages: set = set()
     files = [f for f in list(app.files) if str(f.library_key) == str(key)]
     counts: dict[str, int] = {}
@@ -281,6 +359,9 @@ def library_health(app, key: str) -> dict:
                     languages.add(str(t["language"]).lower().split("-")[0])
             for r in file_checks(m, on, lang):
                 results.append(dict(r, file=os.path.basename(path)))
+            if kind == "audio":
+                for r in audio_checks(m, on, path, getattr(f, "kbps", 0) or 0, level=level):
+                    results.append(dict(r, file=os.path.basename(path)))
         item = {"files": [f.path for f in group], "durations": [getattr(f, "duration_ms", 0) for f in group], "locked": None}
         sd = sync_sides.get(rk)
         if sd:
@@ -296,6 +377,7 @@ def library_health(app, key: str) -> dict:
                           "files": [os.path.basename(f.path) for f in group], "results": results, "live": sum(1 for r in results if not r["ignored"])})
     items.sort(key=lambda it: (it["live"] == 0, it["label"].lower()))  # (items with nothing live left at the bottom)
     langs = sorted(languages | {lang, DEFAULT_LANGUAGE}, key=lambda c: (language_name(c) or c).lower())
-    return {"checks": {cat: [dict(c, on=on[c["id"]]) for c in cs] for cat, cs in CHECKS.items()}, "counts": counts,
+    return {"checks": {cat: [dict(c, on=on_all[c["id"]]) for c in cs if not kind or kind in c.get("applies", ALL)] for cat, cs in CHECKS.items()}, "counts": counts, "kind": kind,
             "items": items[:500], "total": len(items), "checked": len(by_item), "unread": unread, "pages_read": len(sync_sides),
-            "language": lang, "languages": [{"code": c, "name": language_name(c) or c} for c in langs if c not in NO_SPEECH]}
+            "language": lang, "languages": [{"code": c, "name": language_name(c) or c} for c in langs if c not in NO_SPEECH],
+            "audio_quality": level, "audio_levels": list(AUDIO_LEVELS)}

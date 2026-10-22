@@ -53,7 +53,7 @@ PCI18N.ready.then(function () {
     else if (c.l2arc === "absent") now = H("<strong>RAM only</strong> — no L2ARC was found, so RAM defaults are used.");
     else now = H("<strong>RAM only</strong> for now — couldn’t check for an L2ARC.");
     return '<div class="legendbar"><div>' + H("Caching mode:") + " " + now + "</div>" +
-      '<div class="legend-ics">' + mark("ram-def") + H("RAM default") + mark("ssd-def") + H("L2ARC default") + mark("ssd-only") + H("L2ARC option (falls back to RAM default without L2ARC)") +
+      '<div class="legend-ics">' + mark("ram-def") + H("RAM default") + mark("ssd-def") + H("L2ARC default") + mark("ssd-only") + H("L2ARC option (uses RAM default without L2ARC)") +
         mark("ram-only") + H("RAM option (ignored with L2ARC)") + "</div></div>";
   }
 
@@ -1637,7 +1637,7 @@ PCI18N.ready.then(function () {
   var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, hold: { inspect: {}, sync: {} }, rev: null, view: "health", diff: {}, health: {} };
   var PART_NAMES = { header: N("Matroska header"), segment: N("Segment start"), seekhead: N("Table of contents"), info: N("File info"), tracks: N("Track list"), chapters: N("Chapters"),
     attachments: N("Attachments list"), tags: N("Tags"), index: N("Index"), padding: N("Padding"), checksum: N("Checksum"), video: N("Video"),
-    other: N("Other"), image: N("Cover art"), font: N("Font"), attachment: N("Attachment"), empty: N("Unused"), head: N("File header"),
+    other: N("Other"), image: N("Cover art"), font: N("Fonts"), attachment: N("Attachment"), empty: N("Unused"), head: N("File header"),
     id3: N("ID3 tag header"), flac: N("FLAC header"), streams: N("Video & audio") };
   // The parts every Matroska file starts with, a player reads before anything else: one colour, "File header"
   var HEAD_PARTS = { header: 1, segment: 1, seekhead: 1, info: 1, tracks: 1, checksum: 1, id3: 1, flac: 1 };
@@ -2281,7 +2281,7 @@ PCI18N.ready.then(function () {
       LIB.diff[key] = null;
       api("/api/library/differences?key=" + encodeURIComponent(key)).then(function (got) { LIB.diff[key] = got; if (page === "library") render(); })
         .catch(function () { LIB.diff[key] = { none: true }; if (page === "library") render(); });
-      return '<p class="muted">' + H("Loading…") + "</p>";
+      return loadingBar(T("Reading the comparison…"));
     }
     if (sy.decided !== "plex2") return '<p class="muted">' + H("No mirrored server is set up yet: choose it on the <a href=\"/sync\" data-nav>Sync page</a>.") + "</p>";
     if (!d || !d.counts) return syncProgress(sy, key) || '<p class="muted">' + H("Not compared yet.") + '</p><div><button class="btn" type="button" data-act="sync-start" data-key="' + esc(key) + '">' + H("Compare Now") + "</button></div>";
@@ -2347,6 +2347,10 @@ PCI18N.ready.then(function () {
   }
   // The Library page's Health view: the content checks (libhealth.py) — file checks on the files as
   // inspected, Plex checks on how Plex has the items — each with its switch, and the items flagged
+  // a view's data on its way: a bar that moves, not a word
+  function loadingBar(text) {
+    return '<div class="loading"><div class="meter thin busy" role="progressbar" aria-busy="true" aria-label="' + esc(text || T("Loading")) + '"><div></div></div><div class="det">' + esc(text || T("Loading…")) + "</div></div>";
+  }
   var LH_OPEN = {};  // the issue chips opened on the Health view: "item key/check id" -> true
   function libHealthView() {
     var key = LIB.key, d = LIB.health[key];
@@ -2354,9 +2358,9 @@ PCI18N.ready.then(function () {
       LIB.health[key] = null;
       api("/api/library/health?key=" + encodeURIComponent(key)).then(function (got) { LIB.health[key] = got; if (page === "library") render(); })
         .catch(function () { LIB.health[key] = { error: true }; if (page === "library") render(); });
-      return '<p class="muted">' + H("Loading…") + "</p>";
+      return loadingBar(T("Running the checks…"));
     }
-    if (!d || d.error) return '<p class="muted">' + H("Loading…") + "</p>";
+    if (!d || d.error) return loadingBar(T("Running the checks…"));
     var cats = { file: [T("File checks"), T("What’s in each file, as inspected: its tracks.")], plex: [T("Plex checks"), T("How Plex has each item.")] };
     var dflt = ((ST.library_health_defaults || {}).checks) || {};
     var out = '<div class="det" style="margin:8px 0">' + esc(T("{n} items checked", { n: fmtNum(d.checked || 0) })) +
@@ -2366,36 +2370,58 @@ PCI18N.ready.then(function () {
     var langSel = '<select class="sel sm" data-lhlang aria-label="' + H("Subtitle language") + '">' + (d.languages || []).map(function (l) {
       return '<option value="' + esc(l.code) + '"' + (l.code === d.language ? " selected" : "") + ">" + esc(l.name) + "</option>";
     }).join("") + "</select>";
+    // the audio quality level: every codec's floor scaled alike
+    var LEVELS = { poor: T("Only clearly poor"), fair: T("Fair"), good: T("Good"), best: T("Transparent") };
+    var qualSel = '<select class="sel sm" data-lhquality aria-label="' + H("Audio quality level") + '">' + Object.keys(LEVELS).map(function (k) {
+      return '<option value="' + k + '"' + (k === d.audio_quality ? " selected" : "") + ">" + esc(LEVELS[k]) + "</option>";
+    }).join("") + "</select>";
+    // the findings held are every check's: the switches as they are now (the settings, not the answer's copy of them —
+    // a switch flipped shows at once, with no new scan) decide what's shown and counted
+    var chosen = (S.library_health || {}).checks || {}, onIds = {}, parentOn = {};
+    Object.keys(d.checks).forEach(function (cat) { (d.checks[cat] || []).forEach(function (c) { c.on = chosen[c.id] !== undefined ? !!chosen[c.id] : dflt[c.id] !== undefined ? dflt[c.id] : !!c.on; parentOn[c.id] = c.on; }); });
+    Object.keys(d.checks).forEach(function (cat) { (d.checks[cat] || []).forEach(function (c) { onIds[c.id] = c.on && (!c.of || !!parentOn[c.of]); }); });
+    var shownItems = (d.items || []).map(function (it) { return Object.assign({}, it, { results: it.results.filter(function (r) { return onIds[r.id]; }) }); }).filter(function (it) { return it.results.length; });
+    var counts = {};
+    shownItems.forEach(function (it) { it.results.forEach(function (r) { if (!r.ignored) counts[r.id] = (counts[r.id] || 0) + 1; }); });
     out += '<div class="lhgrid">' + Object.keys(cats).map(function (cat) {
       var all = d.checks[cat] || [], byId = {};
       all.forEach(function (c) { byId[c.id] = c; });
       var row = function (c) {
-        var n = (d.counts || {})[c.id] || 0, sub = !!c.of;
+        var n = counts[c.id] || 0, sub = !!c.of;
         var rv = dflt[c.id] !== undefined && c.on !== dflt[c.id] ? ' <button type="button" class="revert" data-lhcheck-revert="' + c.id + '" title="' + H("Back to the default ({value})", { value: dflt[c.id] ? T("on") : T("off") }) + '">↺</button>' : "";
-        return '<div class="chk lhchk' + (sub ? " lhsub" : "") + '">' + info(esc(msg(c.help)), msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
-          (sub ? "" : c.on ? (n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : '<span class="muted det">' + esc(T("off")) + "</span>") +
+        var help = esc(msg(c.help)) + (c.link ? '<p><a href="' + esc(c.link) + '" target="_blank" rel="noopener">' + H("The research behind it ↗") + "</a></p>" : "");
+        return '<div class="chk lhchk' + (sub ? " lhsub" : "") + '">' + info(help, msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
+          (sub ? (c.on && n ? badge("warn", fmtNum(n)) : "") : c.on ? (n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : '<span class="muted det">' + esc(T("off")) + "</span>") +
           (c.id === "subtitles_language" ? '<div class="lhlang"><span>' + H("Language") + "</span>" + langSel +
-            (d.language !== ((ST.library_health_defaults || {}).subtitle_language || "en") ? ' <button type="button" class="revert" data-lhlang-revert title="' + H("Back to the default ({value})", { value: "English" }) + '">↺</button>' : "") + "</div>" : "") + "</div>";
+            (d.language !== ((ST.library_health_defaults || {}).subtitle_language || "en") ? ' <button type="button" class="revert" data-lhlang-revert title="' + H("Back to the default ({value})", { value: "English" }) + '">↺</button>' : "") + "</div>" : "") +
+          (c.id === "audio_low_bitrate" && c.on ? '<div class="lhlang"><span>' + H("Quality level") + "</span>" + qualSel +
+            (d.audio_quality !== ((ST.library_health_defaults || {}).audio_quality || "poor") ? ' <button type="button" class="revert" data-lhquality-revert title="' + H("Back to the default ({value})", { value: LEVELS.poor }) + '">↺</button>' : "") + "</div>" : "") + "</div>";
       };
       // a check's options (c.of) under it, only while it's on
       return '<div class="lhcat"><div class="what">' + esc(cats[cat][0]) + '</div><div class="det">' + esc(cats[cat][1]) + "</div>" + all.filter(function (c) { return !c.of; }).map(function (c) {
         return row(c) + (c.on ? all.filter(function (o) { return o.of === c.id; }).map(row).join("") : "");
       }).join("") + "</div>";
     }).join("") + "</div>";
-    if (!(d.items || []).length) return out + '<p class="muted">' + H("Nothing flagged.") + "</p>";
+    if (!shownItems.length) return out + '<p class="muted">' + H("Nothing flagged.") + "</p>";
     // each item flagged as a record card — its poster, its name as Plex has it (title, year, edition) — with a chip per
     // issue on the right; a chip opened shows what the check found (the file concerned, when the item has several)
     out += '<div class="sshdr lhhdr"><div>' + H("Item") + "</div><div></div><div>" + H("Flagged") + "</div></div>";
-    out += d.items.map(function (it, i) {
+    out += shownItems.map(function (it, i) {
       var poster = it.poster ? '<img class="ssposter" src="/api/poster?path=' + encodeURIComponent(it.poster) + '" alt="" loading="lazy">' : '<div class="ssposter none"></div>';
-      var chips = "", shown = "", live = [], muted = 0;
-      it.results.forEach(function (r, k) {
-        var id = i + "/" + k, on = !!LH_OPEN[key + ":" + id];
-        var name = ((d.checks[r.category] || []).filter(function (c) { return c.id === r.id; })[0] || {}).name;
+      // one chip per check (an item flagged by the same check several times — nine files alike — says ×9), its findings under it
+      var chips = "", shown = "", live = [], muted = 0, byCheck = {}, order = [];
+      it.results.forEach(function (r) {
+        var ck = r.id + (r.ignored ? ":off" : "");
+        if (!byCheck[ck]) { byCheck[ck] = []; order.push(ck); }
+        byCheck[ck].push(r);
         if (r.ignored) muted++; else if (live.indexOf(r.id) < 0) live.push(r.id);
+      });
+      order.forEach(function (ck) {
+        var rs = byCheck[ck], r = rs[0], id = i + "/" + ck, on = !!LH_OPEN[key + ":" + id];
+        var name = ((d.checks[r.category] || []).filter(function (c) { return c.id === r.id; })[0] || {}).name;
         chips += '<button type="button" class="badge b-' + (r.ignored ? "grey" : "warn") + " sschip" + (on ? " on" : "") + '" aria-expanded="' + on + '" data-act="lh-open" data-key="' + esc(key) + '" data-id="' + esc(id) + '"' +
-          (r.ignored ? ' title="' + H("Ignored") + '"' : "") + ">" + esc(name ? msg(name) : r.id) + "</button>";
-        if (on) shown += '<div class="ssval' + (r.ignored ? " muted" : "") + '">' + esc(msg(r.text)) + (r.file && (it.files || []).length > 1 ? ' <span class="mono muted">' + esc(r.file) + "</span>" : "") + "</div>";
+          (r.ignored ? ' title="' + H("Ignored") + '"' : "") + ">" + esc(name ? msg(name) : r.id) + (rs.length > 1 ? " ×" + rs.length : "") + "</button>";
+        if (on) rs.forEach(function (x) { shown += '<div class="ssval' + (x.ignored ? " muted" : "") + '">' + esc(msg(x.text)) + (x.file && (it.files || []).length > 1 ? ' <span class="mono muted">' + esc(x.file) + "</span>" : "") + "</div>"; });
       });
       // ignored: the item's issues as they are now greyed out and kept so (a new kind of issue still warns); brought back on request
       var acts = (live.length ? '<button class="btn sm" type="button" data-act="lh-ignore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" data-ids="' + esc(live.join(",")) + '" title="' + H("Greys out this item’s issues as they are now, for good. A new kind of issue on it still shows as a warning.") + '">' + H("Ignore") + "</button> " : "") +
@@ -2416,7 +2442,6 @@ PCI18N.ready.then(function () {
       if (LIB.rev !== null) {
         LIB.at = 0;
         Object.keys(LIB.detail).forEach(function (p) { if (p !== LIB.open) delete LIB.detail[p]; });
-        LIB.health = {};
         if (LIB.open) libDetailFetch(LIB.open);  // (shown as it was until the new one is in: no flicker)
       }
       LIB.rev = ST.settings_rev;
@@ -2508,7 +2533,7 @@ PCI18N.ready.then(function () {
     }).join("");
     var arc = ST.zfs.arc;
     out += '<section class="card"><h2>' + H("L2ARC on Your Media Pools") + "</h2>" +
-      (rows ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Pool") + '</th><th scope="col">' + H("Cache devices") + '</th><th scope="col">' + H("Size") + "</th></tr></thead><tbody>" + rows + "</tbody></table></div>"
+      (rows ? '<div class="tbl-wrap"><table class="tbl mid"><thead><tr><th scope="col">' + H("Pool") + '</th><th scope="col">' + H("Cache devices") + '</th><th scope="col">' + H("Size") + "</th></tr></thead><tbody>" + rows + "</tbody></table></div>"
         : '<p class="muted">' + (ST.l2arc === "unknown" ? H("Couldn’t check the pools yet. <a href=\"/system\" data-nav>Connect TrueNAS in System</a> to see them.") : H("No media pools found yet.")) + "</p>") +
       (arc && arc.l2_present ? '<p class="muted" style="font-size:13px;margin:10px 0 0">' + H("L2ARC (SSD cache): {used} of {total} filled", { used: fmtBytes(arc.l2_asize), total: fmtBytes(ST.zfs.l2_total || arc.l2_size || 0) }) + "</p>" : "") +
       (ST.l2arc === "absent" && !c.no_l2arc ? '<div class="note">' + H("No L2ARC found. To add one in TrueNAS: Storage → your media pool → Manage Devices → Add VDEV → Cache, and pick an SSD.") + "</div>" : "") +
@@ -4283,11 +4308,14 @@ PCI18N.ready.then(function () {
 
   document.addEventListener("click", function (e) {
     // ↺ on the Optimizer page and the second server's pairs: back to the default
-    var orv = e.target.closest("[data-optlib-revert], [data-convtype-revert], [data-p2lib-revert], [data-syncwhat-revert], [data-lhcheck-revert], [data-lhlang-revert]");
+    var orv = e.target.closest("[data-optlib-revert], [data-convtype-revert], [data-p2lib-revert], [data-syncwhat-revert], [data-lhcheck-revert], [data-lhlang-revert], [data-lhquality-revert]");
     if (orv) {
       e.preventDefault();
       if (orv.dataset.lhlangRevert !== undefined) {
         queueSave("library_health", "subtitle_language", (ST.library_health_defaults || {}).subtitle_language || "en", true);
+        LIB.health = {};
+      } else if (orv.dataset.lhqualityRevert !== undefined) {
+        queueSave("library_health", "audio_quality", (ST.library_health_defaults || {}).audio_quality || "poor", true);
         LIB.health = {};
       } else if (orv.dataset.optlibRevert !== undefined) {
         var libs = JSON.parse(JSON.stringify((S.optimizer || {}).libraries || {}));
@@ -4829,6 +4857,11 @@ PCI18N.ready.then(function () {
     if (!el.dataset) return;
     if (el.dataset.lhlang !== undefined) {  // the subtitle language wanted: the check runs again with it
       queueSave("library_health", "subtitle_language", el.value, true);
+      LIB.health = {};
+      return;
+    }
+    if (el.dataset.lhquality !== undefined) {  // the audio quality level: the floors move, so the checks run again
+      queueSave("library_health", "audio_quality", el.value, true);
       LIB.health = {};
       return;
     }

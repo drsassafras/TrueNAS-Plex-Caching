@@ -5390,6 +5390,36 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(ids2({"tracks": [v, au("eng"), pgs("fra")]}, subtitles_language=True, no_subtitles=False), [])  # (the options narrow the check: off with it)
         self.assertEqual(ids2({"tracks": [v, au("zxx"), pgs("eng")]}, subtitles_language=True, subtitles_text=True), ["subtitles_on_zxx"])  # (no speech)
         self.assertTrue(libhealth.same_language("eng", "en") and not libhealth.same_language("eng", "fra") and not libhealth.same_language("", "en"))
+        # each check says which libraries it applies to; an audio library gets only its own
+        self.assertTrue(all(c.get("applies") for cat in libhealth.CHECKS.values() for c in cat))
+        audio_on = libhealth.for_kind(on, "audio")
+        self.assertFalse(audio_on["no_subtitles"] or audio_on["no_audio"] or audio_on["versions_named_differently"])
+        self.assertTrue(audio_on["duplicate_items"] and audio_on["audio_low_bitrate"] and audio_on["audio_uncompressed"])
+        self.assertFalse(libhealth.for_kind(on, "movie")["audio_low_bitrate"])
+        # the audio checks: a lossy track below its codec's floor (per channel), uncompressed PCM
+        ac = lambda m, path, kbps, ch=2, level="fair": [r["id"] for r in libhealth.audio_checks(m, audio_on, path, kbps, ch, level)]
+        mp3 = {"tracks": [{"type": "audio", "codec": "A_MPEG/L3"}]}
+        self.assertEqual(ac(mp3, "/m/a.mp3", 128), ["audio_low_bitrate"])
+        self.assertEqual(ac(mp3, "/m/a.mp3", 256), [])
+        self.assertEqual(ac(mp3, "/m/a.mp3", 128, 1), [])                                          # (mono: half the floor)
+        self.assertEqual(ac({"tracks": []}, "/m/a.m4a", 96), ["audio_low_bitrate"])                 # (codec from the extension)
+        self.assertEqual(ac({"tracks": []}, "/m/a.opus", 96), [])
+        # the quality level scales every codec's floor alike; "poor" (as it ships) lets a 128 kbps MP3 through
+        self.assertEqual((libhealth.audio_floor("mp3", "poor"), libhealth.audio_floor("mp3", "fair"), libhealth.audio_floor("mp3", "good"), libhealth.audio_floor("mp3", "best")), (128, 192, 256, 320))
+        self.assertEqual((libhealth.audio_floor("aac", "poor"), libhealth.audio_floor("opus", "poor"), libhealth.audio_floor("flac", "best")), (88, 64, None))
+        self.assertEqual(ac(mp3, "/m/a.mp3", 128, 2, "poor"), [])
+        self.assertEqual(ac(mp3, "/m/a.mp3", 96, 2, "poor"), ["audio_low_bitrate"])
+        # outdated codecs: off unless turned on; MP3 is one whatever its bitrate, Opus isn't
+        self.assertFalse(audio_on["audio_outdated"])
+        dated = dict(audio_on, audio_outdated=True)
+        self.assertEqual([r["id"] for r in libhealth.audio_checks(mp3, dated, "/m/a.mp3", 320)], ["audio_outdated"])
+        self.assertEqual([r["id"] for r in libhealth.audio_checks({"tracks": []}, dated, "/m/a.opus", 320)], [])
+        self.assertIn("link", next(c for c in libhealth.CHECKS["file"] if c["id"] == "audio_outdated"))
+        self.assertEqual(ac({"tracks": [{"type": "audio", "codec": "A_FLAC"}]}, "/m/a.flac", 40), [])  # (lossless: never low)
+        self.assertEqual(ac({"tracks": []}, "/m/a.wav", 1411), ["audio_uncompressed"])
+        self.assertEqual(ac({"tracks": [{"type": "audio", "codec": "A_PCM/INT/LIT"}]}, "/m/a.mka", 1411), ["audio_uncompressed"])
+        self.assertIn("Apple Lossless", en(libhealth.audio_checks({"tracks": []}, audio_on, "/m/a.wav", 1411)[0]["text"]))
+        self.assertEqual(libhealth.audio_codec({"codec": "A_DTS/LOSSLESS"}, ""), "dts-hd")
 
     def test_platform_detection(self):
         """Where the app runs: TrueNAS for certain from the API or the host's version file (or said by
@@ -5494,6 +5524,32 @@ class OptimizerTests(unittest.TestCase):
         self.assertTrue(app.updates.status()["updating"])                                        # (said as updating until the restart)
         self.assertIn(("app.pull_images", ["plex-cache", {"redeploy": True}]), TRUENAS.apps_called)
         self.assertTrue(any("pulling the newer image" in en(e["message"]) for e in app.activity.snapshot()["events"]))
+
+    def test_library_health_shows_a_library_its_own_checks(self):
+        """An audio library's Health view lists only the checks that apply to audio, and runs only those."""
+        from plexcache import libhealth
+        app, op, client, d, state = self._app(names=("song.mp3",))
+        app.libraries = [{"key": "1", "title": "Music", "type": "artist", "kind": "audio", "locations": [d]}]
+        f = app.files[0]
+        f.rating_key, f.title, f.kind, f.kbps = "r1", "Song", "audio", 96
+        app.file_maps.get = lambda path, st=None, full=False: {"tracks": [{"type": "audio", "codec": "A_MPEG/L3"}]}
+        got = libhealth.library_health(app, "1")
+        ids = [c["id"] for cat in got["checks"].values() for c in cat]
+        self.assertNotIn("no_subtitles", ids)
+        self.assertIn("audio_low_bitrate", ids)
+        # every check that applies ran — the outdated-codec one too, though it ships off: the page shows what's switched on
+        self.assertEqual((got["kind"], got["counts"], got["audio_quality"]), ("audio", {"audio_low_bitrate": 1, "audio_outdated": 1}, "poor"))
+        # switched off, the finding is still in the answer (the page hides it, no new scan needed); the level moves the floor
+        app.settings.update({"library_health": {"checks": {"audio_low_bitrate": False}}})
+        got = libhealth.library_health(app, "1")
+        self.assertEqual((got["counts"]["audio_low_bitrate"], next(c for c in got["checks"]["file"] if c["id"] == "audio_low_bitrate")["on"]), (1, False))
+        app.settings.update({"library_health": {"audio_quality": "best"}})
+        f.kbps = 300
+        self.assertEqual(libhealth.library_health(app, "1")["counts"]["audio_low_bitrate"], 1)      # (320 is the bar at "best")
+        f.kbps = 320
+        self.assertNotIn("audio_low_bitrate", libhealth.library_health(app, "1")["counts"])
+        with self.assertRaises(config.SettingsError):
+            app.settings.update({"library_health": {"audio_quality": "loud"}})
 
     def test_library_health_issues_ignored(self):
         """An item's issues ignored: greyed out, not counted, the item at the bottom — kept across

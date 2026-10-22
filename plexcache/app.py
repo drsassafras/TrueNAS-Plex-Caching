@@ -1623,7 +1623,7 @@ class App:
             # each library's optimizer choices and the converted kinds, by default: for their ↺ buttons
             "optimizer_defaults": {"library": dict(OPT_DEFAULTS), "convert_types": dict(CONVERT_TYPES)},
             "sync_defaults": {"what": dict(config.DEFAULTS["sync"]["what"])},
-            "library_health_defaults": {"checks": libhealth_defaults(), "subtitle_language": "en"},
+            "library_health_defaults": {"checks": libhealth_defaults(), "subtitle_language": "en", "audio_quality": "poor"},
             "retries": self.optimizing.retrying(),  # failed files to try again, after the file in hand
             "playback": {"sessions": self.monitor.snapshot(), "error": self.monitor.last_error, "last_poll": self.monitor.last_poll},
             "activity": self.activity.snapshot(),
