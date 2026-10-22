@@ -32,6 +32,7 @@ import json
 import os
 import threading
 import time
+from .paging import sort_key
 
 LOG = "job-log.jsonl"
 FILE_FIELDS = ("at", "job", "kind", "library", "file", "label", "result", "seconds", "size_before", "size_after",
@@ -49,7 +50,7 @@ def _pct(b, a):
 RESULT_ORDER = {"failed": 0, "skipped": 1, "rewritten": 2, "converted": 3, "optimized": 3, "discovered": 3, "already": 4, "copied": 5}
 SORTS = {
     # by title (each edition's files together, in file order), the default
-    "file": lambda f: ((f.get("label") or os.path.basename(f.get("file") or "")).lower(), f.get("file") or ""),
+    "file": lambda f: (sort_key(f.get("label") or os.path.basename(f.get("file") or "")), f.get("file") or ""),
     "result": lambda f: RESULT_ORDER.get(f.get("result"), 9),  # failed at the top, then the rest, untried last
     "time": lambda f: -(f.get("seconds") or 0),  # slowest first
     # most smaller first, then the biggest original

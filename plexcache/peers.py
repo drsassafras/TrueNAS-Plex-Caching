@@ -28,7 +28,7 @@ from .optimize.claims import PEER_DAYS
 
 PUBLISH_EVERY = 30 * 60
 TOOL_GAP = 3600  # a file tool run on the other side within this: ours waits
-FILE_TOOLS = ("versions", "folders")
+FILE_TOOLS = ("versions", "folders", "unlink")
 CONTENT = ("mkv", "images", "tags", "convert")  # the optimizer choices that change a file's bytes
 
 

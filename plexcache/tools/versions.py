@@ -17,6 +17,7 @@ from ..i18n import M
 from ..libhealth import _same_file
 from ..plex import PlexError
 from . import MAX_ROWS, Tool
+from ..paging import sort_key
 
 MEDIA = (".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".mpg", ".mpeg", ".vob", ".flv", ".wmv", ".ogm", ".ogv", ".webm",
          ".mp3", ".flac", ".m4a", ".m4b", ".ogg", ".oga", ".opus", ".wav", ".aac", ".wma")
@@ -44,6 +45,7 @@ def _brief(x: dict, keep: dict | None = None) -> dict:
 class DuplicateVersions(Tool):
     name = "versions"
     scan_version = 2  # (each extra copy says whether the mirror lists it)
+    keeps = M("the extra copies themselves: set aside in the library’s .plexcache-trash, kept for the hold (and put back from the page)")
 
     def scan(self, library: str, options: dict | None = None) -> dict:
         lib = self.app.library_info(library)
@@ -55,7 +57,9 @@ class DuplicateVersions(Tool):
             if getattr(f, "rating_key", ""):
                 by_item.setdefault(f.rating_key, []).append(f)
         rows = []
-        for rk, group in by_item.items():
+        for i, (rk, group) in enumerate(by_item.items()):
+            if i % 50 == 0:
+                self.step(i, len(by_item))
             if len(group) < 2:
                 continue
             infos = []
@@ -90,7 +94,7 @@ class DuplicateVersions(Tool):
                              "poster": getattr(group[0], "poster", ""), "keep": _brief(keep), "extras": [_brief(x, keep) for x in extras],
                              "frees": sum(x["size"] for x in extras if not (keep["ino"] and x["ino"] == keep["ino"]))})
         rows += self._unlisted(library, lib, files)
-        rows.sort(key=lambda r: str(r["title"]).lower())
+        rows.sort(key=lambda r: sort_key(r["title"]))
         there = self.mirror(library)
         if there is not None:  # each extra copy on the mirrored server: listed there too (then its synced folder carries the deletion there)
             try:

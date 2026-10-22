@@ -22,6 +22,7 @@ from ..i18n import M
 from ..libhealth import file_title_year
 from ..plex import PlexError
 from . import MAX_ROWS, Tool
+from ..paging import sort_key
 
 WAIT, POLL = 600, 10  # how long Plex gets to list a moved file, checked every POLL seconds
 MIRROR_SCAN_EVERY, MIRROR_GIVE_UP = 15 * 60, 3 * 86400
@@ -80,7 +81,9 @@ class OrganizeFolders(Tool):
         by_key = {r["key"]: r for r in recs}
         folder_recs: dict[tuple, set] = {}
         rows = []
-        for r in recs:
+        for i, r in enumerate(recs):
+            if i % 50 == 0:
+                self.step(i, len(recs))
             for path, _size in r.get("files") or []:
                 root = next((x for x in roots if path.startswith(x + "/")), None)
                 if not root:
@@ -111,7 +114,7 @@ class OrganizeFolders(Tool):
                 rows.append({"id": "folder:" + old, "library": str(library), "kind": "rename", "title": r.get("label") or r.get("title"), "rk": r["key"],
                              "ptitle": r.get("title") or "", "guid": r.get("guid") or "", "thumb": r.get("thumb"), "root": root,
                              "from_folder": top, "folder": want, "moves": moves})
-        rows.sort(key=lambda x: (x["kind"] != "loose", str(x["title"]).lower()))
+        rows.sort(key=lambda x: (x["kind"] != "loose", sort_key(x["title"])))
         there = self.mirror(library)
         return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(recs), "cleanup": cleanup,
                 "folders": len(folder_recs), "mirror": {"name": self.mirror_name()} if there is not None else None}
@@ -135,6 +138,9 @@ class OrganizeFolders(Tool):
                 if not n.startswith("."):
                     out.append(os.path.relpath(os.path.join(dirpath, n), local))
         return sorted(out)
+
+    def needed_bytes(self, rows: list[dict]) -> int:
+        return 0  # (hard links: nothing written; a file system without them copies, said when it happens)
 
     # ------------------------------------------------------------ doing it
     def apply_row(self, row: dict, log) -> dict:

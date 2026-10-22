@@ -180,10 +180,11 @@ PCI18N.ready.then(function () {
     if (RTF) return RTF.format(-v[0], v[1]);
     return v[1] === "minute" ? P(v[0], "{n} minute ago", "{n} minutes ago") : v[1] === "hour" ? P(v[0], "{n} hour ago", "{n} hours ago") : P(v[0], "{n} day ago", "{n} days ago");
   }
-  function toast(msg) {
+  // `long`: an error — shown long enough to read, and kept while the pointer is over it
+  function toast(msg, long) {
     var t = document.getElementById("toast");
-    t.textContent = msg; t.classList.add("show");
-    clearTimeout(toast._t); toast._t = setTimeout(function () { t.classList.remove("show"); }, 2600);
+    t.textContent = msg; t.classList.add("show"); t.classList.toggle("err", !!long);
+    clearTimeout(toast._t); toast._t = setTimeout(function () { t.classList.remove("show"); }, long ? 12000 : 2600);
   }
   function api(path, body) {
     var opts = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
@@ -198,7 +199,7 @@ PCI18N.ready.then(function () {
   function light(status, title, detail, testing) {
     var st = testing ? "testing" : status;
     return '<div class="lightrow"><span class="light l-' + esc(st) + '" aria-hidden="true"></span><div class="grow"><div class="what">' +
-      esc(testing ? T("Checking…") : title) + '</div>' + (detail && !testing ? '<div class="det">' + esc(detail) + "</div>" : "") + "</div></div>";
+      esc(testing ? T("Checking…") : title) + '</div>' + (detail && !testing ? '<div class="det">' + links(detail) + "</div>" : "") + "</div></div>";
   }
   function banner(sum, testing) {
     if (testing) return '<div class="banner bn-testing" role="status"><span class="light l-testing" aria-hidden="true"></span>' + H("Checking your settings…") + "</div>";
@@ -1188,9 +1189,11 @@ PCI18N.ready.then(function () {
       } else {
         // one file job at a time: while one runs, these add to the queue (shown at the top)
         var later = fileBusy(), off = !op.configured;
+        var canGo = !off && sm && (sm.todo || (sm.conflicts || []).length);
+        var gateO = canGo && !qOpt && !runs("optimize") ? readinessPanel(key, "largest", "optimizer", "") : { ready: true, html: "" };
         if (qOpt || runs("optimize")) act = badge("info", qOpt ? T("Queued") : T("Running"));
-        else act = '<button class="btn pri" type="button" data-act="optimize-lib" data-key="' + esc(key) + '"' +
-          (off || !sm || (!sm.todo && !(sm.conflicts || []).length) ? " disabled" : "") + ">" + (later ? H("Add to Queue") : H("Optimize Now")) + "</button>";
+        else act = gateO.html + '<button class="btn pri" type="button" data-act="optimize-lib" data-key="' + esc(key) + '"' +
+          (!canGo || !gateO.ready ? " disabled" : "") + ">" + (later ? H("Add to Queue") : H("Optimize Now")) + "</button>";
         // cover art is set when a file is first optimized; this brings optimized files in line with the choice and Plex now
         if (c.mkv && c.images !== "compress") act += " " + (qCov || runs("covers") ? badge("info", qCov ? T("Cover art sync queued") : T("Syncing cover art"))
           : '<button class="btn" type="button" data-act="optimize-covers" data-key="' + esc(key) + '"' +
@@ -1368,7 +1371,8 @@ PCI18N.ready.then(function () {
       out += '<p class="help">' + H("✓ The dataset {name} is created.", { name: temp }) + "</p>";
       out += migChecks(checks);
       var ready0 = checks.length && checks.every(function (c) { return c.ok; });
-      out += '<div style="margin-top:10px">' + btn("check", H("Check Again")) + btn("copy", H("Start Copying"), true, !ready0) + btn("cancel", H("Cancel")) + "</div>";
+      var gateM = readinessPanel(String(st.library), 0, "dataset", T("the old folder itself: set aside once the copy is checked, deleted only when you say"));
+      out += gateM.html + '<div style="margin-top:10px">' + btn("check", H("Check Again")) + btn("copy", H("Start Copying"), true, !ready0 || !gateM.ready) + btn("cancel", H("Cancel")) + "</div>";
     } else if (st.step === "create") {
       out += '<p class="help">' + H("Create the new dataset next to the folder, with these settings. It’s checked before anything is copied.") + "</p>";
       out += '<div class="fix"><strong>' + H("In the TrueNAS shell") + "</strong>" + cmdBox("sudo zfs create -o recordsize=" + rs + " -o compression=zstd " + shq(temp) + "\n" +
@@ -1442,20 +1446,26 @@ PCI18N.ready.then(function () {
     retrySig = sig;
   }
   function procFilesFetch(id, offset) {
-    api("/api/processes/files?job=" + encodeURIComponent(id) + "&offset=" + (offset || 0) + "&limit=200" + (procSort[id] ? "&sort=" + encodeURIComponent(procSort[id]) : "")).then(function (d) {
+    api("/api/processes/files?job=" + encodeURIComponent(id) + "&offset=" + (offset || 0) + "&limit=" + perPage() + (procSort[id] ? "&sort=" + encodeURIComponent(procSort[id]) : "")).then(function (d) {
       procFiles[id] = d; procOffset[id] = offset || 0; if (page === "processes") render();
     });
   }
   // The pages of a long list, each a span of what it holds ("A–Be"): the one open is plain text, the others open on a click.
   // At most PAGER_MAX spans around the open one; past them, Beginning and End reach the rest. Every paged list uses this.
-  var PAGER_MAX = 12, LIB_PAGE = 200;
+  var PAGER_MAX = 12;
+  function perPage() { return (S && S.general && S.general.page_size) || 200; }  // (System → Preferences)
+  // @testable: plainTitle — a title without the quote, apostrophe or bracket it opens with: how every list sorts and
+  // the page spans read (the server's copy: paging.plain)
+  function plainTitle(label) { return String(label == null ? "" : label).replace(/^[^\p{L}\p{N}_]+/u, ""); }
+  // @end
   // @testable: pageRanges — the spans of a list the page holds whole: as the server works them out (plexcache/paging.py)
   function pageRanges(labels, per) {
     var MAXP = 3, out = [];
+    var plain = function (l) { return String(l == null ? "" : l).replace(/^[^\p{L}\p{N}_]+/u, ""); };  // (plainTitle, held here so the function stands alone)
     var common = function (a, b) { a = a.toLowerCase(); b = b.toLowerCase(); var n = 0; while (n < a.length && n < b.length && a[n] === b[n]) n++; return n; };
     var cut = function (l, n) { var o = l.slice(0, Math.max(1, Math.min(n, MAXP))).replace(/\s+$/, ""); return o || l.slice(0, 1) || "…"; };
     var pages = [];
-    for (var off = 0; off < labels.length; off += per) pages.push({ offset: off, first: String(labels[off] || ""), last: String(labels[Math.min(off + per, labels.length) - 1] || "") });
+    for (var off = 0; off < labels.length; off += per) pages.push({ offset: off, first: plain(labels[off]), last: plain(labels[Math.min(off + per, labels.length) - 1]) });
     pages.forEach(function (p, i) {
       var kf = i ? common(pages[i - 1].last, p.first) + 1 : 1, kt = i + 1 < pages.length ? common(p.last, pages[i + 1].first) + 1 : 1;
       out.push({ offset: p.offset, from: cut(p.first, kf), to: cut(p.last, kt) });
@@ -1699,7 +1709,7 @@ PCI18N.ready.then(function () {
     if (!LIB.key) return;
     if (!force && LIB.data && LIB.data.library === LIB.key && Date.now() - LIB.at < 15000) return;
     LIB.at = Date.now();
-    api("/api/library?key=" + encodeURIComponent(LIB.key) + "&offset=" + LIB.offset + "&limit=200" + (LIB.q ? "&q=" + encodeURIComponent(LIB.q) : ""))
+    api("/api/library?key=" + encodeURIComponent(LIB.key) + "&offset=" + LIB.offset + "&limit=" + perPage() + (LIB.q ? "&q=" + encodeURIComponent(LIB.q) : ""))
       .then(function (d) {
         LIB.data = d;
         LIB.finishedSeen[d.library] = libJob(d.library).finished;  // (the inspection as it stood when these files were fetched)
@@ -2337,10 +2347,10 @@ PCI18N.ready.then(function () {
     if (warned) out += '<div class="note warn">' + H("{n} items would lose metadata: the source’s copy is unmatched with no description, while the other server’s is filled in. Those are marked below — check whether the source is the right server before anything is applied.", { n: fmtNum(warned) }) + "</div>";
     // which server is which, once, over the list (they're the comparison's: the same for every item)
     out += '<div class="sshdr"><div>' + H("Source: {name}", { name: srcName }) + '</div><div></div><div>' + H("Overwritten: {name}", { name: dstName }) + "</div></div>";
-    var spages = { pages: pageRanges((d.items || []).map(function (it) { return it.title; }), LIB_PAGE), total: (d.items || []).length };
+    var spages = { pages: pageRanges((d.items || []).map(function (it) { return it.title; }), perPage()), total: (d.items || []).length };
     if (LIB.syncOffset >= (d.items || []).length) LIB.syncOffset = 0;
     var soff = LIB.syncOffset;
-    out += (d.items || []).slice(soff, soff + LIB_PAGE).map(function (it, k) {
+    out += (d.items || []).slice(soff, soff + perPage()).map(function (it, k) {
       var i = soff + k;
       // the other server's edits the source doesn't have: applying would undo them — said under both sides
       var lost = it.changes.filter(function (c) { return c.kind === "edits" && /would be lost/.test(msg(c.to)); });
@@ -2385,7 +2395,7 @@ PCI18N.ready.then(function () {
         '<div class="ssarrow" aria-label="' + esc(T("copied to")) + '">' + (it.shape === "regroup" || it.shape === "extra" ? "" : "→") + "</div>" +
         stack(dsts, srcs[0] || null, mirrorIsSrc ? "" : "mirror", false, (it.tags || {}).dst, srcFiles) + fileNames + "</div>";
     }).join("");
-    out += pager(spages, soff, LIB_PAGE, 'data-act="sync-page"');
+    out += pager(spages, soff, perPage(), 'data-act="sync-page"');
     if ((d.items || []).length < n) out += '<p class="muted">' + H("The first {n} items shown.", { n: fmtNum((d.items || []).length) }) + "</p>";
     return out + syncApplyBar(key, d.items || [], sy) + syncLogCard(key);
   }
@@ -2447,10 +2457,10 @@ PCI18N.ready.then(function () {
       }).join("") + "</div>";
     }).join("") + "</div>";
     if (!shownItems.length) return out + '<p class="muted">' + H("Nothing flagged.") + "</p>";
-    var hpages = { pages: pageRanges(shownItems.map(function (it) { return it.label; }), LIB_PAGE), total: shownItems.length };
+    var hpages = { pages: pageRanges(shownItems.map(function (it) { return it.label; }), perPage()), total: shownItems.length };
     if (LIB.healthOffset >= shownItems.length) LIB.healthOffset = 0;
     var hoff = LIB.healthOffset;
-    shownItems = shownItems.slice(hoff, hoff + LIB_PAGE);
+    shownItems = shownItems.slice(hoff, hoff + perPage());
     // each item flagged as a record card — its poster, its name as Plex has it (title, year, edition) — with a chip per
     // issue on the right; a chip opened shows what the check found (the file concerned, when the item has several)
     out += '<div class="sshdr lhhdr"><div>' + H("Item") + "</div><div></div><div>" + H("Flagged") + "</div></div>";
@@ -2477,7 +2487,7 @@ PCI18N.ready.then(function () {
       return '<div class="ssitem lhitem' + (live.length ? "" : " lhquiet") + '"><div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(it.label) + '</div><div class="lhacts">' + acts + "</div></div></div></div>" +
         '<div class="ssarrow"></div><div class="lhflags"><div class="sschips">' + chips + "</div>" + shown + "</div></div>";
     }).join("");
-    out += pager(hpages, hoff, LIB_PAGE, 'data-act="lh-page"');
+    out += pager(hpages, hoff, perPage(), 'data-act="lh-page"');
     if ((d.items || []).length < (d.total || 0)) out += '<p class="muted">' + H("The first {n} shown.", { n: fmtNum(d.items.length) }) + "</p>";
     return out;
   }
@@ -2559,7 +2569,7 @@ PCI18N.ready.then(function () {
       if (openHere && !more) { out += '<tr class="ldrow"><td colspan="4">' + libDetail(openHere) + "</td></tr>"; openHere = null; }
     });
     out += "</tbody></table></div>";
-    out += pager(d, d.offset, LIB_PAGE, 'data-act="lib-page"');
+    out += pager(d, d.offset, perPage(), 'data-act="lib-page"');
     return out + "</section></div>";
   }
   var libTyping = null;
@@ -3633,8 +3643,18 @@ PCI18N.ready.then(function () {
     // ---- Media Mappings
     out += mappingsCard();
 
-    // ---- Updates
+    // ---- Preferences: lists, and what stands in for a snapshot before files change
     var g = S.general;
+    out += '<section class="card" id="prefs"><h2>' + H("Preferences") + '</h2><div class="grid">' +
+      number("general", "page_size", T("Entries per page"), 25, 1000, H("On the Library views, the Sync differences, a job’s files: a long list a page at a time, with the pages told by what’s on them.")) +
+      select("general", "backup", T("Backup before files change"), [["snapshot", T("A snapshot, taken through TrueNAS")], ["manual", T("A backup I make myself")], ["copies", T("The copies the action keeps")]],
+        { s: H("Before any action rewrites, moves or deletes files — the file tools, Optimize Now, Child Dataset — a recent snapshot of the library’s dataset must be in reach, or this stands in for it."),
+          more: H("<strong>A snapshot</strong> is the whole dataset as it is this minute, taken through TrueNAS when you press Take a Snapshot on the action’s page, named <code>plexcache-&lt;tool&gt;-&lt;library&gt;-&lt;time&gt;</code> and deleted by the app after the days set below. Needs TrueNAS connected with a key allowed to make snapshots (TrueNAS 24.10 and later).<br><br>" +
+          "<strong>A backup I make myself</strong>: you make one, and say so on the action’s page; it counts for half an hour.<br><br>" +
+          "<strong>The copies the action keeps</strong>: where an action sets files aside rather than deleting them (Duplicate Versions, Child Dataset), those are the backup. An action that keeps none asks for a snapshot or a backup instead.") }) +
+      number("general", "snapshot_days", T("Keep snapshots for (days)"), 1, 365, H("The snapshots the app takes are deleted after this long, by the app itself (TrueNAS keeps a snapshot for ever otherwise). Until then a snapshot holds the space the changed files took.")) +
+      "</div></section>";
+    // ---- Updates
     out += '<section class="card" id="updates"><h2>' + H("Updates") + '</h2>' +
       '<div class="chk" style="margin-top:8px">' + info(H("Every 6 hours the app asks GitHub for the branch’s newest finished build — a small download, nothing about your setup is sent — " +
         "and, when there’s a newer one, says so under the app’s name and in Home Assistant’s update entity. Check Now asks straight away; Update Now has TrueNAS pull it."), T("update check")) +
@@ -3869,7 +3889,7 @@ PCI18N.ready.then(function () {
       var ds = (ST.zfs.datasets || []).filter(function (d) { return d.dataset === l.dataset || d.mountpoint === l.dataset; })[0];
       if (!pending && !excluded && l.status === "ok" && ds) {
         var pc = ds.props && ds.props.primarycache;
-        detail = pc && pc !== "all" ? T("On {dataset} — primarycache={value}, so it can’t be cached until that’s fixed (see Health).", { dataset: ds.dataset, value: pc }) : T("On {dataset}", { dataset: ds.dataset });
+        detail = pc && pc !== "all" ? T("On {dataset} — primarycache={value}, so it can’t be cached until that’s fixed ([see Health](/health#datasets)).", { dataset: ds.dataset, value: pc }) : T("On {dataset}", { dataset: ds.dataset });
         if (pc && pc !== "all") st = "warn";
       }
       // One tick box and name per library, spanning all of its folders.
@@ -3892,20 +3912,21 @@ PCI18N.ready.then(function () {
 
   // --------------------------------------------------------------- render
   var PAGES = { health: pageHealth, caching: pageCaching, ssd: pageSsd, library: pageLibrary, tools: pageTools, optimizer: pageOptimizer, convert: pageConvert, dataset: pageDataset,
-    merge: pageMerge, versions: pageVersions, folders: pageFolders, processes: pageProcesses, sync: pageSync, activity: pageActivity, system: pageSystem };
+    merge: pageMerge, versions: pageVersions, folders: pageFolders, unlink: pageUnlink, processes: pageProcesses, sync: pageSync, activity: pageActivity, system: pageSystem };
   // the tools, under the Tools entry in the menu: [page, name, what it does]
   var TOOLS = [
     ["optimizer", N("Optimizer"), N("Rewrites media files so they suit caching: the dataset’s record size and compression, and MKV files laid out with their metadata at the end.")],
     ["convert", N("Convert to MKV"), N("Converts other containers (AVI, MPEG-TS, VOB…) to MKV when nothing in them would be lost, and sees the new file into Plex on every server before the original goes.")],
-    ["dataset", N("Convert Folder to Child Dataset"), N("Turns a library folder into a dataset of its own, at the same path, with the record size that suits it.")],
+    ["dataset", N("Convert Folder to Child Dataset"), N("Turns a library folder into a dataset of its own, at the same path, with the record size that suits it."), N("Child Dataset")],
     ["merge", N("Merge Duplicates"), N("Finds the same film on several Plex records and makes them versions of one, keeping its edits, poster and watched state. No file is touched.")],
     ["versions", N("Duplicate Versions"), N("Where one Plex item holds the same file twice, removes the extra copy — the file and Plex’s part — after a hold.")],
-    ["folders", N("Organize Folders"), N("Moves loose files into a folder of their own, and renames folders to Title (Year) {edition}, without Plex losing anything.")]];
-  var TOOL_PAGES = { optimizer: 1, convert: 1, dataset: 1, merge: 1, versions: 1, folders: 1 };
+    ["folders", N("Organize Folders"), N("Moves loose files into a folder of their own, and renames folders to Title (Year) {edition}, without Plex losing anything.")],
+    ["unlink", N("Unlink Files"), N("Replaces hard links and symlinks with files of their own — the same bytes — so synced folders match everywhere and the duplicate tools can tidy them safely.")]];
+  var TOOL_PAGES = { optimizer: 1, convert: 1, dataset: 1, merge: 1, versions: 1, folders: 1, unlink: 1 };
   function toolsNav(current) {
     return '<div class="lctl" style="margin-bottom:14px"><div class="seg small" role="tablist" aria-label="' + H("Tools") + '">' +
       '<a role="tab" href="/tools" data-nav aria-selected="' + (current === "tools") + '">' + H("All tools") + "</a>" +
-      TOOLS.map(function (t) { return '<a role="tab" href="/' + t[0] + '" data-nav aria-selected="' + (current === t[0]) + '">' + esc(T(t[1])) + "</a>"; }).join("") + "</div></div>";
+      TOOLS.map(function (t) { return '<a role="tab" href="/' + t[0] + '" data-nav aria-selected="' + (current === t[0]) + '">' + esc(T(t[3] || t[1])) + "</a>"; }).join("") + "</div></div>";
   }
   function pageTools() {
     var out = top(T("Tools"), H("What Plex Cache can do to your library beyond caching it. Each tool has a page of its own; none changes anything until you ask it to."), "");
@@ -3915,7 +3936,7 @@ PCI18N.ready.then(function () {
     return out;
   }
   // ---- the tools that scan a library and do the rows you tick (tools/): Merge Duplicates, Duplicate Versions, Organize Folders
-  var TOOL = { merge: { key: null, sel: {}, opts: {}, confirm: false, keep: {} }, versions: { key: null, sel: {}, opts: {}, confirm: false }, folders: { key: null, sel: {}, opts: {}, confirm: false } };
+  var TOOL = { merge: { key: null, sel: {}, opts: {}, confirm: false, keep: {} }, versions: { key: null, sel: {}, opts: {}, confirm: false }, folders: { key: null, sel: {}, opts: {}, confirm: false }, unlink: { key: null, sel: {}, opts: {}, confirm: false } };
   function toolState(name) { return ((ST.tools || {})[name]) || { results: [], extra: {} }; }
   // the library tabs: the ones the tool can work on
   function toolLibs(name, types) {
@@ -3926,11 +3947,26 @@ PCI18N.ready.then(function () {
       return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(u.key)) + '" data-act="tool-lib" data-tool="' + name + '" data-key="' + esc(l.key) + '">' + libIcon(l.key) + esc(l.title) + "</button>";
     }).join("") + "</div></div>";
   }
-  // what's running: the scan, or the rows being done (which one, which step)
+  // whether the tool is scanning this library: said by the server, or asked for from this page and not yet answered
+  // (a scan is kicked off, then the state read: the page says Scanning… across that gap too)
+  function toolScanning(name, t) {
+    var u = TOOL[name];
+    if (t.running && t.progress && t.progress.what === "scan") return true;
+    if (!u.scanAt) return false;
+    if ((t.error_at || 0) >= u.scanAt || (t.scan && String(t.scan.library) === String(u.key) && (t.scan.at || 0) >= u.scanAt)) { u.scanAt = 0; return false; }
+    return Date.now() / 1000 - u.scanAt < 120;
+  }
+  // what's running: the scan (how far, where the tool counts), or the rows being done (which one, which step)
   function toolRun(t) {
     var pg = t.progress;
     if (!t.running || !pg) return "";
-    if (pg.what === "scan") return '<div class="migprog"><div class="what">' + H("Scanning…") + '</div><div class="det">' + H("Reading the library from Plex (and the mirrored server’s, if one is watched).") + "</div></div>";
+    if (pg.what === "scan") {
+      var spct = pg.total ? Math.round(100 * (pg.done || 0) / pg.total) : null;
+      return '<div class="migprog"><div class="what">' + H("Scanning…") + '</div><div class="det">' + H("Reading the library from Plex (and the mirrored server’s, if one is watched).") +
+        (spct != null ? " " + H("{done} of {total} · {pct}%", { done: fmtNum(pg.done || 0), total: fmtNum(pg.total), pct: spct }) : "") + "</div>" +
+        (spct != null ? '<div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + spct + '"><div style="width:' + spct + '%"></div></div>'
+          : '<div class="meter thin busy" role="progressbar" aria-busy="true"><div></div></div>') + "</div>";
+    }
     var pct = pg.total ? Math.round(100 * pg.done / pg.total) : 0;
     return '<div class="migprog"><div class="what">' + H("Applying…") + '</div><div class="det">' + H("{done} of {total} · {pct}%", { done: fmtNum(pg.done), total: fmtNum(pg.total), pct: pct }) + "</div>" +
       (pg.row ? '<div class="det">' + esc(pg.row) + (pg.step ? ' <span class="muted">(' + esc(msg(pg.step)) + ")</span>" : "") + "</div>" : "") +
@@ -3938,11 +3974,12 @@ PCI18N.ready.then(function () {
   }
   // the Scan button (with a tool's own options before it), and what the last scan found
   function toolScanBar(name, t, optsHtml) {
-    var sc = t.scan, u = TOOL[name], mine = sc && String(sc.library) === String(u.key);
+    var sc = t.scan, u = TOOL[name], mine = sc && String(sc.library) === String(u.key), scanning = toolScanning(name, t);
     return '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap">' + (optsHtml || "") +
-      '<button class="btn" type="button" data-act="tool-scan" data-tool="' + name + '"' + (t.running ? " disabled" : "") + ">" + (mine ? H("Scan Again") : H("Scan")) + "</button>" +
-      (mine ? '<span class="det">' + H("Scanned {when}", { when: ago(sc.at) }) + "</span>" : "") + "</div>" +
-      (t.error ? '<p class="bad">' + esc(msg(t.error)) + "</p>" : "");
+      '<button class="btn" type="button" data-act="tool-scan" data-tool="' + name + '"' + (t.running || scanning ? " disabled" : "") + ">" + (scanning ? H("Scanning…") : mine ? H("Scan Again") : H("Scan")) + "</button>" +
+      (mine && !scanning ? '<span class="det">' + H("Scanned {when}", { when: ago(sc.at) }) + "</span>" : "") + "</div>" +
+      (scanning && !(t.running && t.progress) ? '<div class="migprog"><div class="meter thin busy" role="progressbar" aria-busy="true"><div></div></div></div>' : "") +
+      (t.error && !scanning ? '<p class="bad">' + esc(msg(t.error)) + "</p>" : "");
   }
   // a tool scans the library opened by itself, once (Scan Again for more): what toolAutoPlan says
   function toolAutoScan(name) {
@@ -3950,8 +3987,8 @@ PCI18N.ready.then(function () {
     if (!u.key) return;
     u.tried = u.tried || {};
     if (toolAutoPlan(u.key, t, u.tried) === "scan") {
-      u.tried[u.key] = true;
-      api("/api/tools/" + name, { action: "scan", library: u.key, options: u.opts }).then(function () { load(); }).catch(function () {});
+      u.tried[u.key] = true; u.scanAt = Date.now() / 1000;
+      api("/api/tools/" + name, { action: "scan", library: u.key, options: u.opts }).then(function () { load(); }).catch(function () { u.scanAt = 0; });
     }
   }
   // @testable: toolAutoPlan — pure: what a tool page does by itself for library `key`. "scan" when the
@@ -3963,17 +4000,61 @@ PCI18N.ready.then(function () {
   }
   // @end
   // the rows to tick, and the Apply button: a confirmation first, since the tool then acts on your library
+  // Before files change: two lights — room for what's written, and a recent snapshot (or a backup you made) — both
+  // green (or grey) before Apply opens. The tools that change files (peers.py FILE_TOOLS) and what each writes.
+  var FILE_TOOLS = { versions: function (rows) { return 0; }, folders: function (rows) { return 0; }, unlink: function (rows) { return rows.reduce(function (a, r) { return a + (r.size || 0); }, 0); } };
+  var READY = {};  // "key/needed" -> {at, data}
+  // The lights before anything changes files, the same everywhere, and what the Backup preference (System → Preferences)
+  // puts in for a snapshot when there's none: Take a Snapshot (named for what it's for, kept the days set there), a backup
+  // you've made and say so, or — where the action keeps copies of its own (`keeps`, a tool's text for them) — those, by
+  // themselves. Every one is said here with a link to change it; a snapshot that couldn't be taken stays said until the
+  // next one is, or it's dismissed. `tool` names the snapshot. {ready, html}.
+  function readinessPanel(key, needed, tool, keeps) {
+    var id = key + "/" + needed + "/" + (keeps ? 1 : 0), got = READY[id];
+    if (!got || Date.now() - got.at > 20000) {
+      READY[id] = got = { at: Date.now(), data: got ? got.data : null };
+      api("/api/tools/readiness?key=" + encodeURIComponent(key) + "&needed=" + encodeURIComponent(needed) + (keeps ? "&keeps=1" : "")).then(function (d) { READY[id].data = d; render(); }).catch(function () {});
+    }
+    var d = got.data;
+    if (!d) return { ready: false, html: loadingBar(T("Checking room and snapshots…")) };
+    var change = " " + H("Change it in <a href=\"/system#prefs\" data-nav>System → Preferences</a>.");
+    var how = d.backup === "manual" ? H("<strong>Backup:</strong> one you make yourself, and say so here.")
+      : d.backup === "copies" ? (keeps ? H("<strong>Backup:</strong> the copies this keeps — {what}.", { what: msg(keeps) }) : H("<strong>Backup:</strong> the copies an action keeps — but this one keeps none, so it needs a snapshot or a backup you’ve made."))
+      : H("<strong>Backup:</strong> a ZFS snapshot taken through TrueNAS, named <code>plexcache-{tool}-{library}-{time}</code> and deleted by the app after <strong>{n} days</strong>.", { n: d.life_days, tool: tool || "tool", library: "library", time: "date" });
+    var about = info(H("<strong>A snapshot</strong> is the whole dataset as it is this minute, taken through TrueNAS when you press Take a Snapshot and named for what it’s for, so you can tell it apart in TrueNAS → Datasets → Snapshots. The app deletes it after <strong>{n} days</strong> (the days are yours to set in <a href=\"/system#prefs\" data-nav>System → Preferences</a>): check the result before then, and roll back or restore from it if something went wrong. Until then it holds the space the changed files took.<br><br>" +
+      "<strong>A backup you’ve made</strong> says you have one elsewhere; it counts for half an hour.<br><br>" +
+      "<strong>The copies an action keeps</strong> are its own: files it sets aside rather than deletes, kept for the hold and put back from its page. Not every action keeps some; one that doesn’t asks for a snapshot or a backup instead.<br><br>" +
+      "Which stands in for a snapshot is set once, in <a href=\"/system#prefs\" data-nav>System → Preferences</a>, for every action that changes files.", { n: d.life_days }), T("Backup"));
+    var acts = "";
+    if (d.snapshot.status === "warn") {
+      var wantSnap = d.backup === "snapshot" || (d.backup === "copies" && !keeps);
+      if (wantSnap && d.can_snapshot) acts += '<button class="btn" type="button" data-act="tool-backup" data-how="snapshot" data-key="' + esc(key) + '" data-tool="' + esc(tool || "") + '">' + H("Take a Snapshot") + "</button> ";
+      if (wantSnap && !d.can_snapshot) acts += '<span class="det">' + H("Snapshots are taken through the TrueNAS API: connect it in <a href=\"/system#truenas\" data-nav>System → TrueNAS</a> with a key allowed to make snapshots — or say you’ve made a backup:") + "</span> ";
+      if (d.backup !== "snapshot" || !d.can_snapshot) acts += '<button class="btn" type="button" data-act="tool-backup" data-how="manual" data-key="' + esc(key) + '">' + H("I’ve Made a Backup") + "</button>";
+    }
+    var err = d.error ? '<div class="det bad">' + links(msg(d.error.text)) + ' <button class="link" type="button" data-act="tool-backup" data-how="dismiss" data-key="' + esc(key) + '">' + H("Dismiss") + "</button></div>" : "";
+    var html = '<div class="lights ready">' + light(d.space.status, T("Room for it"), msg(d.space.text), false) +
+      light(d.snapshot.status, T("A recent snapshot"), msg(d.snapshot.text), false) +
+      '<div class="det fallback">' + about + "<span>" + how + change + "</span></div>" + (acts ? '<div class="det fallback">' + acts + "</div>" : "") + err + "</div>";
+    return { ready: !!d.ready, html: html };
+  }
+  function readiness(name, key, rows) {
+    return readinessPanel(key, FILE_TOOLS[name](rows), name, (toolState(name) || {}).keeps);
+  }
   function toolApply(name, t, rows, what) {
     var u = TOOL[name], n = rows.filter(function (r) { return u.sel[r.id]; }).length;
     if (!rows.length) return "";
     var all = rows.every(function (r) { return u.sel[r.id]; });
-    var out = '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px"><label class="det"><input type="checkbox" data-act="tool-all" data-tool="' + name + '"' + (all ? " checked" : "") + "> " + H("All") + "</label>";
+    var gate = FILE_TOOLS[name] ? readiness(name, u.key, rows.filter(function (r) { return u.sel[r.id]; })) : { ready: true, html: "" };
+    var out = gate.html + '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px"><label class="det"><input type="checkbox" data-act="tool-all" data-tool="' + name + '"' + (all ? " checked" : "") + "> " + H("All") + "</label>";
+    if (!gate.ready) u.confirm = false;
     if (u.confirm && n) {
       out += '<span>' + esc(what(n)) + "</span>" +
         '<button class="btn pri" type="button" data-act="tool-apply-yes" data-tool="' + name + '">' + H("Yes, Do It") + "</button>" +
         '<button class="btn" type="button" data-act="tool-apply-no" data-tool="' + name + '">' + H("Cancel") + "</button>";
     } else {
-      out += '<button class="btn pri" type="button" data-act="tool-apply" data-tool="' + name + '"' + (!n || t.running ? " disabled" : "") + ">" + H("Apply to {n} Selected", { n: fmtNum(n) }) + "</button>";
+      out += '<button class="btn pri" type="button" data-act="tool-apply" data-tool="' + name + '"' + (!n || t.running || !gate.ready ? " disabled" : "") + ">" + H("Apply to {n} Selected", { n: fmtNum(n) }) + "</button>" +
+        (!gate.ready && n ? ' <span class="det">' + H("Apply opens once both lights above are green.") + "</span>" : "");
     }
     return out + "</div>";
   }
@@ -4019,10 +4100,11 @@ PCI18N.ready.then(function () {
         return '<div class="mgdrop">' + syncSide(x, keep, "", false, kinds, act, openId, null, fidx, keep.files || []) + "</div>";
       };
       var cards = rights.map(card);
+      var linkNote = (r.linked || []).length ? ' <span title="' + H("{files}: a link (a hard link or symlink). Merging records whose files are links is risky where folders are synced — the other site holds copies, not links, and a merge there would go differently. Make each a file of its own first (Unlink Files) and let every synced library catch up.", { files: r.linked.map(function (l) { return l.name; }).join(", ") }) + '">' + badge("warn", T("Linked file")) + "</span>" : "";
       var why = badge("info", r.why === "file" ? T("The same file") : r.why === "matched" ? T("Same match") : T("Named alike"));
       var lost = kinds.filter(function (k) { return k !== "match"; }).length;
       return '<div class="ssitem lhitem"><div class="sstop"><span class="what">' + toolCheck("merge", r) + " " + esc(r.title) + "</span><span class=\"sswarn\">" + why +
-        (lost ? ' <span title="' + H("A folded record has edits, a poster or collections of its own: Plex keeps only the kept record’s. Open the chips to see what goes.") + '">' + badge("warn", T("Edits lost")) + "</span>" : "") + "</span></div>" +
+        (lost ? ' <span title="' + H("A folded record has edits, a poster or collections of its own: Plex keeps only the kept record’s. Open the chips to see what goes.") + '">' + badge("warn", T("Edits lost")) + "</span>" : "") + linkNote + "</span></div>" +
         card(left) +
         '<button type="button" class="ssarrow mgarrow" data-act="merge-swap" data-id="' + esc(r.id) + '" title="' + H("Keep the other record’s metadata instead") + '"><span>' + (keptLeft ? "←" : "→") + "</span></button>" + (cards.length > 1 ? '<div class="ssstack">' + cards.join("") + "</div>" : cards[0]) +
         '<div class="ssnotes ssfilelist"><div class="ssfiles many">' + files.map(function (f) { return "<div><span class=\"ssfn\">" + fidx[f] + "</span> " + esc(f) + "</div>"; }).join("") + "</div></div></div>";
@@ -4103,6 +4185,30 @@ PCI18N.ready.then(function () {
     return out + "</section>" + trashList() + toolResults(t) + "</div>";
   }
   var FOLDERS_HELP = N("Plex recommends each film in a folder of its own, named <code>Title (Year)</code> — with <code>{edition-…}</code> for an edition, and <code>{tmdb-…}</code> only when two films share a title and year. This moves loose files (in the library folder itself) into such folders, with their subtitles and artwork; with Clean Up, it also renames a film’s folder whose name doesn’t carry the title and year (a folder you named, with both in it, is left as it is).<br><br>Plex loses nothing: each file is first given its new path (a hard link — the same file, nothing copied), Plex asked to scan the new folder, the record it makes for it merged into the original (edits, poster and watched state kept), and only then the old path removed. With a mirrored server, the synced folder carries the change there and the same merge is done there once its Plex has the new path.");
+  var UNLINK_HELP = N("A hard link is one file under two paths; a symlink is a path that points at another. Plex lists only one of two paths to the same bytes, so a linked copy never shows there. Syncthing can’t carry a hard link at all: the other site gets two whole, separate copies, and once either changes the two sites no longer hold the same thing. A symlink is carried as a link, and dangles on the other side when its target isn’t in the synced folder. This tool makes each linked file a file of its own under the same path — the bytes copied beside it and swapped in, the dates kept, so Plex and the folder sync see the same file. Once every site holds plain files, Merge Duplicates and Duplicate Versions can tidy the copies safely.");
+  function pageUnlink() {
+    var t = toolState("unlink"), out = top(T("Unlink Files"), H("Hard links and symlinks among your media made files of their own, so synced folders match everywhere."), "");
+    out += '<div class="stack">' + toolsNav("unlink") + '<section class="card">' + heading(esc(T("Find Linked Files")), UNLINK_HELP) +
+      '<p class="help">' + H("Why: a link looks like a second file to you but not to Plex, and not to the folder sync, which turns it into separate copies at the other site. Making each a file of its own puts every site on the same footing; then the duplicate tools can remove the extra copies the same way everywhere.") + "</p>" +
+      toolLibs("unlink") + toolScanBar("unlink", t) + toolRun(t);
+    toolAutoScan("unlink");
+    var sc = toolRows("unlink", t);
+    if (sc) {
+      out += '<div class="det" style="margin:8px 0">' + esc(P(sc.total, "{n} linked file", "{n} linked files", { n: fmtNum(sc.total) })) + "</div>";
+      if (!sc.rows.length) out += '<p class="muted">' + H("No links: every file is a file of its own.") + "</p>";
+      else {
+        out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">' + H("Item") + '</th><th scope="col">' + H("File") + '</th><th scope="col">' + H("Link") + "</th></tr></thead><tbody>" +
+          sc.rows.map(function (r) {
+            var what = r.kind === "symlink" ? H("Symlink → {target}", { target: r.target }) : esc(P(r.links, "{n} path to one file", "Hard link: {n} paths to one file", { n: r.links }));
+            return "<tr><td>" + toolCheck("unlink", r) + '</td><td><div class="row" style="gap:8px;align-items:center">' + posterImg(r.poster) + "<span>" + esc(r.title) + "</span></div></td>" +
+              '<td class="mono det">' + esc(r.name) + '<div class="det">' + fmtBytes(r.size) + "</div></td><td>" + badge("warn", r.kind === "symlink" ? T("Symlink") : T("Hard link")) + '<div class="det">' + what + "</div></td></tr>";
+          }).join("") + "</tbody></table></div>";
+        out += toolApply("unlink", t, sc.rows, function (n) { return P(n, "Make {n} linked file a file of its own? Its bytes are copied under the same path; nothing else changes.", "Make {n} linked files files of their own? Their bytes are copied under the same paths; nothing else changes.", { n: n }); });
+        if (sc.mirror) out += '<p class="help">' + H("{name} is watched: once its folder has caught up, run the same there, then tidy the copies with Duplicate Versions on each side.", { name: sc.mirror.name }) + "</p>";
+      }
+    }
+    return out + "</section>" + toolResults(t) + "</div>";
+  }
   function pageFolders() {
     var t = toolState("folders"), u = TOOL.folders, out = top(T("Organize Folders"), H("Each film in a folder of its own, named as Plex recommends — without Plex losing its edits, poster or watched state."), "");
     out += '<div class="stack">' + toolsNav("folders") + '<section class="card">' + heading(esc(T("Find Files to Move")), FOLDERS_HELP) +
@@ -4197,7 +4303,7 @@ PCI18N.ready.then(function () {
       if (sub.hidden !== !onTools) sub.hidden = !onTools;
       if (onTools && sub.dataset.for !== page) {
         sub.dataset.for = page;
-        sub.innerHTML = TOOLS.map(function (t) { return '<a class="subnav' + (page === t[0] ? " on" : "") + '" href="/' + t[0] + '" data-nav' + (page === t[0] ? ' aria-current="page"' : "") + ">" + esc(T(t[1])) + "</a>"; }).join("");
+        sub.innerHTML = TOOLS.map(function (t) { return '<a class="subnav' + (page === t[0] ? " on" : "") + '" href="/' + t[0] + '" data-nav' + (page === t[0] ? ' aria-current="page"' : "") + ">" + esc(T(t[3] || t[1])) + "</a>"; }).join("");
       }
     }
     var dot = document.getElementById("dot-health");
@@ -4528,7 +4634,7 @@ PCI18N.ready.then(function () {
     else if (act === "optimize-cancel") { OPT_CONFIRM = null; render(); }
     else if (act === "optimizer-check") {
       el.disabled = true;
-      api("/api/optimizer/check", {}).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+      api("/api/optimizer/check", {}).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "updates-apply") {
       el.disabled = true;
@@ -4556,28 +4662,36 @@ PCI18N.ready.then(function () {
     else if (act === "tool-scan") {
       el.disabled = true;
       var su = TOOL[el.dataset.tool];
-      su.sel = {}; su.confirm = false; (su.tried = su.tried || {})[su.key] = true;
-      api("/api/tools/" + el.dataset.tool, { action: "scan", library: su.key, options: su.opts }).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+      su.sel = {}; su.confirm = false; (su.tried = su.tried || {})[su.key] = true; su.scanAt = Date.now() / 1000;
+      render();
+      api("/api/tools/" + el.dataset.tool, { action: "scan", library: su.key, options: su.opts }).then(function () { load(); }).catch(function (e) { su.scanAt = 0; toast(e.message, true); load(); });
     }
     else if (act === "tool-apply") { TOOL[el.dataset.tool].confirm = true; render(); }
+    else if (act === "tool-backup") {  // a snapshot taken, a backup you say you've made, or the last error dismissed
+      var how = el.dataset.how;
+      el.disabled = true;
+      if (how === "snapshot") el.textContent = T("Taking the snapshot…");
+      api("/api/tools/snapshot", { library: el.dataset.key, action: how === "snapshot" ? "take" : how === "dismiss" ? "dismiss" : "ack", how: how, tool: el.dataset.tool })
+        .then(function () { READY = {}; render(); }).catch(function (e) { READY = {}; toast(e.message, true); render(); });
+    }
     else if (act === "tool-apply-no") { TOOL[el.dataset.tool].confirm = false; render(); }
     else if (act === "tool-apply-yes") {
       el.disabled = true;
       var au = TOOL[el.dataset.tool], ids = Object.keys(au.sel).filter(function (k) { return au.sel[k]; }), choices = {};
       ids.forEach(function (id) { if (au.keep && au.keep[id]) choices[id] = { keep_key: au.keep[id] }; });
       au.sel = {}; au.confirm = false;
-      api("/api/tools/" + el.dataset.tool, { action: "apply", ids: ids, choices: choices }).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+      api("/api/tools/" + el.dataset.tool, { action: "apply", ids: ids, choices: choices }).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "trash") {
       // a file a tool set aside: deleted now, put back, or kept set aside (trash.py)
       el.disabled = true;
-      api("/api/trash", { path: el.dataset.path, action: el.dataset.trash }).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+      api("/api/trash", { path: el.dataset.path, action: el.dataset.trash }).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "conv") {
       // a converted file's original: delete now, keep both, or ask Plex again (converting.py)
       el.disabled = true;
       api("/api/conversions", { original: el.dataset.orig, action: el.dataset.conv }).then(function () { load(); })
-        .catch(function (e) { toast(e.message); load(); });
+        .catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "optimize-covers") {
       api("/api/optimize/library", { library: el.dataset.key, mode: "covers" }).then(function (r) {
@@ -4591,7 +4705,7 @@ PCI18N.ready.then(function () {
       MIG_CONFIRM_DELETE = false;
       el.disabled = true;
       api("/api/migration", { action: m, library: el.dataset.lib, folder: el.dataset.folder })
-        .then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+        .then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "queue-remove") {
       el.disabled = true;
@@ -4631,7 +4745,7 @@ PCI18N.ready.then(function () {
     else if (act === "sync-start") {
       el.disabled = true;
       LIB.hold.sync[el.dataset.key] = false;
-      api("/api/sync/start", { library: el.dataset.key, force: !!el.dataset.force }).then(function () { LIB.diff = {}; load(); }).catch(function (e) { toast(e.message); load(); });
+      api("/api/sync/start", { library: el.dataset.key, force: !!el.dataset.force }).then(function () { LIB.diff = {}; load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "sync-field") {
       var fk = el.dataset.key + "/" + el.dataset.i;
@@ -4655,20 +4769,20 @@ PCI18N.ready.then(function () {
       el.disabled = true;
       var sk = el.dataset.key, ssel = SYNC_SEL[sk] || {}, sids = Object.keys(ssel).filter(function (k) { return ssel[k]; });
       SYNC_SEL[sk] = {}; SYNC_CONFIRM = false;
-      api("/api/sync/apply", { library: sk, ids: sids }).then(function () { LIB.diff = {}; load(); }).catch(function (e) { toast(e.message); load(); });
+      api("/api/sync/apply", { library: sk, ids: sids }).then(function () { LIB.diff = {}; load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "sync-undo") {
       el.disabled = true;
-      api("/api/sync/undo", { id: el.dataset.id }).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+      api("/api/sync/undo", { id: el.dataset.id }).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "sync-compare" || act === "sync-discover" || act === "sync-approve") {
       el.disabled = true;
-      api("/api/" + act.replace("-", "/"), {}).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+      api("/api/" + act.replace("-", "/"), {}).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "plex2-use-found") {  // a server found by discovery: watched (its addresses tried again), and chosen as the mirror
       el.disabled = true;
       api("/api/plex2/servers", {}).then(function () { return api("/api/plex2/use", { id: el.dataset.id }); })
-        .then(function () { queueSave("sync", "mirrors", "plex2", true); load(); }).catch(function (e) { toast(e.message); load(); });
+        .then(function () { queueSave("sync", "mirrors", "plex2", true); load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "lib-tab") {
       // the library opened inspects its files (pausing the one before, which carries on when it's opened again)
@@ -4733,7 +4847,7 @@ PCI18N.ready.then(function () {
     }
     else if (act === "plex2-refresh" || act === "plex2-forget") {
       el.disabled = true;
-      api("/api/" + act.replace("-", "/"), {}).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+      api("/api/" + act.replace("-", "/"), {}).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
   }
 

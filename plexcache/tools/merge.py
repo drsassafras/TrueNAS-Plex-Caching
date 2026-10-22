@@ -16,12 +16,15 @@ a mirrored server (no file is touched), so its own duplicates are its own matter
 
 from __future__ import annotations
 
+import os
 import re
 
 from ..i18n import M
 from ..libhealth import file_title_year
 from ..sync import _compare_pair, side
 from . import MAX_ROWS, Tool
+from .unlink import link_kind
+from ..paging import sort_key
 
 TOP_TYPE = {"movie": 1, "show": 2}  # the records that get duplicated: films, and shows
 LEN_PCT, LEN_SECS = 4, 30  # running times may differ this much (whichever is more) and still be one film
@@ -143,16 +146,25 @@ class MergeDuplicates(Tool):
         leaf = TOP_TYPE[lib["type"]]
         recs = self.app.plex(timeout=120).library_items(lib["key"], leaf)
         rows = []
-        for why, cluster in clusters(recs):
+        found = clusters(recs)
+        for i, (why, cluster) in enumerate(found):
+            if i % 20 == 0:
+                self.step(i, len(found))
             cluster.sort(key=keep_rank, reverse=True)
             keep, others = cluster[0], cluster[1:]
             kinds: list[str] = []
             changes: list[dict] = []
             for o in others:  # what the folded records have that the kept one hasn't: lost in the merge
                 _compare_pair(o, keep, WHAT, lambda kind, _a, frm, to, _b=None: (kinds.append(kind) if kind not in kinds else None, changes.append({"kind": kind, "from": str(frm), "to": str(to)})))
+            linked = []  # files of these records that are links: merging them is unsafe until each is a file of its own
+            for rec in cluster:
+                for path, _ in rec.get("files") or []:
+                    k, n, _t = link_kind(self.app.map_path(path))
+                    if k:
+                        linked.append({"name": os.path.basename(path), "kind": k, "links": n})
             rows.append({"id": "rec:" + keep["key"], "library": str(library), "title": keep.get("label") or keep.get("title"),
-                         "why": why, "keep": side(keep), "others": [side(o) for o in others], "kinds": kinds, "changes": changes})
-        rows.sort(key=lambda r: str(r["title"]).lower())
+                         "why": why, "keep": side(keep), "others": [side(o) for o in others], "kinds": kinds, "changes": changes, "linked": linked})
+        rows.sort(key=lambda r: sort_key(r["title"]))
         return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(recs)}
 
     def apply_row(self, row: dict, log) -> dict:

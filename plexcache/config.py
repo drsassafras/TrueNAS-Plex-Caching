@@ -52,6 +52,12 @@ DEFAULTS: dict = {
     "general": {
         "poll_seconds": 5,
         "update_check": True,  # ask GitHub every few hours whether there's a newer version
+        "page_size": 200,      # entries on a page of a long list (the Library views, a job's files)
+        # Before anything changes files (safety.py): what stands in for a backup when there's no recent snapshot —
+        # "snapshot": one taken through TrueNAS when you press the button (kept snapshot_days, then deleted by the app);
+        # "manual": a backup you make yourself and say so; "copies": the copies the action keeps of its own, where it does.
+        "backup": "snapshot",
+        "snapshot_days": 14,
         "hdd_mb_per_sec": 150,
         "hdd_measured_at": None,
         # Measured uncached read speed per dataset (or mount, when it isn't ZFS):
@@ -195,12 +201,15 @@ LIMITS = {
     ("optimizer", "convert_hold_days"): (0, 90),
     ("sync", "compare_hours"): (1, 168),
     ("sync", "ask_over"): (1, 1000),
+    ("general", "page_size"): (25, 1000),
+    ("general", "snapshot_days"): (1, 365),
 }
 AUTO = -1  # a cooldown worked out from what's been measured (cachelog.CacheLog.auto_cooldown)
 COOLDOWN_RAM = (AUTO, 0, 10, 30, 60, 120, 180, 240, 360, 720)                    # minutes
 COOLDOWN_L2ARC = (AUTO, 0, 10, 60, 180, 360, 720, 1440, 2880, 4320, 10080)
 CHOICES = {
     ("general", "poll_seconds"): (3, 5, 10, 30),
+    ("general", "backup"): ("snapshot", "manual", "copies"),
     # 0 and 10 minutes: next to no cooldown, to collect re-reads for "How Long Cached Data Lasts"
     ("general", "ram_cooldown_lead_in_minutes"): COOLDOWN_RAM,
     ("general", "ram_cooldown_whole_minutes"): COOLDOWN_RAM,

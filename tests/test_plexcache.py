@@ -1748,6 +1748,10 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.post("/api/optimize/library", {"library": "999"})[0], 400)
         key = app.libraries[0]["key"]
         self.assertEqual(self.post("/api/optimize/library", {"library": key, "mode": "x"})[0], 400)
+        # optimizing follows the same formula as the file tools: without a recent snapshot or a backup, it does not start
+        self.assertEqual(self.post("/api/optimize/library", {"library": key})[0], 400)
+        from plexcache import safety
+        safety.acknowledge_backup(app, key)
         self.assertEqual(self.post("/api/optimize/library", {"library": key}), (200, {"started": False, "queued": False}))
         self.assertEqual(self.post("/api/optimizer/check", {})[0], 200)
         # the folder move: with none in progress, each step says why it can't (never a server error)
@@ -4348,6 +4352,28 @@ class PageStructureTests(unittest.TestCase):
         self.assertEqual(page_ranges(["x"], 10), [{"offset": 0, "from": "x", "to": "x"}])
         self.assertEqual(page_ranges([], 10), [])
         self.assertEqual(page_ranges(["", "b"], 1)[0]["from"], "…")
+        # a title's opening quote, apostrophe or bracket doesn't sort it, nor open a span: 'Twas the Night… is a T
+        from plexcache.paging import plain, sort_key
+        titles = ["'Twas the Night Before Christmas (1974)", "10,000 BC (2008)", "Alpha", "(500) Days of Summer", "“Quoted”", "zed"]
+        self.assertEqual(sorted(titles, key=sort_key), ["10,000 BC (2008)", "(500) Days of Summer", "Alpha", "“Quoted”", "'Twas the Night Before Christmas (1974)", "zed"])
+        self.assertEqual([(p["from"], p["to"]) for p in page_ranges(sorted(titles, key=sort_key), 2)], [("1", "5"), ("A", "Q"), ("T", "z")])
+        plainjs = self._js_fn("plainTitle")
+        for t in titles:
+            self.assertEqual(self._node(plainjs + "\nconsole.log(JSON.stringify(plainTitle(" + json.dumps(t) + ")));"), plain(t))
+        got = self._node(fn + "\nconsole.log(JSON.stringify(pageRanges(" + json.dumps(sorted(titles, key=sort_key)) + ", 2)));")
+        self.assertEqual(got, page_ranges(sorted(titles, key=sort_key), 2))
+        # every list sorts so (the server's lists through sort_key; the page's pages come from the server)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for mod in ("app.py", "libhealth.py", "joblog.py", "sync.py", "tools/merge.py", "tools/versions.py", "tools/folders.py", "tools/unlink.py"):
+            src = open(os.path.join(root, "plexcache", mod), encoding="utf-8").read()
+            self.assertIn("sort_key(", src, f"{mod} sorts titles without sort_key")
+            self.assertNotRegex(src, r'\["(title|label)"\]\.lower\(\)\)', f"{mod} sorts titles by .lower() alone")
+        # the pager: one look for every page, the open one framed (no size of its own)
+        css = open(os.path.join(root, "plexcache", "web", "app.css"), encoding="utf-8").read()
+        cur = re.search(r"\.pager \.pg\.cur\{([^}]*)\}", css).group(1)
+        self.assertNotRegex(cur, r"padding|font-weight|font-size|line-height|min-height", "the open page's chip is sized differently from the others")
+        self.assertRegex(css, r"\.pager button\.link\.pg\{[^}]*min-height", "the page links keep .link's own height: taller than the open page's chip")
+        self.assertIn("border-color:var(--ink)", cur)
 
     def test_internal_links_reach_their_place(self):
         """Wherever a text names a place in the app, it's a link — and every internal link points at a page
@@ -4830,7 +4856,7 @@ class FakeOptimizer:
         from plexcache.optimize import files
         self.sent.append({"action": action, "path": path, "to": to, "root": root})
         return {"set_aside": lambda: files.set_aside(root, path), "restore": lambda: files.put_back(root, path), "purge": lambda: files.purge(root, path),
-                "link": lambda: files.link(path, to), "unlink": lambda: files.unlink(path, to)}[action]()
+                "link": lambda: files.link(path, to), "unlink": lambda: files.unlink(path, to), "make_real": lambda: files.make_real(path)}[action]()
 
     def claim(self, folder, key, instance, release=False):
         mine = self.claims.setdefault(key, {})
@@ -9156,6 +9182,13 @@ class MQTTTests(unittest.TestCase):
         for bad in ({"port": 0}, {"interval": 1}, {"report_period": "year"}, {"base_topic": "a/#"}, {"discovery_prefix": ""}):
             with self.assertRaises(config.SettingsError, msg=bad):
                 self.app.settings.update({"mqtt": bad})
+        for bad in ({"backup": "none"}, {"page_size": 10}, {"page_size": 5000}, {"snapshot_days": 0}, {"snapshot_days": "14"}):
+            with self.assertRaises(config.SettingsError, msg=bad):
+                self.app.settings.update({"general": bad})
+        self.app.settings.update({"general": {"backup": "manual", "page_size": 50, "snapshot_days": 30}})
+        g = self.app.settings.section("general")
+        self.assertEqual((g["backup"], g["page_size"], g["snapshot_days"]), ("manual", 50, 30))
+        self.app.settings.update({"general": {"backup": "snapshot", "page_size": 200, "snapshot_days": 14}})
         self.app.settings.update({"mqtt": {"password": "pw"}})
         pub = self.app.settings.public()["mqtt"]
         self.assertTrue(pub["password_set"])
@@ -10214,6 +10247,8 @@ class ToolsTests(unittest.TestCase):
             self.addCleanup(other.close)
             app.settings.update({"plex2": {"url": other.url, "token": "other-token", "name": "Starlit", "machine_id": "xyz"}, "sync": {"mirrors": "plex2"}})
         app.scan_library()
+        from plexcache import safety
+        safety.acknowledge_backup(app, "1")  # (the file tools wait for a recent snapshot or a backup you say you made: said here)
         return app, plex, client, cat, other
 
     def _run(self, tool, started):
@@ -10479,6 +10514,173 @@ class ToolsTests(unittest.TestCase):
         self.assertTrue(tool.stuck())
         self.assertIn("hasn’t picked up", en(next(i for i in checks._tool_items(app) if "moved" in en(i["title"]))["title"]))
 
+    def test_unlink_files_and_the_link_check(self):
+        """Linked media files — hard links and symlinks — are flagged by Library Health and listed by the
+        Unlink Files tool, which makes each a file of its own under the same path (the bytes copied, the
+        dates kept); Merge Duplicates marks a row whose files are links."""
+        from plexcache import libhealth
+        app, plex, client, cat, _ = self._app()
+        root = os.path.join(cat["root"], "Movies")
+        m1, m2 = cat["movies"][1], cat["movies"][2]
+        hard = os.path.join(root, "Film 1 (2011) hard.mkv")
+        os.link(m1["path"], hard)
+        m1["more"] = [hard]
+        soft = os.path.join(root, "Film 2 (2012) soft.mkv")
+        os.symlink(m2["path"], soft)
+        m2["more"] = [soft]
+        app.scan_library()
+        # Health: each link said, by kind
+        got = libhealth.library_health(app, "1")
+        flagged = {r["file"]: r["id"] for it in got["items"] for r in it["results"] if r["id"] == "linked_file"}
+        self.assertEqual(set(flagged), {"Movie 1.mkv", "Film 1 (2011) hard.mkv", "Film 2 (2012) soft.mkv"})  # (the original of a hard link is one too)
+        # the tool lists them, and makes each a file of its own
+        tool = app.tools["unlink"]
+        snap = self._run(tool, tool.scan_async("1"))
+        kinds = {r["name"]: r["kind"] for r in snap["scan"]["rows"]}
+        self.assertEqual(kinds, {"Movie 1.mkv": "hardlink", "Film 1 (2011) hard.mkv": "hardlink", "Film 2 (2012) soft.mkv": "symlink"})
+        before = os.stat(hard)
+        snap = self._run(tool, tool.apply_async(["link:" + hard, "link:" + soft]))
+        self.assertEqual([r["result"] for r in snap["results"]], ["done", "done"])
+        after = os.stat(hard)
+        self.assertEqual((after.st_nlink, after.st_size, int(after.st_mtime)), (1, before.st_size, int(before.st_mtime)))
+        self.assertEqual(os.stat(m1["path"]).st_nlink, 1)                                         # (the original is on its own too now)
+        self.assertFalse(os.path.islink(soft))
+        self.assertEqual(os.path.getsize(soft), os.path.getsize(m2["path"]))
+        self.assertEqual([x["action"] for x in client.sent], ["make_real", "make_real"])
+        self.assertEqual(self._run(tool, tool.scan_async("1"))["scan"]["rows"], [])                 # (Movie 1.mkv is on its own too once its twin was copied: none left)
+        # Merge Duplicates: a row whose files are links carries the warning
+        from plexcache.optimize import files
+        self.assertEqual(files.make_real(hard)["already"], True)
+        link2 = os.path.join(root, "Film 3 (2013) twin.mkv")
+        os.link(cat["movies"][3]["path"], link2)
+        cat["movies"].append({"path": link2, "size": cat["movies"][3]["size"], "kbps": 1, "key": "193", "title": "Film 3", "year": 2013, "guid": "plex://movie/3", "duration": cat["movies"][3]["duration"]})
+        mg = app.tools["merge"]
+        snap = self._run(mg, mg.scan_async("1"))
+        row = next(r for r in snap["scan"]["rows"] if r["keep"]["key"] in ("103", "193"))
+        self.assertEqual(sorted(l["name"] for l in row["linked"]), ["Film 3 (2013) twin.mkv", "Movie 3.mkv"])
+
+    def test_file_tools_wait_for_room_and_a_snapshot(self):
+        """Before a tool changes files: room for what it writes, and a snapshot of the library's dataset
+        within the last half hour (or a backup you say you made). Apply is refused until both are so;
+        Take a Snapshot makes one through TrueNAS; the acknowledgement counts for the same half hour."""
+        from plexcache import safety
+        app, plex, client, cat, _ = self._app()
+        root = os.path.join(cat["root"], "Movies")
+        app.zfs = {"datasets": [{"dataset": "tank/media", "mountpoint": cat["root"], "keys": ["1"]}]}
+        tool = app.tools["unlink"]
+        link = os.path.join(root, "Film 1 (2011) link.mkv")
+        os.link(cat["movies"][1]["path"], link)
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1"))
+        ids = [r["id"] for r in snap["scan"]["rows"]]
+        self.assertEqual(tool.needed_bytes(snap["scan"]["rows"]), os.path.getsize(link))         # (Plex lists one path of the pair: one copy to write)
+        app._backup_acks = {}                                                                    # (no backup said, no snapshot anywhere)
+        app._save_json(safety.ACKS, {})
+        # no snapshot anywhere: not ready, Apply refused
+        r = safety.readiness(app, "1", 1000)
+        self.assertEqual((r["space"]["status"], r["snapshot"]["status"], r["ready"], r["can_snapshot"]), ("ok", "warn", False, True))
+        with self.assertRaises(ValueError) as cm:
+            tool.apply_async(ids)
+        self.assertIn("No snapshot", en(cm.exception.args[0]))
+        # not enough room: said, and refused
+        with mock.patch.object(safety.os, "statvfs", lambda p: types.SimpleNamespace(f_bavail=10, f_frsize=4096)):
+            r = safety.readiness(app, "1", 1000)
+            self.assertEqual((r["space"]["status"], r["ready"]), ("warn", False))
+            self.assertIn("make room", en(r["space"]["text"]))
+        # a snapshot taken through TrueNAS: green, named for what it's for, and deleted by the app after its two weeks
+        made = safety.take_snapshot(app, "1", "unlink")
+        self.assertEqual(len(made), 1)
+        self.assertTrue(made[0].startswith("tank/media@plexcache-unlink-movies-"), made[0])
+        self.assertEqual([s["tool"] for s in safety.taken(app)], ["unlink"])
+        self.assertEqual(safety.prune_snapshots(app), 0)                                           # (fresh: kept)
+        app._snapshots[0]["at"] -= safety.LIFE + 1
+        self.assertEqual(safety.prune_snapshots(app), 1)
+        self.assertEqual((safety.taken(app), TRUENAS.snapshots.get("tank/media")), ([], []))
+        safety.take_snapshot(app, "1", "unlink")
+        r = safety.readiness(app, "1", 1000)
+        self.assertEqual((r["snapshot"]["status"], r["ready"]), ("ok", True))
+        self.assertIn("minutes ago", en(r["snapshot"]["text"]))
+        # an old snapshot alone doesn't do; "I've made a manual backup" does, for half an hour (grey)
+        TRUENAS.snapshots = {"tank/media": [("old", time.time() - 2 * safety.FRESH)]}
+        self.assertEqual(safety.readiness(app, "1")["snapshot"]["status"], "warn")
+        safety.acknowledge_backup(app, "1")
+        r = safety.readiness(app, "1")
+        self.assertEqual((r["snapshot"]["status"], r["snapshot"]["ack"], r["snapshot"]["how"], r["ready"]), ("off", True, "manual", True))
+        safety.acknowledge_backup(app, "1", "trash")                                             # (the action's own set-aside copies will do)
+        self.assertIn("copies set aside", en(safety.readiness(app, "1")["snapshot"]["text"]))
+        self.assertEqual(safety.readiness(app, "1", "largest")["space"]["needed"], max(f.size for f in app.files if f.library_key == "1"))
+        app._backup_acks = None                                                                  # (a restart: kept on disk)
+        self.assertTrue(safety.readiness(app, "1")["ready"])
+        # both TrueNAS snapshot APIs: pool.snapshot.* (25.04 and later) is tried first, and zfs.snapshot.* (before)
+        # when TrueNAS says the first doesn't exist; the one that worked is remembered
+        self.assertIn("pool.snapshot.create", TRUENAS.snapshot_calls)
+        self.assertNotIn("zfs.snapshot.create", TRUENAS.snapshot_calls)
+        TRUENAS.snapshot_api, TRUENAS.snapshot_calls, app._snapshot_api = "zfs.snapshot", [], None
+        safety.take_snapshot(app, "1", "unlink")
+        self.assertEqual(TRUENAS.snapshot_calls, ["pool.snapshot.create", "zfs.snapshot.create"])
+        self.assertEqual(app._snapshot_api, "zfs.snapshot")
+        safety.take_snapshot(app, "1", "unlink")
+        self.assertEqual(TRUENAS.snapshot_calls[-1], "zfs.snapshot.create")                      # (remembered: not tried again)
+        TRUENAS.snapshot_api, app._snapshot_api = "pool.snapshot", None
+        # a snapshot TrueNAS refuses: said with the lights until the next one is taken (or dismissed), and logged
+        TRUENAS.snapshot_refused = "not allowed for this key"
+        before = len(app.activity.events)
+        with self.assertRaises(ValueError):
+            safety.take_snapshot(app, "1", "unlink")
+        r = safety.readiness(app, "1")
+        self.assertIn("not allowed for this key", en(r["error"]["text"]))
+        logged = [e for e in list(app.activity.events)[before:]]
+        self.assertEqual([(e["kind"], e["level"]) for e in logged], [("tools", "warn")])
+        self.assertIn("snapshot not taken", en(logged[0]["message"]))
+        TRUENAS.snapshot_refused = ""
+        safety.take_snapshot(app, "1", "unlink")
+        self.assertIsNone(safety.readiness(app, "1")["error"])
+        self.assertIn("snapshot taken", en(list(app.activity.events)[-1]["message"]))
+        # the Backup preference (System → Preferences): "copies" — the action's own set-aside copies do, where it keeps some
+        TRUENAS.snapshots = {"tank/media": []}
+        app._backup_acks = {}
+        app.settings.update({"general": {"backup": "copies", "snapshot_days": 1}})
+        r = safety.readiness(app, "1", 0, keeps=True)
+        self.assertEqual((r["snapshot"]["status"], r["snapshot"]["how"], r["ready"], r["backup"], r["life_days"]), ("off", "trash", True, "copies", 1))
+        self.assertIn("Preferences", en(r["snapshot"]["text"]))
+        self.assertFalse(safety.readiness(app, "1", 0, keeps=False)["ready"])                   # (an action that keeps none: a snapshot or a backup)
+        app.settings.update({"general": {"backup": "snapshot", "snapshot_days": 14}})
+        self.assertFalse(safety.readiness(app, "1", 0, keeps=True)["ready"])
+        app._backup_acks = None
+        # the dataset's own .zfs/snapshot folder tells too, with no API
+        app.settings.update({"truenas": {"api_key": ""}})
+        app._backup_acks = {}
+        self.assertEqual(safety.readiness(app, "1")["snapshot"]["status"], "warn")
+        sdir = os.path.join(cat["root"], ".zfs", "snapshot", "auto-now")
+        os.makedirs(sdir)
+        r = safety.readiness(app, "1")
+        self.assertEqual((r["snapshot"]["status"], r["snapshot"]["name"], r["can_snapshot"]), ("ok", "auto-now", False))
+        with self.assertRaises(ValueError):
+            safety.take_snapshot(app, "1")                                                       # (no API: make one yourself)
+        snap = self._run(tool, tool.apply_async(ids))                                              # (ready now: it goes)
+        self.assertEqual([x["result"] for x in snap["results"]], ["done"])
+        # the page: every tool that changes files passes the gate (its Apply goes through toolApply, which holds the lights)
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        from plexcache import peers
+        for name in peers.FILE_TOOLS:
+            self.assertIn(f'toolApply("{name}"', js, f"{name}'s page doesn't apply through toolApply (the lights)")
+            self.assertRegex(js, r"var FILE_TOOLS = .*\b" + name + r": function", f"{name} isn't among the page's FILE_TOOLS: its Apply wouldn't wait for the lights")
+        self.assertIn("if (!gate.ready) u.confirm = false;", js)
+        self.assertRegex(js, r'readinessPanel\(key, "largest", "optimizer"')                       # (Optimize Now)
+        self.assertRegex(js, r'readinessPanel\(String\(st\.library\), 0, "dataset"')             # (Start Copying, on the dataset page)
+        self.assertEqual(app.tools["versions"].keeps != "", True)
+        # the lights say which backup stands in, link to the preference, and hold the Take a Snapshot button and the kept error
+        panel = js[js.index("  function readinessPanel("):]
+        panel = panel[:panel.index("\n  function ", 10)]
+        self.assertIn('href=\\"/system#prefs\\" data-nav', panel)
+        self.assertIn('data-act="tool-backup" data-how="snapshot"', panel)
+        self.assertIn('data-act="tool-backup" data-how="manual"', panel)
+        self.assertIn('data-how="dismiss"', panel)
+        self.assertNotIn("tool-fallback", js)                                                      # (no choice on the page itself any more)
+        self.assertIn('id="prefs"', js)
+        for key in ("page_size", "backup", "snapshot_days"):
+            self.assertIn(f'"general", "{key}"', js)
+
     def test_tool_api_and_state(self):
         """The Tools API: a scan and an apply started through it, each tool's state in the app's state,
         and a set-aside file acted on."""
@@ -10497,7 +10699,7 @@ class ToolsTests(unittest.TestCase):
         self.assertTrue(got["started"])
         self._run(app.tools["merge"], True)
         st = json.loads(urllib.request.urlopen(base + "/api/state", timeout=10).read())
-        self.assertEqual(sorted(st["tools"]), ["folders", "merge", "versions"])
+        self.assertEqual(sorted(st["tools"]), ["folders", "merge", "unlink", "versions"])
         self.assertEqual((st["tools"]["merge"]["scan"]["library"], st["trash"]["items"], st["trash"]["hold_days"]), ("1", [], 0))
         with self.assertRaises(urllib.error.HTTPError):
             post("/api/tools/nothing", {"action": "scan", "library": "1"})

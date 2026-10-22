@@ -29,6 +29,7 @@ from .i18n import M
 from .plex import EDIT_FIELDS, LEAF_TYPE, PlexClient, PlexError, reachable, servers
 from .optimize.claims import PEER_DAYS
 from . import libhealth
+from .paging import sort_key
 
 STORE = "sync-report.json"
 REPORT_VERSION = 3  # what a report holds; one made by an older version is dropped, so it's never shown as current
@@ -170,8 +171,8 @@ def compare_library(src: _Side, dst: _Side, what: dict, checks_on: dict | None =
                 g["d"] = groups.pop(other)["d"]
                 solo_d.pop(it["guid"], None)
     for g in groups.values():
-        S = sorted((src.items[k] for k in g["s"]), key=lambda it: it["label"].lower())
-        D = sorted((dst.items[k] for k in g["d"]), key=lambda it: it["label"].lower())
+        S = sorted((src.items[k] for k in g["s"]), key=lambda it: sort_key(it["label"]))
+        D = sorted((dst.items[k] for k in g["d"]), key=lambda it: sort_key(it["label"]))
         if S and not D:
             for it in S:
                 r = row("missing", [it], [], src, dst)
@@ -230,7 +231,7 @@ def compare_library(src: _Side, dst: _Side, what: dict, checks_on: dict | None =
             _compare_pair(it, other, what, lambda kind, _it, frm, to, _o=None: add(r, kind, frm, to))
             if r["kinds"]:
                 rows.append(r)
-    rows.sort(key=lambda r: r["title"].lower())
+    rows.sort(key=lambda r: sort_key(r["title"]))
     return {"counts": counts, "items": rows[:MAX_ITEMS], "matched": len(pairs), "total": len(src.items)}
 
 

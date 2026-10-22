@@ -149,6 +149,7 @@ details{margin-top:14px;font-size:14px}
 summary{cursor:pointer;font-weight:600;color:var(--accent);min-height:32px;display:flex;align-items:center}
 .toast{position:fixed;right:20px;bottom:20px;background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:8px;font-size:14px;opacity:0;transform:translateY(8px);transition:all .2s;pointer-events:none;max-width:420px}
 .toast.show{opacity:1;transform:none}
+.toast.err{background:var(--bad-bg);color:var(--bad);border:1px solid var(--bad);pointer-events:auto}
 .pathmap{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 :focus-visible{outline:3px solid #6FB8AE;outline-offset:2px}
@@ -713,8 +714,12 @@ fieldset.greyed *{cursor:not-allowed}
 /* the pages of a long list, each a span of what it holds */
 .pager{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;margin-top:10px}
 .pager .pgcount{margin-right:6px}
-.pager .pg{font:inherit;font-size:13px;padding:2px 6px;border-radius:6px}
-.pager button.pg{background:none;border:1px solid var(--line);cursor:pointer;color:var(--accent)}
+/* every page the same box: the open one framed in ink, the others links */
+.pager .pg,.pager button.link.pg{display:inline-flex;align-items:center;box-sizing:border-box;font:inherit;font-size:13px;line-height:18px;font-weight:500;min-height:32px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:none;margin:0}
+.pager button.pg{cursor:pointer;color:var(--accent)}
 .pager button.pg:hover{border-color:var(--accent)}
-.pager .pg.cur{border:1px solid transparent;background:var(--line2);color:var(--ink);font-weight:600}
+.pager .pg.cur{border-color:var(--ink);color:var(--ink)}
 .pager .pgdots{color:var(--muted)}
+.lights.ready{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px}
+.lights.ready .fallback{margin:6px 0 0 30px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.lights.ready .fallback label{display:flex;align-items:center;gap:6px}

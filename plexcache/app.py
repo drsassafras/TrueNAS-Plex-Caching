@@ -31,6 +31,7 @@ from .trash import Trash
 from .tools.merge import MergeDuplicates
 from .tools.versions import DuplicateVersions
 from .tools.folders import OrganizeFolders
+from .tools.unlink import UnlinkFiles
 from .libhealth import defaults as libhealth_defaults
 from .languages import language_name
 from .migrating import Migration
@@ -40,7 +41,7 @@ from .playback import PlaybackMonitor
 from .plex import PlexClient, PlexError
 from .reader import MiB, benchmark_file
 from . import platform as platform_mod
-from . import peers
+from . import peers, safety
 from .scheduler import TIMED, due, next_run
 from .truenas import TrueNASClient, TrueNASError, describe_pool, probe as probe_truenas
 from .warmup import KIND_SECONDS, KINDS, L2ARC_RATE_SHARE, NEXT_DAY, next_day_check, LibraryStats, WarmupRun, plan, resolve_schedule
@@ -191,7 +192,7 @@ class App:
         self.trash = Trash(self)  # files the tools set aside, purged once Plex (here and mirrored) no longer lists them
         self.tool_runs: dict = self._load_json("tool-runs.json") or {}  # {library: {tool: when}} — told to the other Plex Cache (peers.py)
         self.peers_summary: dict | None = None
-        self.tools = {t.name: t for t in (MergeDuplicates(self), DuplicateVersions(self), OrganizeFolders(self))}  # the Tools pages
+        self.tools = {t.name: t for t in (MergeDuplicates(self), DuplicateVersions(self), OrganizeFolders(self), UnlinkFiles(self))}  # the Tools pages
         # what's where in each media file (the Library Health page), and the job that reads it
         self.file_maps = FileMaps(self.config_dir)
         self.inspector = Inspector(self)  # Library Health: each library's files read, one library at a time
@@ -267,6 +268,7 @@ class App:
         last_check = dt.datetime.now()
         last_health = last_tools = time.time()
         last_publish = 0.0
+        last_prune = time.time()
         while not self.stopping.wait(30):
             now = dt.datetime.now()
             w = self.settings.section("warmup")
@@ -294,6 +296,9 @@ class App:
             # files the tools set aside: purged once Plex no longer lists them (and the mirror's), after the hold
             if any(e["state"] == "waiting" for e in self.trash.items):
                 threading.Thread(target=self.trash.tick, name="trash", daemon=True).start()
+            if time.time() - last_prune > 3600:  # the snapshots the app took, deleted after their two weeks (safety.py)
+                last_prune = time.time()
+                threading.Thread(target=lambda: safety.prune_snapshots(self), name="snapshots", daemon=True).start()
             if time.time() - last_publish > peers.PUBLISH_EVERY and self.libraries:  # our marker in the shared folders (peers.py)
                 last_publish = time.time()
                 threading.Thread(target=self.publish_peers, name="peers", daemon=True).start()
@@ -1185,8 +1190,9 @@ class App:
 
     # ---------------------------------------------------------------- Library Health
     def _health_files(self, key: str) -> list:
+        from .paging import sort_key
         return sorted((f for f in list(self.files) if str(f.library_key) == str(key)),
-                      key=lambda f: ((getattr(f, "title", "") or os.path.basename(f.path)).lower(), f.path))
+                      key=lambda f: (sort_key(getattr(f, "title", "") or os.path.basename(f.path)), f.path))
 
     def library_view(self, key: str, offset: int = 0, limit: int = 100, q: str = "") -> dict:
         """A library's files for the Library Health page, by title: each with its layout (as last read;

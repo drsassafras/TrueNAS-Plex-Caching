@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import time
 import ssl
 import struct
 import tempfile
@@ -467,6 +468,7 @@ class FakeTrueNAS:
                     return
                 req = json.loads(msg)
                 self.calls.append(req["method"])
+                error = None
                 # an unrelated notification first, to test the client skips it
                 self._send(conn, json.dumps({"jsonrpc": "2.0", "method": "collection_update", "params": {}}))
                 if req["method"] == "auth.login_with_api_key":
@@ -504,11 +506,39 @@ class FakeTrueNAS:
                     result = [{"id": ds, "name": ds, "properties": {k: v for k, v in allp.items() if k in wanted}}]
                 elif req["method"] == "disk.query":
                     result = [{"name": "nvme1n1", "size": 480 * 10 ** 9}]
+                # the snapshot API by TrueNAS version: pool.snapshot.* from 25.04, zfs.snapshot.* before (snapshot_api
+                # says which this fake TrueNAS has; the other name is "Method does not exist", as TrueNAS answers)
+                elif req["method"].endswith((".snapshot.query", ".snapshot.delete", ".snapshot.create")) and \
+                        req["method"].rsplit(".", 1)[0] != getattr(self, "snapshot_api", "pool.snapshot"):
+                    self.snapshot_calls = getattr(self, "snapshot_calls", []) + [req["method"]]
+                    error = {"code": -32601, "message": "Method does not exist", "data": {"reason": f"Method {req['method']} does not exist"}}
+                elif req["method"].endswith(".snapshot.query"):
+                    self.snapshot_calls = getattr(self, "snapshot_calls", []) + [req["method"]]
+                    ds = req["params"][0][0][2]
+                    result = [{"name": f"{ds}@{n}", "dataset": ds, "properties": {"creation": {"rawvalue": str(int(at))}}} for n, at in getattr(self, "snapshots", {}).get(ds, [])]
+                elif req["method"].endswith(".snapshot.delete"):
+                    self.snapshot_calls = getattr(self, "snapshot_calls", []) + [req["method"]]
+                    ds, _, n = req["params"][0].partition("@")
+                    self.snapshots = getattr(self, "snapshots", {})
+                    self.snapshots[ds] = [x for x in self.snapshots.get(ds, []) if x[0] != n]
+                    result = True
+                elif req["method"].endswith(".snapshot.create"):
+                    self.snapshot_calls = getattr(self, "snapshot_calls", []) + [req["method"]]
+                    spec = req["params"][0]
+                    if getattr(self, "snapshot_refused", ""):
+                        error = {"code": 1, "message": self.snapshot_refused}
+                    else:
+                        self.snapshots = getattr(self, "snapshots", {})
+                        self.snapshots.setdefault(spec["dataset"], []).append((spec["name"], time.time()))
+                        result = True
                 elif req["method"] in ("app.pull_images", "app.redeploy"):  # (an app updated or restarted: noted)
                     self.apps_called = getattr(self, "apps_called", []) + [(req["method"], req.get("params"))]
                     result = True
                 else:
                     result = None
+                if error:
+                    self._send(conn, json.dumps({"jsonrpc": "2.0", "id": req["id"], "error": error}))
+                    continue
                 # A big reply exercises the 16-bit length path.
                 self._send(conn, json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": result, "pad": "x" * 300}))
         except (OSError, ssl.SSLError, ValueError, IndexError):

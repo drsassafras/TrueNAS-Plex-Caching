@@ -207,6 +207,9 @@ def folder_action(svc: Service, body: dict) -> tuple[int, dict]:
             if len(json.dumps(info)) > 8192:
                 return 400, {"error": "too much to publish"}
             return 200, {"marked": claims.mark(path, str(body.get("instance") or ""), info)}
+        if action == "make_real":  # a link made a file of its own (files.py)
+            from . import files
+            return 200, files.make_real(path)
         if action in ("set_aside", "restore", "purge", "link", "unlink"):  # the tools' file actions (files.py)
             from . import files
             if action in ("set_aside", "restore", "purge") and not root:

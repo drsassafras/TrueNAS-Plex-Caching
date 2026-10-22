@@ -22,7 +22,7 @@ from .plex import PlexError, check_pin, create_pin
 
 log = logging.getLogger("plexcache")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
-PAGES = {"/", "/health", "/caching", "/ssd", "/library", "/tools", "/optimizer", "/convert", "/dataset", "/merge", "/versions", "/folders", "/processes", "/sync", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
+PAGES = {"/", "/health", "/caching", "/ssd", "/library", "/tools", "/optimizer", "/convert", "/dataset", "/merge", "/versions", "/folders", "/unlink", "/processes", "/sync", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
 MAX_BODY = 1024 * 1024
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
@@ -232,13 +232,25 @@ def make_handler(app):
                 return self._json({"ok": True, "version": app.version})
             if path == "/api/state":
                 return self._json(dict(app.state(), build=BUILD))  # (build: see app.js load())
+            if path == "/api/tools/readiness":  # before files change: room for it, and a recent snapshot (safety.py)
+                from .safety import readiness
+                rq = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                key, need = (rq.get("key") or [""])[0], (rq.get("needed") or ["0"])[0]
+                if not app.library_info(key):
+                    return self._error("not found", 404)
+                if need != "largest":
+                    try:
+                        need = max(0, int(need))
+                    except ValueError:
+                        need = 0
+                return self._json(jsonable(readiness(app, key, need, keeps=(rq.get("keeps") or [""])[0] == "1")))
             if path.startswith("/api/library"):
                 # The Library Health page: a library's files with their layouts, or one file in full
                 q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
                 arg = lambda k, d="": (q.get(k) or [d])[0]
                 if path == "/api/library":
                     try:
-                        off, lim = max(0, int(arg("offset", "0"))), min(500, max(1, int(arg("limit", "100"))))
+                        off, lim = max(0, int(arg("offset", "0"))), min(1000, max(1, int(arg("limit", "100"))))
                     except ValueError:
                         return self._error("bad request", 400)
                     if not app.library_info(arg("key")):
@@ -426,10 +438,14 @@ def make_handler(app):
                     mode = body.get("mode", "optimize")
                     if mode not in ("optimize", "covers"):
                         raise SettingsError(M("mode must be optimize or covers"))
-                    from . import peers
+                    from . import peers, safety
                     why = peers.optimizer_conflict(app, key)
                     if why:
                         raise SettingsError(why)  # (another Plex Cache would undo it: said on Health too)
+                    if mode == "optimize":  # files are rewritten: room for the largest, and a recent snapshot, first
+                        ready = safety.readiness(app, key, "largest")
+                        if not ready["ready"]:
+                            raise SettingsError(M("Not yet: {why}", why=ready["space"]["text"] if ready["space"]["status"] != "ok" else ready["snapshot"]["text"]))
                     got = app.optimizing.queue(key, mode)  # now, or after the jobs before it
                     return self._json({"started": got == "started", "queued": got == "queued"})
                 if path.startswith("/api/sync/"):
@@ -466,6 +482,21 @@ def make_handler(app):
                         return self._json(app.update_now())
                     except ValueError as e:
                         raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+                if path == "/api/tools/snapshot":  # a snapshot of the library's datasets, "I've made a backup", or the last error dismissed: {"library", "action": "take" | "ack" | "dismiss"}
+                    from . import safety
+                    key = str(body.get("library") or "")
+                    if not app.library_info(key):
+                        raise SettingsError(M("unknown library: {key}", key=key))
+                    try:
+                        if body.get("action") == "ack":
+                            safety.acknowledge_backup(app, key, str(body.get("how") or "manual"))
+                        elif body.get("action") == "dismiss":
+                            safety.errors(app).pop(key, None)
+                        else:
+                            safety.take_snapshot(app, key, str(body.get("tool") or ""))
+                    except ValueError as e:
+                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+                    return self._json(jsonable(safety.readiness(app, key)))
                 if path.startswith("/api/tools/"):
                     # a tool (tools/): {"action": "scan", "library", "options"} or {"action": "apply", "ids": [...]}
                     tool = app.tools.get(path[len("/api/tools/"):])
@@ -507,6 +538,11 @@ def make_handler(app):
                         if action == "check":
                             return self._json(jsonable(mig.refresh()))
                         if action in ("copy", "catchup"):
+                            if action == "copy":  # the folder copied into the new dataset: a recent snapshot first (room is among its own checks)
+                                from . import safety
+                                ready = safety.readiness(app, str((mig.state or {}).get("library") or ""), 0, keeps=True)
+                                if not ready["ready"]:
+                                    raise SettingsError(M("Not yet: {why}", why=ready["snapshot"]["text"] if ready["snapshot"]["status"] == "warn" else ready["space"]["text"]))
                             return self._json(jsonable(mig.start_copy(mirror=action == "catchup")))
                         if action in ("pause", "resume"):
                             app.jobs.pause(action == "pause")

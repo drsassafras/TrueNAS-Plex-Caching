@@ -36,6 +36,7 @@ class Tool:
         self.running = False
         self.progress: dict | None = None
         self.error: str | None = None
+        self.error_at: float = 0.0  # (when the last scan failed: the page tells it from an earlier one's)
 
     def save(self) -> None:
         with self.lock:
@@ -50,6 +51,18 @@ class Tool:
     def apply_row(self, row: dict, log) -> dict:
         """One row done. {"result": "done" | "failed", "reason"?, ...}; ``log(text)`` keeps a step."""
         raise NotImplementedError
+
+    keeps = ""  # what the tool keeps of the files it changes, if anything (M): a fallback the page can offer instead of a snapshot
+
+    def needed_bytes(self, rows: list[dict]) -> int:
+        """What doing these rows writes to the library's folders (0: nothing new — a rename, a record change)."""
+        return 0
+
+    def step(self, done: int, total: int) -> None:
+        """How far a scan has got (the page's progress bar): ``done`` of ``total`` looked at."""
+        with self.lock:
+            if self.progress and self.progress.get("what") == "scan":
+                self.progress.update(done=int(done), total=int(total))
 
     def tick(self) -> None:
         """Follow-ups checked now and then (the scheduler): what's waited for on the mirror."""
@@ -75,7 +88,7 @@ class Tool:
                 with self.lock:
                     self.scan_result = got
             except Exception as e:  # noqa: BLE001 — said on the page
-                self.error = str(e)
+                self.error, self.error_at = str(e), time.time()
             finally:
                 self.save()
                 with self.lock:
@@ -85,8 +98,9 @@ class Tool:
 
     def apply_async(self, ids: list[str], choices: dict | None = None) -> bool:
         """The rows named done, each with your choices for it (``choices``: {row id: {...}}, merged into the row)."""
-        from .. import peers
-        why = peers.tool_conflict(self.app, str((self.scan_result or {}).get("library") or ""), self.name)
+        from .. import peers, safety
+        key = str((self.scan_result or {}).get("library") or "")
+        why = peers.tool_conflict(self.app, key, self.name)
         if why:
             raise ValueError(why)
         with self.lock:
@@ -94,6 +108,11 @@ class Tool:
                 return False
             want = set(ids)
             rows = [dict(r, **((choices or {}).get(r["id"]) or {})) for r in self.scan_result.get("rows") or [] if r["id"] in want]
+        if self.name in peers.FILE_TOOLS and rows:  # (files change: room for it, and a recent snapshot, first)
+            ready = safety.readiness(self.app, key, self.needed_bytes(rows), keeps=bool(self.keeps))
+            if not ready["ready"]:
+                raise ValueError(M("Not yet: {why}", why=ready["space"]["text"] if ready["space"]["status"] != "ok" else ready["snapshot"]["text"]))
+        with self.lock:
             if not rows:
                 return False
             self.running, self.error = True, None
@@ -131,8 +150,8 @@ class Tool:
 
     def snapshot(self) -> dict:
         with self.lock:
-            return {"name": self.name, "running": self.running, "progress": dict(self.progress) if self.progress else None, "error": self.error,
-                    "scan": self.scan_result, "results": list(reversed(self.results[-50:])), "extra": json.loads(json.dumps(self.extra))}
+            return {"name": self.name, "running": self.running, "progress": dict(self.progress) if self.progress else None, "error": self.error, "error_at": self.error_at,
+                    "scan": self.scan_result, "results": list(reversed(self.results[-50:])), "extra": json.loads(json.dumps(self.extra)), "keeps": self.keeps or ""}
 
     # ------------------------------------------------------------ what the tools share
     def mirror(self, library: str):

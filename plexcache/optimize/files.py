@@ -83,6 +83,33 @@ def _prune(base: str, folder: str) -> None:
         folder = os.path.dirname(folder)
 
 
+def make_real(path: str) -> dict:
+    """A link — a hard link (two paths to one file) or a symlink — replaced by a file of its own at the
+    same path: the bytes copied beside it, then swapped in, the dates kept. {"bytes": copied}."""
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        src = os.path.realpath(path)
+        if not os.path.isfile(src):
+            raise ValueError("the link's target isn't a file")
+    elif stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+        src = path
+    elif stat.S_ISREG(st.st_mode):
+        return {"bytes": 0, "already": True}  # (a file of its own already)
+    else:
+        raise ValueError("not a file or a link")
+    tmp = os.path.join(os.path.dirname(path), ".plexcache-copy-" + os.path.basename(path))
+    try:
+        shutil.copy2(src, tmp)  # (the bytes and the dates: Plex and the folder sync see the same file)
+        os.replace(tmp, path)   # (the old path's inode drops a link; a symlink is replaced by the file)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return {"bytes": os.stat(path).st_size}
+
+
 def link(path: str, new: str) -> dict:
     """A second path to the file: a hard link (instant, no space; the same dataset). {"linked": new}."""
     _plain(path)

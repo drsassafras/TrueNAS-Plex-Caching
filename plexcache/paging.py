@@ -6,7 +6,21 @@ files on Processes); the page draws them with pager() in app.js.
 
 from __future__ import annotations
 
+import re
+
 MAX_PREFIX = 3  # (as many letters as tell one page from the next, three at most)
+_LEAD = re.compile(r"^[^\w]+")  # what a title starts with before its first letter or digit: quotes, brackets, dots…
+
+
+def plain(label: str) -> str:
+    """A title without the quote, apostrophe or bracket it opens with, for sorting and the page spans:
+    “'Twas the Night Before Christmas” goes with the Ts, not before 10,000 BC. (The page's own copy: app.js plainTitle.)"""
+    return _LEAD.sub("", str(label or ""))
+
+
+def sort_key(label: str) -> str:
+    """How every list of titles sorts: by the title's letters, case aside (plain(), casefolded)."""
+    return plain(label).casefold()
 
 
 def _common(a: str, b: str) -> int:
@@ -27,7 +41,7 @@ def page_ranges(labels: list[str], per_page: int) -> list[dict]:
     first and last label cut to the shortest prefix that tells it from the page before and after."""
     if per_page < 1 or not labels:
         return []
-    pages = [{"offset": off, "first": str(labels[off] or ""), "last": str(labels[min(off + per_page, len(labels)) - 1] or "")}
+    pages = [{"offset": off, "first": plain(labels[off]), "last": plain(labels[min(off + per_page, len(labels)) - 1])}
              for off in range(0, len(labels), per_page)]
     out = []
     for i, p in enumerate(pages):

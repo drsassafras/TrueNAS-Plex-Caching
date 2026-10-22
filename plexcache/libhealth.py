@@ -62,6 +62,8 @@ CHECKS = {
          "help": M("An audio track in a codec that today’s codecs beat at every bitrate — MP3, MPEG Layer II, WMA, RealAudio, and in music libraries AC-3 (a film’s AC-3 track is the normal thing and isn’t flagged). Each finding says what the codec is and where it falls short. In the public listening tests collected by Hydrogenaudio, AAC, Opus and Vorbis come out clearly ahead of MP3 at equal bitrates. Off unless you turn it on: a well-made 320 kbps MP3 is fine for most ears, and the files are what they are unless you still have the source.")},
         {"id": "audio_uncompressed", "name": M("Uncompressed audio"), "applies": ALL,
          "help": M("PCM audio — WAV, AIFF, a raw PCM track, the LPCM track of a Blu-ray rip: the sound as it is, not compressed at all. A lossless codec holds the very same sound, bit for bit, in about half the space, and every player and Plex read them: FLAC (.flac, and inside an MKV), Apple Lossless (.m4a, ALAC) or WavPack (.wv). Re-encoding to one loses nothing. Lossy tracks (MP3, AAC, AC-3) aren’t flagged: a lossless copy of them would only be bigger.")},
+        {"id": "linked_file", "name": M("Linked file"), "applies": ALL,
+         "help": M("A media file that’s a link: a hard link (one file under two paths) or a symlink. Syncthing can’t carry a hard link — the other site gets two whole copies, which drift apart once either changes — and carries a symlink as a link, which dangles there when its target isn’t in the synced folder. Plex lists only one of two paths to the same bytes. The Unlink Files tool makes each a file of its own.")},
         {"id": "duplicate_versions", "name": M("The same file twice on one item"), "applies": ALL,
          "help": M("Two versions on one Plex item that are the same file: the same size and running time, and the same bytes at both ends — not another bitrate of the film. A hard link or symlink counts as a second path to one file, and is said so.")},
         {"id": "duplicate_items", "name": M("The same file on different items"), "applies": ALL,
@@ -273,6 +275,13 @@ def duplicate_checks(groups: dict, on: dict) -> dict:
                         out.setdefault(k, []).append({"id": "duplicate_versions", "category": "file", "status": "warn",
                                                       "text": M("{a} and {b} are the same file ({how}).", a=os.path.basename(a["path"]), b=os.path.basename(b["path"]),
                                                                 how=M("a link to one file") if linked else M("two copies"))})
+    if on.get("linked_file"):
+        for k, files in groups.items():
+            for a in files:
+                if a.get("symlink") or (a.get("nlink") or 1) > 1:
+                    out.setdefault(k, []).append({"id": "linked_file", "category": "file", "status": "warn", "file": os.path.basename(a["path"]),
+                                                  "text": M("{file} is a symlink: synced as a link, it dangles where its target isn’t.", file=os.path.basename(a["path"])) if a.get("symlink")
+                                                  else M("{file} is a hard link ({n} paths to one file): synced as whole copies that drift apart.", file=os.path.basename(a["path"]), n=a.get("nlink"))})
     if on.get("duplicate_items"):
         seen: list[tuple] = []  # (key, file)
         for k, files in groups.items():
@@ -346,10 +355,10 @@ def library_health(app, key: str) -> dict:
             local = app.map_path(f.path)
             try:
                 st = os.lstat(local)
-                ino, dev, size = st.st_ino, st.st_dev, st.st_size
+                ino, dev, size, nlink, sym = st.st_ino, st.st_dev, st.st_size, st.st_nlink, os.path.islink(local)
             except OSError:
-                ino, dev, size = 0, 0, getattr(f, "size", 0)
-            rows.append({"path": f.path, "local": local if ino else "", "size": size, "duration": getattr(f, "duration_ms", 0), "ino": ino, "dev": dev})
+                ino, dev, size, nlink, sym = 0, 0, getattr(f, "size", 0), 1, False
+            rows.append({"path": f.path, "local": local if ino else "", "size": size, "duration": getattr(f, "duration_ms", 0), "ino": ino, "dev": dev, "nlink": nlink, "symlink": sym})
         dup_groups[rk] = rows
     dups = duplicate_checks(dup_groups, on)
     quiet = ignored(app).get(str(key)) or {}
@@ -383,7 +392,8 @@ def library_health(app, key: str) -> dict:
                     counts[r["id"]] = counts.get(r["id"], 0) + 1
             items.append({"key": rk, "label": getattr(group[0], "title", "") or os.path.basename(group[0].path), "poster": getattr(group[0], "poster", ""),
                           "files": [os.path.basename(f.path) for f in group], "results": results, "live": sum(1 for r in results if not r["ignored"])})
-    items.sort(key=lambda it: (it["live"] == 0, it["label"].lower()))  # (items with nothing live left at the bottom)
+    from .paging import sort_key
+    items.sort(key=lambda it: (it["live"] == 0, sort_key(it["label"])))  # (items with nothing live left at the bottom)
     langs = sorted(languages | {lang, DEFAULT_LANGUAGE}, key=lambda c: (language_name(c) or c).lower())
     return {"checks": {cat: [dict(c, on=on_all[c["id"]]) for c in cs if not kind or kind in c.get("applies", ALL)] for cat, cs in CHECKS.items()}, "counts": counts, "kind": kind,
             "items": items[:2000], "total": len(items), "checked": len(by_item), "unread": unread, "pages_read": len(sync_sides),
