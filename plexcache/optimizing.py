@@ -134,6 +134,10 @@ class OptimizerClient:
     def delete_original(self, path: str, new: str) -> dict:
         return self._call("/api/folder", {"action": "delete_original", "path": path, "to": new}, timeout=60)
 
+    def mark(self, folder: str, instance: str, info: dict) -> dict:
+        """This system's marker in a library folder, with what it tells the other systems (peers.py)."""
+        return self._call("/api/folder", {"action": "mark", "path": folder, "instance": instance, "info": info}, timeout=30)
+
     def file_action(self, action: str, path: str, to: str = "", root: str = "") -> dict:
         """The tools' file actions (optimize/files.py): "set_aside" / "restore" / "purge" (``root``: the
         library folder, whose trash it is), "link" (``to``: the new path), "unlink" (``to``: the path kept)."""

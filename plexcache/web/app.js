@@ -573,7 +573,7 @@ PCI18N.ready.then(function () {
     rows.forEach(function (r) {
       var kind = KIND_NAME[r.kind], z = libSizes(r);
       var mine = r.rs ? fmtRs(r.rs) : "";
-      table += "<tr><td>" + libIcon(r.key) + esc(r.name) + (r.name.toLowerCase().indexOf(kind.toLowerCase()) < 0 ? ' <span class="muted">· ' + esc(kind) + "</span>" : "") + '</td><td class="nw">' + fmtNum(r.count) + '</td><td class="nw">' + (r.count ? kbps(r.kbps) : "—") +
+      table += "<tr><td>" + libIcon(r.key) + '<a href="/library" data-nav data-libkey="' + esc(r.key) + '" data-libview="caching">' + esc(r.name) + "</a>" + (r.name.toLowerCase().indexOf(kind.toLowerCase()) < 0 ? ' <span class="muted">· ' + esc(kind) + "</span>" : "") + '</td><td class="nw">' + fmtNum(r.count) + '</td><td class="nw">' + (r.count ? kbps(r.kbps) : "—") +
         '</td><td class="nw">' + (r.avg_size ? esc(fmtBytes(r.avg_size)) : "—") + "</td>" +
         cell(z.tmin, fmtRs(r.rs_best)) + cell(z.ymin, mine) +
         '<td class="nw estc" data-estcell="' + esc(r.key) + '">' + estCell(r) + "</td>" +
@@ -629,8 +629,9 @@ PCI18N.ready.then(function () {
     }).join("") + "</div>";
   }
   document.addEventListener("click", function (e) {
-    var a = e.target.closest && e.target.closest("[data-synclib]");
-    if (a) { LIB.key = a.dataset.synclib; LIB.view = "sync"; LIB.diff = {}; }
+    var a = e.target.closest && e.target.closest("[data-synclib], [data-libkey]");
+    if (a && a.dataset.synclib !== undefined) { LIB.key = a.dataset.synclib; LIB.view = "sync"; LIB.diff = {}; }
+    else if (a) { LIB.key = a.dataset.libkey; LIB.view = a.dataset.libview || "caching"; LIB.data = null; LIB.at = 0; }
   }, true);
   document.addEventListener("input", function (e) {
     var el = e.target;
@@ -3574,7 +3575,9 @@ PCI18N.ready.then(function () {
     var u = ST.updates || {};
     if (!S.general.update_check) return "";
     var chan = '<span class="muted" style="font-size:13px">' + (u.channel === "dev" ? H("Dev build{commit}: follows the dev branch.", { commit: u.commit ? " (" + u.commit + ")" : "" }) : H("Stable build: follows releases.")) + "</span> ";
-    var btn = ' <button class="btn sm" type="button" data-act="updates-check"' + (u.checking ? " disabled" : "") + ">" + (u.checking ? H("Checking…") : H("Check Now")) + "</button>";
+    var btn = ' <button class="btn sm" type="button" data-act="updates-check"' + (u.checking ? " disabled" : "") + ">" + (u.checking ? H("Checking…") : H("Check Now")) + "</button>" +
+      // Update Now: TrueNAS pulls the newer image and restarts the app — with its API connected
+      (u.available && (ST.platform || {}).truenas && ((ST.connections || {}).truenas_key || {}).status === "ok" ? ' <button class="btn sm pri" type="button" data-act="updates-apply">' + H("Update Now") + "</button>" : "");
     var line = "";
     if (u.available) line = u.latest && u.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} is available — update the app in TrueNAS.", { version: u.latest })
       : H("A newer dev build is available (dev is at {head}) — update the app in TrueNAS.", { head: u.latest_commit });
@@ -4407,6 +4410,11 @@ PCI18N.ready.then(function () {
       el.disabled = true;
       api("/api/optimizer/check", {}).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
     }
+    else if (act === "updates-apply") {
+      el.disabled = true;
+      api("/api/updates/apply", {}).then(function () { toast(T("TrueNAS is pulling the newer image and restarting the app: this page comes back by itself.")); })
+        .catch(function (e) { toast(e.message); el.disabled = false; });
+    }
     else if (act === "updates-check") { el.disabled = true; api("/api/updates/check", {}).then(function () { setTimeout(load, 1500); }).catch(function (e) { toast(e.message); }); }
     else if (act === "tool-lib") { TOOL[el.dataset.tool].key = el.dataset.key; TOOL[el.dataset.tool].sel = {}; TOOL[el.dataset.tool].confirm = false; render(); }
     else if (act === "merge-swap") {  // the next record of the row kept instead (round and round)
@@ -4493,7 +4501,7 @@ PCI18N.ready.then(function () {
     }
     else if (act === "proc-chart") { procChart[el.dataset.key] = !procChart[el.dataset.key]; render(); }
     else if (act === "file-toggle") { SHOWFILE[el.dataset.file] = !SHOWFILE[el.dataset.file]; render(); }
-    else if (act === "lib-view") { LIB.view = el.dataset.view; render(); }
+    else if (act === "lib-view") { LIB.view = el.dataset.view; LIB_DRIVE.at = 0; if (LIB.view === "caching") libFetch(true); render(); }
     else if (act === "lh-open") { var lk = el.dataset.key + ":" + el.dataset.id; LH_OPEN[lk] = !LH_OPEN[lk]; render(); }
     else if (act === "lh-ignore" || act === "lh-restore") {
       el.disabled = true;

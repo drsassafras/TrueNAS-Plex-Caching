@@ -85,6 +85,10 @@ class Tool:
 
     def apply_async(self, ids: list[str], choices: dict | None = None) -> bool:
         """The rows named done, each with your choices for it (``choices``: {row id: {...}}, merged into the row)."""
+        from .. import peers
+        why = peers.tool_conflict(self.app, str((self.scan_result or {}).get("library") or ""), self.name)
+        if why:
+            raise ValueError(why)
         with self.lock:
             if self.running or not self.scan_result:
                 return False
@@ -119,6 +123,8 @@ class Tool:
                 self.save()
                 with self.lock:
                     self.running, self.progress = False, None
+                if self.name in peers.FILE_TOOLS and hasattr(self.app, "note_tool_run"):
+                    self.app.note_tool_run(str(self.scan_result.get("library") if self.scan_result else ""), self.name)
                 self.app.run_checks_async()
         threading.Thread(target=work, name=f"tool-{self.name}-apply", daemon=True).start()
         return True

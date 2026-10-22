@@ -40,6 +40,7 @@ from .playback import PlaybackMonitor
 from .plex import PlexClient, PlexError
 from .reader import MiB, benchmark_file
 from . import platform as platform_mod
+from . import peers
 from .scheduler import TIMED, due, next_run
 from .truenas import TrueNASClient, TrueNASError, describe_pool, probe as probe_truenas
 from .warmup import KIND_SECONDS, KINDS, L2ARC_RATE_SHARE, NEXT_DAY, next_day_check, LibraryStats, WarmupRun, plan, resolve_schedule
@@ -188,6 +189,8 @@ class App:
         self.other = OtherServer(self)  # a second Plex server with the same files (plex2.py)
         self.sync = Sync(self)  # Library Sync: this server and its mirror compared (sync.py)
         self.trash = Trash(self)  # files the tools set aside, purged once Plex (here and mirrored) no longer lists them
+        self.tool_runs: dict = self._load_json("tool-runs.json") or {}  # {library: {tool: when}} — told to the other Plex Cache (peers.py)
+        self.peers_summary: dict | None = None
         self.tools = {t.name: t for t in (MergeDuplicates(self), DuplicateVersions(self), OrganizeFolders(self))}  # the Tools pages
         # what's where in each media file (the Library Health page), and the job that reads it
         self.file_maps = FileMaps(self.config_dir)
@@ -263,6 +266,7 @@ class App:
     def _scheduler_loop(self):
         last_check = dt.datetime.now()
         last_health = last_tools = time.time()
+        last_publish = 0.0
         while not self.stopping.wait(30):
             now = dt.datetime.now()
             w = self.settings.section("warmup")
@@ -290,6 +294,9 @@ class App:
             # files the tools set aside: purged once Plex no longer lists them (and the mirror's), after the hold
             if any(e["state"] == "waiting" for e in self.trash.items):
                 threading.Thread(target=self.trash.tick, name="trash", daemon=True).start()
+            if time.time() - last_publish > peers.PUBLISH_EVERY and self.libraries:  # our marker in the shared folders (peers.py)
+                last_publish = time.time()
+                threading.Thread(target=self.publish_peers, name="peers", daemon=True).start()
             if time.time() - last_tools > 300:  # the tools' follow-ups on the mirror (Organize Folders)
                 last_tools = time.time()
                 for tool in self.tools.values():
@@ -839,6 +846,38 @@ class App:
             with self.lock:
                 self.checking = False
 
+    def publish_peers(self) -> None:
+        peers.publish(self)
+        self.peers_summary = peers.summary(self)
+
+    def note_tool_run(self, library: str, tool: str) -> None:
+        """A tool ran on a library here: told to the other Plex Cache in the folder's marker."""
+        self.tool_runs.setdefault(str(library), {})[tool] = time.time()
+        self._save_json("tool-runs.json", self.tool_runs)
+        threading.Thread(target=self.publish_peers, name="peers", daemon=True).start()
+
+    def update_now(self) -> dict:
+        """The newer image pulled and the app redeployed, through the TrueNAS API (Update Now)."""
+        if not self.updates.available():
+            raise ValueError(M("No update is available."))
+        name = None
+        try:
+            name = (self.optimizing._containers() or {}).get("app")
+        except Exception:  # noqa: BLE001
+            name = None
+        if not name:
+            raise ValueError(M("Plex Cache can’t update itself without the TrueNAS API ([System → TrueNAS](/system#truenas), with a key allowed to manage apps). Update it in TrueNAS: Apps → plex-cache → Update."))
+        try:
+            with self.truenas() as tn:
+                try:
+                    tn.call("app.pull_images", [name, {"redeploy": True}])
+                except TrueNASError:
+                    tn.call("app.redeploy", [name])  # (an older TrueNAS: a redeploy pulls the tag anew)
+        except TrueNASError as e:
+            raise ValueError(M("TrueNAS didn’t update {app}: {why}", app=name, why=str(e))) from None
+        self.activity.event("update", M("Update asked of TrueNAS: {app} is pulling the newer image and restarting", app=name))
+        return {"updating": True, "app": name}
+
     def run_checks_async(self, rescan: bool = False):
         def work():
             if rescan:
@@ -1232,13 +1271,13 @@ class App:
                 proj["rewrite"] = proj.get("rewrite", 0) + bool(pr.get("rewrite"))
                 for k in MIX_KEYS + ("blocks",):
                     proj["now"][k] += got.get(k, 0)
-                    proj["after"][k] += pr["mix"][k]
+                    proj["after"][k] += pr["mix"].get(k, 0)
                 for k, n in pr["removed"].items():
                     proj["removed"][k] = proj["removed"].get(k, 0) + n
                 proj["removed_disk"] += pr["removed_disk"]
             mix["files"] += 1
             for k in MIX_KEYS:
-                mix[k] += got[k]
+                mix[k] += got.get(k, 0)  # (a mix kept before a key was added — round_disk — hasn't it yet)
         if posters:
             self.optimizing.poster_sizes_soon(posters)  # (learnt in the background: the estimate then has them)
         out = filechecks.summarize(results)
@@ -1590,6 +1629,7 @@ class App:
             "reports": self.reports(),
             "mqtt": dict(self.ha.status),
             "updates": self.updates.status(),
+            "peers": self.peers_summary,  # the other Plex Caches sharing library folders, and what fights (peers.py)
         }
 
 

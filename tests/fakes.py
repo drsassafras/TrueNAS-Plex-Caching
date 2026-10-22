@@ -504,6 +504,9 @@ class FakeTrueNAS:
                     result = [{"id": ds, "name": ds, "properties": {k: v for k, v in allp.items() if k in wanted}}]
                 elif req["method"] == "disk.query":
                     result = [{"name": "nvme1n1", "size": 480 * 10 ** 9}]
+                elif req["method"] in ("app.pull_images", "app.redeploy"):  # (an app updated or restarted: noted)
+                    self.apps_called = getattr(self, "apps_called", []) + [(req["method"], req.get("params"))]
+                    result = True
                 else:
                     result = None
                 # A big reply exercises the 16-bit length path.

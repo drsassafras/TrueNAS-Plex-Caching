@@ -31,6 +31,24 @@ def _write(path: str, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def mark(folder: str, instance: str, info: dict | None = None, now: float | None = None) -> str:
+    """This system's marker in a library folder (.plexcache/systems/<instance>.json): seen here, and —
+    ``info`` — what it tells the other systems (peers.py). What's there stays unless given anew."""
+    if not _ID.fullmatch(instance):
+        raise ValueError("bad instance")
+    path = os.path.join(folder, ".plexcache", "systems", f"{instance}.json")
+    data: dict = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh) or {}
+    except (OSError, ValueError):
+        data = {}
+    data.update(info or {})
+    data.update(instance=instance, at=now or time.time())
+    _write(path, data)
+    return path
+
+
 def claim(folder: str, key: str, instance: str, release: bool = False, now: float | None = None) -> dict:
     """Claim (or release) ``key`` in a library folder for ``instance``. {"claims": [{"instance",
     "at"}] — every live claim on the key, earliest first —, "peers": [other instances seen]}."""
@@ -52,7 +70,7 @@ def claim(folder: str, key: str, instance: str, release: bool = False, now: floa
     except OSError:
         fresh = False
     if not fresh:  # at most once an hour: it's synced to the other systems too
-        _write(seen, {"instance": instance, "at": now})
+        mark(folder, instance, {}, now)
     claims = []
     cdir = os.path.join(base, "claims")
     for name in os.listdir(cdir) if os.path.isdir(cdir) else []:

@@ -51,7 +51,8 @@ class Applier:
             return M("No mirrored server is watched.")
         if self.sync.review_needed():
             return M("The sync settings changed since they were reviewed: look the differences over and press I’ve Reviewed These first.")
-        return None
+        from . import peers
+        return peers.sync_conflict(self.app)
 
     # ------------------------------------------------------------ the two servers
     def _ends(self, key: str):

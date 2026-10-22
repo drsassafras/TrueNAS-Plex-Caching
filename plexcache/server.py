@@ -426,6 +426,10 @@ def make_handler(app):
                     mode = body.get("mode", "optimize")
                     if mode not in ("optimize", "covers"):
                         raise SettingsError(M("mode must be optimize or covers"))
+                    from . import peers
+                    why = peers.optimizer_conflict(app, key)
+                    if why:
+                        raise SettingsError(why)  # (another Plex Cache would undo it: said on Health too)
                     got = app.optimizing.queue(key, mode)  # now, or after the jobs before it
                     return self._json({"started": got == "started", "queued": got == "queued"})
                 if path.startswith("/api/sync/"):
@@ -457,6 +461,11 @@ def make_handler(app):
                 if path == "/api/updates/check":  # Check Now: GitHub asked for the newest version (and, on dev, commit)
                     app.updates.check_async()
                     return self._json(app.updates.status())
+                if path == "/api/updates/apply":  # Update Now: the newer image pulled and the app redeployed by TrueNAS
+                    try:
+                        return self._json(app.update_now())
+                    except ValueError as e:
+                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
                 if path.startswith("/api/tools/"):
                     # a tool (tools/): {"action": "scan", "library", "options"} or {"action": "apply", "ids": [...]}
                     tool = app.tools.get(path[len("/api/tools/"):])
@@ -467,7 +476,10 @@ def make_handler(app):
                         started = tool.scan_async(str(body.get("library") or ""), body.get("options") if isinstance(body.get("options"), dict) else {})
                     elif action == "apply":
                         choices = body.get("choices") if isinstance(body.get("choices"), dict) else {}
-                        started = tool.apply_async([str(i) for i in body.get("ids") or []], {str(k): v for k, v in choices.items() if isinstance(v, dict)})
+                        try:
+                            started = tool.apply_async([str(i) for i in body.get("ids") or []], {str(k): v for k, v in choices.items() if isinstance(v, dict)})
+                        except ValueError as e:
+                            raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
                     else:
                         raise SettingsError(M("unknown action"))
                     return self._json(dict(jsonable(tool.snapshot()), started=started))

@@ -634,11 +634,7 @@ def _sync_items(app) -> list[dict]:
     if likely and s.get("mirrors") != "none":
         out.append(dict(item("info", M("A server that looks like a mirror: {names}", names=[c["name"] for c in likely]),
                              M("Its files are here too, at the same places (a sample of them)."), M("Watch it on the Sync page, or say it isn’t a mirror.")), link=link))
-    peers = sync.peers()
-    if peers:
-        out.append(dict(item("info", M("Another Plex Cache shares these folders"),
-                             M("It marked itself in the library folders (the optimizer’s claims): {n} system(s), seen within the last {days} days.", n=len(peers), days=30),
-                             M("Each optimizes files on its own side; claims keep them off the same file.")), link=link))
+    out.extend(_peer_items(app))
     rep = sync.report
     if rep and sum((rep.get("totals") or {}).values()):
         n = sum(rep["totals"].values())
@@ -668,6 +664,36 @@ def _tool_items(app) -> list[dict]:
         out.append(dict(item("warn", M("{n} moved films the mirrored server hasn’t picked up", one="{n} moved film the mirrored server hasn’t picked up", n=len(late)),
                              M("Its Plex doesn’t list the new folder after {days} days: {titles}. Is the folder synced there?", days=3, titles=[e["title"] for e in late[:3]])),
                         link={"href": "/folders", "text": M("Open Organize Folders")}))
+    return out
+
+
+def _peer_items(app) -> list[dict]:
+    """Another Plex Cache sharing library folders (peers.py): who, with which settings, and what
+    would fight — applying both ways, optimizer choices that differ, a file tool just run there."""
+    from . import peers
+    summary = getattr(app, "peers_summary", None)
+    if summary is None:
+        try:
+            summary = app.peers_summary = peers.summary(app)
+        except Exception:  # noqa: BLE001
+            return []
+    out = []
+    names = {str(lib["key"]): lib.get("title") or lib["key"] for lib in getattr(app, "libraries", []) or []}
+    for sy in summary.get("systems") or []:
+        s = sy.get("sync") or {}
+        how = (M("applies Library Sync with itself as the source") if s.get("mode") == "apply" and s.get("source") == "this"
+               else M("applies Library Sync with its mirror as the source") if s.get("mode") == "apply" else M("compares only") if s.get("mode") == "compare" else M("has Library Sync off"))
+        out.append(dict(item("info", M("Another Plex Cache shares these folders: {name}", name=sy.get("name") or sy.get("instance")),
+                             M("Version {version}; shares {libs}; it {how}. Each side optimizes its own files, and claims keep the two off the same file.",
+                               version=sy.get("version") or "?", libs=[names.get(k, k) for k in sy.get("libraries") or []], how=how),
+                             "" if summary.get("publishing") else M("This side can’t tell the other about its own settings until the optimizer service is set up (it writes the marker).")),
+                        link={"href": "/sync", "text": M("Open the Sync page")}))
+    if summary.get("sync_conflict"):
+        out.append(dict(item("fail", M("Library Sync would go back and forth"), summary["sync_conflict"], M("Applying is refused here until it’s settled.")),
+                        link={"href": "/sync", "text": M("Open the Sync page")}))
+    for key, why in (summary.get("optimizer_conflicts") or {}).items():
+        out.append(dict(item("fail", M("Optimizer choices differ between the two sides: {library}", library=names.get(key, key)), why,
+                             M("Optimize Now is refused for this library until they match.")), link={"href": "/optimizer", "text": M("Open the Optimizer page")}))
     return out
 
 

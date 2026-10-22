@@ -201,6 +201,12 @@ def folder_action(svc: Service, body: dict) -> tuple[int, dict]:
     if not path or (body.get("to") and not to) or (body.get("root") and not root):
         return 403, {"error": "path is outside the media folders"}
     try:
+        if action == "mark":  # this system's marker in a library folder, with what it tells the other systems (peers.py)
+            from . import claims
+            info = body.get("info") if isinstance(body.get("info"), dict) else {}
+            if len(json.dumps(info)) > 8192:
+                return 400, {"error": "too much to publish"}
+            return 200, {"marked": claims.mark(path, str(body.get("instance") or ""), info)}
         if action in ("set_aside", "restore", "purge", "link", "unlink"):  # the tools' file actions (files.py)
             from . import files
             if action in ("set_aside", "restore", "purge") and not root:

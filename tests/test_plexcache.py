@@ -4768,6 +4768,10 @@ class FakeOptimizer:
         os.remove(path)
         return {"deleted": True}
 
+    def mark(self, folder, instance, info):
+        from plexcache.optimize import claims
+        return {"marked": claims.mark(folder, instance, info)}
+
     def file_action(self, action, path, to="", root=""):
         from plexcache.optimize import files
         self.sent.append({"action": action, "path": path, "to": to, "root": root})
@@ -5412,6 +5416,83 @@ class OptimizerTests(unittest.TestCase):
         app.zfs = {"platform": {"truenas": None, "label": "x"}}
         self.assertIn("TrueNAS API not connected", en(tn()["title"]))
         self.assertIn("[System → TrueNAS](/system#truenas)", en(tn()["fix"]))
+
+    def test_library_view_with_an_older_mix(self):
+        """A file inspected before a mix key existed (round_disk came later) still adds up on the
+        Library page: the summary takes a missing key as zero instead of failing the whole view."""
+        app, op, client, d, state = self._app(names=("film.mkv",))
+        f = app.files[0]
+        f.rating_key, f.title = "r1", "Film"
+        old = {"format": "matroska", "size": 100, "tracks": [{"type": "video", "codec": "V_X"}],
+               "mix": {"video": 60, "meta": 30, "unused": 10, "video_disk": 60, "meta_disk": 30, "unused_disk": 10, "blocks": 1}}  # (no round_disk)
+        app.file_maps.get = lambda path, st=None, full=False: old
+        view = app.library_view("1")
+        self.assertEqual((view["summary"]["mix"]["files"], view["summary"]["mix"]["round_disk"]), (1, 0))
+
+    def test_two_plex_caches_sharing_folders(self):
+        """Two Plex Caches on servers sharing library folders (peers.py): each publishes its settings in
+        the folder's marker (through the optimizer service), and the other refuses what would fight —
+        Library Sync applying from both sides, optimizer choices that differ, a file tool just run
+        there — saying so on Health. A claim's hourly refresh keeps the marker's content."""
+        from plexcache import checks, peers
+        from plexcache.optimize import claims
+        app, op, client, d, state = self._app(names=("film.mkv",))
+        app.plex_name = "Here"
+        app.settings.update({"sync": {"mode": "apply", "source": "this"}})
+        self.assertEqual(peers.publish(app), 1)
+        mine = json.load(open(os.path.join(d, ".plexcache", "systems", app.optimizing.instance() + ".json")))
+        self.assertEqual((mine["name"], mine["sync"]["mode"], mine["sync"]["source"], mine["optimizer"]["images"]), ("Here", "apply", "this", op.options("1")["images"]))
+        self.assertEqual(peers.read(app), {})                                                       # (only our own marker)
+        # the other side's marker arrives (the folder sync): it applies with itself as the source too
+        other = {"name": "There", "version": "0.16.0", "sync": {"mode": "apply", "source": "this"}, "optimizer": dict(mine["optimizer"]), "tools": {}}
+        claims.mark(d, "system-b", other)
+        found = peers.read(app)
+        self.assertEqual((list(found), found["system-b"]["libraries"]), (["system-b"], ["1"]))
+        self.assertIn("back and forth", en(peers.sync_conflict(app)))
+        app.settings.update({"sync": {"source": "mirror"}})                                          # one side the source: fine
+        self.assertIsNone(peers.sync_conflict(app))
+        claims.mark(d, "system-b", dict(other, sync={"mode": "apply", "source": "mirror"}))         # both pulling: fights too
+        self.assertIn("back and forth", en(peers.sync_conflict(app)))
+        claims.mark(d, "system-b", dict(other, sync={"mode": "compare", "source": "this"}))
+        self.assertIsNone(peers.sync_conflict(app))
+        # optimizer choices that change the bytes must agree
+        self.assertIsNone(peers.optimizer_conflict(app, "1"))
+        claims.mark(d, "system-b", dict(other, optimizer=dict(mine["optimizer"], images="remove" if mine["optimizer"]["images"] != "remove" else "compress")))
+        self.assertIn("other choices (images)", en(peers.optimizer_conflict(app, "1")))
+        summary = peers.summary(app)
+        self.assertEqual((summary["systems"][0]["name"], list(summary["optimizer_conflicts"]), summary["publishing"]), ("There", ["1"], True))
+        titles = [en(i["title"]) for i in checks._peer_items(app)]
+        self.assertTrue(any("shares these folders: There" in t for t in titles) and any("Optimizer choices differ" in t for t in titles), titles)
+        # a file tool just run there: ours waits; Merge (no files) doesn't
+        claims.mark(d, "system-b", dict(other, tools={"versions": time.time() - 600}))
+        self.assertIn("ran versions", en(peers.tool_conflict(app, "1", "folders")))
+        self.assertIsNone(peers.tool_conflict(app, "1", "merge"))
+        with self.assertRaises(ValueError):
+            app.tools["versions"].scan_result = {"library": "1", "rows": [{"id": "x", "title": "x"}]}
+            app.tools["versions"].apply_async(["x"])
+        claims.mark(d, "system-b", dict(other, tools={"versions": time.time() - 2 * peers.TOOL_GAP}))
+        self.assertIsNone(peers.tool_conflict(app, "1", "folders"))
+        # a claim's hourly refresh of the marker keeps what was published in it
+        claims.claim(d, "abcdefgh", "system-b", now=time.time() + 7200)
+        self.assertEqual(json.load(open(os.path.join(d, ".plexcache", "systems", "system-b.json")))["name"], "There")
+        # a tool run here is told to the other side
+        app.note_tool_run("1", "folders")
+        self.assertTrue(wait_for(lambda: "folders" in (json.load(open(os.path.join(d, ".plexcache", "systems", app.optimizing.instance() + ".json"))).get("tools") or {})))
+
+    def test_update_now_through_truenas(self):
+        """Update Now: with an update available and the TrueNAS API connected, TrueNAS is asked to pull
+        the newer image and redeploy the app; without an update, or an app name, it's refused."""
+        app = _new_app()
+        with self.assertRaises(ValueError):
+            app.update_now()                                                                       # (nothing newer)
+        app.updates.latest = "9.0.0"
+        with mock.patch.object(app.optimizing, "_containers", lambda: None), self.assertRaises(ValueError):
+            app.update_now()                                                                       # (no app name without the API)
+        with mock.patch.object(app.optimizing, "_containers", lambda: {"app": "plex-cache"}):
+            got = app.update_now()
+        self.assertEqual(got, {"updating": True, "app": "plex-cache"})
+        self.assertIn(("app.pull_images", ["plex-cache", {"redeploy": True}]), TRUENAS.apps_called)
+        self.assertTrue(any("pulling the newer image" in en(e["message"]) for e in app.activity.snapshot()["events"]))
 
     def test_library_health_issues_ignored(self):
         """An item's issues ignored: greyed out, not counted, the item at the bottom — kept across
