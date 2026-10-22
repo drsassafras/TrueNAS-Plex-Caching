@@ -241,8 +241,10 @@ def main() -> int:
     todo, by_bs, ok_files, total = [], {}, 0, 0
     root_dev = os.stat(folder).st_dev
     for dirpath, dirnames, filenames in os.walk(folder):
-        # Stay on this dataset: child datasets have their own recordsize.
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and os.lstat(os.path.join(dirpath, d)).st_dev == root_dev]
+        # Stay on this dataset: child datasets have their own recordsize. In name order, so a run
+        # stopped and started again goes on where it left off (the file system's own order varies).
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and os.lstat(os.path.join(dirpath, d)).st_dev == root_dev)
+        filenames = sorted(filenames)
         try:
             dir_st = os.lstat(dirpath)
         except OSError:
