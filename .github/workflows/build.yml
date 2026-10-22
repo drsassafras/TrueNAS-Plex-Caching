@@ -2,7 +2,7 @@ name: Test and publish image
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*"]
   pull_request:
 
@@ -38,6 +38,7 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/plex-cache
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
