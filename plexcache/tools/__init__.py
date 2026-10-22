@@ -77,9 +77,9 @@ class Tool:
             except Exception as e:  # noqa: BLE001 — said on the page
                 self.error = str(e)
             finally:
+                self.save()
                 with self.lock:
                     self.running, self.progress = False, None
-                self.save()
         threading.Thread(target=work, name=f"tool-{self.name}-scan", daemon=True).start()
         return True
 
@@ -115,9 +115,9 @@ class Tool:
                             self.scan_result["rows"] = [r for r in self.scan_result["rows"] if r["id"] != row["id"]]
                     self.save()
             finally:
+                self.save()
                 with self.lock:
                     self.running, self.progress = False, None
-                self.save()
                 self.app.run_checks_async()
         threading.Thread(target=work, name=f"tool-{self.name}-apply", daemon=True).start()
         return True

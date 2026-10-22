@@ -793,7 +793,7 @@ class Inspector:
                     finished, self.current, self.working = (self.current, st["read"]), None, False
                     path = None
                 else:
-                    path = st["todo"].pop(0)
+                    path = st["todo"][0]  # (left in the list while it's read: the job counts as running until it's in)
             if finished:
                 self._finished(*finished)
                 break
@@ -805,6 +805,8 @@ class Inspector:
                 pass
             with self.lock:
                 st["done"] += 1
+                if st["todo"] and st["todo"][0] == path:
+                    st["todo"].pop(0)
             since_save += 1
             if since_save >= 200:
                 maps.save()
