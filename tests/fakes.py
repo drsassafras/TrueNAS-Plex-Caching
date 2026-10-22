@@ -8,7 +8,6 @@ import json
 import os
 import ssl
 import struct
-import subprocess
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -401,13 +400,10 @@ class FakePlexTV:
 # ---------------------------------------------------------------------------
 
 def self_signed_cert(directory: str) -> tuple[str, str]:
-    cert, key = os.path.join(directory, "cert.pem"), os.path.join(directory, "key.pem")
-    subprocess.run(
-        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert,
-         "-days", "1", "-subj", "/CN=localhost"],
-        check=True, capture_output=True,
-    )
-    return cert, key
+    """A certificate for the fakes' TLS: the one in tests/fixtures (self-signed, for "localhost", only
+    ever used by these fakes), so no openssl is needed — the app's image has none."""
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+    return os.path.join(here, "localhost.crt"), os.path.join(here, "localhost.key")
 
 
 class FakeTrueNAS:
