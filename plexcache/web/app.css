@@ -209,7 +209,7 @@ input.secret{font-family:var(--mono)}
 .legend i.k0{background:var(--chart-a)}.legend i.k1{background:var(--chart-b)}
 .chart-tip{position:absolute;z-index:5;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;line-height:1.5;pointer-events:none;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.12)}
 /* Info buttons: a small "i" that opens a bubble with the longer explanation */
-.info{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin:0 0 0 6px;padding:0;border-radius:50%;border:1px solid var(--muted);background:transparent;color:var(--muted);font:700 11px/1 var(--sans);cursor:pointer;vertical-align:1px;position:relative;flex:none}
+.info{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin:0 0 0 6px;padding:0;border-radius:50%;border:1px solid var(--muted);background:transparent;color:var(--muted);font:700 11px/1 var(--sans);cursor:pointer;vertical-align:middle;position:relative;flex:none;transform:translateY(-1px)}  /* centred on the text beside it, wherever it sits */
 .info::before{content:"";position:absolute;inset:-13px}  /* a 44px touch target around the 18px mark */
 .info:hover,.info[aria-expanded=true]{border-color:var(--accent);color:var(--accent);background:var(--guide-bg)}
 .info:focus-visible{outline:2px solid var(--accent);outline-offset:2px}

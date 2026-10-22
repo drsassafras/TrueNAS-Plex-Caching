@@ -566,8 +566,10 @@ PCI18N.ready.then(function () {
       "Optimizing the files (<a href=\"/optimizer\" data-nav>the Optimizer page</a>) and using the recommended record size give the Target columns; <a href=\"/health#media\" data-nav>Health → Libraries</a> shows each library’s record size and the one recommended for it. " +
       "Sizes are for your libraries as they are today: leave room on top for how much they’ll grow.",
       { video: w.padding_video, audio: w.padding_audio, how: ST.index_avg ? T("measured by warm-up") : T("estimated until warm-up has measured yours") });
-    var table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">' + H("Titles") + '</th><th scope="col">' + H("Avg bitrate") + "</th>" +
-      '<th scope="col">' + H("Avg file") + "</th>" + head4.map(function (h, i) { return '<th scope="col"' + (i === 2 ? ' class="estc"' : "") + ">" + h[0] + info(h[1], h[0]) + "</th>"; }).join("") + "</tr></thead><tbody>";
+    // each heading a word to a line, so the columns stay narrow
+    var wordy = function (t) { return String(t).split(/\s+/).join("<br>"); };
+    var table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">' + H("Titles") + '</th><th scope="col">' + wordy(H("Avg bitrate")) + "</th>" +
+      '<th scope="col">' + wordy(H("Avg file")) + "</th>" + head4.map(function (h, i) { return '<th scope="col"' + (i === 2 ? ' class="estc"' : "") + ">" + wordy(h[0]) + info(h[1], h[0]) + "</th>"; }).join("") + "</tr></thead><tbody>";
     rows.forEach(function (r) {
       var kind = KIND_NAME[r.kind], z = libSizes(r);
       var mine = r.rs ? fmtRs(r.rs) : "";
@@ -580,11 +582,11 @@ PCI18N.ready.then(function () {
     var four = function (f, cls) {
       return SIZE_COLS.map(function (c) { return '<td class="nw' + (c === "target" ? " estc" : "") + '"' + (cls ? " data-est" + cls + '="' + c + '"' : "") + ">" + esc(fmtBytes(f(tot[c]))) + "</td>"; }).join("");
     };
-    var blank = "<td></td><td></td><td></td>";
-    table += '<tr class="sum"><th scope="row">' + H("Lead-ins") + info(H("What the lead-ins take: in RAM without an L2ARC, or on the SSD with one."), T("Lead-ins")) + "</th>" + blank + four(function (x) { return x.bytes; }, "lead") + "</tr>" +
-      "<tr><td>" + H("System buffer") + info(H("Room on the SSD for everything else ZFS caches. This size decides how quickly the L2ARC is emptied: it reuses its space oldest first, so the larger the buffer, the longer cached files stay cached. Set it with the slider above."), T("System buffer")) + "</td>" + blank +
+    var blank = "<td></td><td></td>";  // (the summary rows' heading spans the Titles column too: room for its name)
+    table += '<tr class="sum"><th scope="row" colspan="2">' + H("Lead-ins") + info(H("What the lead-ins take: in RAM without an L2ARC, or on the SSD with one."), T("Lead-ins")) + "</th>" + blank + four(function (x) { return x.bytes; }, "lead") + "</tr>" +
+      '<tr><td colspan="2">' + H("System buffer") + info(H("Room on the SSD for everything else ZFS caches. This size decides how quickly the L2ARC is emptied: it reuses its space oldest first, so the larger the buffer, the longer cached files stay cached. Set it with the slider above."), T("System buffer")) + "</td>" + blank +
       four(function () { return buffer; }) + "</tr>" +
-      '<tr class="sum"><th scope="row">' + H("L2ARC size") + info(why, T("L2ARC sizing")) + "</th>" + blank + four(function (x) { return x.bytes + buffer; }, "l2") + "</tr></tbody></table></div>";
+      '<tr class="sum"><th scope="row" colspan="2">' + H("L2ARC size") + info(why, T("L2ARC sizing")) + "</th>" + blank + four(function (x) { return x.bytes + buffer; }, "l2") + "</tr></tbody></table></div>";
     // With an L2ARC, the bar above says whether it fits; without one, this says what to add
     var l2 = ST.zfs.l2_total, need = tot.your.bytes + buffer, head = "";
     if (ST.l2arc === "absent" || !l2) {
