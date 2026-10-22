@@ -514,6 +514,20 @@ def make_handler(app):
                         why = e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))  # (translated, when it can be)
                         raise SettingsError(why) from None
                     raise SettingsError(M("unknown action"))
+                if path == "/api/library/health/ignore":
+                    # an item's Library Health issues ignored (greyed out, kept for good) or brought back:
+                    # {"library", "item", "action": "ignore" | "restore", "ids": [check ids]}
+                    from .libhealth import set_ignored
+                    key = str(body.get("library") or "")
+                    if not app.library_info(key) or not body.get("item"):
+                        raise SettingsError(M("unknown library: {key}", key=key))
+                    if body.get("action") == "ignore":
+                        set_ignored(app, key, str(body["item"]), [str(i) for i in body.get("ids") or []])
+                    elif body.get("action") == "restore":
+                        set_ignored(app, key, str(body["item"]), None)
+                    else:
+                        raise SettingsError(M("unknown action"))
+                    return self._json({"ok": True})
                 if path == "/api/library/survey":
                     # read the layout of a library's files (Library Health): {"library", "force"?, "pause"?}.
                     # One library at a time: starting one pauses the other, which carries on when started again.

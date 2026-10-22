@@ -2367,7 +2367,7 @@ PCI18N.ready.then(function () {
         var rv = dflt[c.id] !== undefined && c.on !== dflt[c.id] ? ' <button type="button" class="revert" data-lhcheck-revert="' + c.id + '" title="' + H("Back to the default ({value})", { value: dflt[c.id] ? T("on") : T("off") }) + '">↺</button>' : "";
         return '<div class="chk lhchk' + (sub ? " lhsub" : "") + '">' + info(esc(msg(c.help)), msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
           (sub ? "" : c.on ? (n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : '<span class="muted det">' + esc(T("off")) + "</span>") +
-          (c.id === "subtitles_language" && c.on ? '<div class="lhlang"><span>' + H("Language") + "</span>" + langSel +
+          (c.id === "subtitles_language" ? '<div class="lhlang"><span>' + H("Language") + "</span>" + langSel +
             (d.language !== ((ST.library_health_defaults || {}).subtitle_language || "en") ? ' <button type="button" class="revert" data-lhlang-revert title="' + H("Back to the default ({value})", { value: "English" }) + '">↺</button>' : "") + "</div>" : "") + "</div>";
       };
       // a check's options (c.of) under it, only while it's on
@@ -2378,17 +2378,23 @@ PCI18N.ready.then(function () {
     if (!(d.items || []).length) return out + '<p class="muted">' + H("Nothing flagged.") + "</p>";
     // each item flagged as a record card — its poster, its name as Plex has it (title, year, edition) — with a chip per
     // issue on the right; a chip opened shows what the check found (the file concerned, when the item has several)
-    out += '<div class="sshdr lhhdr"><div>' + H("Item") + "</div><div></div><div>" + H("Flagged") + "</div></div>";
+    out += '<p class="help">' + H("Ignore greys out an item’s issues as they are now, for good — a new kind of issue on it still shows as a warning; Bring Back undoes it.") + "</p>" +
+      '<div class="sshdr lhhdr"><div>' + H("Item") + "</div><div></div><div>" + H("Flagged") + "</div></div>";
     out += d.items.map(function (it, i) {
       var poster = it.poster ? '<img class="ssposter" src="/api/poster?path=' + encodeURIComponent(it.poster) + '" alt="" loading="lazy">' : '<div class="ssposter none"></div>';
-      var chips = "", shown = "";
+      var chips = "", shown = "", live = [], muted = 0;
       it.results.forEach(function (r, k) {
         var id = i + "/" + k, on = !!LH_OPEN[key + ":" + id];
         var name = ((d.checks[r.category] || []).filter(function (c) { return c.id === r.id; })[0] || {}).name;
-        chips += '<button type="button" class="badge b-warn sschip' + (on ? " on" : "") + '" aria-expanded="' + on + '" data-act="lh-open" data-key="' + esc(key) + '" data-id="' + esc(id) + '">' + esc(name ? msg(name) : r.id) + "</button>";
-        if (on) shown += '<div class="ssval">' + esc(msg(r.text)) + (r.file && (it.files || []).length > 1 ? ' <span class="mono muted">' + esc(r.file) + "</span>" : "") + "</div>";
+        if (r.ignored) muted++; else if (live.indexOf(r.id) < 0) live.push(r.id);
+        chips += '<button type="button" class="badge b-' + (r.ignored ? "grey" : "warn") + " sschip" + (on ? " on" : "") + '" aria-expanded="' + on + '" data-act="lh-open" data-key="' + esc(key) + '" data-id="' + esc(id) + '"' +
+          (r.ignored ? ' title="' + H("Ignored") + '"' : "") + ">" + esc(name ? msg(name) : r.id) + "</button>";
+        if (on) shown += '<div class="ssval' + (r.ignored ? " muted" : "") + '">' + esc(msg(r.text)) + (r.file && (it.files || []).length > 1 ? ' <span class="mono muted">' + esc(r.file) + "</span>" : "") + "</div>";
       });
-      return '<div class="ssitem lhitem"><div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(it.label) + "</div></div></div></div>" +
+      // ignored: the item's issues as they are now greyed out and kept so (a new kind of issue still warns); brought back on request
+      var acts = (live.length ? '<button class="btn sm" type="button" data-act="lh-ignore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" data-ids="' + esc(live.join(",")) + '">' + H("Ignore") + "</button> " : "") +
+        (muted ? '<button class="btn sm" type="button" data-act="lh-restore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '">' + H("Bring Back") + "</button>" : "");
+      return '<div class="ssitem lhitem' + (live.length ? "" : " lhquiet") + '"><div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(it.label) + '</div><div class="lhacts">' + acts + "</div></div></div></div>" +
         '<div class="ssarrow"></div><div class="lhflags"><div class="sschips">' + chips + "</div>" + shown + "</div></div>";
     }).join("");
     if ((d.items || []).length < (d.total || 0)) out += '<p class="muted">' + H("The first {n} shown.", { n: fmtNum(d.items.length) }) + "</p>";
@@ -4462,6 +4468,11 @@ PCI18N.ready.then(function () {
     else if (act === "file-toggle") { SHOWFILE[el.dataset.file] = !SHOWFILE[el.dataset.file]; render(); }
     else if (act === "lib-view") { LIB.view = el.dataset.view; render(); }
     else if (act === "lh-open") { var lk = el.dataset.key + ":" + el.dataset.id; LH_OPEN[lk] = !LH_OPEN[lk]; render(); }
+    else if (act === "lh-ignore" || act === "lh-restore") {
+      el.disabled = true;
+      api("/api/library/health/ignore", { library: el.dataset.key, item: el.dataset.item, action: act === "lh-ignore" ? "ignore" : "restore", ids: (el.dataset.ids || "").split(",").filter(Boolean) })
+        .then(function () { LIB.health = {}; render(); }).catch(function (e) { toast(e.message); });
+    }
     else if (act === "sync-start") {
       el.disabled = true;
       LIB.hold.sync[el.dataset.key] = false;

@@ -181,6 +181,30 @@ def duplicate_checks(groups: dict, on: dict) -> dict:
     return out
 
 
+IGNORED = "health-ignored.json"  # {library key: {item key: [check ids ignored]}}
+
+
+def ignored(app) -> dict:
+    if getattr(app, "_lh_ignored", None) is None:
+        app._lh_ignored = {k: v for k, v in (app._load_json(IGNORED) or {}).items() if isinstance(v, dict)}
+    return app._lh_ignored
+
+
+def set_ignored(app, key: str, item: str, ids: list | None) -> None:
+    """An item's issues ignored (``ids``: the check ids to grey out, added to any already ignored) or
+    brought back (None). Kept for good: it survives re-checks and restarts; a new kind of issue on the
+    item still shows as a warning."""
+    store = ignored(app)
+    lib = store.setdefault(str(key), {})
+    if ids is None:
+        lib.pop(str(item), None)
+    else:
+        lib[str(item)] = sorted(set(lib.get(str(item)) or []) | set(ids))
+    if not lib:
+        store.pop(str(key), None)
+    app._save_json(IGNORED, store)
+
+
 def library_health(app, key: str) -> dict:
     """A library's items through the checks: {"checks": CHECKS with each one's switch, "counts":
     {id: n}, "items": [{"label", "file", "results": [...]}], "checked", "unread" (files not inspected
@@ -213,6 +237,7 @@ def library_health(app, key: str) -> dict:
             rows.append({"path": f.path, "size": getattr(f, "size", 0), "duration": getattr(f, "duration_ms", 0), "ino": ino})
         dup_groups[rk] = rows
     dups = duplicate_checks(dup_groups, on)
+    quiet = ignored(app).get(str(key)) or {}
     for rk, group in by_item.items():
         results = list(dups.get(rk) or [])
         for f in group:
@@ -234,11 +259,14 @@ def library_health(app, key: str) -> dict:
             item.update(locked=sd.get("locked") or [], fields=sd.get("fields") or {}, tags=sd.get("tags") or {})
         results += plex_checks(item, on)
         if results:
+            muted = set(quiet.get(rk) or [])
             for r in results:
-                counts[r["id"]] = counts.get(r["id"], 0) + 1
-            items.append({"label": getattr(group[0], "title", "") or os.path.basename(group[0].path), "poster": getattr(group[0], "poster", ""),
-                          "files": [os.path.basename(f.path) for f in group], "results": results})
-    items.sort(key=lambda it: it["label"].lower())
+                r["ignored"] = r["id"] in muted  # (greyed out, not counted: ignored on this item)
+                if not r["ignored"]:
+                    counts[r["id"]] = counts.get(r["id"], 0) + 1
+            items.append({"key": rk, "label": getattr(group[0], "title", "") or os.path.basename(group[0].path), "poster": getattr(group[0], "poster", ""),
+                          "files": [os.path.basename(f.path) for f in group], "results": results, "live": sum(1 for r in results if not r["ignored"])})
+    items.sort(key=lambda it: (it["live"] == 0, it["label"].lower()))  # (items with nothing live left at the bottom)
     langs = sorted(languages | {lang, DEFAULT_LANGUAGE}, key=lambda c: (language_name(c) or c).lower())
     return {"checks": {cat: [dict(c, on=on[c["id"]]) for c in cs] for cat, cs in CHECKS.items()}, "counts": counts,
             "items": items[:500], "total": len(items), "checked": len(by_item), "unread": unread, "pages_read": len(sync_sides),

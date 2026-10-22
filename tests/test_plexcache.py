@@ -4896,9 +4896,10 @@ class OptimizerTests(unittest.TestCase):
                     else:
                         self.assertIn(pm["blocks"], (gm["blocks"], gm["blocks"] + 1), kw)
                     self.assertAlmostEqual(want["first_video"], max(0, rec - got["video_start"]), delta=256, msg=kw)
-                    self.assertAlmostEqual(pm["meta"], gm["meta"], delta=256 + gm["meta"] * (0.03 if images == "remove" else 0.08), msg=kw)
-                    self.assertAlmostEqual(pm["video"], gm["video"], delta=8192, msg=kw)
-                    self.assertAlmostEqual(pm["video_tail"], projection.tail_video(got), delta=8192, msg=kw)   # the end's video, as written
+                    slack = 0 if images == "remove" else rec  # (smaller cover art: what's cached shifts by up to a block)
+                    self.assertAlmostEqual(pm["meta"], gm["meta"], delta=256 + gm["meta"] * 0.03 + slack, msg=kw)
+                    self.assertAlmostEqual(pm["video"], gm["video"], delta=8192 + slack, msg=kw)
+                    self.assertAlmostEqual(pm["video_tail"], projection.tail_video(got), delta=8192 + slack, msg=kw)   # the end's video, as written
                     self.assertAlmostEqual(pm["meta_disk"], gm["meta_disk"], delta=4096 + gm["meta_disk"] * 0.05, msg=kw)
                     if images != "plex":
                         gone = m["size"] - got["size"]                  # what the file lost, against what was said to go
@@ -5355,6 +5356,34 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(ids2({"tracks": [v, au("eng"), pgs("fra")]}, subtitles_language=True, no_subtitles=False), [])  # (the options narrow the check: off with it)
         self.assertEqual(ids2({"tracks": [v, au("zxx"), pgs("eng")]}, subtitles_language=True, subtitles_text=True), ["subtitles_on_zxx"])  # (no speech)
         self.assertTrue(libhealth.same_language("eng", "en") and not libhealth.same_language("eng", "fra") and not libhealth.same_language("", "en"))
+
+    def test_library_health_issues_ignored(self):
+        """An item's issues ignored: greyed out, not counted, the item at the bottom — kept across
+        re-checks and restarts; a new kind of issue on it still warns; brought back on request."""
+        from plexcache import libhealth
+        app, op, client, d, state = self._app(names=("film.mkv",))
+        f = app.files[0]
+        f.rating_key, f.title = "r1", "Film"
+        app.file_maps.files[f.path] = {"map": {"format": "matroska", "size": 100, "tracks": [{"type": "video", "codec": "V_X"}]}, "stat": {}}
+        maps = lambda path, st=None: {"tracks": [{"type": "video", "codec": "V_X"}]}
+        app.file_maps.get = maps
+        got = libhealth.library_health(app, "1")
+        self.assertEqual(([r["id"] for r in got["items"][0]["results"]], got["counts"]), (["no_audio"], {"no_audio": 1}))
+        libhealth.set_ignored(app, "1", "r1", ["no_audio"])
+        got = libhealth.library_health(app, "1")
+        self.assertEqual((got["items"][0]["results"][0]["ignored"], got["items"][0]["live"], got["counts"]), (True, 0, {}))
+        app._lh_ignored = None                                                                   # (a restart: read from disk)
+        self.assertTrue(libhealth.library_health(app, "1")["items"][0]["results"][0]["ignored"])
+        # a new kind of issue on the item: a warning still
+        app.file_maps.get = lambda path, st=None: {"tracks": [{"type": "video", "codec": "V_X"}, {"type": "audio", "codec": "A_X", "language": "eng"}, {"type": "subtitles", "codec": "S_X", "language": "eng"}]}
+        app.settings.update({"library_health": {"checks": {"subtitles_text": True}}})
+        got = libhealth.library_health(app, "1")
+        self.assertEqual([(r["id"], r["ignored"]) for r in got["items"][0]["results"]], [("no_subtitles", False)])
+        libhealth.set_ignored(app, "1", "r1", ["no_subtitles"])
+        self.assertEqual(libhealth.ignored(app)["1"]["r1"], ["no_audio", "no_subtitles"])           # (both kept)
+        libhealth.set_ignored(app, "1", "r1", None)
+        self.assertEqual(libhealth.ignored(app), {})
+        self.assertFalse(libhealth.library_health(app, "1")["items"][0]["results"][0]["ignored"])
 
     def test_library_health_duplicate_checks(self):
         """The duplicate checks: the same file (running time and size) twice on one item — a link to one

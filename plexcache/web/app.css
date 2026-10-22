@@ -680,3 +680,6 @@ h2 .mode-ic{vertical-align:-3px}
 .lhchk select.sel.sm{font-size:12px;padding:2px 6px;min-height:0;max-width:140px}
 .lhchk .lhlang{flex-basis:100%;display:flex;align-items:center;gap:8px;margin:-4px 0 2px 36px;font-size:13px;color:var(--soft)}
 .lhchk.lhsub{margin-left:36px;font-size:13px}
+.lhacts{margin-top:6px}
+.lhquiet .what{color:var(--muted)}
+.ssval.muted{color:var(--muted)}
