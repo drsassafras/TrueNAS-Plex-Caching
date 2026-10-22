@@ -5523,6 +5523,23 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(libhealth.ignored(app), {})
         self.assertFalse(libhealth.library_health(app, "1")["items"][0]["results"][0]["ignored"])
 
+    def test_same_file_means_the_same_bytes(self):
+        """Two files alike in size and running time aren't the same file unless their bytes say so: over
+        thousands of episodes, two of one size and length do turn up (two anime episodes, say)."""
+        from plexcache import libhealth
+        d = tempfile.mkdtemp(dir=TMP)
+        a, b, c = (os.path.join(d, n) for n in ("a.mkv", "b.mkv", "c.mkv"))
+        for p, tail in ((a, b"AAAA"), (b, b"AAAA"), (c, b"CCCC")):
+            with open(p, "wb") as fh:
+                fh.write(b"x" * 200000 + tail)
+        f = lambda p, ino: {"path": p, "local": p, "size": 200004, "duration": 1440000, "ino": ino, "dev": 1}
+        self.assertTrue(libhealth._same_file(f(a, 1), f(b, 2)))                                   # the same bytes: one file copied
+        self.assertFalse(libhealth._same_file(f(a, 1), f(c, 3)))                                  # the same size and length, other bytes
+        self.assertTrue(libhealth._same_file(f(a, 7), f(c, 7)))                                   # one inode: a link, whatever we'd read
+        self.assertFalse(libhealth._same_file(dict(f(a, 1), size=200005), f(b, 2)))                # a byte apart: not the same
+        self.assertFalse(libhealth._same_file(dict(f(a, 1), duration=1441000), f(b, 2)))           # a second apart: not the same
+        self.assertTrue(libhealth._same_file(dict(f(a, 1), local=""), dict(f(c, 3), local="")))    # (nothing to read: size and length must do)
+
     def test_library_health_duplicate_checks(self):
         """The duplicate checks: the same file (running time and size) twice on one item — a link to one
         file, or two copies — and the same file under two items. Another bitrate isn't a duplicate."""
@@ -5531,7 +5548,7 @@ class OptimizerTests(unittest.TestCase):
         f = lambda path, dur, size, ino=0: {"path": path, "duration": dur, "size": size, "ino": ino}
         got = libhealth.duplicate_checks({"A": [f("/m/A/a.mkv", 7200000, 4e9, 1), f("/m/a.mkv", 7200000, 4e9, 1)],
                                           "B": [f("/m/b 1080p.mkv", 5400000, 3e9), f("/m/b 4K.mkv", 5400000, 9e9)],
-                                          "C": [f("/m/c.mkv", 6000000, 2e9, 5)], "D": [f("/m/sub/c.mkv", 6000500, 2e9 + 1000, 6)]}, on)
+                                          "C": [f("/m/c.mkv", 6000000, 2e9, 5)], "D": [f("/m/sub/c.mkv", 6000400, 2e9, 6)]}, on)
         self.assertEqual([r["id"] for r in got["A"]], ["duplicate_versions"])
         self.assertIn("a link to one file", en(got["A"][0]["text"]))
         self.assertNotIn("B", got)                                                              # two bitrates: not duplicates
@@ -8790,7 +8807,8 @@ class UpdateCheckTests(unittest.TestCase):
         class H(BaseHTTPRequestHandler):
             def do_GET(self):
                 test.agent = self.headers.get("User-Agent")
-                body = (test.commit_json if self.path.endswith("/commits/dev") else test.body).encode()  # (a dev build asks the branch's commit too)
+                body = (test.runs_json if "/actions/runs" in self.path else test.body).encode()  # (the branch's newest finished build is asked too)
+                test.paths = getattr(test, "paths", []) + [self.path]
                 self.send_response(test.code)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -8799,7 +8817,7 @@ class UpdateCheckTests(unittest.TestCase):
             def log_message(self, *a):
                 pass
         self.body, self.code = '"""x"""\n\n__version__ = "9.0.0"\n', 200
-        self.commit_json = json.dumps({"sha": "0000000"})
+        self.runs_json = json.dumps({"workflow_runs": [{"head_sha": "0000000"}]})
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/plexcache/__init__.py"
@@ -8826,8 +8844,9 @@ class UpdateCheckTests(unittest.TestCase):
         # the channel: a dev build reads the dev branch's version and its newest commit; the label says -dev
         from plexcache import updates, version_label
         self.assertTrue(updates.source_for("dev").endswith("/dev/plexcache/__init__.py"))
-        self.assertTrue(updates.commit_source_for("dev").endswith("/commits/dev"))
-        self.assertIsNone(updates.commit_source_for("stable"))
+        self.assertIn("/actions/runs?branch=dev&status=success", updates.runs_source_for("dev"))
+        self.assertIn("branch=main", updates.runs_source_for("stable"))
+        self.assertTrue(updates.source_for("dev", "abc123").endswith("/abc123/plexcache/__init__.py"))
         self.assertEqual((version_label("stable"), version_label("dev")), (updates.__version__, updates.__version__ + "-dev"))
         app = _new_app()
         self.assertTrue(updates.UpdateChecker(app, self.url, channel="stable").build_url().endswith("/releases/tag/v" + updates.__version__))
@@ -8860,17 +8879,22 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertTrue(u.status()["error"])
         self.code, self.body = 200, "no version"
         self.assertFalse(u.check())
-        # a dev build: the same version number, but dev has moved on to another commit — an update
+        # a dev build: the same version number, but dev's newest finished build is another commit — an update
         from plexcache import updates
         self.body = f'__version__ = "{updates.__version__}"\n'
-        self.commit_json = json.dumps({"sha": "abcdef0123456789"})
-        d = app.updates = UpdateChecker(app, self.url, channel="dev", commit_source=self.url + "/commits/dev", commit="1234567890ab")
+        self.runs_json = json.dumps({"workflow_runs": [{"head_sha": "abcdef0123456789"}]})
+        d = app.updates = UpdateChecker(app, self.url, channel="dev", runs_source=self.url + "/actions/runs?x", commit="1234567890ab")
         self.assertTrue(d.check())
         self.assertEqual((d.status()["available"], d.status()["channel"], d.status()["latest_commit"], d.status()["commit"]), (True, "dev", "abcdef0", "1234567"))
         self.assertTrue(any("newer dev build" in en(e["message"]) for e in app.activity.snapshot()["events"]))
-        d = UpdateChecker(app, self.url, channel="dev", commit_source=self.url + "/commits/dev", commit="abcdef0123456789")
+        d = UpdateChecker(app, self.url, channel="dev", runs_source=self.url + "/actions/runs?x", commit="abcdef0123456789")
         self.assertTrue(d.check())
-        self.assertFalse(d.status()["available"])                                                 # (this build is dev's newest)
+        self.assertFalse(d.status()["available"])                                                 # (this build is dev's newest built one)
+        # a push still building (no finished run newer than ours): nothing offered, whatever dev's head is
+        self.runs_json = json.dumps({"workflow_runs": []})
+        d = UpdateChecker(app, self.url, channel="dev", runs_source=self.url + "/actions/runs?x", commit="abcdef0123456789")
+        self.assertTrue(d.check())
+        self.assertFalse(d.status()["available"])
         self.assertTrue(d.check_async())                                                           # (Check Now)
         self.assertTrue(wait_for(lambda: not d.checking))
 

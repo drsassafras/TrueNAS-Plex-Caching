@@ -1,11 +1,11 @@
 """Is there a newer version? Asks GitHub every few hours (can be switched off in System), and when
 you press Check Now — and a few seconds after the app starts.
 
-Follows the channel this build is from (plexcache.CHANNEL): a stable build reads the version number
-from plexcache/__init__.py on the main branch, which is what the published :latest image is built
-from; a dev build reads it from the dev branch and, the number being the same between releases,
-also asks which commit dev is at, so a newer dev image is noticed. Nothing is sent but ordinary
-downloads.
+Follows the channel this build is from (plexcache.CHANNEL), and only ever points at a build that
+exists: GitHub is asked for the newest finished build of the branch (its workflow runs, the last
+successful one), and the version number is read from plexcache/__init__.py at that very commit —
+so a push that is still building, or failed, isn't offered. A dev build also compares the commit,
+the number being the same between releases. Nothing is sent but ordinary downloads.
 """
 
 from __future__ import annotations
@@ -30,13 +30,14 @@ EVERY = 6 * 3600
 RETRY = 3600
 
 
-def source_for(channel: str) -> str:
-    return f"{RAW}/{BRANCH.get(channel, 'main')}/plexcache/__init__.py"
+def source_for(channel: str, sha: str | None = None) -> str:
+    """The version file, on the branch — or at one commit (the newest built one)."""
+    return f"{RAW}/{sha or BRANCH.get(channel, 'main')}/plexcache/__init__.py"
 
 
-def commit_source_for(channel: str) -> str | None:
-    """Where the branch's newest commit is read from — dev builds only (a release has its number)."""
-    return f"{API}/commits/{BRANCH['dev']}" if channel == "dev" else None
+def runs_source_for(channel: str) -> str:
+    """Where the branch's newest finished build is read from: its last successful workflow run."""
+    return f"{API}/actions/runs?branch={BRANCH.get(channel, 'main')}&status=success&event=push&per_page=1"
 
 
 def parse_version(text: str) -> str | None:
@@ -60,14 +61,14 @@ def newer(a: str, b: str) -> bool:
 
 
 class UpdateChecker:
-    def __init__(self, app, source: str | None = None, channel: str | None = None, commit_source: str | None = None, commit: str | None = None):
+    def __init__(self, app, source: str | None = None, channel: str | None = None, runs_source: str | None = None, commit: str | None = None):
         self.app = app
         self.channel = channel or CHANNEL
         self.source = source or os.environ.get("PLEXCACHE_UPDATE_SOURCE") or source_for(self.channel)
-        # the commit this build is from, and where the branch's newest is read: only when neither the
-        # source nor the commit source was given by hand (tests), and for dev builds
+        # the commit this build is from, and where the branch's newest finished build is read: by default
+        # from GitHub, unless the source was given by hand (tests) without a runs source
         self.commit = COMMIT if commit is None else commit
-        self.commit_source = commit_source if commit_source is not None else (commit_source_for(self.channel) if source is None and not os.environ.get("PLEXCACHE_UPDATE_SOURCE") else None)
+        self.runs_source = runs_source if runs_source is not None else (runs_source_for(self.channel) if source is None and not os.environ.get("PLEXCACHE_UPDATE_SOURCE") else None)
         self.latest: str | None = None  # newest version seen, if newer than this one; else this one
         self.latest_commit: str | None = None  # the branch's newest commit (dev builds)
         self.checked: float | None = None
@@ -110,13 +111,16 @@ class UpdateChecker:
 
     def check(self) -> bool:
         try:
-            found = parse_version(self._fetch(self.source).decode("utf-8", "replace"))
+            head, source = None, self.source
+            if self.runs_source:  # the newest finished build: the version is read at that commit, so what's offered exists
+                data = json.loads(self._fetch(self.runs_source).decode("utf-8", "replace"))
+                runs = (data or {}).get("workflow_runs") or []
+                head = str((runs[0].get("head_sha") if runs else "") or "")[:40] or None
+                if head and source == source_for(self.channel):
+                    source = source_for(self.channel, head)
+            found = parse_version(self._fetch(source).decode("utf-8", "replace"))
             if not found:
                 raise ValueError("no version number in the file")
-            head = None
-            if self.commit_source:
-                data = json.loads(self._fetch(self.commit_source).decode("utf-8", "replace"))
-                head = str((data or {}).get("sha") or "")[:40] or None
         except (OSError, ValueError) as e:
             self.error = str(getattr(e, "reason", None) or e)
             log.info("update check failed: %s", self.error)

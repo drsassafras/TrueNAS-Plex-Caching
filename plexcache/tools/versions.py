@@ -66,7 +66,7 @@ class DuplicateVersions(Tool):
                 except OSError:
                     continue
                 root = self.root_of(library, f.path)
-                infos.append({"path": f.path, "local": local, "size": st.st_size, "duration": getattr(f, "duration_ms", 0), "ino": st.st_ino,
+                infos.append({"path": f.path, "local": local, "size": st.st_size, "duration": getattr(f, "duration_ms", 0), "ino": st.st_ino, "dev": st.st_dev,
                               "mtime": st.st_mtime, "root": root, "sub": bool(root) and "/" in local[len(root) + 1:]})
             # clusters of the same file (union-find over the pairs)
             parent = list(range(len(infos)))

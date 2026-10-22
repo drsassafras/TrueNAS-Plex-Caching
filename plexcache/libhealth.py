@@ -33,9 +33,9 @@ CHECKS = {
         {"id": "subtitles_on_zxx", "name": M("Subtitles on a film without speech"),
          "help": M("A file whose audio is marked zxx (no linguistic content) yet holds subtitles that aren’t forced ones. One of three things is wrong: the audio’s language is tagged wrongly (it does have speech); the subtitles don’t belong to this file, or are empty; or they translate text shown on screen and should be marked forced. Forced subtitles carry written content and belong.")},
         {"id": "duplicate_versions", "name": M("The same file twice on one item"),
-         "help": M("Two versions on one Plex item that are the same file — the same running time and size, so not another bitrate of the film. A hard link or symlink counts as a second path to one file, and is said so.")},
+         "help": M("Two versions on one Plex item that are the same file: the same size and running time, and the same bytes at both ends — not another bitrate of the film. A hard link or symlink counts as a second path to one file, and is said so.")},
         {"id": "duplicate_items", "name": M("The same file on different items"),
-         "help": M("The same file (running time and size) under two Plex items: a copy or link that slipped in — a file in a subfolder and one in the root, say.")},
+         "help": M("The same file under two Plex items — the same size and running time, and the same bytes at both ends: a copy or link that slipped in, a file in a subfolder and one in the root, say.")},
     ],
     "plex": [
         {"id": "versions_named_differently", "name": M("Versions named for different titles"),
@@ -148,15 +148,41 @@ def plex_checks(item: dict, on: dict) -> list[dict]:
     return out
 
 
+SAMPLE = 64 * 1024  # bytes read at each end of two files of one size, to tell the same bytes
+
+
+def _ends(path: str, size: int) -> bytes | None:
+    """The first and last SAMPLE bytes of a file (what two copies of one file share and two files of one size don't)."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(SAMPLE)
+            if size > SAMPLE:
+                fh.seek(max(SAMPLE, size - SAMPLE))
+                return head + fh.read(SAMPLE)
+            return head
+    except OSError:
+        return None
+
+
 def _same_file(a: dict, b: dict) -> bool:
-    """Two files that are one film at one bitrate — the same running time (2 s) and size (1 MB)."""
-    return bool(a.get("duration") and b.get("duration") and abs(a["duration"] - b["duration"]) <= 2000 and abs(a.get("size", 0) - b.get("size", 0)) <= 1024 * 1024)
+    """Two entries that are one file: the same inode, or the very same size and running time (to the
+    half second) and — when both can be read ("local" paths) — the same bytes at both ends. Over
+    thousands of files two merely alike in size and length do turn up; the bytes settle it."""
+    if a.get("ino") and a.get("ino") == b.get("ino") and a.get("dev", 0) == b.get("dev", 0):
+        return True
+    if not (a.get("duration") and b.get("duration")) or abs(a["duration"] - b["duration"]) > 500 or a.get("size", 0) != b.get("size", 0) or not a.get("size"):
+        return False
+    if a.get("local") and b.get("local"):
+        x = _ends(a["local"], a["size"])
+        return x is not None and x == _ends(b["local"], b["size"])
+    return True
 
 
 def duplicate_checks(groups: dict, on: dict) -> dict:
-    """The duplicate checks over a library: ``groups`` {item key: [{"path", "size", "duration", "ino"}]} →
-    {item key: [results]}. Within an item: files that are the same file (linked, when they share an
-    inode); across items: the same file under two."""
+    """The duplicate checks over a library: ``groups`` {item key: [{"path", "size", "duration", "ino",
+    "local"}]} → {item key: [results]}. Within an item: files that are the same file (linked, when they
+    share an inode); across items: the same file under two. With "local" paths the bytes at both ends
+    are compared, so two files merely alike in size and length aren't called the same."""
     out: dict[str, list] = {}
     if on.get("duplicate_versions"):
         for k, files in groups.items():
@@ -230,11 +256,13 @@ def library_health(app, key: str) -> dict:
     for rk, group in by_item.items():
         rows = []
         for f in group:
+            local = app.map_path(f.path)
             try:
-                ino = os.lstat(app.map_path(f.path)).st_ino
+                st = os.lstat(local)
+                ino, dev, size = st.st_ino, st.st_dev, st.st_size
             except OSError:
-                ino = 0
-            rows.append({"path": f.path, "size": getattr(f, "size", 0), "duration": getattr(f, "duration_ms", 0), "ino": ino})
+                ino, dev, size = 0, 0, getattr(f, "size", 0)
+            rows.append({"path": f.path, "local": local if ino else "", "size": size, "duration": getattr(f, "duration_ms", 0), "ino": ino, "dev": dev})
         dup_groups[rk] = rows
     dups = duplicate_checks(dup_groups, on)
     quiet = ignored(app).get(str(key)) or {}

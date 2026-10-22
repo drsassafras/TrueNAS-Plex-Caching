@@ -3689,7 +3689,7 @@ PCI18N.ready.then(function () {
     if (!ds.length) {
       out += '<p class="muted" style="margin:0">' + H("Datasets appear here once a library’s files are readable (see Media Mappings above).") + "</p>";
     } else {
-      out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Dataset") + '</th><th scope="col">' + H("Libraries") + '</th><th scope="col">' + H("Uncached speed") +
+      out += '<div class="tbl-wrap"><table class="tbl mid"><thead><tr><th scope="col">' + H("Dataset") + '</th><th scope="col">' + H("Libraries") + '</th><th scope="col">' + H("Uncached speed") +
         '</th><th scope="col">' + H("Measured") + "</th></tr></thead><tbody>";
       ds.forEach(function (d) {
         var name = d.dataset || d.mountpoint, row = speeds[name];
