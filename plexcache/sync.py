@@ -32,7 +32,7 @@ from . import libhealth
 
 STORE = "sync-report.json"
 REPORT_VERSION = 3  # what a report holds; one made by an older version is dropped, so it's never shown as current
-MAX_ITEMS = 200  # differences listed per library (the counts are whole)
+MAX_ITEMS = 1000  # differences listed per library, paged on the Library page (the counts are whole)
 SAMPLE = 300  # of a candidate mirror's files looked up here, per library
 KINDS = ("missing", "extra", "grouping", "match", "edits", "art", "collections", "labels", "editions")
 LEAVES = {"movie": (1,), "show": (2, 3, 4), "artist": (8, 9, 10)}
@@ -87,7 +87,7 @@ def side(it: dict) -> dict:
     """One server's item, as the page shows it beside the other's."""
     return {"key": it["key"], "label": it["label"], "year": it.get("year", ""), "matched": it["matched"], "guid": it["guid"], "type": it.get("type", ""), "art_path": it.get("art_path", ""),
             "summary": it.get("summary", False), "thumb": it.get("thumb", ""), "fields": dict(it["fields"]), "values": dict(it.get("values") or {}), "locked": list(it.get("locked") or []), "art": list(it["art_locked"]),
-            "files": [os.path.basename(f) for f, _ in it["files"]], "durations": list(it.get("durations") or []),
+            "files": [os.path.basename(f) for f, _ in it["files"]], "paths": [f for f, _ in it["files"]], "durations": list(it.get("durations") or []),
             "summary_text": it.get("summary_text", ""), "tags": dict(it.get("tags") or {}),
             "collections": list(it["collections"]), "labels": list(it["labels"]), "edition": it.get("edition", "")}
 

@@ -4331,7 +4331,14 @@ class PageStructureTests(unittest.TestCase):
         self.assertNotRegex(js.replace(body, ""), r'H\("(Next|Previous)"\)', "a list pages with Next/Previous of its own: use pager()")
         for m in re.finditer(r'data-offset="', js.replace(body, "")):
             self.fail(f"a list draws its own page links: {js[m.start() - 80:m.start() + 40]!r}")
-        self.assertGreaterEqual(js.count("pager(d"), 2)  # (the Library files and a job's files)
+        self.assertGreaterEqual(js.count("pager("), 5)  # (the Library files, Health items, Sync differences, a job's files)
+        # the page's own span helper (for lists it holds whole) agrees with the server's
+        fn = self._js_fn("pageRanges")
+        got = self._node(fn + "\nconsole.log(JSON.stringify(pageRanges(" + json.dumps(["Alpha", "Alps", "Amber", "Beta", "Altered Carbon · S01E01", "Altered Carbon · S01E02"]) + ", 2)));")
+        self.assertEqual(got, page_ranges(["Alpha", "Alps", "Amber", "Beta", "Altered Carbon · S01E01", "Altered Carbon · S01E02"], 2))
+        # three letters at most: episodes of one show across pages don't make a span of the whole title
+        shows = [f"Altered Carbon · S01E{i:02d}" for i in range(1, 11)] + ["Andromeda · S01E01"]
+        self.assertEqual([(p["from"], p["to"]) for p in page_ranges(shows, 5)], [("A", "Alt"), ("Alt", "Al"), ("An", "A")])
         # the spans: shortest prefixes that tell the pages apart
         labels = [f"{c}{i:02d}" for c in "ABCD" for i in range(5)]  # A00…A04, B00…
         self.assertEqual(page_ranges(labels, 5), [{"offset": 0, "from": "A", "to": "A"}, {"offset": 5, "from": "B", "to": "B"},

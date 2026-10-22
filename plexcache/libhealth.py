@@ -386,6 +386,6 @@ def library_health(app, key: str) -> dict:
     items.sort(key=lambda it: (it["live"] == 0, it["label"].lower()))  # (items with nothing live left at the bottom)
     langs = sorted(languages | {lang, DEFAULT_LANGUAGE}, key=lambda c: (language_name(c) or c).lower())
     return {"checks": {cat: [dict(c, on=on_all[c["id"]]) for c in cs if not kind or kind in c.get("applies", ALL)] for cat, cs in CHECKS.items()}, "counts": counts, "kind": kind,
-            "items": items[:500], "total": len(items), "checked": len(by_item), "unread": unread, "pages_read": len(sync_sides),
+            "items": items[:2000], "total": len(items), "checked": len(by_item), "unread": unread, "pages_read": len(sync_sides),
             "language": lang, "languages": [{"code": c, "name": language_name(c) or c} for c in langs if c not in NO_SPEECH],
             "audio_quality": level, "audio_levels": list(AUDIO_LEVELS)}

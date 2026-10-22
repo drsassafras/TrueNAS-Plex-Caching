@@ -1448,7 +1448,21 @@ PCI18N.ready.then(function () {
   }
   // The pages of a long list, each a span of what it holds ("A–Be"): the one open is plain text, the others open on a click.
   // At most PAGER_MAX spans around the open one; past them, Beginning and End reach the rest. Every paged list uses this.
-  var PAGER_MAX = 12;
+  var PAGER_MAX = 12, LIB_PAGE = 200;
+  // @testable: pageRanges — the spans of a list the page holds whole: as the server works them out (plexcache/paging.py)
+  function pageRanges(labels, per) {
+    var MAXP = 3, out = [];
+    var common = function (a, b) { a = a.toLowerCase(); b = b.toLowerCase(); var n = 0; while (n < a.length && n < b.length && a[n] === b[n]) n++; return n; };
+    var cut = function (l, n) { var o = l.slice(0, Math.max(1, Math.min(n, MAXP))).replace(/\s+$/, ""); return o || l.slice(0, 1) || "…"; };
+    var pages = [];
+    for (var off = 0; off < labels.length; off += per) pages.push({ offset: off, first: String(labels[off] || ""), last: String(labels[Math.min(off + per, labels.length) - 1] || "") });
+    pages.forEach(function (p, i) {
+      var kf = i ? common(pages[i - 1].last, p.first) + 1 : 1, kt = i + 1 < pages.length ? common(p.last, pages[i + 1].first) + 1 : 1;
+      out.push({ offset: p.offset, from: cut(p.first, kf), to: cut(p.last, kt) });
+    });
+    return out;
+  }
+  // @end
   function pager(d, offset, perPage, act) {
     var pages = d.pages || [], total = d.total || 0;
     if (!pages.length || total <= perPage) return "";
@@ -1655,7 +1669,7 @@ PCI18N.ready.then(function () {
   // video and 60% of a block of video; at its end, every block holding metadata. Every block the
   // same size, filled in proportion with what's in it. Layouts come from Read the Files (filemap.py);
   // a file opened shows its blocks larger: click one for what's in it and how ZFS might store it.
-  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, hold: { inspect: {}, sync: {} }, finishedSeen: {}, rev: null, view: "health", diff: {}, health: {} };
+  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, hold: { inspect: {}, sync: {} }, finishedSeen: {}, rev: null, view: "health", diff: {}, health: {}, healthOffset: 0, syncOffset: 0 };
   var PART_NAMES = { header: N("Matroska header"), segment: N("Segment start"), seekhead: N("Table of contents"), info: N("File info"), tracks: N("Track list"), chapters: N("Chapters"),
     attachments: N("Attachments list"), tags: N("Tags"), index: N("Index"), padding: N("Padding"), checksum: N("Checksum"), video: N("Video"),
     other: N("Other"), image: N("Cover art"), font: N("Fonts"), attachment: N("Attachment"), empty: N("Unused"), head: N("File header"),
@@ -1685,7 +1699,7 @@ PCI18N.ready.then(function () {
     if (!LIB.key) return;
     if (!force && LIB.data && LIB.data.library === LIB.key && Date.now() - LIB.at < 15000) return;
     LIB.at = Date.now();
-    api("/api/library?key=" + encodeURIComponent(LIB.key) + "&offset=" + LIB.offset + "&limit=100" + (LIB.q ? "&q=" + encodeURIComponent(LIB.q) : ""))
+    api("/api/library?key=" + encodeURIComponent(LIB.key) + "&offset=" + LIB.offset + "&limit=200" + (LIB.q ? "&q=" + encodeURIComponent(LIB.q) : ""))
       .then(function (d) {
         LIB.data = d;
         LIB.finishedSeen[d.library] = libJob(d.library).finished;  // (the inspection as it stood when these files were fetched)
@@ -2216,6 +2230,9 @@ PCI18N.ready.then(function () {
     return (x.files || []).map(function (f) {
       var n = fidx[f], id = "file:" + n, on = openId === id, both = otherNames.indexOf(f) >= 0;
       return '<button type="button" class="badge b-' + (both ? "pass" : "warn") + " sschip" + (on ? " on" : "") + '" aria-expanded="' + on + '" ' + act + ' data-f="' + id + '" title="' + esc(f) + '">' + esc(T("File {n}", { n: n })) + "</button>";
+    }).join("") + (x.gains || []).map(function (f) {  // files it would gain (greyed: what the record looks like after)
+      var n = fidx[f], id = "file:" + n, on = openId === id;
+      return '<button type="button" class="badge b-grey sschip' + (on ? " on" : "") + '" aria-expanded="' + on + '" ' + act + ' data-f="' + id + '" title="' + esc(T("{file} — joins this record as a version", { file: f })) + '">' + esc(T("File {n}", { n: n })) + "</button>";
     }).join("");
   }
   function syncSide(x, other, server, isSource, kinds, act, openId, tags, fidx, otherNames) {
@@ -2320,7 +2337,11 @@ PCI18N.ready.then(function () {
     if (warned) out += '<div class="note warn">' + H("{n} items would lose metadata: the source’s copy is unmatched with no description, while the other server’s is filled in. Those are marked below — check whether the source is the right server before anything is applied.", { n: fmtNum(warned) }) + "</div>";
     // which server is which, once, over the list (they're the comparison's: the same for every item)
     out += '<div class="sshdr"><div>' + H("Source: {name}", { name: srcName }) + '</div><div></div><div>' + H("Overwritten: {name}", { name: dstName }) + "</div></div>";
-    out += (d.items || []).map(function (it, i) {
+    var spages = { pages: pageRanges((d.items || []).map(function (it) { return it.title; }), LIB_PAGE), total: (d.items || []).length };
+    if (LIB.syncOffset >= (d.items || []).length) LIB.syncOffset = 0;
+    var soff = LIB.syncOffset;
+    out += (d.items || []).slice(soff, soff + LIB_PAGE).map(function (it, k) {
+      var i = soff + k;
       // the other server's edits the source doesn't have: applying would undo them — said under both sides
       var lost = it.changes.filter(function (c) { return c.kind === "edits" && /would be lost/.test(msg(c.to)); });
       var lostNames = lost.length ? msg(lost[0].to).replace(/^[^:]*: /, "").replace(/ —.*$/, "").split(", ").map(fieldName) : [];
@@ -2364,6 +2385,7 @@ PCI18N.ready.then(function () {
         '<div class="ssarrow" aria-label="' + esc(T("copied to")) + '">' + (it.shape === "regroup" || it.shape === "extra" ? "" : "→") + "</div>" +
         stack(dsts, srcs[0] || null, mirrorIsSrc ? "" : "mirror", false, (it.tags || {}).dst, srcFiles) + fileNames + "</div>";
     }).join("");
+    out += pager(spages, soff, LIB_PAGE, 'data-act="sync-page"');
     if ((d.items || []).length < n) out += '<p class="muted">' + H("The first {n} items shown.", { n: fmtNum((d.items || []).length) }) + "</p>";
     return out + syncApplyBar(key, d.items || [], sy) + syncLogCard(key);
   }
@@ -2425,6 +2447,10 @@ PCI18N.ready.then(function () {
       }).join("") + "</div>";
     }).join("") + "</div>";
     if (!shownItems.length) return out + '<p class="muted">' + H("Nothing flagged.") + "</p>";
+    var hpages = { pages: pageRanges(shownItems.map(function (it) { return it.label; }), LIB_PAGE), total: shownItems.length };
+    if (LIB.healthOffset >= shownItems.length) LIB.healthOffset = 0;
+    var hoff = LIB.healthOffset;
+    shownItems = shownItems.slice(hoff, hoff + LIB_PAGE);
     // each item flagged as a record card — its poster, its name as Plex has it (title, year, edition) — with a chip per
     // issue on the right; a chip opened shows what the check found (the file concerned, when the item has several)
     out += '<div class="sshdr lhhdr"><div>' + H("Item") + "</div><div></div><div>" + H("Flagged") + "</div></div>";
@@ -2451,6 +2477,7 @@ PCI18N.ready.then(function () {
       return '<div class="ssitem lhitem' + (live.length ? "" : " lhquiet") + '"><div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(it.label) + '</div><div class="lhacts">' + acts + "</div></div></div></div>" +
         '<div class="ssarrow"></div><div class="lhflags"><div class="sschips">' + chips + "</div>" + shown + "</div></div>";
     }).join("");
+    out += pager(hpages, hoff, LIB_PAGE, 'data-act="lh-page"');
     if ((d.items || []).length < (d.total || 0)) out += '<p class="muted">' + H("The first {n} shown.", { n: fmtNum(d.items.length) }) + "</p>";
     return out;
   }
@@ -2532,7 +2559,7 @@ PCI18N.ready.then(function () {
       if (openHere && !more) { out += '<tr class="ldrow"><td colspan="4">' + libDetail(openHere) + "</td></tr>"; openHere = null; }
     });
     out += "</tbody></table></div>";
-    out += pager(d, d.offset, 100, 'data-act="lib-page"');
+    out += pager(d, d.offset, LIB_PAGE, 'data-act="lib-page"');
     return out + "</section></div>";
   }
   var libTyping = null;
@@ -3972,22 +3999,32 @@ PCI18N.ready.then(function () {
   // two servers' records: the poster, the fields each has, its files. The folded records' edits are lost.
   var MERGE_FIELD = null;  // the one chip opened: {row, id}
   function mergeRows(sc) {
-    var hdr = '<div class="sshdr lhhdr"><div>' + H("Kept: the one record left, its metadata as it is") + '</div><div></div><div>' + H("Folded into it: their files become its versions; their own edits, posters and collections are lost") + "</div></div>";
+    var hdr = '<div class="sshdr lhhdr"><div>' + H("Framed: the record kept, with its metadata — and, greyed, the files it gains") + '</div><div></div><div>' + H("Greyed: folded into it — their files become its versions; their own edits, posters and collections are lost") + "</div></div>";
     return hdr + sc.rows.map(function (r) {
-      // the record kept: the tool's pick, or the one chosen with the arrow (sent with Apply as keep_key)
+      // the records keep their places (the tool's pick on the left); the frame and the arrow say which is kept —
+      // the tool's pick, or the one chosen with the arrow (sent with Apply as keep_key)
       var all = [r.keep].concat(r.others || []), chosen = TOOL.merge.keep[r.id] || r.keep.key;
-      var keep = all.filter(function (x) { return String(x.key) === String(chosen); })[0] || r.keep, others = all.filter(function (x) { return x !== keep; }), kinds = r.kinds || [];
+      // the files by name — or by their whole path where two records' files share a name (a link or a copy in another folder)
+      var names = all.reduce(function (a, x) { return a.concat(x.files || []); }, []), clash = names.some(function (f, k) { return names.indexOf(f) !== k; });
+      if (clash) all = all.map(function (x) { return Object.assign({}, x, { files: x.paths || x.files }); });
+      var keep = all.filter(function (x) { return String(x.key) === String(chosen); })[0] || all[0], others = all.filter(function (x) { return x !== keep; }), kinds = r.kinds || [];
+      var left = all[0], rights = all.slice(1), keptLeft = keep === left;
       var files = [keep].concat(others).reduce(function (a, x) { return a.concat(x.files || []); }, []).filter(function (f, k, a) { return a.indexOf(f) === k; }), fidx = {};
       files.forEach(function (f, k) { fidx[f] = k + 1; });
       var act = 'data-act="merge-field" data-id="' + esc(r.id) + '"', openId = MERGE_FIELD && MERGE_FIELD.row === r.id ? MERGE_FIELD.id : null;
       var otherFiles = others.reduce(function (a, x) { return a.concat(x.files || []); }, []);
-      var cards = others.map(function (x) { return '<div class="mgdrop">' + syncSide(x, keep, "", false, kinds, act, openId, null, fidx, keep.files || []) + "</div>"; });
+      // a card: framed and labelled when it's the one kept (showing the files it gains, greyed), greyed when it's folded in
+      var card = function (x) {
+        if (x === keep) return '<div class="mgkeep"><div class="mgkeeplbl">' + H("Metadata kept") + "</div>" + syncSide(Object.assign({}, x, { gains: otherFiles.filter(function (f) { return (x.files || []).indexOf(f) < 0; }) }), others[0] || null, "", true, kinds, act, openId, null, fidx, otherFiles) + "</div>";
+        return '<div class="mgdrop">' + syncSide(x, keep, "", false, kinds, act, openId, null, fidx, keep.files || []) + "</div>";
+      };
+      var cards = rights.map(card);
       var why = badge("info", r.why === "file" ? T("The same file") : r.why === "matched" ? T("Same match") : T("Named alike"));
       var lost = kinds.filter(function (k) { return k !== "match"; }).length;
       return '<div class="ssitem lhitem"><div class="sstop"><span class="what">' + toolCheck("merge", r) + " " + esc(r.title) + "</span><span class=\"sswarn\">" + why +
         (lost ? ' <span title="' + H("A folded record has edits, a poster or collections of its own: Plex keeps only the kept record’s. Open the chips to see what goes.") + '">' + badge("warn", T("Edits lost")) + "</span>" : "") + "</span></div>" +
-        '<div class="mgkeep"><div class="mgkeeplbl">' + H("Metadata kept") + "</div>" + syncSide(keep, others[0] || null, "", true, kinds, act, openId, null, fidx, otherFiles) + "</div>" +
-        '<button type="button" class="ssarrow mgarrow" data-act="merge-swap" data-id="' + esc(r.id) + '" title="' + H("Keep the other record’s metadata instead") + '"><span>←</span><small>' + H("into") + "</small></button>" + (cards.length > 1 ? '<div class="ssstack">' + cards.join("") + "</div>" : cards[0]) +
+        card(left) +
+        '<button type="button" class="ssarrow mgarrow" data-act="merge-swap" data-id="' + esc(r.id) + '" title="' + H("Keep the other record’s metadata instead") + '"><span>' + (keptLeft ? "←" : "→") + "</span></button>" + (cards.length > 1 ? '<div class="ssstack">' + cards.join("") + "</div>" : cards[0]) +
         '<div class="ssnotes ssfilelist"><div class="ssfiles many">' + files.map(function (f) { return "<div><span class=\"ssfn\">" + fidx[f] + "</span> " + esc(f) + "</div>"; }).join("") + "</div></div></div>";
     }).join("");
   }
@@ -4636,13 +4673,15 @@ PCI18N.ready.then(function () {
     else if (act === "lib-tab") {
       // the library opened inspects its files (pausing the one before, which carries on when it's opened again)
       var was = LIB.key;
-      LIB.key = el.dataset.key; LIB.offset = 0; LIB.open = null; LIB.data = null; LIB.hold.inspect[LIB.key] = false; LIB.hold.sync[LIB.key] = false;
+      LIB.key = el.dataset.key; LIB.offset = 0; LIB.healthOffset = 0; LIB.syncOffset = 0; LIB.open = null; LIB.data = null; LIB.hold.inspect[LIB.key] = false; LIB.hold.sync[LIB.key] = false;
       // a compare of the library left: paused (it picks up when the library is opened again)
       var wj = ((ST.sync || {}).libs || {})[was] || {};
       if (LIB.view === "sync" && was && was !== LIB.key && (wj.running || wj.queued)) api("/api/sync/start", { library: was, pause: true });
       libFetch(true); render();
     }
     else if (act === "lib-page") { LIB.offset = Number(el.dataset.offset) || 0; LIB.open = null; libFetch(true); }
+    else if (act === "lh-page") { LIB.healthOffset = Number(el.dataset.offset) || 0; render(); window.scrollTo(0, 0); }
+    else if (act === "sync-page") { LIB.syncOffset = Number(el.dataset.offset) || 0; render(); window.scrollTo(0, 0); }
     else if (act === "lib-block") {
       var bn = el.dataset.n === "video" ? "video" : Number(el.dataset.n);
       LIB.block[el.dataset.file] = LIB.block[el.dataset.file] === bn ? null : bn;

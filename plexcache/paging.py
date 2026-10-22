@@ -6,7 +6,7 @@ files on Processes); the page draws them with pager() in app.js.
 
 from __future__ import annotations
 
-MAX_PREFIX = 10
+MAX_PREFIX = 3  # (as many letters as tell one page from the next, three at most)
 
 
 def _common(a: str, b: str) -> int:
