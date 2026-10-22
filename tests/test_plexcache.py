@@ -4895,7 +4895,7 @@ class OptimizerTests(unittest.TestCase):
                     # tail may cross a block boundary either way: one block of leeway)
                     self.assertIn(pm["blocks"], (gm["blocks"] - 1, gm["blocks"], gm["blocks"] + 1), kw)
                     self.assertAlmostEqual(want["first_video"], max(0, rec - got["video_start"]), delta=256, msg=kw)
-                    slack = 0 if images == "remove" else rec  # (smaller cover art: what's cached shifts by up to a block)
+                    slack = rec  # (the tail crossing a block boundary — see above — moves a block of video in or out of the count)
                     self.assertAlmostEqual(pm["meta"], gm["meta"], delta=256 + gm["meta"] * 0.03 + slack, msg=kw)
                     self.assertAlmostEqual(pm["video"], gm["video"], delta=8192 + slack, msg=kw)
                     self.assertAlmostEqual(pm["video_tail"], projection.tail_video(got), delta=8192 + slack, msg=kw)   # the end's video, as written
