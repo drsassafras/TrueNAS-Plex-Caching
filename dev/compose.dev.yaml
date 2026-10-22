@@ -33,6 +33,7 @@ services:
       - /mnt/ssd/AppConfigs/plex-cache-dev/config:/config
       - /mnt/ssd/AppConfigs/plex-cache-dev/src/plexcache:/app/plexcache:ro
       - /mnt/tank/plexfiles:/data:ro      # CHANGE ME: same as your real app
+      - /etc/version:/host/etc/version:ro  # tells the app it's on TrueNAS (and which version) without the API
       # - /mnt/tank/…:/media:ro
       # - /mnt/tank/…:/music:ro
     security_opt:

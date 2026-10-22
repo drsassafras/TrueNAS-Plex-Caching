@@ -16,6 +16,8 @@ a mirrored server (no file is touched), so its own duplicates are its own matter
 
 from __future__ import annotations
 
+import re
+
 from ..i18n import M
 from ..libhealth import file_title_year
 from ..sync import _compare_pair, side
@@ -53,12 +55,21 @@ def same_file(a: tuple, b: tuple) -> bool:
     return bool(a[0] and a[0] == b[0] and abs(a[1] - b[1]) <= 500)
 
 
+def plain_title(rec: dict) -> str:
+    """A record's title as Plex has it, lower-cased and without punctuation."""
+    return re.sub(r"[\W_]+", " ", str(rec.get("title") or "")).strip().lower()
+
+
 def duplicates(a: dict, b: dict) -> bool:
-    """Whether two records of one group are one film: running times that agree, and the same edition
-    (unless they hold the very same file)."""
+    """Whether two records of one group are one film: running times that agree, the same edition, and
+    the same title — two records matched to one entry yet titled apart were told apart on purpose: a
+    work released in parts, Henry IV Part 1 and Part 2, each its own record — unless they hold the
+    very same file."""
     identical = any(same_file(x, y) for x in _files(a) for y in _files(b))
     if identical:
         return True
+    if plain_title(a) and plain_title(b) and plain_title(a) != plain_title(b):
+        return False
     da, db = [d for d in a.get("durations") or [] if d], [d for d in b.get("durations") or [] if d]
     if da and db:
         la, lb = max(da), max(db)
@@ -145,7 +156,10 @@ class MergeDuplicates(Tool):
         return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(recs)}
 
     def apply_row(self, row: dict, log) -> dict:
-        keep, others = row["keep"], [o["key"] for o in row.get("others") or []]
+        records = [row["keep"]] + list(row.get("others") or [])
+        chosen = str(row.get("keep_key") or row["keep"]["key"])  # (the arrow on the page: another record kept instead)
+        keep = next((r for r in records if str(r["key"]) == chosen), row["keep"])
+        others = [r["key"] for r in records if r is not keep]
         self.app.plex().merge(keep["key"], others)
         log(M("{n} records merged into {title}", one="{n} record merged into {title}", n=len(others), title=keep["label"]))
         self.app.activity.event("tools", M("merged {n} records into {title}", n=len(others) + 1, title=keep["label"]))

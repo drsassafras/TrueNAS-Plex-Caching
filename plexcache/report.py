@@ -231,11 +231,11 @@ def build(app, period: str = "week", now: float | None = None) -> dict:
                               "detail": M("Only part of those files fit in Now Playing Cache’s RAM limit, and the viewer skipped "
                                           "past the part that was loaded."),
                               "fix": M("Raise Now Playing Cache’s RAM limit, or lower “Reserve ZFS cache” "
-                                       "(both in Caching → Cache Settings)."), "link": "/caching#arc"})
+                                       "(both in [Caching → Cache Settings](/caching#arc))."), "link": "/caching#arc"})
         elif reason == "the preload hadn't started yet":
             attention.append({"status": "warn", "title": M("{n} skips before Now Playing Cache started", one="{n} skip before Now Playing Cache started", n=n),
                               "detail": M("The viewer skipped while Now Playing Cache was still waiting to start."),
-                              "fix": M("Use the automatic start time, or a shorter fixed delay (Caching → Now Playing Cache)."),
+                              "fix": M("Use the automatic start time, or a shorter fixed delay ([Caching → Now Playing Cache](/caching#nowplaying))."),
                               "link": "/caching"})
         elif reason == "the preload hadn't reached that part yet":
             attention.append({"status": "info", "title": M("{n} skips ahead of Now Playing Cache", one="{n} skip ahead of Now Playing Cache", n=n),
@@ -251,7 +251,7 @@ def build(app, period: str = "week", now: float | None = None) -> dict:
                           "detail": M("About 30 minutes after loading, much of the data had already been pushed out of "
                                       "the ZFS cache by other work."),
                           "fix": M("Lower Now Playing Cache’s and Prefetch’s RAM limits so they don’t push each other out, "
-                                   "leave more for the rest of the NAS (Caching → Cache Settings), or add an L2ARC (SSD cache)."), "link": "/caching#arc"})
+                                   "leave more for the rest of the NAS ([Caching → Cache Settings](/caching#arc)), or add an L2ARC (SSD cache)."), "link": "/caching#arc"})
     if busy_peak is not None and busy_peak >= DISK_BUSY_HIGH:
         attention.append({"status": "info", "title": M("Disks reached {pct}% busy while people watched", pct=busy_peak),
                           "detail": M("On average they were {pct}% busy during streams.", pct=busy_avg),

@@ -42,7 +42,7 @@ def check_plex(app) -> dict:
         r = c.get(key)
         if r and r["status"] in STATUS_MAP:
             items.append(item(STATUS_MAP[r["status"]], r["text"], r["detail"],
-                              "" if r["status"] == "ok" else M("Open System → Plex.")))
+                              "" if r["status"] == "ok" else M("Open [System → Plex](/system#plex).")))
     if c.get("plex_token", {}).get("status") == "ok":
         if app.scan_error:
             items.append(item("fail", M("Couldn’t list libraries"), app.scan_error))
@@ -84,7 +84,7 @@ def check_media(app) -> dict:
             continue
         if lib["excluded"]:
             rows.append({"library": lib["title"], "key": lib["key"], "count": 0, "status": "info",
-                         "folders": [], "detail": M("Not cached — unticked in System → Media Mappings"),
+                         "folders": [], "detail": M("Not cached — unticked in [System → Media Mappings](/system#mappings)"),
                          "badge": M("Disabled")})
             continue
         row = by_lib.get(lib["key"], {"library": lib["title"], "key": lib["key"], "folders": [], "status": "pass"})
@@ -94,10 +94,10 @@ def check_media(app) -> dict:
             found = [f for f in bad if f["found_at"]]
             row["detail"] = bad[0]["detail"]
             if found:
-                row["fix"] = M("Found “{library}” files at {path} — choose that folder in System → Media Mappings.",
+                row["fix"] = M("Found “{library}” files at {path} — choose that folder in [System → Media Mappings](/system#mappings).",
                                library=lib["title"], path=found[0]["found_at"][0])
             else:
-                row["fix"] = M("Fix its folder in System → Media Mappings, or untick it there to stop caching it.")
+                row["fix"] = M("Fix its folder in [System → Media Mappings](/system#mappings), or untick it there to stop caching it.")
         else:
             row["detail"] = M("Files readable")
         rows.append(row)
@@ -150,8 +150,8 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
         fixes.append(item("warn", M("{name} isn’t used by any Plex library", name=name),
                           M("It’s mounted in this app at {path}, but none of Plex’s library folders are in it, "
                             "so nothing there is ever cached.", path=d["mountpoint"]),
-                          M("If a library should be using it, check where that library’s folder is in System → Media "
-                            "mappings. Otherwise remove the mount from this app’s volumes (Apps → plex-cache → Edit).")))
+                          M("If a library should be using it, check where that library’s folder is in [System → Media "
+                            "Mappings](/system#mappings). Otherwise remove the mount from this app’s volumes (Apps → plex-cache → Edit).")))
         return row
     libs = _libs(d) if d["libraries"] else M("{list}", list=d["off"])
     cached = bool(d["libraries"])
@@ -286,12 +286,12 @@ def check_datasets(app) -> dict:
         why = (M("Can’t check — no library folder is readable yet, so there’s nothing to check.")
                if app.libraries else M("Can’t check — Plex isn’t connected yet."))
         items.append(item("info", M("Media Datasets: not checked yet"), why,
-                          M("Fix the problems under Libraries first (System → Media Mappings).") if app.libraries else M("Open System → Plex.")))
+                          M("Fix the problems under [Libraries](/health#media) first ([System → Media Mappings](/system#mappings)).") if app.libraries else M("Open [System → Plex](/system#plex).")))
     elif not tn_ok:
         items.append(item("info", M("Dataset settings: not checked"),
                           M("Cache settings, record size and L2ARC devices need the TrueNAS API (see TrueNAS & ZFS).") if tn_set
                           else M("Cache settings, record size and L2ARC devices need the TrueNAS API."),
-                          M("Check System → TrueNAS.")))
+                          M("Check [System → TrueNAS](/system#truenas).")))
     return {"id": "datasets", "title": M("Media Datasets"),
             "hint": M("Each dataset your libraries are on, checked on its own."),
             "datasets": rows, "items": items}
@@ -302,12 +302,17 @@ def check_zfs(app) -> dict:
     s = app.settings.get()
     items: list[dict] = []
     t = s["truenas"]
+    pf = z.get("platform") or {}
     if not (t["url"] and t["api_key"]):
-        items.append(item("info", M("TrueNAS API not connected"),
-                          M("Add an API key to check each dataset’s settings and cache devices, and to size the L2ARC."),
-                          M("Open System → TrueNAS.")))
+        if pf.get("truenas") is False:  # (another Linux host: there's no TrueNAS API to connect)
+            items.append(item("info", M("Not running on TrueNAS"),
+                              M("{label}. Datasets are read from ZFS directly; the checks that need the TrueNAS API — cache devices, pool layout, scrubs — are left out.", label=pf.get("label") or "")))
+        else:
+            items.append(item("info", M("TrueNAS API not connected"),
+                              M("Add an API key to check each dataset’s settings and cache devices, and to size the L2ARC."),
+                              M("Open [System → TrueNAS](/system#truenas).")))
     elif z.get("truenas_error"):
-        items.append(item("fail", M("TrueNAS API"), z["truenas_error"], M("Check the address and API key in System.")))
+        items.append(item("fail", M("TrueNAS API"), z["truenas_error"], M("Check the address and API key in [System → TrueNAS](/system#truenas).")))
     elif z.get("truenas_version"):
         items.append(item("pass", M("TrueNAS API"), M("Connected to {version} (read-only).", version=z["truenas_version"])))
 
@@ -346,14 +351,14 @@ def _ram_check(app) -> list[dict]:
     if b["usable"] <= 0:
         return [item("fail" if on else "warn", M("Not enough RAM for Now Playing Cache and Prefetch"),
                      M("{base}, and {reserve} leaves nothing for Now Playing Cache or Prefetch.", base=base, reserve=reserve),
-                     M("Lower “Reserve ZFS cache” in Caching → Cache Settings, or add RAM."))]
+                     M("Lower “Reserve ZFS cache” in [Caching → Cache Settings](/caching#arc), or add RAM."))]
     limits = M("Now Playing Cache may use up to {nowplaying} and Prefetch {nextepisode}.",
                nowplaying=_fmt_bytes(b["nowplaying"]), nextepisode=_fmt_bytes(b["nextepisode"]))
     if b["nowplaying"] < TIGHT_RAM:
         return [item("warn", M("RAM is tight for Now Playing Cache and Prefetch"),
                      M("{base}; with {reserve}, {limits} That’s only a few minutes of a 4K film, so skipping far "
                        "ahead will still read from disk.", base=base, reserve=reserve, limits=limits),
-                     M("Add RAM, an L2ARC (SSD cache), or lower “Reserve ZFS cache” in Caching → Cache Settings."))]
+                     M("Add RAM, an L2ARC (SSD cache), or lower “Reserve ZFS cache” in [Caching → Cache Settings](/caching#arc)."))]
     return [item("pass", M("RAM for Now Playing Cache and Prefetch"), M("{base}; with {reserve}, {limits}", base=base, reserve=reserve, limits=limits))]
 
 
@@ -514,7 +519,7 @@ def _l2arc_tuning_checks(app, params: dict) -> list[dict]:
                                 "about {reading} MB/s ({pct}% of {disk} MB/s). "
                                 "Data can leave RAM before it reaches the SSD, so some reads are wasted.",
                                 fill=round(fill), reading=round(reading), pct=w["pacing_percent"], disk=disk),
-                              M("Either turn on automatic L2ARC pacing or lower it to about {pct}% (SSD Cache → L2ARC Cache Settings), "
+                              M("Either turn on automatic L2ARC pacing or lower it to about {pct}% ([SSD Cache → L2ARC Cache Settings](/ssd#l2arc-settings)), "
                                 "or raise the limit to 128 MiB/s in the TrueNAS shell. {persist}",
                                 pct=max(1, int(fill / disk * 100)), persist=PERSIST_HINT),
                               f"echo 134217728 | sudo tee {sysp}/l2arc_write_max"))
@@ -551,10 +556,10 @@ def check_cache_mode(app) -> dict:
     else:
         items.append(item("info", M("L2ARC not checked yet"),
                           M("Couldn’t tell whether the media pool has an L2ARC, so settings use their RAM-only defaults for now."),
-                          M("Connect TrueNAS in System to check.")))
+                          M("Connect TrueNAS in [System → TrueNAS](/system#truenas) to check.")))
     fell = app.fallbacks.recent()
     fallback_help = M("Some choices only work with an SSD cache (L2ARC), because they read more than RAM can hold: every warm-up "
-                      "schedule (Caching → Warm-up), and Prefetch’s larger steps — Whole season, Next season, All seasons, Every "
+                      "schedule ([Caching → Warm-up](/caching#leadin)), and Prefetch’s larger steps — Whole season, Next season, All seasons, Every "
                       "show, and Rest of the season near the end. They’re marked with the SSD icon.<br><br>"
                       "When the media pool has no L2ARC (or “I won’t use an L2ARC” is ticked on the SSD Cache page), the app uses "
                       "that setting’s RAM-only default instead — so nothing breaks, but you get less than you chose — and lists it "
@@ -850,7 +855,7 @@ def recommendations(app) -> list[dict]:
         recs.append({"feature": "warmup", "verdict": "maybe",
                      "reason": M("Needs an L2ARC on the media pool; connect TrueNAS in System to check.")})
     if no_ram:
-        why = M("No ZFS cache left after the reserve — lower “Reserve ZFS cache” in Caching → Cache Settings.")
+        why = M("No ZFS cache left after the reserve — lower “Reserve ZFS cache” in [Caching → Cache Settings](/caching#arc).")
         recs.append({"feature": "nextepisode", "verdict": "avoid", "reason": why})
         recs.append({"feature": "nowplaying", "verdict": "avoid", "reason": why})
         return recs

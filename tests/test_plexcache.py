@@ -4295,6 +4295,37 @@ class SmallModuleTests(unittest.TestCase):
         self.assertIn("attachments already", str(cm.exception))
 
 class PageStructureTests(unittest.TestCase):
+    def test_internal_links_reach_their_place(self):
+        """Wherever a text names a place in the app, it's a link — and every internal link points at a page
+        that exists and, with a fragment, at an element on it with that id, so it scrolls there. Links in
+        the page's own text (href="/page#id"), in the server's texts ([text](/page#id), rendered by links()),
+        and in the menu."""
+        from plexcache import server
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        read = lambda *p: open(os.path.join(root, *p), encoding="utf-8").read()
+        js, html = read("plexcache", "web", "app.js"), read("plexcache", "web", "index.html")
+        py = "".join(read("plexcache", n) for n in os.listdir(os.path.join(root, "plexcache")) if n.endswith(".py"))
+        py += "".join(read("plexcache", "tools", n) for n in os.listdir(os.path.join(root, "plexcache", "tools")) if n.endswith(".py"))
+        found = set(re.findall(r'href=\\?"(/[a-z0-9-]*(?:#[a-z0-9-]+)?)\\?"', js)) | set(re.findall(r'href="(/[a-z0-9-]*(?:#[a-z0-9-]+)?)"', html))
+        found |= set(re.findall(r"\]\((/[a-z0-9-]*(?:#[a-z0-9-]+)?)\)", py))
+        # also the links a check builds as a dict: {"href": "/sync", ...}
+        found |= set(re.findall(r'"href": "(/[a-z0-9-]*(?:#[a-z0-9-]+)?)"', py))
+        self.assertGreater(len(found), 15)
+        ids = set(re.findall(r'\bid="([a-z0-9-]+)"', js)) | set(re.findall(r'\bid="([a-z0-9-]+)"', html)) | set(re.findall(r'"id": "([a-z0-9-]+)"', py))
+        for link in sorted(found):
+            page, _, frag = link.partition("#")
+            self.assertIn(page, server.PAGES, f"{link}: no such page")
+            if frag:
+                self.assertIn(frag, ids, f"{link}: nothing on the page has id={frag!r}")
+        # no text a page shows names a place without linking it ("System → Plex" and the like): the Health and Metrics
+        # items' texts (checks.py, report.py — rendered through links()) and the page's own H() texts. TrueNAS's own
+        # places ("in TrueNAS under System → …") aren't ours to link.
+        shown = "".join(re.findall(r'H\("((?:[^"\\]|\\.)*)"', js)) + "\n" + "".join(re.findall(r'M\("((?:[^"\\]|\\.)*)"', read("plexcache", "checks.py") + read("plexcache", "report.py")))
+        for m in re.finditer(r"(System|Caching|SSD Cache|Sync|Health|Tools) → [A-Z][A-Za-z ]+", shown):
+            before = shown[max(0, m.start() - 120):m.start()]
+            self.assertTrue("data-nav>" in before[-60:] or before.endswith("[") or before.endswith("TrueNAS under "),
+                            f"“{m.group(0)}” names a place without a link")
+
     def test_every_page_starts_with_a_description(self):
         """Every page opens with its title and a short description under it (top()'s second argument):
         what the page is for, in a sentence or two, before anything else."""
@@ -5355,6 +5386,32 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(ids2({"tracks": [v, au("eng"), pgs("fra")]}, subtitles_language=True, no_subtitles=False), [])  # (the options narrow the check: off with it)
         self.assertEqual(ids2({"tracks": [v, au("zxx"), pgs("eng")]}, subtitles_language=True, subtitles_text=True), ["subtitles_on_zxx"])  # (no speech)
         self.assertTrue(libhealth.same_language("eng", "en") and not libhealth.same_language("eng", "fra") and not libhealth.same_language("", "en"))
+
+    def test_platform_detection(self):
+        """Where the app runs: TrueNAS for certain from the API or the host's version file (or said by
+        PLEXCACHE_PLATFORM); otherwise only whether ZFS is there, TrueNAS "not detected". Health's TrueNAS
+        item follows: on another Linux host there's no API to ask for."""
+        from plexcache import checks, platform
+        self.assertEqual((platform.detect("25.04.1")["name"], platform.detect("25.04.1")["truenas"], platform.detect("25.04.1")["how"]), ("truenas", True, "api"))
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "version"), "w") as fh:
+            fh.write("24.10.2\n")
+        with mock.patch.object(platform, "HOST_FILES", (os.path.join(d, "version"),)), mock.patch.dict(os.environ, {"PLEXCACHE_PLATFORM": ""}):
+            got = platform.detect(None)
+            self.assertEqual((got["truenas"], got["how"], got["version"]), (True, "host", "24.10.2"))
+        with mock.patch.object(platform, "HOST_FILES", ()), mock.patch.dict(os.environ, {"PLEXCACHE_PLATFORM": ""}):
+            got = platform.detect(None)                                                          # (the test's fake /proc has ZFS)
+            self.assertEqual((got["name"], got["truenas"]), ("linux-zfs", None))
+            self.assertIn("not detected", en(got["label"]))
+        with mock.patch.dict(os.environ, {"PLEXCACHE_PLATFORM": "linux"}):
+            self.assertIs(platform.detect(None)["truenas"], False)
+        app = _new_app(truenas={"url": "", "api_key": ""})  # (no API connected)
+        tn = lambda: next(i for i in checks.check_zfs(app)["items"] if "TrueNAS" in en(i["title"]))
+        app.zfs = {"platform": {"truenas": False, "label": "Linux with ZFS"}}
+        self.assertIn("Not running on TrueNAS", en(tn()["title"]))
+        app.zfs = {"platform": {"truenas": None, "label": "x"}}
+        self.assertIn("TrueNAS API not connected", en(tn()["title"]))
+        self.assertIn("[System → TrueNAS](/system#truenas)", en(tn()["fix"]))
 
     def test_library_health_issues_ignored(self):
         """An item's issues ignored: greyed out, not counted, the item at the bottom — kept across
@@ -8651,7 +8708,7 @@ class UpdateCheckTests(unittest.TestCase):
         class H(BaseHTTPRequestHandler):
             def do_GET(self):
                 test.agent = self.headers.get("User-Agent")
-                body = test.body.encode()
+                body = (test.commit_json if self.path.endswith("/commits/dev") else test.body).encode()  # (a dev build asks the branch's commit too)
                 self.send_response(test.code)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -8660,6 +8717,7 @@ class UpdateCheckTests(unittest.TestCase):
             def log_message(self, *a):
                 pass
         self.body, self.code = '"""x"""\n\n__version__ = "9.0.0"\n', 200
+        self.commit_json = json.dumps({"sha": "0000000"})
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/plexcache/__init__.py"
@@ -8683,6 +8741,12 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertIsNone(parse_version("nothing here"))
         self.assertIn("raw.githubusercontent.com/drsassafras/TrueNAS-Plex-Caching/main/plexcache/__init__.py",
                       __import__("plexcache.updates").updates.SOURCE)
+        # the channel: a dev build reads the dev branch's version and its newest commit; the label says -dev
+        from plexcache import updates, version_label
+        self.assertTrue(updates.source_for("dev").endswith("/dev/plexcache/__init__.py"))
+        self.assertTrue(updates.commit_source_for("dev").endswith("/commits/dev"))
+        self.assertIsNone(updates.commit_source_for("stable"))
+        self.assertEqual((version_label("stable"), version_label("dev")), (updates.__version__, updates.__version__ + "-dev"))
 
     def test_check(self):
         from plexcache.homeassistant import update_info
@@ -8709,6 +8773,19 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertTrue(u.status()["error"])
         self.code, self.body = 200, "no version"
         self.assertFalse(u.check())
+        # a dev build: the same version number, but dev has moved on to another commit — an update
+        from plexcache import updates
+        self.body = f'__version__ = "{updates.__version__}"\n'
+        self.commit_json = json.dumps({"sha": "abcdef0123456789"})
+        d = app.updates = UpdateChecker(app, self.url, channel="dev", commit_source=self.url + "/commits/dev", commit="1234567890ab")
+        self.assertTrue(d.check())
+        self.assertEqual((d.status()["available"], d.status()["channel"], d.status()["latest_commit"], d.status()["commit"]), (True, "dev", "abcdef0", "1234567"))
+        self.assertTrue(any("newer dev build" in en(e["message"]) for e in app.activity.snapshot()["events"]))
+        d = UpdateChecker(app, self.url, channel="dev", commit_source=self.url + "/commits/dev", commit="abcdef0123456789")
+        self.assertTrue(d.check())
+        self.assertFalse(d.status()["available"])                                                 # (this build is dev's newest)
+        self.assertTrue(d.check_async())                                                           # (Check Now)
+        self.assertTrue(wait_for(lambda: not d.checking))
 
     def test_background_loop(self):
         from plexcache.updates import UpdateChecker
@@ -9929,15 +10006,16 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual(row["id"], "rec:101")
         self.assertEqual((row["kinds"], snap["scan"]["records"]), (["edits"], 5))                     # (the kept record's edit: said as what the other lacks)
         self.assertFalse(tool.apply_async(["nothing"]))
-        snap = self._run(tool, tool.apply_async([row["id"]]))
-        self.assertEqual((plex.merged, getattr(other, "merged", [])), ([("101", "190")], []))     # (the mirror's records are its own: untouched)
+        path1 = cat["movies"][1]["path"]
+        snap = self._run(tool, tool.apply_async([row["id"]], {row["id"]: {"keep_key": "190"}}))   # (the arrow: the other record kept instead)
+        self.assertEqual((plex.merged, getattr(other, "merged", [])), ([("190", "101")], []))     # (the mirror's records are its own: untouched)
         (res,) = snap["results"]
         self.assertEqual((res["result"], res["merged"]), ("done", 1))
         self.assertEqual(snap["scan"]["rows"], [])                                                    # done: off the list
         self.assertTrue(os.path.exists(copy))
         self.assertEqual(client.sent, [])
-        self.assertEqual(sorted(m["key"] for m in plex.cat["movies"]), ["100", "101", "102", "103"])
-        self.assertEqual(plex.cat["movies"][1]["more"], [copy])                                       # a version of the kept record now
+        self.assertEqual(sorted(m["key"] for m in plex.cat["movies"]), ["100", "102", "103", "190"])
+        self.assertEqual(next(m for m in plex.cat["movies"] if m["key"] == "190")["more"], [path1])  # a version of the kept record now
         # another edition isn't a duplicate (unless it's the very same file); nor is a film of another length
         from plexcache.tools import merge as mg
         rec = lambda key, **kw: dict({"key": key, "files": [("/m/%s.mkv" % key, 100 + int(key))], "durations": [5400000], "edition": "", "locked": []}, **kw)
@@ -9947,6 +10025,14 @@ class ToolsTests(unittest.TestCase):
         self.assertFalse(mg.duplicates(rec("1"), rec("2", durations=[5400000 + 5 * 60000], files=[("/m/2.mkv", 7)])))
         self.assertTrue(mg.duplicates(rec("1"), rec("2", durations=[5400000 + 20000], files=[("/m/2.mkv", 7)])))     # (a few seconds: fine)
         self.assertEqual([w for w, _ in mg.clusters([rec("1", guid="g", matched=True), rec("2", guid="g", matched=True, durations=[9000000]), rec("3", guid="g", matched=True)])], ["matched"])
+        # a work in parts, each part a record, all matched to one entry but titled apart on purpose — kept apart
+        parts = [rec("1", guid="g", matched=True, title="Henry IV, Part 1", files=[("/m/Henry IV Part 1 (2012).mkv", 101)]),
+                 rec("2", guid="g", matched=True, title="Henry IV Part 2", files=[("/m/Henry IV Part 2 (2012).mkv", 102)])]
+        self.assertFalse(mg.duplicates(*parts))
+        self.assertEqual(mg.clusters(parts), [])
+        # …unless a part is there twice as the very same file: those two are duplicates, the other part still apart
+        parts.append(rec("3", guid="g", matched=True, title="Shakespeare’s Globe: Henry IV, Part 2", files=[("/m/Henry IV Part 2 (2012) copy.mkv", 102)]))
+        self.assertEqual([(w, [r["key"] for r in c]) for w, c in mg.clusters(parts)], [("file", ["2", "3"])])
         # the very same file (a link, a copy) on two records matched to different entries — or one unmatched: one film
         same = [rec("1", guid="g", matched=True), rec("2", guid="local://2", matched=False, files=[("/other/1.mkv", 101)])]
         self.assertEqual([(w, [r["key"] for r in c]) for w, c in mg.clusters(same)], [("file", ["1", "2"])])

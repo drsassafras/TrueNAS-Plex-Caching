@@ -11,7 +11,7 @@ import random
 import threading
 import time
 
-from . import __version__, cachemode, checks, config, mapping, prefetch, report, zfs
+from . import cachemode, checks, config, mapping, prefetch, report, version_label, zfs
 from .activity import Activity
 from .cachelog import CacheLog
 from .auth import Auth
@@ -39,6 +39,7 @@ from .optimize.convert import DEFAULT_TYPES as CONVERT_TYPES
 from .playback import PlaybackMonitor
 from .plex import PlexClient, PlexError
 from .reader import MiB, benchmark_file
+from . import platform as platform_mod
 from .scheduler import TIMED, due, next_run
 from .truenas import TrueNASClient, TrueNASError, describe_pool, probe as probe_truenas
 from .warmup import KIND_SECONDS, KINDS, L2ARC_RATE_SHARE, NEXT_DAY, next_day_check, LibraryStats, WarmupRun, plan, resolve_schedule
@@ -138,7 +139,7 @@ class App:
         self.auth = Auth.from_env(config_dir)
         self.activity = Activity(config_dir)
         self.lock = threading.RLock()
-        self.version = __version__
+        self.version = version_label()  # (0.16.0, or 0.16.0-dev for a build of the dev branch)
         # Library scan
         self.files: list = []
         self._posters: tuple | None = None  # (files, {path: (poster, title)}) for poster_of() and title_of()
@@ -783,6 +784,7 @@ class App:
             try:
                 with self.truenas() as tn:
                     info["truenas_version"] = tn.version()
+                    info["platform"] = platform_mod.detect(info["truenas_version"])
                     for name in sorted({d["pool"] for d in datasets if d["pool"] and d["keys"]}):
                         pool = tn.pool(name)
                         if pool:
@@ -800,6 +802,8 @@ class App:
         self._survey_blocks(datasets)
         with self.lock:
             self.zfs = info
+        if "platform" not in info:  # (no TrueNAS API: told by the host's version file, the environment, or not at all)
+            info["platform"] = platform_mod.detect(None)
         return info
 
     def _survey_blocks(self, datasets: list[dict]) -> None:
@@ -1544,6 +1548,7 @@ class App:
             "library": {"stats": stats, "error": self.scan_error, "scanning": self.scanning,
                         # tv / music / books for the libraries Prefetch covers
                         "libraries": [dict(lib, prefetch_kind=prefetch.library_kind(lib)) for lib in libraries]},
+            "platform": zinfo.get("platform") or platform_mod.detect(None),  # TrueNAS, or another Linux host (platform.py)
             "zfs": {
                 "arc": zinfo.get("arc"),
                 "pools": zinfo.get("pools", {}),

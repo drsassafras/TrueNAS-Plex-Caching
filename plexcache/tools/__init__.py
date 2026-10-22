@@ -83,12 +83,13 @@ class Tool:
         threading.Thread(target=work, name=f"tool-{self.name}-scan", daemon=True).start()
         return True
 
-    def apply_async(self, ids: list[str]) -> bool:
+    def apply_async(self, ids: list[str], choices: dict | None = None) -> bool:
+        """The rows named done, each with your choices for it (``choices``: {row id: {...}}, merged into the row)."""
         with self.lock:
             if self.running or not self.scan_result:
                 return False
             want = set(ids)
-            rows = [r for r in self.scan_result.get("rows") or [] if r["id"] in want]
+            rows = [dict(r, **((choices or {}).get(r["id"]) or {})) for r in self.scan_result.get("rows") or [] if r["id"] in want]
             if not rows:
                 return False
             self.running, self.error = True, None

@@ -351,6 +351,7 @@ def make_handler(app):
                 user, pw = body.get("username", ""), body.get("password", "")
                 if not isinstance(user, str) or not isinstance(pw, str) or len(user) > 256 or len(pw) > 1024:
                     return self._error(M("username and password must be text"), 400)
+                user = user.strip()  # (a space from autofill or a paste shouldn't refuse the sign-in)
                 address = self.client_address[0]
                 if auth.locked_out(address):
                     return self._error(M("Too many wrong passwords from this device. Try again in 15 minutes."), 429)
@@ -453,6 +454,9 @@ def make_handler(app):
                     except ValueError as e:
                         raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
                     raise SettingsError(M("unknown action"))
+                if path == "/api/updates/check":  # Check Now: GitHub asked for the newest version (and, on dev, commit)
+                    app.updates.check_async()
+                    return self._json(app.updates.status())
                 if path.startswith("/api/tools/"):
                     # a tool (tools/): {"action": "scan", "library", "options"} or {"action": "apply", "ids": [...]}
                     tool = app.tools.get(path[len("/api/tools/"):])
@@ -462,7 +466,8 @@ def make_handler(app):
                     if action == "scan":
                         started = tool.scan_async(str(body.get("library") or ""), body.get("options") if isinstance(body.get("options"), dict) else {})
                     elif action == "apply":
-                        started = tool.apply_async([str(i) for i in body.get("ids") or []])
+                        choices = body.get("choices") if isinstance(body.get("choices"), dict) else {}
+                        started = tool.apply_async([str(i) for i in body.get("ids") or []], {str(k): v for k, v in choices.items() if isinstance(v, dict)})
                     else:
                         raise SettingsError(M("unknown action"))
                     return self._json(dict(jsonable(tool.snapshot()), started=started))

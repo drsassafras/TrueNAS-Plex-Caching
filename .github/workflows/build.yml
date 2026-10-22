@@ -51,6 +51,9 @@ jobs:
           load: true
           tags: plex-cache:test
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PLEXCACHE_CHANNEL=${{ github.ref == 'refs/heads/dev' && 'dev' || 'stable' }}
+            PLEXCACHE_COMMIT=${{ github.sha }}
       - name: Optimizer tests inside the image
         run: >
           docker run --rm -v "$PWD:/src:ro" -w /src --entrypoint python plex-cache:test

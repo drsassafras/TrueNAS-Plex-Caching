@@ -5,10 +5,16 @@ LABEL org.opencontainers.image.title="Plex Cache" \
       org.opencontainers.image.source="https://github.com/drsassafras/TrueNAS-Plex-Caching" \
       org.opencontainers.image.licenses="MIT"
 
+# Which branch this image is from ("stable": main, released; "dev": the dev branch, shown as 0.x.y-dev)
+# and the commit, so the update check follows the same branch. Set by the build workflow.
+ARG PLEXCACHE_CHANNEL=stable
+ARG PLEXCACHE_COMMIT=""
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PLEXCACHE_CONFIG=/config \
-    PLEXCACHE_PORT=8642
+    PLEXCACHE_PORT=8642 \
+    PLEXCACHE_CHANNEL=$PLEXCACHE_CHANNEL \
+    PLEXCACHE_COMMIT=$PLEXCACHE_COMMIT
 
 # For the optimizer service (the second container of the app): MKVToolNix (mkvmerge, mkvpropedit,
 # mkvextract) rewrites files; ffmpeg checks every stream is unchanged before a swap; oxipng and

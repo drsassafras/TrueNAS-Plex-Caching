@@ -263,7 +263,7 @@ PCI18N.ready.then(function () {
       tile(c.fail, P(c.fail, "failure", "failures"), c.fail ? "var(--bad)" : "var(--muted)") + "</div>";
     out += '<div class="stack">';
     h.groups.forEach(function (g) {
-      out += '<section class="card">' + heading(esc(g.title), esc(g.hint));
+      out += '<section class="card" id="' + esc(g.id) + '">' + heading(esc(g.title), esc(g.hint));
       if (g.table && g.table.length) {
         out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library") + '</th><th scope="col">' + H("Folders (Plex → here)") +
           '</th><th scope="col">' + H("Items") + '</th><th scope="col">' + H("Readable here") + '</th><th scope="col">' + H("Record size") + info(RS_HELP, T("Record size")) + "</th></tr></thead><tbody>";
@@ -312,7 +312,7 @@ PCI18N.ready.then(function () {
     "too large, and small files (music, audiobooks) waste cache space on data nobody asked for.<br><br>" +
     "<strong>To fix a warning</strong>: in TrueNAS, Datasets → the dataset → Edit → Advanced Options → <strong>Record Size</strong>. " +
     "If no one size suits every library, give the library named a dataset of its own (TrueNAS → Datasets → Add Dataset), move its files there, " +
-    "then point its folder in Plex and in System → Media Mappings at the new place.");
+    "then point its folder in Plex and in <a href=\"/system#mappings\" data-nav>System → Media Mappings</a> at the new place.");
   var FILE_RS_HELP = H("<strong>What it checks</strong>: that every file on the dataset is written in blocks of the dataset’s record size. Each health check looks at every file " +
     "(their details, not their contents — a fraction of a second). Files smaller than one record don’t count: they’re a single block of their own size.<br><br>" +
     "<strong>Why it matters</strong>: ZFS uses a record size only for files written after it’s set. Files written before keep their old block size — and with it the slower reads " +
@@ -343,7 +343,7 @@ PCI18N.ready.then(function () {
   // Media Datasets table: each column's explanation sits behind an ⓘ in its header.
   var DS_COLUMNS = [
     [H("In use"), H("Which libraries are on the dataset. A dataset mounted in this app with no Plex library on it is flagged, " +
-      "in case a mount is pointing at the wrong place. Libraries unticked in System → Media Mappings show as “caching off”: " +
+      "in case a mount is pointing at the wrong place. Libraries unticked in <a href=\"/system#mappings\" data-nav>System → Media Mappings</a> show as “caching off”: " +
       "only their record size is checked.")],
     [H("Cache settings"), H("<strong>primarycache=all</strong> is needed for any caching: ZFS only keeps in RAM, and only copies to the SSD, " +
       "data that passed through RAM. With <strong>metadata</strong>, nothing is cached and no feature can help.<br><br>" +
@@ -355,13 +355,17 @@ PCI18N.ready.then(function () {
       "Now Playing Cache and Prefetch work from RAM.")]
   ];
 
+  // A place in the app named in server text is a link to it: "[System → Plex](/system#plex)" (the text escaped first)
+  function links(text) {
+    return esc(text).replace(/\[([^\]]+)\]\((\/[a-z0-9-]*(?:#[a-z0-9-]+)?)\)/g, '<a href="$2" data-nav>$1</a>');
+  }
   function itemRow(it, extra) {
     var out = '<div class="row">' + badge(it.status, STATUS_TEXT[it.status] || it.status) + '<div class="grow"><div class="what">' + esc(it.title) +
-      (it.help ? info(it.help, it.title) : "") + '</div><div class="det">' + esc(it.detail) + "</div>";
+      (it.help ? info(it.help, it.title) : "") + '</div><div class="det">' + links(it.detail) + "</div>";
     if (it.fix || it.fix_cmd) {
       // {APP} in a command is this app's own address (e.g. to download a script it serves).
       var cmd = it.fix_cmd ? it.fix_cmd.split("{APP}").join(location.origin) : "";
-      out += '<div class="fix">' + esc(it.fix);
+      out += '<div class="fix">' + links(it.fix);
       if (cmd) out += '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) + '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button></div>";
       out += "</div>";
     }
@@ -559,7 +563,7 @@ PCI18N.ready.then(function () {
       [H("Your library"), H("As your files are written now — the block sizes found on the dataset, their metadata where it is — at your lead-in lengths.")]];
     var why = H("Each title’s lead-in (its length is set per library on the Caching page) × its library’s average bitrate ({video}% extra for video, {audio}% for audio, for bitrate spikes), " +
       "and its metadata ({how}): what’s in front of the video, and at the end the index, tags, fonts and cover art. ZFS caches whole records, so a lead-in rounds up to the record size — never less than 60% of a record of video — and metadata at the end of a file costs the records it touches there as well. " +
-      "Optimizing the files (the Optimizer page) and using the recommended record size give the Target columns; Health → Libraries shows each library’s record size and the one recommended for it. " +
+      "Optimizing the files (<a href=\"/optimizer\" data-nav>the Optimizer page</a>) and using the recommended record size give the Target columns; <a href=\"/health#media\" data-nav>Health → Libraries</a> shows each library’s record size and the one recommended for it. " +
       "Sizes are for your libraries as they are today: leave room on top for how much they’ll grow.",
       { video: w.padding_video, audio: w.padding_audio, how: ST.index_avg ? T("measured by warm-up") : T("estimated until warm-up has measured yours") });
     var table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">' + H("Titles") + '</th><th scope="col">' + H("Avg bitrate") + "</th>" +
@@ -733,7 +737,7 @@ PCI18N.ready.then(function () {
   // "≈ 20.8 GB of the 52 GB usable RAM cache, shared by all streams"
   function ramHelp(feature, how) {
     var r = ST.ram;
-    if (!r || !r.usable) return { s: r && r.cache_max ? H("No ZFS cache is left after the reserve (Caching → Cache Settings).") : H("Share of the usable ZFS cache."), more: how };
+    if (!r || !r.usable) return { s: r && r.cache_max ? H("No ZFS cache is left after the reserve (<a href=\"/caching#arc\" data-nav>Caching → Cache Settings</a>).") : H("Share of the usable ZFS cache."), more: how };
     return { s: H("Up to {size} now, shared by all streams", { size: fmtBytes(r[feature]) }),
       more: how + " " + H("{pct}% of the {usable} available now: total memory available {avail} minus {reserve} left for the rest of the NAS (see “Reserve ZFS cache”).",
         { pct: r_pct(feature), usable: fmtBytes(r.usable), avail: fmtBytes(r.available), reserve: fmtBytes(r.reserve) }) };
@@ -785,7 +789,7 @@ PCI18N.ready.then(function () {
         "</div>";
       if (!n.delay_sec) {
         out += details("np-timing", H("Automatic start timing"),
-          '<p class="help" style="margin:8px 0 12px">' + H("The wait is Plex’s buffer read at the disks’ speed.") + info(H("Plex keeps filling its buffer after playback starts. The wait is that buffer — some seconds of playback at the file’s bitrate — read at the measured speed of its dataset (System → Disk Speed). " +
+          '<p class="help" style="margin:8px 0 12px">' + H("The wait is Plex’s buffer read at the disks’ speed.") + info(H("Plex keeps filling its buffer after playback starts. The wait is that buffer — some seconds of playback at the file’s bitrate — read at the measured speed of its dataset (<a href=\"/system#disk-speed\" data-nav>System → Disk Speed</a>). " +
           "For example, 60 s of an 80 Mbps remux is 600 MB: about {s} s at {speed} MB/s.", { s: Math.max(n.min_delay_sec, Math.round(600 / speedGuess())), speed: speedGuess() }), T("automatic timing")) + "</p>" +
           '<div class="grid" style="margin-top:0">' +
           number("nowplaying", "buffer_direct_sec", T("Direct Play: seconds of playback buffer"), 0, 600, "") +
@@ -971,7 +975,7 @@ PCI18N.ready.then(function () {
     return out + "</section>";
   }
   var OPT_CONFIRM = null;  // the library whose Optimize Now is waiting for "Optimize Anyway" (ZFS settings off)
-  var ZFS_CFG_HELP = H("Whether the library’s dataset is set up for the best result: its record size (see Health → Libraries) and its compression. " +
+  var ZFS_CFG_HELP = H("Whether the library’s dataset is set up for the best result: its record size (see <a href=\"/health#media\" data-nav>Health → Libraries</a>) and its compression. " +
     "<strong>Ideal</strong>: the recommended record size and ZSTD-3. <strong>Pass</strong>: the second-best record size, or ZSTD at levels 4 to 19. " +
     "<strong>Warning</strong>: either is off.<br><br>Files take their dataset’s settings when they’re written, so change these first, in TrueNAS " +
     "(Datasets → the dataset → Edit → Advanced Options): optimizing before that means writing every file twice.");
@@ -1279,7 +1283,7 @@ PCI18N.ready.then(function () {
         return '<div class="convtype"><label><input type="checkbox" data-convtype="' + t[0] + '"' + (types[t[0]] ? " checked" : "") + "> " + esc(T(t[1])) + "</label>" + info(help, T(t[1])) + rv + "</div>";
       }).join("") + "</div>";
     out += '<div class="row"><div class="grow"><div class="what">' + H("Keep each original after Plex has its MKV") + '</div><div class="det">' +
-      H("Counted from when Plex has it — both servers, with a second one watched (Sync → Second Plex Server). Time lets any other copy of the files catch up first: another server that isn’t watched, or a backup. With every server watched, none is needed.") + "</div></div>" +
+      H("Counted from when Plex has it — both servers, with a second one watched (<a href=\"/sync#plex2\" data-nav>Sync → Second Plex Server</a>). Time lets any other copy of the files catch up first: another server that isn’t watched, or a backup. With every server watched, none is needed.") + "</div></div>" +
       select("optimizer", "convert_hold_days", T("Keep for"), [0, 1, 3, 7, 14, 30].map(function (d) {
         return [d, d ? P(d, "{n} day", "{n} days", { n: d }) : T("No time: delete it straight away")];
       })) + "</div>";
@@ -2378,8 +2382,7 @@ PCI18N.ready.then(function () {
     if (!(d.items || []).length) return out + '<p class="muted">' + H("Nothing flagged.") + "</p>";
     // each item flagged as a record card — its poster, its name as Plex has it (title, year, edition) — with a chip per
     // issue on the right; a chip opened shows what the check found (the file concerned, when the item has several)
-    out += '<p class="help">' + H("Ignore greys out an item’s issues as they are now, for good — a new kind of issue on it still shows as a warning; Bring Back undoes it.") + "</p>" +
-      '<div class="sshdr lhhdr"><div>' + H("Item") + "</div><div></div><div>" + H("Flagged") + "</div></div>";
+    out += '<div class="sshdr lhhdr"><div>' + H("Item") + "</div><div></div><div>" + H("Flagged") + "</div></div>";
     out += d.items.map(function (it, i) {
       var poster = it.poster ? '<img class="ssposter" src="/api/poster?path=' + encodeURIComponent(it.poster) + '" alt="" loading="lazy">' : '<div class="ssposter none"></div>';
       var chips = "", shown = "", live = [], muted = 0;
@@ -2392,8 +2395,8 @@ PCI18N.ready.then(function () {
         if (on) shown += '<div class="ssval' + (r.ignored ? " muted" : "") + '">' + esc(msg(r.text)) + (r.file && (it.files || []).length > 1 ? ' <span class="mono muted">' + esc(r.file) + "</span>" : "") + "</div>";
       });
       // ignored: the item's issues as they are now greyed out and kept so (a new kind of issue still warns); brought back on request
-      var acts = (live.length ? '<button class="btn sm" type="button" data-act="lh-ignore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" data-ids="' + esc(live.join(",")) + '">' + H("Ignore") + "</button> " : "") +
-        (muted ? '<button class="btn sm" type="button" data-act="lh-restore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '">' + H("Bring Back") + "</button>" : "");
+      var acts = (live.length ? '<button class="btn sm" type="button" data-act="lh-ignore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" data-ids="' + esc(live.join(",")) + '" title="' + H("Greys out this item’s issues as they are now, for good. A new kind of issue on it still shows as a warning.") + '">' + H("Ignore") + "</button> " : "") +
+        (muted ? '<button class="btn sm" type="button" data-act="lh-restore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" title="' + H("Shows this item’s ignored issues as warnings again.") + '">' + H("Bring Back") + "</button>" : "");
       return '<div class="ssitem lhitem' + (live.length ? "" : " lhquiet") + '"><div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(it.label) + '</div><div class="lhacts">' + acts + "</div></div></div></div>" +
         '<div class="ssarrow"></div><div class="lhflags"><div class="sschips">' + chips + "</div>" + shown + "</div></div>";
     }).join("");
@@ -3358,7 +3361,7 @@ PCI18N.ready.then(function () {
     } else if (p2.signed_in) {
       out += '<div class="det">' + H("Choose it from your Plex account’s servers: this server’s sign-in lists them, so there’s nothing more to sign in to — unless it’s on another account.") + "</div>";
     } else {
-      out += '<div class="det">' + H("Sign in with Plex first (System → Plex): your account’s servers are listed from there.") + "</div>";
+      out += '<div class="det">' + H("Sign in with Plex first (<a href=\"/system#plex\" data-nav>System → Plex</a>): your account’s servers are listed from there.") + "</div>";
     }
     out += '<div class="acts">' + (p2.signed_in ? '<button class="btn' + (p2.configured ? "" : " pri") + '" type="button" data-act="plex2-list">' +
       (p2.configured ? H("Choose Another Server") : H("Choose the Server")) + "</button> " : "") + signin +
@@ -3495,7 +3498,7 @@ PCI18N.ready.then(function () {
 
     // ---- Access: who may use the web UI and the API
     var au = ST.auth || {};
-    out += '<section class="card"><h2>' + H("Access") + '</h2><p class="hint">' + H("Who can open Plex Cache and change its settings.") + "</p>" +
+    out += '<section class="card" id="access"><h2>' + H("Access") + '</h2><p class="hint">' + H("Who can open Plex Cache and change its settings.") + "</p>" +
       '<div class="det">' + (au.enabled ? badge("pass", T("Sign-in required")) + " " + H("Signed in as {user}.", { user: au.user })
         : badge(S.general.lan_only ? "info" : "warn", T("No sign-in")) + " " +
           (S.general.lan_only ? H("Any device on your local network can change settings and run the optimizer.") : H("Any device that can reach it can change settings and run the optimizer.")) + " " +
@@ -3508,7 +3511,7 @@ PCI18N.ready.then(function () {
     // ---- Plex
     var guessPlex = ST.host ? "http://" + ST.host + ":32400" : "http://192.168.1.10:32400";
     var tokOk = c.plex_token && c.plex_token.status === "ok";
-    out += '<section class="card"><h2>Plex</h2><p class="hint">' + H("Used to list your libraries and see what’s playing.") + "</p>" +
+    out += '<section class="card" id="plex"><h2>Plex</h2><p class="hint">' + H("Used to list your libraries and see what’s playing.") + "</p>" +
       '<div class="lights">' + lightFor(c.plex_server, T("Plex server"), testing) + lightFor(c.plex_token, T("Plex sign-in"), testing) + "</div>" +
       '<div class="grid">' +
       textInput("plex", "url", T("Server address"), "s-purl", H("Usually your NAS’s IP. Port 32400 is used if you leave it off."), guessPlex) +
@@ -3528,7 +3531,11 @@ PCI18N.ready.then(function () {
 
     // ---- TrueNAS
     var guessTn = ST.host ? "https://" + ST.host : "https://192.168.1.10";
-    out += '<section class="card"><h2>TrueNAS <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional, recommended") + "</span></h2>" +
+    var pf = ST.platform || {};
+    out += '<section class="card" id="truenas"><h2>TrueNAS <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional, recommended") + "</span></h2>" +
+      // where this is running: TrueNAS for certain (the API, or the host's version file), or another Linux host
+      '<div class="lights">' + light(pf.truenas ? "ok" : pf.truenas === false ? "off" : "warn", T("Platform"), esc(msg(pf.label || "")) +
+        (pf.truenas === null || pf.truenas === undefined ? " · " + esc(T("Connect the API, or mount the host’s /etc/version at /host/etc/version in the app’s YAML, to be sure")) : ""), false) + "</div>" +
       '<p class="hint">' + H("Read-only: checks cache devices and dataset settings.") + info(H("It’s also how the app sizes the L2ARC, pauses for scrubs and resilvers, and checks the optimizer’s service. It never changes anything."), "TrueNAS") + "</p>" +
       '<div class="lights">' + lightFor(c.truenas_server, "TrueNAS", testing) + lightFor(c.truenas_key, T("API key"), testing) + "</div>" +
       '<div class="grid">' +
@@ -3548,7 +3555,7 @@ PCI18N.ready.then(function () {
 
     // ---- Updates
     var g = S.general;
-    out += '<section class="card"><h2>' + H("Updates") + '</h2>' +
+    out += '<section class="card" id="updates"><h2>' + H("Updates") + '</h2>' +
       '<div class="chk" style="margin-top:8px"><label><input type="checkbox" data-check="general.update_check"' + (g.update_check ? " checked" : "") +
       ">" + H("Check GitHub for new versions") + info(H("Every 6 hours the app downloads one small file from GitHub (the version number on the main branch) " +
         "and, when there’s a newer version, says so under the app’s name and in Home Assistant’s update entity. Nothing about your setup is sent. " +
@@ -3564,10 +3571,14 @@ PCI18N.ready.then(function () {
   function updateLine() {
     var u = ST.updates || {};
     if (!S.general.update_check) return "";
-    if (u.available) return '<span class="muted" style="font-size:13px">' + H("v{version} is available — update the app in TrueNAS.", { version: u.latest }) + "</span>";
-    if (u.checked) return '<span class="muted" style="font-size:13px">' + H("Up to date (checked {when}).", { when: ago(u.checked) }) + "</span>";
-    if (u.error) return '<span class="muted" style="font-size:13px">' + H("Couldn’t check: {why}", { why: u.error }) + "</span>";
-    return "";
+    var chan = '<span class="muted" style="font-size:13px">' + (u.channel === "dev" ? H("Dev build{commit}: follows the dev branch.", { commit: u.commit ? " (" + u.commit + ")" : "" }) : H("Stable build: follows releases.")) + "</span> ";
+    var btn = ' <button class="btn sm" type="button" data-act="updates-check"' + (u.checking ? " disabled" : "") + ">" + (u.checking ? H("Checking…") : H("Check Now")) + "</button>";
+    var line = "";
+    if (u.available) line = u.latest && u.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} is available — update the app in TrueNAS.", { version: u.latest })
+      : H("A newer dev build is available (dev is at {head}) — update the app in TrueNAS.", { head: u.latest_commit });
+    else if (u.checked) line = H("Up to date (checked {when}).", { when: ago(u.checked) });
+    else if (u.error) line = H("Couldn’t check: {why}", { why: u.error });
+    return chan + '<span class="muted" style="font-size:13px">' + line + "</span>" + btn;
   }
   function mqttLights() {
     var m = ST.mqtt || {}, M = S.mqtt, steps = m.steps || {};
@@ -3813,7 +3824,7 @@ PCI18N.ready.then(function () {
     return out;
   }
   // ---- the tools that scan a library and do the rows you tick (tools/): Merge Duplicates, Duplicate Versions, Organize Folders
-  var TOOL = { merge: { key: null, sel: {}, opts: {}, confirm: false }, versions: { key: null, sel: {}, opts: {}, confirm: false }, folders: { key: null, sel: {}, opts: {}, confirm: false } };
+  var TOOL = { merge: { key: null, sel: {}, opts: {}, confirm: false, keep: {} }, versions: { key: null, sel: {}, opts: {}, confirm: false }, folders: { key: null, sel: {}, opts: {}, confirm: false } };
   function toolState(name) { return ((ST.tools || {})[name]) || { results: [], extra: {} }; }
   // the library tabs: the ones the tool can work on
   function toolLibs(name, types) {
@@ -3897,20 +3908,22 @@ PCI18N.ready.then(function () {
   // two servers' records: the poster, the fields each has, its files. The folded records' edits are lost.
   var MERGE_FIELD = null;  // the one chip opened: {row, id}
   function mergeRows(sc) {
-    var hdr = '<div class="sshdr"><div>' + H("Kept: its metadata stays") + '</div><div></div><div>' + H("Folded in: their edits are lost") + "</div></div>";
+    var hdr = '<div class="sshdr lhhdr"><div>' + H("Kept: the one record left, its metadata as it is") + '</div><div></div><div>' + H("Folded into it: their files become its versions; their own edits, posters and collections are lost") + "</div></div>";
     return hdr + sc.rows.map(function (r) {
-      var keep = r.keep, others = r.others || [], kinds = r.kinds || [];
+      // the record kept: the tool's pick, or the one chosen with the arrow (sent with Apply as keep_key)
+      var all = [r.keep].concat(r.others || []), chosen = TOOL.merge.keep[r.id] || r.keep.key;
+      var keep = all.filter(function (x) { return String(x.key) === String(chosen); })[0] || r.keep, others = all.filter(function (x) { return x !== keep; }), kinds = r.kinds || [];
       var files = [keep].concat(others).reduce(function (a, x) { return a.concat(x.files || []); }, []).filter(function (f, k, a) { return a.indexOf(f) === k; }), fidx = {};
       files.forEach(function (f, k) { fidx[f] = k + 1; });
       var act = 'data-act="merge-field" data-id="' + esc(r.id) + '"', openId = MERGE_FIELD && MERGE_FIELD.row === r.id ? MERGE_FIELD.id : null;
       var otherFiles = others.reduce(function (a, x) { return a.concat(x.files || []); }, []);
-      var cards = others.map(function (x) { return syncSide(x, keep, "", false, kinds, act, openId, null, fidx, keep.files || []); });
+      var cards = others.map(function (x) { return '<div class="mgdrop">' + syncSide(x, keep, "", false, kinds, act, openId, null, fidx, keep.files || []) + "</div>"; });
       var why = badge("info", r.why === "file" ? T("The same file") : r.why === "matched" ? T("Same match") : T("Named alike"));
       var lost = kinds.filter(function (k) { return k !== "match"; }).length;
-      return '<div class="ssitem"><div class="sstop"><span class="what">' + toolCheck("merge", r) + " " + esc(r.title) + "</span><span class=\"sswarn\">" + why +
+      return '<div class="ssitem lhitem"><div class="sstop"><span class="what">' + toolCheck("merge", r) + " " + esc(r.title) + "</span><span class=\"sswarn\">" + why +
         (lost ? ' <span title="' + H("A folded record has edits, a poster or collections of its own: Plex keeps only the kept record’s. Open the chips to see what goes.") + '">' + badge("warn", T("Edits lost")) + "</span>" : "") + "</span></div>" +
-        syncSide(keep, others[0] || null, "", true, kinds, act, openId, null, fidx, otherFiles) +
-        '<div class="ssarrow" aria-label="' + esc(T("merged with")) + '">←</div>' + (cards.length > 1 ? '<div class="ssstack">' + cards.join("") + "</div>" : cards[0]) +
+        '<div class="mgkeep"><div class="mgkeeplbl">' + H("Metadata kept") + "</div>" + syncSide(keep, others[0] || null, "", true, kinds, act, openId, null, fidx, otherFiles) + "</div>" +
+        '<button type="button" class="ssarrow mgarrow" data-act="merge-swap" data-id="' + esc(r.id) + '" title="' + H("Keep the other record’s metadata instead") + '"><span>←</span><small>' + H("into") + "</small></button>" + (cards.length > 1 ? '<div class="ssstack">' + cards.join("") + "</div>" : cards[0]) +
         '<div class="ssnotes ssfilelist"><div class="ssfiles many">' + files.map(function (f) { return "<div><span class=\"ssfn\">" + fidx[f] + "</span> " + esc(f) + "</div>"; }).join("") + "</div></div></div>";
     }).join("");
   }
@@ -4083,8 +4096,10 @@ PCI18N.ready.then(function () {
     var c = ST.health ? ST.health.counts : null;
     dot.className = "dot " + (!c ? "" : c.fail ? "fail" : c.warn ? "warn" : "ok");
     var ver = document.getElementById("version"), up = ST.updates || {};
-    ver.innerHTML = "TrueNAS · v" + esc(ST.version) + (up.available ?
-      '<a class="update" href="' + esc(up.repo) + '" target="_blank" rel="noopener">' + H("v{version} available ↗", { version: up.latest }) + "</a>" : "");
+    var pfm = ST.platform || {};
+    ver.innerHTML = esc(pfm.truenas === false ? "Linux" : "TrueNAS") + " · v" + esc(ST.version) + (up.available ?
+      '<a class="update" href="' + esc(up.repo) + (up.channel === "dev" ? "/commits/dev" : "") + '" target="_blank" rel="noopener">' +
+      (up.latest && up.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} available ↗", { version: up.latest }) : H("newer dev build ↗")) + "</a>" : "");
     var bar = document.getElementById("userbar");
     if (!bar) {
       // Top right: the language menu and the sign-out button.
@@ -4390,7 +4405,16 @@ PCI18N.ready.then(function () {
       el.disabled = true;
       api("/api/optimizer/check", {}).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
     }
+    else if (act === "updates-check") { el.disabled = true; api("/api/updates/check", {}).then(function () { setTimeout(load, 1500); }).catch(function (e) { toast(e.message); }); }
     else if (act === "tool-lib") { TOOL[el.dataset.tool].key = el.dataset.key; TOOL[el.dataset.tool].sel = {}; TOOL[el.dataset.tool].confirm = false; render(); }
+    else if (act === "merge-swap") {  // the next record of the row kept instead (round and round)
+      var mrow = (((toolState("merge").scan || {}).rows) || []).filter(function (r) { return r.id === el.dataset.id; })[0];
+      if (mrow) {
+        var keys = [mrow.keep.key].concat((mrow.others || []).map(function (o) { return o.key; })), cur = TOOL.merge.keep[el.dataset.id] || mrow.keep.key;
+        TOOL.merge.keep[el.dataset.id] = keys[(keys.indexOf(cur) + 1) % keys.length];
+        render();
+      }
+    }
     else if (act === "merge-field") { MERGE_FIELD = MERGE_FIELD && MERGE_FIELD.row === el.dataset.id && MERGE_FIELD.id === el.dataset.f ? null : { row: el.dataset.id, id: el.dataset.f }; render(); }
     else if (act === "tool-opt") { TOOL[el.dataset.tool].opts[el.dataset.opt] = el.checked; }
     else if (act === "tool-sel") { TOOL[el.dataset.tool].sel[el.dataset.id] = el.checked; TOOL[el.dataset.tool].confirm = false; render(); }
@@ -4409,9 +4433,10 @@ PCI18N.ready.then(function () {
     else if (act === "tool-apply-no") { TOOL[el.dataset.tool].confirm = false; render(); }
     else if (act === "tool-apply-yes") {
       el.disabled = true;
-      var au = TOOL[el.dataset.tool], ids = Object.keys(au.sel).filter(function (k) { return au.sel[k]; });
+      var au = TOOL[el.dataset.tool], ids = Object.keys(au.sel).filter(function (k) { return au.sel[k]; }), choices = {};
+      ids.forEach(function (id) { if (au.keep && au.keep[id]) choices[id] = { keep_key: au.keep[id] }; });
       au.sel = {}; au.confirm = false;
-      api("/api/tools/" + el.dataset.tool, { action: "apply", ids: ids }).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
+      api("/api/tools/" + el.dataset.tool, { action: "apply", ids: ids, choices: choices }).then(function () { load(); }).catch(function (e) { toast(e.message); load(); });
     }
     else if (act === "trash") {
       // a file a tool set aside: deleted now, put back, or kept set aside (trash.py)
