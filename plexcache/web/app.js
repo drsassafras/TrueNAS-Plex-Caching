@@ -2346,6 +2346,7 @@ PCI18N.ready.then(function () {
   }
   // The Library page's Health view: the content checks (libhealth.py) — file checks on the files as
   // inspected, Plex checks on how Plex has the items — each with its switch, and the items flagged
+  var LH_OPEN = {};  // the issue chips opened on the Health view: "item key/check id" -> true
   function libHealthView() {
     var key = LIB.key, d = LIB.health[key];
     if (d === undefined) {
@@ -2360,22 +2361,36 @@ PCI18N.ready.then(function () {
     var out = '<div class="det" style="margin:8px 0">' + esc(T("{n} items checked", { n: fmtNum(d.checked || 0) })) +
       (d.unread ? " · " + esc(P(d.unread, "{n} file not inspected yet", "{n} files not inspected yet", { n: fmtNum(d.unread) })) : "") +
       (d.pages_read != null ? " · " + esc(T("{n} items’ pages read (the locked-field check needs them: a Library Sync compare reads them)", { n: fmtNum(d.pages_read) })) : "") + "</div>";
+    // the language the subtitle check wants: chosen beside it, from the languages the library's files hold
+    var langSel = '<select class="sel sm" data-lhlang aria-label="' + H("Subtitle language") + '">' + (d.languages || []).map(function (l) {
+      return '<option value="' + esc(l.code) + '"' + (l.code === d.language ? " selected" : "") + ">" + esc(l.name) + "</option>";
+    }).join("") + "</select>";
     out += '<div class="lhgrid">' + Object.keys(cats).map(function (cat) {
       return '<div class="lhcat"><div class="what">' + esc(cats[cat][0]) + '</div><div class="det">' + esc(cats[cat][1]) + "</div>" + (d.checks[cat] || []).map(function (c) {
         var n = (d.counts || {})[c.id] || 0;
         var rv = dflt[c.id] !== undefined && c.on !== dflt[c.id] ? ' <button type="button" class="revert" data-lhcheck-revert="' + c.id + '" title="' + H("Back to the default ({value})", { value: dflt[c.id] ? T("on") : T("off") }) + '">↺</button>' : "";
         return '<div class="chk lhchk">' + info(esc(msg(c.help)), msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
-          (c.on ? (n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : '<span class="muted det">' + esc(T("off")) + "</span>") + "</div>";
+          (c.on ? (n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : '<span class="muted det">' + esc(T("off")) + "</span>") +
+          (c.id === "subtitles_language" ? '<div class="lhlang"><span>' + H("Language") + "</span>" + langSel +
+            (d.language !== ((ST.library_health_defaults || {}).subtitle_language || "en") ? ' <button type="button" class="revert" data-lhlang-revert title="' + H("Back to the default ({value})", { value: "English" }) + '">↺</button>' : "") + "</div>" : "") + "</div>";
       }).join("") + "</div>";
     }).join("") + "</div>";
     if (!(d.items || []).length) return out + '<p class="muted">' + H("Nothing flagged.") + "</p>";
-    out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Item") + '</th><th scope="col">' + H("Flagged") + "</th></tr></thead><tbody>" +
-      d.items.map(function (it) {
-        return "<tr><td>" + esc(it.label) + '<div class="det mono">' + esc((it.files || []).join(", ")) + "</div></td><td>" + it.results.map(function (r) {
-          var name = ((d.checks[r.category] || []).filter(function (c) { return c.id === r.id; })[0] || {}).name;
-          return '<div class="det">' + badge("warn", name ? msg(name) : r.id) + " " + esc(msg(r.text)) + (r.file && (it.files || []).length > 1 ? ' <span class="mono muted">' + esc(r.file) + "</span>" : "") + "</div>";
-        }).join("") + "</td></tr>";
-      }).join("") + "</tbody></table></div>";
+    // each item flagged as a record card — its poster, its name as Plex has it (title, year, edition) — with a chip per
+    // issue on the right; a chip opened shows what the check found (the file concerned, when the item has several)
+    out += '<div class="sshdr lhhdr"><div>' + H("Item") + "</div><div></div><div>" + H("Flagged") + "</div></div>";
+    out += d.items.map(function (it, i) {
+      var poster = it.poster ? '<img class="ssposter" src="/api/poster?path=' + encodeURIComponent(it.poster) + '" alt="" loading="lazy">' : '<div class="ssposter none"></div>';
+      var chips = "", shown = "";
+      it.results.forEach(function (r, k) {
+        var id = i + "/" + k, on = !!LH_OPEN[key + ":" + id];
+        var name = ((d.checks[r.category] || []).filter(function (c) { return c.id === r.id; })[0] || {}).name;
+        chips += '<button type="button" class="badge b-warn sschip' + (on ? " on" : "") + '" aria-expanded="' + on + '" data-act="lh-open" data-key="' + esc(key) + '" data-id="' + esc(id) + '">' + esc(name ? msg(name) : r.id) + "</button>";
+        if (on) shown += '<div class="ssval">' + esc(msg(r.text)) + (r.file && (it.files || []).length > 1 ? ' <span class="mono muted">' + esc(r.file) + "</span>" : "") + "</div>";
+      });
+      return '<div class="ssitem lhitem"><div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(it.label) + "</div></div></div></div>" +
+        '<div class="ssarrow"></div><div class="lhflags"><div class="sschips">' + chips + "</div>" + shown + "</div></div>";
+    }).join("");
     if ((d.items || []).length < (d.total || 0)) out += '<p class="muted">' + H("The first {n} shown.", { n: fmtNum(d.items.length) }) + "</p>";
     return out;
   }
@@ -4210,10 +4225,13 @@ PCI18N.ready.then(function () {
 
   document.addEventListener("click", function (e) {
     // ↺ on the Optimizer page and the second server's pairs: back to the default
-    var orv = e.target.closest("[data-optlib-revert], [data-convtype-revert], [data-p2lib-revert], [data-syncwhat-revert], [data-lhcheck-revert]");
+    var orv = e.target.closest("[data-optlib-revert], [data-convtype-revert], [data-p2lib-revert], [data-syncwhat-revert], [data-lhcheck-revert], [data-lhlang-revert]");
     if (orv) {
       e.preventDefault();
-      if (orv.dataset.optlibRevert !== undefined) {
+      if (orv.dataset.lhlangRevert !== undefined) {
+        queueSave("library_health", "subtitle_language", (ST.library_health_defaults || {}).subtitle_language || "en", true);
+        LIB.health = {};
+      } else if (orv.dataset.optlibRevert !== undefined) {
         var libs = JSON.parse(JSON.stringify((S.optimizer || {}).libraries || {}));
         var lib = libs[orv.dataset.optlibRevert] = optChoices(orv.dataset.optlibRevert);
         lib[orv.dataset.field] = ((ST.optimizer_defaults || {}).library || {})[orv.dataset.field];
@@ -4432,6 +4450,7 @@ PCI18N.ready.then(function () {
     else if (act === "proc-chart") { procChart[el.dataset.key] = !procChart[el.dataset.key]; render(); }
     else if (act === "file-toggle") { SHOWFILE[el.dataset.file] = !SHOWFILE[el.dataset.file]; render(); }
     else if (act === "lib-view") { LIB.view = el.dataset.view; render(); }
+    else if (act === "lh-open") { var lk = el.dataset.key + ":" + el.dataset.id; LH_OPEN[lk] = !LH_OPEN[lk]; render(); }
     else if (act === "sync-start") {
       el.disabled = true;
       LIB.hold.sync[el.dataset.key] = false;
@@ -4729,7 +4748,13 @@ PCI18N.ready.then(function () {
   // Library → Health: each check's switch
   document.addEventListener("change", function (e) {
     var el = e.target;
-    if (!el.dataset || el.dataset.lhcheck === undefined) return;
+    if (!el.dataset) return;
+    if (el.dataset.lhlang !== undefined) {  // the subtitle language wanted: the check runs again with it
+      queueSave("library_health", "subtitle_language", el.value, true);
+      LIB.health = {};
+      return;
+    }
+    if (el.dataset.lhcheck === undefined) return;
     var checks = JSON.parse(JSON.stringify((S.library_health || {}).checks || {}));
     checks[el.dataset.lhcheck] = el.checked;
     queueSave("library_health", "checks", checks, true);

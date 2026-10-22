@@ -4887,10 +4887,15 @@ class OptimizerTests(unittest.TestCase):
                     got = filemap.describe(f)
                     got["mix"] = filemap.cache_mix(f, got, rec)
                     pm, gm = want["mix"], got["mix"]
-                    self.assertEqual(pm["blocks"], gm["blocks"], kw)
+                    # (cover art — the file's own, or Plex's poster — is compressed losslessly where a tool for it is
+                    # installed: a few % smaller than the estimate, which can't know the tool's gain, so the
+                    # estimate may be a block over, never under)
+                    if images == "remove":
+                        self.assertEqual(pm["blocks"], gm["blocks"], kw)
+                    else:
+                        self.assertIn(pm["blocks"], (gm["blocks"], gm["blocks"] + 1), kw)
                     self.assertAlmostEqual(want["first_video"], max(0, rec - got["video_start"]), delta=256, msg=kw)
-                    # (Plex's poster is compressed losslessly where a tool for it is installed: a few % smaller)
-                    self.assertAlmostEqual(pm["meta"], gm["meta"], delta=256 + gm["meta"] * (0.08 if images == "plex" else 0.03), msg=kw)
+                    self.assertAlmostEqual(pm["meta"], gm["meta"], delta=256 + gm["meta"] * (0.03 if images == "remove" else 0.08), msg=kw)
                     self.assertAlmostEqual(pm["video"], gm["video"], delta=8192, msg=kw)
                     self.assertAlmostEqual(pm["video_tail"], projection.tail_video(got), delta=8192, msg=kw)   # the end's video, as written
                     self.assertAlmostEqual(pm["meta_disk"], gm["meta_disk"], delta=4096 + gm["meta_disk"] * 0.05, msg=kw)
@@ -5329,6 +5334,19 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(ids(None), [])
         off = dict(on, no_subtitles=False)
         self.assertEqual([r["id"] for r in libhealth.file_checks({"tracks": [v, au("eng")]}, off)], [])
+        # off unless turned on: subtitles in the chosen language (any code for it), and text subtitles (SRT, ASS)
+        self.assertFalse(on["subtitles_language"] or on["subtitles_text"])
+        more = dict(on, subtitles_language=True, subtitles_text=True)
+        ids2 = lambda m, lang="en": [r["id"] for r in libhealth.file_checks(m, more, lang)]
+        srt = lambda lang: dict(sub(lang), codec="S_TEXT/UTF8")
+        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("eng")]}), [])
+        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("en-US")]}), [])                        # ("en", "eng", "en-US": one language)
+        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("fra")]}), ["subtitles_language"])
+        self.assertEqual(ids2({"tracks": [v, au("eng"), srt("fra")]}, "fr"), [])
+        self.assertEqual(ids2({"tracks": [v, au("eng"), dict(sub("eng"), codec="S_HDMV/PGS")]}), ["subtitles_text"])
+        self.assertEqual(ids2({"tracks": [v, au("eng")]}), ["no_subtitles", "subtitles_language"])     # (no text check without any subtitles: said once)
+        self.assertEqual(ids2({"tracks": [v, au("zxx"), dict(sub("eng"), codec="S_HDMV/PGS")]}), ["subtitles_on_zxx"])  # (no speech: neither)
+        self.assertTrue(libhealth.same_language("eng", "en") and not libhealth.same_language("eng", "fra") and not libhealth.same_language("", "en"))
 
     def test_library_health_duplicate_checks(self):
         """The duplicate checks: the same file (running time and size) twice on one item — a link to one
@@ -5378,12 +5396,17 @@ class OptimizerTests(unittest.TestCase):
         for cat, checks in libhealth.CHECKS.items():
             self.assertIn(cat, ("file", "plex"))
             for c in checks:
-                self.assertTrue(on[c["id"]], c["id"])
-                settings.update({"library_health": {"checks": {c["id"]: False}}})
-                self.assertFalse(libhealth.enabled(settings.get())[c["id"]], f"{cat}: {c['id']} can't be turned off")
+                self.assertEqual(on[c["id"]], c.get("default", True), c["id"])
+                settings.update({"library_health": {"checks": {c["id"]: not c.get("default", True)}}})
+                self.assertEqual(libhealth.enabled(settings.get())[c["id"]], not c.get("default", True), f"{cat}: {c['id']} can't be switched")
                 self.assertTrue(c.get("name") and c.get("help"), c["id"])
+        self.assertEqual(libhealth.defaults()["subtitles_language"], False)
         with self.assertRaises(config.SettingsError):
             settings.update({"library_health": {"checks": {"made_up": True}}})
+        settings.update({"library_health": {"subtitle_language": "FR"}})
+        self.assertEqual(settings.section("library_health")["subtitle_language"], "fr")
+        with self.assertRaises(config.SettingsError):
+            settings.update({"library_health": {"subtitle_language": "english"}})
 
     def test_convert_with_the_real_tools(self):
         """The optimizer's converting, with MKVToolNix and ffmpeg: an AVI becomes an optimized MKV next to

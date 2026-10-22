@@ -34,7 +34,7 @@ DEFAULTS: dict = {
     # "none", or "plex2", the server watched), and what a sync would do. Nothing acts without a review:
     # "approved" holds the settings as last reviewed; changed since, applying stays paused.
     # Library Health (libhealth.py): which checks run, by id ({id: true/false}; the ids are libhealth.CHECKS)
-    "library_health": {"checks": {}},
+    "library_health": {"checks": {}, "subtitle_language": "en"},  # (checks: each check's switch, where it differs from how it ships)
     "sync": {
         "mirrors": "unknown",
         "discover": True,        # look for mirrors among the account's servers, weekly
@@ -338,6 +338,10 @@ def _coerce(section: str, key: str, value, current):
         return _text(section, key, value, 255, spaces=False)
     if (section, key) in (("plex2", "name"), ("plex2", "machine_id")):
         return _text(section, key, value, 200)
+    if (section, key) == ("library_health", "subtitle_language"):
+        if not isinstance(value, str) or not re.fullmatch(r"[a-z]{2,3}", value.strip().lower()):
+            raise SettingsError(M("library_health.subtitle_language must be a two- or three-letter language code"))
+        return value.strip().lower()
     if (section, key) == ("library_health", "checks"):
         from .libhealth import CHECKS
         ids = {c["id"] for cat in CHECKS.values() for c in cat}

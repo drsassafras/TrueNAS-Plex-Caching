@@ -673,3 +673,9 @@ h2 .mode-ic{vertical-align:-3px}
 .shell.collapsed .toolsub{display:none}
 /* Library Health's checks: the ⓘ before the checkbox, where the eye lands first */
 .lhchk > .info{margin-left:0;margin-right:-8px}
+/* Library → Health: each flagged item as a record card, its issues as chips on the right */
+.lhitem{grid-template-columns:minmax(0,1fr) 34px minmax(0,1.2fr)}
+.lhhdr{grid-template-columns:minmax(0,1fr) 34px minmax(0,1.2fr)}
+.lhflags{min-width:0}
+.lhchk select.sel.sm{font-size:12px;padding:2px 6px;min-height:0;max-width:140px}
+.lhchk .lhlang{flex-basis:100%;display:flex;align-items:center;gap:8px;margin:-4px 0 2px 36px;font-size:13px;color:var(--soft)}

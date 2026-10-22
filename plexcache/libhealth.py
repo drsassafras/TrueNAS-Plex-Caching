@@ -18,7 +18,7 @@ import os
 import re
 
 from .i18n import M
-from .languages import language_label
+from .languages import language_label, language_name
 from .plex import EDIT_FIELDS, TAG_FIELDS
 
 LEEWAY_PCT, LEEWAY_SECS = 3, 120  # how far versions' running times may differ before they're flagged
@@ -26,6 +26,10 @@ CHECKS = {
     "file": [
         {"id": "no_audio", "name": M("No audio"), "help": M("A video file with no audio track at all.")},
         {"id": "no_subtitles", "name": M("No subtitles"), "help": M("A film with spoken audio and no subtitle track. Files whose audio is marked as having no linguistic content (zxx) aren’t flagged.")},
+        {"id": "subtitles_language", "name": M("No subtitles in the chosen language"), "default": False,
+         "help": M("A film with spoken audio and no subtitle track in the language chosen beside this check (any format). Off unless you turn it on.")},
+        {"id": "subtitles_text", "name": M("Subtitles that aren’t SRT or ASS"), "default": False,
+         "help": M("A film whose subtitle tracks are all bitmap ones (PGS, VobSub) or another format that isn’t SRT, ASS or SSA text: text subtitles can be searched, styled and resized by every player, and are tiny. Off unless you turn it on.")},
         {"id": "subtitles_on_zxx", "name": M("Subtitles on a film without speech"),
          "help": M("A file whose audio is marked zxx (no linguistic content) with subtitles that aren’t forced ones. Forced subtitles carry written content and belong; others are probably for another film.")},
         {"id": "duplicate_versions", "name": M("The same file twice on one item"),
@@ -43,13 +47,28 @@ CHECKS = {
     ],
 }
 NO_SPEECH = ("zxx", "und")  # audio marked as having no linguistic content (and unknown: not flagged either way)
+TEXT_SUBS = ("s_text/utf8", "s_text/ascii", "s_text/ass", "s_text/ssa", "subrip", "srt", "ass", "ssa")  # subtitle codecs that are text
+DEFAULT_LANGUAGE = "en"
+
+
+def same_language(a: str | None, b: str | None) -> bool:
+    """Whether two language codes name one language: "en", "eng" and "en-US" are all English."""
+    x, y = str(a or "").strip().lower().split("-")[0], str(b or "").strip().lower().split("-")[0]
+    if not x or not y:
+        return False
+    return x == y or (language_name(x) != "" and language_name(x) == language_name(y))
 _TITLE = re.compile(r"^(?P<title>.+?)[ ._\-(\[]+(?P<year>(?:19|20)\d\d)(?![0-9p])")
 
 
 def enabled(settings: dict) -> dict:
     """Each check's switch: on unless turned off."""
     chosen = (settings.get("library_health") or {}).get("checks") or {}
-    return {c["id"]: chosen.get(c["id"], True) for cat in CHECKS.values() for c in cat}
+    return {c["id"]: chosen.get(c["id"], c.get("default", True)) for cat in CHECKS.values() for c in cat}
+
+
+def defaults() -> dict:
+    """Each check's switch as shipped (the page's ↺ buttons)."""
+    return {c["id"]: c.get("default", True) for cat in CHECKS.values() for c in cat}
 
 
 def file_title_year(path: str) -> tuple[str, str]:
@@ -62,9 +81,9 @@ def file_title_year(path: str) -> tuple[str, str]:
     return title, (m.group("year") if m else "")
 
 
-def file_checks(m: dict | None, on: dict) -> list[dict]:
+def file_checks(m: dict | None, on: dict, lang: str = DEFAULT_LANGUAGE) -> list[dict]:
     """The file checks on a file's layout as inspected (its tracks). [] without one, or for a file
-    whose tracks aren't read (MP4: none listed)."""
+    whose tracks aren't read (MP4: none listed). ``lang``: the subtitle language wanted."""
     tracks = (m or {}).get("tracks") or []
     if not tracks or not any(t.get("type") == "video" for t in tracks):
         return []
@@ -78,6 +97,13 @@ def file_checks(m: dict | None, on: dict) -> list[dict]:
     if on.get("no_subtitles") and speech and not subs:
         out.append({"id": "no_subtitles", "category": "file", "status": "warn",
                     "text": M("Spoken audio ({langs}) and no subtitle track.", langs=", ".join(sorted(language_label(l) for l in langs if l)))})
+    if on.get("subtitles_language") and speech and lang and not any(same_language(t.get("language"), lang) for t in subs):
+        out.append({"id": "subtitles_language", "category": "file", "status": "warn",
+                    "text": M("No {lang} subtitles ({have}).", lang=language_name(lang) or lang,
+                              have=", ".join(sorted({language_label(t.get("language") or "?") for t in subs})) or M("none at all"))})
+    if on.get("subtitles_text") and speech and subs and not any(str(t.get("codec") or "").lower() in TEXT_SUBS for t in subs):
+        out.append({"id": "subtitles_text", "category": "file", "status": "warn",
+                    "text": M("No SRT or ASS subtitles: {have}.", have=", ".join(sorted({str(t.get("codec") or "?") for t in subs})))})
     if on.get("subtitles_on_zxx") and audio and not speech:
         odd = [t for t in subs if not t.get("forced")]
         if odd:
@@ -159,6 +185,8 @@ def library_health(app, key: str) -> dict:
     yet)}. The Plex "locked field" check needs an item's own page: run for the items a Library Sync
     comparison has read."""
     on = enabled(app.settings.get())
+    lang = (app.settings.get().get("library_health") or {}).get("subtitle_language") or DEFAULT_LANGUAGE
+    languages: set = set()
     files = [f for f in list(app.files) if str(f.library_key) == str(key)]
     counts: dict[str, int] = {}
     items: list[dict] = []
@@ -193,7 +221,10 @@ def library_health(app, key: str) -> dict:
                 m = None
             if m is None:
                 unread += 1
-            for r in file_checks(m, on):
+            for t in (m or {}).get("tracks") or []:
+                if t.get("type") in ("audio", "subtitles") and t.get("language"):
+                    languages.add(str(t["language"]).lower().split("-")[0])
+            for r in file_checks(m, on, lang):
                 results.append(dict(r, file=os.path.basename(path)))
         item = {"files": [f.path for f in group], "durations": [getattr(f, "duration_ms", 0) for f in group], "locked": None}
         sd = sync_sides.get(rk)
@@ -206,5 +237,7 @@ def library_health(app, key: str) -> dict:
             items.append({"label": getattr(group[0], "title", "") or os.path.basename(group[0].path), "poster": getattr(group[0], "poster", ""),
                           "files": [os.path.basename(f.path) for f in group], "results": results})
     items.sort(key=lambda it: it["label"].lower())
+    langs = sorted(languages | {lang, DEFAULT_LANGUAGE}, key=lambda c: (language_name(c) or c).lower())
     return {"checks": {cat: [dict(c, on=on[c["id"]]) for c in cs] for cat, cs in CHECKS.items()}, "counts": counts,
-            "items": items[:500], "total": len(items), "checked": len(by_item), "unread": unread, "pages_read": len(sync_sides)}
+            "items": items[:500], "total": len(items), "checked": len(by_item), "unread": unread, "pages_read": len(sync_sides),
+            "language": lang, "languages": [{"code": c, "name": language_name(c) or c} for c in langs if c not in NO_SPEECH]}

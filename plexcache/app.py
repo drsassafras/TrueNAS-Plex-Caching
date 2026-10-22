@@ -31,7 +31,7 @@ from .trash import Trash
 from .tools.merge import MergeDuplicates
 from .tools.versions import DuplicateVersions
 from .tools.folders import OrganizeFolders
-from .libhealth import CHECKS as CHECKS_LH
+from .libhealth import defaults as libhealth_defaults
 from .languages import language_name
 from .migrating import Migration
 from .optimizing import DEFAULTS as OPT_DEFAULTS, Optimizing
@@ -1578,7 +1578,7 @@ class App:
             # each library's optimizer choices and the converted kinds, by default: for their ↺ buttons
             "optimizer_defaults": {"library": dict(OPT_DEFAULTS), "convert_types": dict(CONVERT_TYPES)},
             "sync_defaults": {"what": dict(config.DEFAULTS["sync"]["what"])},
-            "library_health_defaults": {"checks": {c["id"]: True for cat in CHECKS_LH.values() for c in cat}},
+            "library_health_defaults": {"checks": libhealth_defaults(), "subtitle_language": "en"},
             "retries": self.optimizing.retrying(),  # failed files to try again, after the file in hand
             "playback": {"sessions": self.monitor.snapshot(), "error": self.monitor.last_error, "last_poll": self.monitor.last_poll},
             "activity": self.activity.snapshot(),
