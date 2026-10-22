@@ -8828,6 +8828,11 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertTrue(updates.commit_source_for("dev").endswith("/commits/dev"))
         self.assertIsNone(updates.commit_source_for("stable"))
         self.assertEqual((version_label("stable"), version_label("dev")), (updates.__version__, updates.__version__ + "-dev"))
+        app = _new_app()
+        self.assertTrue(updates.UpdateChecker(app, self.url, channel="stable").build_url().endswith("/releases/tag/v" + updates.__version__))
+        self.assertTrue(updates.UpdateChecker(app, self.url, channel="dev", commit="abc1234def").build_url().endswith("/commit/abc1234def"))
+        self.assertTrue(updates.UpdateChecker(app, self.url, channel="dev", commit="").build_url().endswith("/tree/dev"))
+        self.assertIn("url", updates.UpdateChecker(app, self.url).status())
 
     def test_check(self):
         from plexcache.homeassistant import update_info

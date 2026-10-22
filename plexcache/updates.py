@@ -140,7 +140,13 @@ class UpdateChecker:
             return True
         return bool(self.latest_commit and self.commit and not self.latest_commit.startswith(self.commit) and not self.commit.startswith(self.latest_commit))
 
+    def build_url(self) -> str:
+        """This build's page on GitHub: a stable build's release, a dev build's commit — else the repository."""
+        if self.channel == "dev":
+            return f"{REPO_URL}/commit/{self.commit}" if self.commit else f"{REPO_URL}/tree/dev"
+        return f"{REPO_URL}/releases/tag/v{__version__}"
+
     def status(self) -> dict:
-        return {"latest": self.latest, "available": self.available(), "checked": self.checked, "error": self.error, "repo": REPO_URL,
+        return {"latest": self.latest, "available": self.available(), "checked": self.checked, "error": self.error, "repo": REPO_URL, "url": self.build_url(),
                 "channel": self.channel, "branch": BRANCH.get(self.channel, "main"), "commit": (self.commit or "")[:7], "latest_commit": (self.latest_commit or "")[:7],
                 "checking": self.checking}

@@ -4062,6 +4062,13 @@ PCI18N.ready.then(function () {
       if (on) a.title = a.querySelector(".lbl").textContent; else a.removeAttribute("title");
     });
   }
+  document.getElementById("version").addEventListener("click", function (e) {
+    var b = e.target.closest && e.target.closest("[data-act=updates-apply]");
+    if (!b) return;
+    b.disabled = true;
+    api("/api/updates/apply", {}).then(function () { toast(T("TrueNAS is pulling the newer image and restarting the app: this page comes back by itself.")); })
+      .catch(function (err) { toast(err.message); b.disabled = false; });
+  });
   document.getElementById("sidetoggle").addEventListener("click", function () {
     var on = !document.querySelector(".shell").classList.contains("collapsed");
     setSideCollapsed(on);
@@ -4101,10 +4108,11 @@ PCI18N.ready.then(function () {
     var c = ST.health ? ST.health.counts : null;
     dot.className = "dot " + (!c ? "" : c.fail ? "fail" : c.warn ? "warn" : "ok");
     var ver = document.getElementById("version"), up = ST.updates || {};
-    var pfm = ST.platform || {};
-    ver.innerHTML = esc(pfm.truenas === false ? "Linux" : "TrueNAS") + " · v" + esc(ST.version) + (up.available ?
-      '<a class="update" href="' + esc(up.repo) + (up.channel === "dev" ? "/commits/dev" : "") + '" target="_blank" rel="noopener">' +
-      (up.latest && up.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} available ↗", { version: up.latest }) : H("newer dev build ↗")) + "</a>" : "");
+    var canUpdate = up.available && (ST.platform || {}).truenas && ((ST.connections || {}).truenas_key || {}).status === "ok";
+    ver.innerHTML = '<a class="verlink" href="' + esc(up.url || up.repo || "#") + '" target="_blank" rel="noopener" title="' + H("This build on GitHub") + '">v' + esc(ST.version) + "</a>" +
+      (canUpdate ? '<button type="button" class="update" data-act="updates-apply">' + H("Update now") + "</button>"
+        : up.available ? '<a class="update" href="' + esc(up.repo) + (up.channel === "dev" ? "/commits/dev" : "/releases") + '" target="_blank" rel="noopener">' +
+          (up.latest && up.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} available ↗", { version: up.latest }) : H("newer dev build ↗")) + "</a>" : "");
     var bar = document.getElementById("userbar");
     if (!bar) {
       // Top right: the language menu and the sign-out button.
