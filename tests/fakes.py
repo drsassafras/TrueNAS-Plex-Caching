@@ -484,6 +484,11 @@ class FakeTrueNAS:
                 elif req["method"] == "test.garbage":
                     self._send(conn, "this is not json")
                     continue
+                elif req["method"] == "core.get_methods":  # (every method this TrueNAS has, by name; methods_missing: left out)
+                    have = ["auth.login_with_api_key", "system.version", "pool.query", "pool.dataset.query", "zfs.dataset.query", "disk.query",
+                            "app.query", "app.pull_images", "app.redeploy", "core.get_methods"] + \
+                           [getattr(self, "snapshot_api", "pool.snapshot") + x for x in (".query", ".create", ".delete")]
+                    result = {m: {"description": ""} for m in have if m not in getattr(self, "methods_missing", ())}
                 elif req["method"] == "system.version":
                     result = "TrueNAS-25.10.0"
                 elif req["method"] == "pool.query":

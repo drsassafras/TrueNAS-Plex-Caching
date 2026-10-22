@@ -3694,6 +3694,41 @@ class AppEdgeTests(unittest.TestCase):
         self.assertEqual(app.test_connections()["truenas_key"]["text"], "TrueNAS API key not accepted")
         app.probe_zfs()
         self.assertIsNotNone(app.zfs["truenas_error"])
+        # connected: every call the app makes checked against what this TrueNAS offers (core.get_methods); one it
+        # hasn't got is said by Health, by what it's for and the names tried, before the feature is tried
+        from plexcache import checks, truenas
+        app.settings.update({"truenas": {"url": TRUENAS.url, "api_key": "good-key"}})
+        c = app.test_connections()                                                              # (System → TrueNAS: the third light)
+        self.assertEqual((c["truenas_api"]["status"], en(c["truenas_api"]["text"])), ("ok", f"API compatibility: all {len(truenas.METHODS)} calls known"))
+        TRUENAS.methods_missing = ("app.redeploy",)
+        try:
+            c = app.test_connections()
+            self.assertEqual((c["truenas_api"]["status"], en(c["truenas_api"]["text"])), ("warn", f"API compatibility: 1 of {len(truenas.METHODS)} calls missing"))
+            self.assertIn("app.redeploy", en(c["truenas_api"]["detail"]))
+            self.assertIn("report", en(c["truenas_api"]["detail"]))
+            self.assertEqual(c["summary"]["status"], "warn")
+        finally:
+            TRUENAS.methods_missing = ()
+        self.assertEqual(app._api_compatibility(None, "25.04")["status"], "warn")                # (a TrueNAS that won't list its methods: said, not green)
+        app.probe_zfs()
+        self.assertEqual(app.zfs["truenas_missing"], {})
+        self.assertIn("pool.snapshot.create", app.zfs["truenas_methods"])
+        self.assertNotIn("zfs.snapshot.create", app.zfs["truenas_methods"])
+        zitems = {i["title"]: i for i in checks.check_zfs(app)["items"]}
+        self.assertEqual(zitems["TrueNAS API"]["status"], "pass")
+        self.assertIn("Every call the app makes is there", en(zitems["TrueNAS API"]["detail"]))
+        TRUENAS.methods_missing = ("app.redeploy", "zfs.dataset.query")                         # (a release without them: the dataset read has another name)
+        try:
+            app.probe_zfs()
+            self.assertEqual(list(app.zfs["truenas_missing"]), ["an update: restarting the app"])
+            zitems = {i["title"]: i for i in checks.check_zfs(app)["items"]}
+            self.assertEqual(zitems["TrueNAS API"]["status"], "warn")
+            self.assertIn("app.redeploy", en(zitems["TrueNAS API"]["detail"]))
+            self.assertIn("/system#updates", en(zitems["TrueNAS API"]["fix"]))
+        finally:
+            TRUENAS.methods_missing = ()
+        self.assertEqual(truenas.missing_methods(None), truenas.METHODS)
+        self.assertEqual(truenas.missing_methods({n for ns in truenas.METHODS.values() for n in ns[:1]}), {})
 
     def test_scan_error_and_warmup_stops(self):
         app = _new_app(plex={"token": "wrong"})
@@ -4303,6 +4338,75 @@ class SmallModuleTests(unittest.TestCase):
                 fh.write(b"\x00" * 10)
             mkv.reorder_tail(p, attachments=mkv.attachments_element([{"name": "a.ttf", "mime": "font/ttf", "path": font, "uid": 1}]))
         self.assertIn("attachments already", str(cm.exception))
+
+class TrueNASWatchTests(unittest.TestCase):
+    """dev/truenas_api.py: the methods the app calls found in the middleware's source the way the
+    middleware declares them — a service class's namespace (named, or from its class name), its
+    methods, do_* for create/update/delete, query by inheritance for CRUD services — and a call
+    with no name left reported."""
+
+    def test_calls_found_in_the_middleware_source(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sys.path.insert(0, os.path.join(root, "dev"))
+        try:
+            import truenas_api
+        finally:
+            sys.path.pop(0)
+        d = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(d, "plugins", "pool_"))
+        os.makedirs(os.path.join(d, "service"))
+        w = lambda rel, text: open(os.path.join(d, rel), "w", encoding="utf-8").write(text)
+        w("plugins/pool_/snapshot.py", "class PoolSnapshotService(CRUDService):\n\n    class Config:\n        namespace = 'pool.snapshot'\n\n"
+          "    @api_method(A, B)\n    def do_create(self, data):\n        pass\n\n    async def do_delete(self, id_):\n        pass\n")
+        w("plugins/pool_/pool.py", "class PoolService(CRUDService):\n    def do_update(self, id_, data):\n        pass\n")
+        w("plugins/pool_/dataset.py", "class PoolDatasetService(CRUDService):\n\n    class Config:\n        namespace = 'pool.dataset'\n")
+        w("plugins/auth.py", "class AuthService(Service):\n\n    class Config:\n        cli_namespace = \"auth\"\n\n    async def login_with_api_key(self, app, key):\n        pass\n")
+        w("plugins/system.py", "class SystemService(Service):\n    def version(self):\n        pass\n\nclass Other:\n    def version2(self):\n        pass\n")
+        w("plugins/disk.py", "class DiskService(CRUDService):\n    pass\n")
+        w("plugins/apps.py", "class AppService(GenericCRUDService[AppEntry, str]):\n\n    class Config:\n        namespace = 'app'\n\n"
+          "    @job()\n    def redeploy(self, job, name):\n        pass\n\n    def pull_images(self, job, name, options):\n        pass\n")
+        w("service/core_service.py", "class CoreService(Service):\n    def get_methods(self, prefix=''):\n        pass\n")
+        have = truenas_api.services(d)
+        self.assertEqual(have["pool.snapshot"], {"create", "delete", "query"})
+        self.assertEqual(have["pool"], {"update", "query"})
+        self.assertEqual((have["auth"], have["system"], have["core"]), ({"login_with_api_key"}, {"version"}, {"get_methods"}))
+        self.assertNotIn("other", have)
+        found, missing = truenas_api.check(d)
+        self.assertEqual(missing, {})
+        self.assertEqual(found["a dataset's settings"], ["pool.dataset.query"])                   # (zfs.dataset.query gone: the other name does)
+        self.assertEqual(found["taking a snapshot"], ["pool.snapshot.create"])
+        os.remove(os.path.join(d, "plugins", "apps.py"))
+        found, missing = truenas_api.check(d)
+        self.assertEqual(sorted(missing), ["an update: pulling the image", "an update: restarting the app", "the apps and their containers"])
+        # the workflow runs it every week against the branch that becomes the next release
+        wf = open(os.path.join(root, ".github", "workflows", "truenas-api.yml"), encoding="utf-8").read()
+        self.assertIn("schedule:", wf)
+        self.assertIn("dev/truenas_api.py", wf)
+
+    def test_every_call_the_app_makes_is_on_the_watch_list(self):
+        """Every TrueNAS method the app's source calls — .call("name") and the raw "method": "name" of the
+        probe — is in truenas.METHODS, so the runtime check and the weekly watch cover it; and the
+        snapshot calls built from safety.SNAPSHOT_APIS are there under each API's name."""
+        from plexcache import safety, truenas
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache")
+        watched = {n for names in truenas.METHODS.values() for n in names}
+        called = set()
+        for base, _dirs, files in os.walk(root):
+            for fn in files:
+                if fn.endswith(".py"):
+                    src = open(os.path.join(base, fn), encoding="utf-8").read()
+                    called |= set(re.findall(r'\.call\(\s*"([a-z_]+(?:\.[a-z_]+)+)"', src))
+                    called |= set(re.findall(r'"method":\s*"([a-z_]+(?:\.[a-z_]+)+)"', src))
+                    called |= set(re.findall(r'\(\s*"([a-z_]+(?:\.[a-z_]+)+)",\s*\[', src))  # (a (name, params) pair tried in turn: dataset_cache_props)
+        self.assertGreaterEqual(len(called), 8, called)
+        self.assertEqual(sorted(called - watched), [], "TrueNAS calls not in truenas.METHODS: add them, so the checks cover them")
+        for api in safety.SNAPSHOT_APIS:
+            for what in ("query", "create", "delete"):
+                self.assertIn(f"{api}.{what}", watched)
+        # and nothing watched that the app no longer calls (a name kept for an older TrueNAS is still called through its list)
+        snapshot_names = {f"{api}.{what}" for api in safety.SNAPSHOT_APIS for what in ("query", "create", "delete")}
+        self.assertEqual(sorted(watched - called - snapshot_names), [])
+
 
 class PageStructureTests(unittest.TestCase):
     def test_info_buttons_line_up(self):

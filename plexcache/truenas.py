@@ -18,6 +18,33 @@ class TrueNASError(Exception):
     pass
 
 
+# Every call the app makes, by what it's for: the names TrueNAS has given it over the versions, the first
+# that this TrueNAS knows used. Checked against core.get_methods when TrueNAS is connected (known_methods,
+# missing_methods: Health says what a TrueNAS release hasn't got), and against the middleware's source on
+# GitHub every week (dev/truenas_api.py), so a rename shows before it reaches a release.
+METHODS = {
+    "signing in": ("auth.login_with_api_key",),
+    "the TrueNAS version": ("system.version",),
+    "the pool's layout and cache devices": ("pool.query",),
+    "the cache devices' sizes": ("disk.query",),
+    "a dataset's settings": ("zfs.dataset.query", "pool.dataset.query"),  # (zfs.dataset.* went in 25.10; pool.dataset.query has them too)
+    "the apps and their containers": ("app.query",),
+    "an update: pulling the image": ("app.pull_images",),
+    "an update: restarting the app": ("app.redeploy",),
+    "the snapshots of a dataset": ("pool.snapshot.query", "zfs.snapshot.query"),  # (pool.snapshot.* from 25.04, zfs.snapshot.* before)
+    "taking a snapshot": ("pool.snapshot.create", "zfs.snapshot.create"),
+    "deleting a snapshot the app took": ("pool.snapshot.delete", "zfs.snapshot.delete"),
+    "the list of calls itself": ("core.get_methods",),
+}
+
+
+def missing_methods(known) -> dict:
+    """What the app can't do on a TrueNAS that knows the methods ``known``: {what: the names tried}, for
+    every call none of whose names is there."""
+    known = set(known or ())
+    return {what: names for what, names in METHODS.items() if not any(n in known for n in names)}
+
+
 def ws_url(url: str) -> str:
     u = urllib.parse.urlparse(url if "://" in url else "https://" + url)
     if u.scheme != "https":
@@ -93,6 +120,18 @@ class TrueNASClient:
             return str(self.call("system.version"))
         except TrueNASError:
             return ""
+
+    def known_methods(self) -> set[str] | None:
+        """The names of every method this TrueNAS offers (core.get_methods), or None when it won't say."""
+        try:
+            got = self.call("core.get_methods")
+        except TrueNASError:
+            return None
+        if isinstance(got, dict):
+            return set(got)
+        if isinstance(got, list):
+            return {str(m.get("name") if isinstance(m, dict) else m) for m in got}
+        return None
 
     def pool(self, name: str) -> dict | None:
         pools = self.call("pool.query", [[["name", "=", name]]])

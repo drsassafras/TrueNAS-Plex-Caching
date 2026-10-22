@@ -43,7 +43,7 @@ from .reader import MiB, benchmark_file
 from . import platform as platform_mod
 from . import peers, safety
 from .scheduler import TIMED, due, next_run
-from .truenas import TrueNASClient, TrueNASError, describe_pool, probe as probe_truenas
+from .truenas import METHODS as TRUENAS_METHODS, TrueNASClient, TrueNASError, describe_pool, missing_methods, probe as probe_truenas
 from .warmup import KIND_SECONDS, KINDS, L2ARC_RATE_SHARE, NEXT_DAY, next_day_check, LibraryStats, WarmupRun, plan, resolve_schedule
 
 GiB = 1024 ** 3
@@ -402,25 +402,31 @@ class App:
                                      "detail": M("Without it, cache devices and dataset settings can’t be checked, "
                                                  "and the L2ARC can’t be sized.")}
             res["truenas_key"] = {"status": "off", "text": M("TrueNAS API key"), "detail": ""}
+            res["truenas_api"] = {"status": "off", "text": M("API compatibility"), "detail": ""}
         elif not probe_truenas(t["url"]):
             res["truenas_server"] = {"status": "fail", "text": M("TrueNAS not found"),
                                      "detail": M("No TrueNAS API answered at {url}.", url=t["url"])}
             res["truenas_key"] = {"status": "off", "text": M("API key: waiting for TrueNAS"), "detail": ""}
+            res["truenas_api"] = {"status": "off", "text": M("API compatibility"), "detail": ""}
         else:
             res["truenas_server"] = {"status": "ok", "text": M("TrueNAS found"), "detail": t["url"]}
             if not t["api_key"]:
                 res["truenas_key"] = {"status": "warn", "text": M("TrueNAS API key needed"),
                                       "detail": M("Add a key so the app can read pool and dataset settings. "
                                                   "It only reads; nothing is changed.")}
+                res["truenas_api"] = {"status": "off", "text": M("API compatibility"), "detail": ""}
             else:
                 try:
                     with self.truenas() as tn:
                         v = tn.version()
+                        known = tn.known_methods()
                     res["truenas_key"] = {"status": "ok", "text": M("TrueNAS API key accepted"), "detail": v or M("Connected")}
+                    res["truenas_api"] = self._api_compatibility(known, v)
                 except TrueNASError as e:
                     res["truenas_key"] = {"status": "fail", "text": M("TrueNAS API key not accepted"), "detail": msg(e)}
+                    res["truenas_api"] = {"status": "off", "text": M("API compatibility"), "detail": ""}
         problems = [k for k in ("plex_server", "plex_token") if res[k]["status"] != "ok"]
-        optional = [k for k in ("truenas_server", "truenas_key") if res[k]["status"] in ("warn", "fail")]
+        optional = [k for k in ("truenas_server", "truenas_key", "truenas_api") if res[k]["status"] in ("warn", "fail")]
         if problems:
             res["summary"] = {"status": "fail" if any(res[k]["status"] == "fail" for k in problems) else "warn",
                               "text": M("Plex needs attention — the app can’t do anything until Plex is connected.")}
@@ -431,6 +437,23 @@ class App:
         with self.lock:
             self.connections = res
         return res
+
+    @staticmethod
+    def _api_compatibility(known, version: str) -> dict:
+        """The API compatibility light (System → TrueNAS): every call the app makes (truenas.METHODS) against
+        what this TrueNAS release offers (core.get_methods). Green when each has a name there; orange naming
+        what hasn't — to be reported, so the app can learn the new name."""
+        total = len(TRUENAS_METHODS)
+        if known is None:
+            return {"status": "warn", "text": M("API compatibility: not checked"),
+                    "detail": M("This TrueNAS wouldn’t list its API methods (core.get_methods), so the app’s {n} calls couldn’t be checked against it. Please report the TrueNAS version ({version}) on GitHub.", n=total, version=version or "?")}
+        gone = missing_methods(known)
+        if gone:
+            return {"status": "warn", "text": M("API compatibility: {n} of {total} calls missing", n=len(gone), total=total),
+                    "detail": M("{version} hasn’t got: {what}. The features that need them won’t work until the app learns the new names — please report this TrueNAS version and these calls on GitHub.",
+                                version=version or "?", what="; ".join(f"{what} ({', '.join(names)})" for what, names in gone.items()))}
+        return {"status": "ok", "text": M("API compatibility: all {total} calls known", total=total),
+                "detail": M("Every call the app makes has a name {version} offers.", version=version or "")}
 
     def test_connections_async(self, then_checks: bool = True, rescan: bool = False):
         with self.lock:
@@ -797,6 +820,11 @@ class App:
                 with self.truenas() as tn:
                     info["truenas_version"] = tn.version()
                     info["platform"] = platform_mod.detect(info["truenas_version"])
+                    # every call the app makes, against what this TrueNAS release offers (truenas.METHODS)
+                    known = tn.known_methods()
+                    ours = {n for names in TRUENAS_METHODS.values() for n in names}
+                    info["truenas_methods"] = sorted(known & ours) if known is not None else None
+                    info["truenas_missing"] = missing_methods(known) if known is not None else {}
                     for name in sorted({d["pool"] for d in datasets if d["pool"] and d["keys"]}):
                         pool = tn.pool(name)
                         if pool:

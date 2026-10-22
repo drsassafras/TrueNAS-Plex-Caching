@@ -76,6 +76,9 @@ def backup_kind(app) -> str:
 def snap_call(app, tn, what: str, params: list):
     """``<api>.<what>`` on TrueNAS, with the API this TrueNAS has (SNAPSHOT_APIS, the first that exists)."""
     known = getattr(app, "_snapshot_api", None)
+    if not known:  # (what the TrueNAS release offers, as read when it was connected: the right name first time)
+        offered = (app.zfs or {}).get("truenas_methods") if getattr(app, "zfs", None) else None
+        known = next((api for api in SNAPSHOT_APIS if f"{api}.{what}" in (offered or ())), None)
     apis = (known,) if known else SNAPSHOT_APIS
     last = None
     for api in apis:

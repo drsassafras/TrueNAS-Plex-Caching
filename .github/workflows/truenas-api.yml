@@ -1,0 +1,23 @@
+name: TrueNAS API watch
+
+# Every week: does the TrueNAS release in the making (the middleware's master branch) still declare every
+# API call Plex Cache makes? TrueNAS renames methods between releases (zfs.snapshot.* became pool.snapshot.*
+# in 25.04); this fails, and GitHub says so, before the release reaches anyone's NAS. dev/truenas_api.py.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python3 dev/truenas_api.py --ref master

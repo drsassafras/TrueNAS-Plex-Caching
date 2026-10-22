@@ -3627,7 +3627,9 @@ PCI18N.ready.then(function () {
       (pf.truenas === false ? '<div class="note pitch">' + H("Not running on TrueNAS, so there’s no API to connect here. Upgrade your server to TrueNAS to supercharge it with caching: SSD speeds from regular HDDs!") + "</div>" : "") +
       '<fieldset class="plain' + (pf.truenas === false ? " greyed" : "") + '"' + (pf.truenas === false ? " disabled" : "") + ">" +
       '<p class="hint">' + H("Read-only: checks cache devices and dataset settings.") + info(H("It’s also how the app sizes the L2ARC, pauses for scrubs and resilvers, and checks the optimizer’s service. It never changes anything."), "TrueNAS") + "</p>" +
-      '<div class="lights">' + lightFor(c.truenas_server, "TrueNAS", testing) + lightFor(c.truenas_key, T("API key"), testing) + "</div>" +
+      '<div class="lights">' + lightFor(c.truenas_server, "TrueNAS", testing) + lightFor(c.truenas_key, T("API key"), testing) +
+      lightInfo(c.truenas_api, T("API compatibility"), testing, info(H("TrueNAS renames API methods between releases (<code>zfs.snapshot.*</code> became <code>pool.snapshot.*</code> in 25.04). This light checks every call Plex Cache makes — signing in, the version, pools, disks, dataset settings, apps, updates, snapshots — against the list of methods this TrueNAS offers, and is green when each has a name there. " +
+        "<strong>If it’s orange, please report it on GitHub</strong> with your TrueNAS version and the calls it names: the app then learns the new name, and the features that need it work again. A weekly check against the next TrueNAS release runs on GitHub too, so most renames are caught before they reach you."), T("API compatibility"))) + "</div>" +
       '<div class="grid">' +
       textInput("truenas", "url", T("TrueNAS address"), "s-turl", H("https:// is used automatically — TrueNAS revokes API keys sent over plain http."), guessTn) +
       secretInput("truenas", "api_key", T("API key"), "s-tkey") + "</div>" +
@@ -3825,6 +3827,12 @@ PCI18N.ready.then(function () {
   function lightFor(r, title, testing) {
     if (!r) return light("off", title, T("Not tested yet"), testing);
     return light(r.status, r.text, r.detail, testing);
+  }
+  // a light with an ⓘ after its title: what the check looks at
+  function lightInfo(r, title, testing, infoHtml) {
+    var st = testing ? "testing" : r ? r.status : "off", text = testing ? T("Checking…") : r ? r.text : title, detail = r ? r.detail : T("Not tested yet");
+    return '<div class="lightrow"><span class="light l-' + esc(st) + '" aria-hidden="true"></span><div class="grow"><div class="what">' + esc(text) + infoHtml + "</div>" +
+      (detail && !testing ? '<div class="det">' + links(detail) + "</div>" : "") + "</div></div>";
   }
 
   function currentMapping(plexPath) {

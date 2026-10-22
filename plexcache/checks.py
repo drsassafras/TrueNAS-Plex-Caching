@@ -317,8 +317,15 @@ def check_zfs(app) -> dict:
                               M("Open [System → TrueNAS](/system#truenas).")))
     elif z.get("truenas_error"):
         items.append(item("fail", M("TrueNAS API"), z["truenas_error"], M("Check the address and API key in [System → TrueNAS](/system#truenas).")))
+    elif z.get("truenas_missing"):  # (a TrueNAS release without a call the app makes: said before the feature is tried)
+        gone = z["truenas_missing"]
+        items.append(item("warn", M("TrueNAS API"),
+                          M("Connected to {version}, but this release hasn’t got {n} of the calls the app makes: {what}. The features that need them won’t work until the app is updated for it.",
+                            version=z["truenas_version"] or "", n=len(gone), what="; ".join(f"{what} ({', '.join(names)})" for what, names in gone.items())),
+                          M("Look for a newer Plex Cache in [System → Updates](/system#updates) — or report the TrueNAS version and the calls above on GitHub.")))
     elif z.get("truenas_version"):
-        items.append(item("pass", M("TrueNAS API"), M("Connected to {version} (read-only).", version=z["truenas_version"])))
+        items.append(item("pass", M("TrueNAS API"), M("Connected to {version} (read-only). Every call the app makes is there.", version=z["truenas_version"])
+                          if z.get("truenas_methods") is not None else M("Connected to {version} (read-only).", version=z["truenas_version"])))
 
     arc = z.get("arc")
     if arc:
