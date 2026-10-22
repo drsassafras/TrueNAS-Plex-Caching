@@ -3571,19 +3571,27 @@ PCI18N.ready.then(function () {
 
   var MQTT_STEPS = [["broker", T("Broker found")], ["tls", T("Encrypted (TLS)")], ["login", T("Login accepted")], ["publish", T("Publishing")]];
   var MQTT_WAITING = { broker: T("Looking for the broker…"), tls: T("Starting TLS…"), login: T("Signing in…"), publish: T("Sending…") };
+  var UPDATING = false;  // Update Now pressed on this page: said as updating until the page comes back on the new build
+  function updateStage(u) {
+    if (UPDATING || u.updating) return "updating";
+    if (!u.checked && !u.error) return "checking";  // (just started: GitHub asked in a moment)
+    if (!u.available) return "";
+    return (ST.platform || {}).truenas && ((ST.connections || {}).truenas_key || {}).status === "ok" ? "button" : "link";
+  }
   function updateLine() {
     var u = ST.updates || {};
     if (!S.general.update_check) return "";
-    var chan = '<span class="muted" style="font-size:13px">' + (u.channel === "dev" ? H("Dev build{commit}: follows the dev branch.", { commit: u.commit ? " (" + u.commit + ")" : "" }) : H("Stable build: follows releases.")) + "</span> ";
-    var btn = ' <button class="btn sm" type="button" data-act="updates-check"' + (u.checking ? " disabled" : "") + ">" + (u.checking ? H("Checking…") : H("Check Now")) + "</button>" +
-      // Update Now: TrueNAS pulls the newer image and restarts the app — with its API connected
-      (u.available && (ST.platform || {}).truenas && ((ST.connections || {}).truenas_key || {}).status === "ok" ? ' <button class="btn sm pri" type="button" data-act="updates-apply">' + H("Update Now") + "</button>" : "");
+    var stage = updateStage(u);
+    var build = '<span class="muted" style="font-size:13px">' + (u.channel === "dev" ? H("Dev build v{version}{commit}.", { version: ST.version, commit: u.commit ? " (" + u.commit + ")" : "" }) : H("Stable build v{version}.", { version: ST.version })) + "</span> ";
+    if (stage === "updating") return build + '<span class="muted" style="font-size:13px">' + H("Updating: TrueNAS is pulling the newer image and restarting the app. This page comes back by itself.") + "</span>";
+    var btn = ' <button class="btn sm" type="button" data-act="updates-check"' + (u.checking || stage === "checking" ? " disabled" : "") + ">" + (u.checking || stage === "checking" ? H("Checking…") : H("Check Now")) + "</button>" +
+      (stage === "button" ? ' <button class="btn sm pri" type="button" data-act="updates-apply">' + H("Update Now") + "</button>" : "");
     var line = "";
-    if (u.available) line = u.latest && u.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} is available — update the app in TrueNAS.", { version: u.latest })
-      : H("A newer dev build is available (dev is at {head}) — update the app in TrueNAS.", { head: u.latest_commit });
+    if (stage === "checking") line = H("Checking GitHub…");
+    else if (u.available) line = u.latest && u.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} is available.", { version: u.latest }) : H("A newer dev build is available (dev is at {head}).", { head: u.latest_commit });
     else if (u.checked) line = H("Up to date (checked {when}).", { when: ago(u.checked) });
     else if (u.error) line = H("Couldn’t check: {why}", { why: u.error });
-    return chan + '<span class="muted" style="font-size:13px">' + line + "</span>" + btn;
+    return build + '<span class="muted" style="font-size:13px">' + line + "</span>" + btn;
   }
   function mqttLights() {
     var m = ST.mqtt || {}, M = S.mqtt, steps = m.steps || {};
@@ -4066,7 +4074,7 @@ PCI18N.ready.then(function () {
     var b = e.target.closest && e.target.closest("[data-act=updates-apply]");
     if (!b) return;
     b.disabled = true;
-    api("/api/updates/apply", {}).then(function () { toast(T("TrueNAS is pulling the newer image and restarting the app: this page comes back by itself.")); })
+    api("/api/updates/apply", {}).then(function () { UPDATING = true; render(); })
       .catch(function (err) { toast(err.message); b.disabled = false; });
   });
   document.getElementById("sidetoggle").addEventListener("click", function () {
@@ -4108,10 +4116,14 @@ PCI18N.ready.then(function () {
     var c = ST.health ? ST.health.counts : null;
     dot.className = "dot " + (!c ? "" : c.fail ? "fail" : c.warn ? "warn" : "ok");
     var ver = document.getElementById("version"), up = ST.updates || {};
-    var canUpdate = up.available && (ST.platform || {}).truenas && ((ST.connections || {}).truenas_key || {}).status === "ok";
+    // the stages: updating (asked of TrueNAS, until this page comes back on the new build), checking (just started, GitHub not
+    // asked yet), an update to have (a button when TrueNAS can do it, else a link), or nothing to say
+    var stage = updateStage(up);
     ver.innerHTML = '<a class="verlink" href="' + esc(up.url || up.repo || "#") + '" target="_blank" rel="noopener" title="' + H("This build on GitHub") + '">v' + esc(ST.version) + "</a>" +
-      (canUpdate ? '<button type="button" class="update" data-act="updates-apply">' + H("Update now") + "</button>"
-        : up.available ? '<a class="update" href="' + esc(up.repo) + (up.channel === "dev" ? "/commits/dev" : "/releases") + '" target="_blank" rel="noopener">' +
+      (stage === "updating" ? '<span class="update quiet">' + H("Updating…") + "</span>"
+        : stage === "checking" ? '<span class="update quiet">' + H("checking…") + "</span>"
+        : stage === "button" ? '<button type="button" class="update" data-act="updates-apply">' + H("Update now") + "</button>"
+        : stage === "link" ? '<a class="update" href="' + esc(up.repo) + (up.channel === "dev" ? "/commits/dev" : "/releases") + '" target="_blank" rel="noopener">' +
           (up.latest && up.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} available ↗", { version: up.latest }) : H("newer dev build ↗")) + "</a>" : "");
     var bar = document.getElementById("userbar");
     if (!bar) {
@@ -4177,6 +4189,7 @@ PCI18N.ready.then(function () {
       if (!editing() && !selecting()) render();
     }).catch(function () {
       if (!ST) main.innerHTML = '<p class="muted">' + H("Can’t reach the Plex Cache service. Retrying…") + "</p>";
+      else if (UPDATING || (ST.updates || {}).updating) render();  // (away while it restarts: still "Updating…")
     });
   }
 
@@ -4420,7 +4433,7 @@ PCI18N.ready.then(function () {
     }
     else if (act === "updates-apply") {
       el.disabled = true;
-      api("/api/updates/apply", {}).then(function () { toast(T("TrueNAS is pulling the newer image and restarting the app: this page comes back by itself.")); })
+      api("/api/updates/apply", {}).then(function () { UPDATING = true; render(); })
         .catch(function (e) { toast(e.message); el.disabled = false; });
     }
     else if (act === "updates-check") { el.disabled = true; api("/api/updates/check", {}).then(function () { setTimeout(load, 1500); }).catch(function (e) { toast(e.message); }); }

@@ -693,3 +693,4 @@ h2 .mode-ic{vertical-align:-3px}
 .mgdrop{opacity:.6}
 button.mgarrow{background:none;border:1px solid var(--line);border-radius:8px;padding:6px 8px;cursor:pointer;font:inherit;color:var(--muted)}
 button.mgarrow:hover{border-color:var(--accent);color:var(--accent)}
+.brand small .update.quiet{color:#A3ABA6;cursor:default}

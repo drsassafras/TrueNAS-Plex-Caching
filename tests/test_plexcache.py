@@ -5491,6 +5491,7 @@ class OptimizerTests(unittest.TestCase):
         with mock.patch.object(app.optimizing, "_containers", lambda: {"app": "plex-cache"}):
             got = app.update_now()
         self.assertEqual(got, {"updating": True, "app": "plex-cache"})
+        self.assertTrue(app.updates.status()["updating"])                                        # (said as updating until the restart)
         self.assertIn(("app.pull_images", ["plex-cache", {"redeploy": True}]), TRUENAS.apps_called)
         self.assertTrue(any("pulling the newer image" in en(e["message"]) for e in app.activity.snapshot()["events"]))
 

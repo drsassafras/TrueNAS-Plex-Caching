@@ -73,6 +73,7 @@ class UpdateChecker:
         self.checked: float | None = None
         self.error: str | None = None
         self.checking = False
+        self.updating: float | None = None  # when Update Now was asked (TrueNAS pulls and restarts: this process ends)
         self.wake = threading.Event()
         self.first_delay = 5  # a check soon after every start, once startup has settled
 
@@ -149,4 +150,4 @@ class UpdateChecker:
     def status(self) -> dict:
         return {"latest": self.latest, "available": self.available(), "checked": self.checked, "error": self.error, "repo": REPO_URL, "url": self.build_url(),
                 "channel": self.channel, "branch": BRANCH.get(self.channel, "main"), "commit": (self.commit or "")[:7], "latest_commit": (self.latest_commit or "")[:7],
-                "checking": self.checking}
+                "checking": self.checking, "updating": self.updating, "version": self.app.version}

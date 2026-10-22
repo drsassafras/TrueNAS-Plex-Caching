@@ -875,6 +875,7 @@ class App:
                     tn.call("app.redeploy", [name])  # (an older TrueNAS: a redeploy pulls the tag anew)
         except TrueNASError as e:
             raise ValueError(M("TrueNAS didn’t update {app}: {why}", app=name, why=str(e))) from None
+        self.updates.updating = time.time()
         self.activity.event("update", M("Update asked of TrueNAS: {app} is pulling the newer image and restarting", app=name))
         return {"updating": True, "app": name}
 
