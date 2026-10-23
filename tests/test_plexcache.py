@@ -56,7 +56,7 @@ def en(v) -> str:
 REAL_BLOCK_SIZES = zfs.block_sizes
 zfs.block_sizes = lambda paths: (lambda n: {"checked": n, "single": n, "sizes": {}})(len(list(paths)))
 from plexcache.app import App  # noqa: E402
-from plexcache.i18n import from_json  # noqa: E402
+from plexcache.i18n import from_json, jsonable  # noqa: E402
 from plexcache.plex import PlexClient, PlexError  # noqa: E402
 from plexcache.reader import MiB, ReadResult, is_cache_hit, read_range  # noqa: E402
 from plexcache.truenas import TrueNASClient, TrueNASError, describe_pool, ws_url  # noqa: E402
@@ -4426,6 +4426,56 @@ class PageStructureTests(unittest.TestCase):
             sel, body = m.group(1).strip(), m.group(2)
             if re.search(r"\.(chk|lhchk|lhsub)\b", sel) and not re.search(r"\b(label|lhlang|info|badge|select)\b", sel.split(",")[-1]):
                 self.assertNotRegex(body, r"(margin|padding)-left\s*:\s*[1-9]", f"{sel} indents a whole row (its ⓘ would leave the column)")
+
+    # Every page as the browser draws it from one /api/state answer (tests/render.js, node with a stand-in DOM).
+    def _render(self, state, page):
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        got = subprocess.run([node, os.path.join(root, "tests", "render.js"), page], input=json.dumps(jsonable(state)), capture_output=True, text=True, timeout=60)
+        self.assertEqual(got.returncode, 0, got.stderr)
+        return json.loads(got.stdout)
+
+    # What a page may not say before the check behind it has run: the verdicts. Each one a text the page shows once
+    # it knows; while it doesn't, the place says Checking… (or Reading…, Loading…) instead.
+    VERDICTS = re.compile(r"not detected|not found|not accepted|not connected|not set up|not tested yet|not running|"
+                          r"couldn.t (check|confirm)|needs attention|needs fixing|aren.t being cached|isn.t mounted|"
+                          r"No L2ARC found|No media pools|No library folders|No library of the kind|Upgrade your server|RAM only for now", re.I)
+    PAGES_DRAWN = ("health", "caching", "ssd", "library", "optimizer", "mkv", "dataset", "merge", "versions", "folders", "unlink", "tools", "processes", "sync", "activity", "system")
+
+    def test_pages_say_checking_before_the_checks_ran(self):
+        """Before the first checks have run — Plex not yet asked, ZFS and TrueNAS not yet probed — no page gives
+        a verdict: not "TrueNAS not detected", "Not found", "RAM only — couldn't check", "No library…". Each such
+        place says it's checking. Every page is drawn from a fresh app's state, as the browser would draw it, and
+        searched for the verdict texts; then the checks run, and the same places give their verdicts (so the
+        Checking… texts don't stay). A new verdict text that can show before its check ran fails here: add it to
+        VERDICTS when it's a verdict, and make its place wait."""
+        app = _new_app()
+        app.checking, app.testing = True, True                                                  # (the first run is under way)
+        for page in self.PAGES_DRAWN:
+            with self.subTest(page=page, when="checking"):
+                text = self._render(app.state(), page)["text"]
+                self.assertTrue(text, "nothing drawn")
+                m = self.VERDICTS.search(text)
+                self.assertIsNone(m, f"{page} gives a verdict while the checks run: …{text[max(0, m.start() - 80):m.end() + 40] if m else ''}…")
+        text = self._render(app.state(), "system")["text"]
+        self.assertGreaterEqual(text.count("Checking…"), 5, text)                                # (Plex ×2, Platform, TrueNAS ×3)
+        for page, said in (("health", "Running the first checks"), ("caching", "Checking"), ("ssd", "Checking the pools"), ("library", "Reading your libraries"), ("folders", "Reading your libraries")):
+            self.assertIn(said, self._render(app.state(), page)["text"], page)
+        # the checks run: the verdicts come, the Checking… texts go
+        app.checking, app.testing = False, False
+        app.scan_library()
+        app.run_checks()
+        self.assertFalse(app.state()["pending"])
+        text = self._render(app.state(), "system")["text"]
+        self.assertNotIn("Checking…", text.split("Updates")[0])                                  # (GitHub isn't asked in the tests: that line still checks)
+        self.assertNotIn("once Plex is connected", text)
+        self.assertIn("Platform TrueNAS", text)
+        self.assertIn("API compatibility: all", text)
+        self.assertNotIn("Reading your libraries", self._render(app.state(), "folders")["text"])
+        self.assertNotIn("Checking", self._render(app.state(), "ssd")["text"].split("I won’t use an L2ARC")[0])
 
     def test_paged_lists_use_the_pager(self):
         """Every list shown a page at a time uses the one pager(): spans of what each page holds (its

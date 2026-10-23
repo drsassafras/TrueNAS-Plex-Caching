@@ -1598,6 +1598,9 @@ class App:
             "defaults": config.public_defaults(),
             "health": self.health,
             "checking": self.checking,
+            # the first checks haven't finished: ZFS, TrueNAS and the platform aren't known yet — the page says
+            # Checking… rather than a verdict (tests/render.js renders every page in that state to make sure)
+            "pending": not self.zfs,
             "connections": self.connections,
             "testing": self.testing,
             "host": self.host,

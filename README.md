@@ -332,6 +332,8 @@ It paces itself (`--mb-per-sec`, default 80), skips files any program has open, 
 
 **Branches and versions.** `main` is what's released: each push to it is tagged and built as the `:latest` image, shown as a plain version (0.16.0). `dev` is where work lands between releases; every push to it is built as the `:dev` image, with the last number of the version raised each time (0.16.1, 0.16.2…) and `-dev` appended on the page (0.16.2-dev). The two never cross: a dev install updates on new dev builds, a stable install on releases. The channel comes from the build (the Dockerfile's `PLEXCACHE_CHANNEL` and `PLEXCACHE_COMMIT` arguments, set by the workflow), and the update check follows it, only ever offering a build that exists: it asks GitHub for the branch's newest finished build (its last successful workflow run) and reads the version at that commit, so a push still building isn't offered; a dev build also compares the commit, the number being the same between pushes it hasn't bumped. **Check Now** on the System page asks GitHub straight away; the app also checks a few seconds after it starts. With the TrueNAS API connected (a key allowed to manage apps), **Update Now** — on the System page and under the version in the menu — has TrueNAS pull the newer image and restart the app; TrueNAS itself only flags updates for catalogue apps, so a custom app on a tag like `:dev` or `:latest` never shows one there. The version in the menu links to this build on GitHub: its release, or for a dev build its commit. (A development install that mounts the source folder over `/app/plexcache`, as `dev/compose.dev.yaml` does for `tnsync`, runs that folder's code whatever image it pulls: it updates when the folder does.)
 
+The tests draw every page the way the browser does — `tests/render.js` runs `app.js` in node with a stand-in for the DOM, from one `/api/state` answer — so they can read what a page says in a given state. One test draws every page from a fresh app's state, before the first checks have run, and fails if any place gives a verdict ("TrueNAS not detected", "No library…", "RAM only — couldn't check") rather than saying it's checking; then runs the checks and makes sure the Checking… texts have gone.
+
 To try changes on your own TrueNAS before pushing, see [`dev/README.md`](dev/README.md): a test copy of the app plus `tnsync`, which runs the tests, copies your code to the NAS and restarts the test app in one command.
 
 ```sh
@@ -339,6 +341,7 @@ python3 tests/run.py      # progress bar; tests use fake Plex, TrueNAS and MQTT 
 python3 dev/coverage.py   # the same, with test coverage per file (Python 3.12+)
 python3 tests/demo.py     # UI demo at http://127.0.0.1:8642 with sample data
 node dev/screenshots.js   # README screenshots (see the file for how to run it)
+node tests/render.js system < state.json   # a page as the browser draws it from one /api/state answer (the tests use it)
 docker build -t plex-cache .
 ```
 

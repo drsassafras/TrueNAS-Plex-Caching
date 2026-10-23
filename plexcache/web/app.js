@@ -51,6 +51,7 @@ PCI18N.ready.then(function () {
     if (c.no_l2arc) now = H("<strong>RAM only</strong> — you chose not to use an L2ARC.");
     else if (c.mode === "l2arc") now = H("<strong>L2ARC</strong> — the media pool has an SSD cache, so L2ARC defaults are used.");
     else if (c.l2arc === "absent") now = H("<strong>RAM only</strong> — no L2ARC was found, so RAM defaults are used.");
+    else if (ST.pending || ST.checking) now = H("<strong>Checking</strong> whether the media pool has an L2ARC…");
     else now = H("<strong>RAM only</strong> for now — couldn’t check for an L2ARC.");
     return '<div class="legendbar"><div>' + H("Caching mode:") + " " + now + "</div>" +
       '<div class="legend-ics">' + mark("ram-def") + H("RAM default") + mark("ssd-def") + H("L2ARC default") + mark("ssd-only") + H("L2ARC option (uses RAM default without L2ARC)") +
@@ -1117,7 +1118,7 @@ PCI18N.ready.then(function () {
     // The optimizer's version (written into every file it optimizes): the running service's, and this app's if they differ
     var svcV = (op.service || {}).version, appV = op.version;
     var ver = svcV ? H("Optimizer version {version}", { version: svcV }) + (appV && String(svcV) !== String(appV) ? " " + H("(this app expects {version})", { version: appV }) : "")
-      : appV ? H("Optimizer version {version} (not running)", { version: appV }) : "";
+      : appV ? (op.configured ? H("Optimizer version {version} (not running)", { version: appV }) : H("Optimizer version {version} (service to set up below)", { version: appV })) : "";
     var out = top(T("Optimizer"), H("Rewrites your media files so they suit caching — one library at a time, only when you press Optimize Now.") +
       (ver ? '<br><span class="muted">' + ver + "</span>" : ""), "");
     out += '<div class="stack">' + toolsNav("optimizer") + optimizerSetup(op);
@@ -1338,7 +1339,7 @@ PCI18N.ready.then(function () {
       if (st && st.step === "done") out += '<div class="note">' + H("{folder} is now the dataset {name}.", { folder: st.host_folder || st.folder, name: st.child }) +
         ' <button class="link" type="button" data-act="mig" data-mig="cancel">' + H("Close") + "</button></div>";
       var cands = mg.candidates || [];
-      if (!cands.length) return out + '<p class="muted">' + H("No library folders yet.") + "</p></section>";
+      if (!cands.length) return out + '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No library folders yet.")) + "</p></section>";
       out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library folder") + '</th><th scope="col">' + H("Would become") +
         '</th><th scope="col">' + H("Size") + '</th><th scope="col"></th></tr></thead><tbody>';
       cands.forEach(function (c) {
@@ -1453,6 +1454,9 @@ PCI18N.ready.then(function () {
   // The pages of a long list, each a span of what it holds ("A–Be"): the one open is plain text, the others open on a click.
   // At most PAGER_MAX spans around the open one; past them, Beginning and End reach the rest. Every paged list uses this.
   var PAGER_MAX = 12;
+  // the libraries aren't read from Plex yet (the first scan, or one running with nothing listed before): a page
+  // waits with "Reading…" rather than saying there are none
+  function librariesPending() { var l = (ST || {}).library || {}; return !((l.stats || {}).scanned_at) && !l.error; }
   function perPage() { return (S && S.general && S.general.page_size) || 200; }  // (System → Preferences)
   // @testable: plainTitle — a title without the quote, apostrophe or bracket it opens with: how every list sorts and
   // the page spans read (the server's copy: paging.plain)
@@ -2593,9 +2597,9 @@ PCI18N.ready.then(function () {
     var arc = ST.zfs.arc;
     out += '<section class="card"><h2>' + H("L2ARC on Your Media Pools") + "</h2>" +
       (rows ? '<div class="tbl-wrap"><table class="tbl mid"><thead><tr><th scope="col">' + H("Pool") + '</th><th scope="col">' + H("Cache devices") + '</th><th scope="col">' + H("Size") + "</th></tr></thead><tbody>" + rows + "</tbody></table></div>"
-        : '<p class="muted">' + (ST.l2arc === "unknown" ? H("Couldn’t check the pools yet. <a href=\"/system\" data-nav>Connect TrueNAS in System</a> to see them.") : H("No media pools found yet.")) + "</p>") +
+        : '<p class="muted">' + (ST.pending || ST.checking ? H("Checking the pools…") : ST.l2arc === "unknown" ? H("Couldn’t check the pools yet. <a href=\"/system\" data-nav>Connect TrueNAS in System</a> to see them.") : H("No media pools found yet.")) + "</p>") +
       (arc && arc.l2_present ? '<p class="muted" style="font-size:13px;margin:10px 0 0">' + H("L2ARC (SSD cache): {used} of {total} filled", { used: fmtBytes(arc.l2_asize), total: fmtBytes(ST.zfs.l2_total || arc.l2_size || 0) }) + "</p>" : "") +
-      (ST.l2arc === "absent" && !c.no_l2arc ? '<div class="note">' + H("No L2ARC found. To add one in TrueNAS: Storage → your media pool → Manage Devices → Add VDEV → Cache, and pick an SSD.") + "</div>" : "") +
+      (ST.l2arc === "absent" && !c.no_l2arc && !ST.pending ? '<div class="note">' + H("No L2ARC found. To add one in TrueNAS: Storage → your media pool → Manage Devices → Add VDEV → Cache, and pick an SSD.") + "</div>" : "") +
       '<div style="margin-top:14px">' + checkbox("general", "no_l2arc", T("I won’t use an L2ARC"),
         { s: H("Runs on RAM only, without a warning in Health."),
           more: H("Settings then always use their RAM-only defaults, choices that need an SSD fall back, and warm-up stays off. Untick it if you add an L2ARC later.") }) + "</div>" +
@@ -2678,7 +2682,7 @@ PCI18N.ready.then(function () {
     // Warm-up's runs (what each library warms, and when, is chosen per library below)
     if (!noL2 && !unavailable("warmup")) {
       out += '<div class="cachegrp">';
-      if (ST.l2arc === "unknown") out += '<div class="note">' + H("Couldn’t confirm the media pool has an L2ARC. <a href=\"/system\" data-nav>Connect TrueNAS in System</a> to check.") + "</div>";
+      if (ST.l2arc === "unknown") out += '<div class="note">' + (ST.pending || ST.checking ? H("Checking whether the media pool has an L2ARC…") : H("Couldn’t confirm the media pool has an L2ARC. <a href=\"/system\" data-nav>Connect TrueNAS in System</a> to check.")) + "</div>";
       var scheds = ST.warmup.schedules || {};
       var used = Object.keys(scheds).map(function (k) { return scheds[k]; });
       var timed = used.filter(function (v) { return WARM_TIMED.indexOf(v) >= 0; }).length > 0;
@@ -3622,7 +3626,8 @@ PCI18N.ready.then(function () {
     out += '<section class="card" id="truenas"><h2>TrueNAS <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional, recommended") + "</span></h2>" +
       // where this is running: TrueNAS for certain (the API, or the host's version file), or another Linux host
       '<div class="lights">' + light(pf.truenas ? "ok" : pf.truenas === false ? "off" : "warn", T("Platform"), esc(msg(pf.label || "")) +
-        (pf.truenas === null || pf.truenas === undefined ? " · " + esc(T("Connect the API, or mount the host’s /etc/version at /host/etc/version in the app’s YAML, to be sure")) : pf.how === "kernel" ? " · " + esc(T("told by the kernel; the API would add the version")) : ""), false) + "</div>" +
+        (pf.truenas === null || pf.truenas === undefined ? " · " + esc(T("Connect the API, or mount the host’s /etc/version at /host/etc/version in the app’s YAML, to be sure")) : pf.how === "kernel" ? " · " + esc(T("told by the kernel; the API would add the version")) : ""),
+        pf.truenas == null && (ST.pending || ST.checking || testing)) + "</div>" +
       // not TrueNAS: the fields are there to see, greyed out, with the pitch
       (pf.truenas === false ? '<div class="note pitch">' + H("Not running on TrueNAS, so there’s no API to connect here. Upgrade your server to TrueNAS to supercharge it with caching: SSD speeds from regular HDDs!") + "</div>" : "") +
       '<fieldset class="plain' + (pf.truenas === false ? " greyed" : "") + '"' + (pf.truenas === false ? " disabled" : "") + ">" +
@@ -3854,7 +3859,7 @@ PCI18N.ready.then(function () {
       '<p class="hint">' + H("Tick the libraries to cache.") + info(H("All libraries are ticked by default; unticked ones are skipped by every feature and by the health checks. " +
       "Plex lists each library’s folders as it sees them inside its own app; if this app has a folder mounted somewhere else, choose where. " +
       "Folders marked ✓ contain that library’s files. A library is only cached once all its folders are found."), T("media mappings")) + "</p>";
-    if (!locs.length) return out + '<p class="muted" style="margin:0">' + H("Your library folders appear here once Plex is connected.") + "</p></section>";
+    if (!locs.length) return out + '<p class="muted" style="margin:0">' + (librariesPending() || ST.checking ? H("Reading your libraries from Plex…") : H("Your library folders appear here once Plex is connected.")) + "</p></section>";
     var healthAt = ST.health ? ST.health.at : 0;
     out += '<div class="tbl-wrap"><table class="tbl"><thead><tr>' + [N("Cache"), N("Library"), N("Plex folder"), N("In this app")].map(function (c) {
       return '<th scope="col">' + H(c) + "</th>"; }).join("") + "</tr></thead><tbody>";
@@ -3950,7 +3955,7 @@ PCI18N.ready.then(function () {
   function toolLibs(name, types) {
     var u = TOOL[name], libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind && (!types || types.indexOf(l.type) >= 0); });
     if (!u.key || !libs.some(function (l) { return String(l.key) === String(u.key); })) u.key = libs.length ? String(libs[0].key) : null;
-    if (!libs.length) return '<p class="muted">' + H("No library of the kind this tool works on.") + "</p>";
+    if (!libs.length) return '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No library of the kind this tool works on.")) + "</p>";
     return '<div class="lctl"><div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + libs.map(function (l) {
       return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(u.key)) + '" data-act="tool-lib" data-tool="' + name + '" data-key="' + esc(l.key) + '">' + libIcon(l.key) + esc(l.title) + "</button>";
     }).join("") + "</div></div>";
