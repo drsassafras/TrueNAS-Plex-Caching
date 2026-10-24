@@ -326,6 +326,23 @@ class App:
                 self.run_checks_async()
 
     # --------------------------------------------------------------- library
+    def refresh_library_files(self, key: str) -> None:
+        """One library's files listed from Plex again — the data layer asks when it reads the library's records again
+        (Plex's change stamp moved, or Scan Again): that library's part of app.files replaced, the stats and the count with
+        it, so what Plex has now is what every tool and check sees."""
+        from .plex import Library
+        info = self.library_info(key) or {}
+        if not info.get("kind") or info.get("excluded"):
+            return
+        lib = Library(str(info["key"]), info.get("title") or "", info.get("type") or "", info.get("kind"), list(info.get("locations") or []), str(info.get("changed") or ""))
+        lf = self.plex(timeout=120).library_files(lib)
+        with self.lock:
+            self.files = [f for f in self.files if str(f.library_key) != str(key)] + lf
+            for i in self.libraries:
+                if str(i["key"]) == str(key):
+                    i["count"] = len(lf)
+            self.stats = LibraryStats.from_files(self.files, {i["key"]: i["title"] for i in self.libraries})
+
     def scan_library(self) -> None:
         with self.lock:
             if self.scanning:

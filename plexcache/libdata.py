@@ -303,6 +303,10 @@ class Gatherer:
                 recs = self.app.plex(timeout=120).library_items(key, leaf) if leaf else []
                 d.records = recs
                 d.errors.pop("records", None)
+                # and the library's files as Plex lists them now (app.files, the listing the files below come from): a
+                # file Plex added since reaches every tool's rows without waiting for the app's own next listing
+                if hasattr(self.app, "refresh_library_files"):
+                    self.app.refresh_library_files(key)
             except Exception as e:  # noqa: BLE001 — tried at this stamp: said, and not again until it moves (or the age is up)
                 d.errors["records"] = str(e)
             d.records_at, d.plex_changed = time.time(), str(lib.get("changed") or "")

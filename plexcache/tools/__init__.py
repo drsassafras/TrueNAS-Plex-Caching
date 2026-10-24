@@ -163,8 +163,12 @@ class Tool:
         out from it."""
         with self.lock:
             if self.running:
-                # a scan under way already (the one that follows a run or a revert, say) reads the same fresh data: it stands
-                return bool(self.progress and self.progress.get("what") == "scan" and str(self.progress.get("library")) == str(library))
+                if self.progress and self.progress.get("what") == "scan":
+                    # a scan under way already (the one that follows a run or a revert, say): this one runs after it, since
+                    # the library may have changed since that one read it
+                    self._again = (str(library), dict(options or {}), refresh)
+                    return True
+                return False
             self.running, self.error = True, None
             self.progress = {"what": "scan", "library": library}
             self.last_options = dict(options or {})  # (what a scan after a run or a revert scans with)
@@ -189,6 +193,9 @@ class Tool:
                 self.save()
                 with self.lock:
                     self.running, self.progress = False, None
+                    again, self._again = getattr(self, "_again", None), None
+                if again:
+                    self.scan_async(*again)
         threading.Thread(target=work, name=f"tool-{self.name}-scan", daemon=True).start()
         return True
 

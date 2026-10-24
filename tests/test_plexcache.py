@@ -4488,8 +4488,8 @@ class DataLayerTests(unittest.TestCase):
         self.assertIn("libdata", app.state())
 
     def test_one_gathering_serves_every_tool(self):
-        """The request budget: one library gathered means one Plex listing of its records — then every tool's scan,
-        Library Health and a scan of fresh data ask Plex nothing more. A tool that fetched for itself would break it."""
+        """The request budget: one library gathered means one Plex listing of its records and one of its files — then every
+        tool's scan, Library Health and a scan of fresh data ask Plex nothing more. A tool that fetched for itself would break it."""
         from plexcache import libhealth
         tt = ToolsTests()
         app, plex, client, cat, _ = tt._app()
@@ -4498,11 +4498,12 @@ class DataLayerTests(unittest.TestCase):
         plex.requests.clear()
         data = app.libdata.gather("1", wait=True, refresh=True)
         self.assertTrue(data.ready)
-        # one listing of the records, one page per item for its streams and locked fields — and nothing else
-        self.assertEqual(len([r for r in plex.requests if "/library/sections/1/all" in r]), 1, plex.requests)
+        # one listing of the records and one of the files (app.files, read again with them), one page per item for its
+        # streams and locked fields — and nothing else
+        self.assertEqual(len([r for r in plex.requests if "/library/sections/1/all" in r]), 2, plex.requests)
         pages = [r for r in plex.requests if "/library/metadata/" in r]
         self.assertEqual(len(pages), len({f["rk"] for f in data.files if f["rk"]}), pages)
-        self.assertEqual(len([r for r in plex.requests if "/library/" in r]), 1 + len(pages), plex.requests)
+        self.assertEqual(len([r for r in plex.requests if "/library/" in r]), 2 + len(pages), plex.requests)
         before = len(plex.requests)
         for tool in app.tools.values():
             if tool.works_on("1"):
@@ -4673,10 +4674,15 @@ class PageStructureTests(unittest.TestCase):
         nav = re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)
         self.assertEqual(set(re.findall(r"(\w+): 1", nav)) - set(tool_pages), {"optimizer", "dataset", "filechecks", "plexchecks"},
                          "a page under the Tools nav that's neither a tool (app.tools, on toolPage) nor named here with why")
+        from plexcache.plex import KIND_BY_LIBRARY_TYPE
         for name in tool_pages:
             body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S)
             self.assertIsNotNone(body, f"no page{name.capitalize()}()")
             self.assertIn("toolPage({", body.group(1), f"page{name.capitalize()} isn't built on toolPage")
+            # the library tabs the page offers are the kinds the tool works on (Plex's types: movie, show, artist)
+            types = re.search(r"types: \[([^\]]*)\]", body.group(1))
+            offered = {KIND_BY_LIBRARY_TYPE.get(t, t) for t in re.findall(r"\"(\w+)\"", types.group(1))} if types else set(KIND_BY_LIBRARY_TYPE.values())
+            self.assertEqual(offered, set(app.tools[name].applies), f"page{name.capitalize()}'s library tabs (types) aren't the tool's kinds (applies)")
             self.assertNotIn('<p class="help">', body.group(1), f"page{name.capitalize()} explains itself in a paragraph: put it behind the heading's ⓘ")
         # a library with something for every tool: a duplicate record, a duplicate file, a loose film, a hard link
         rootd = os.path.join(cat["root"], "Movies")
@@ -7000,6 +7006,7 @@ class OptimizerTests(unittest.TestCase):
         app.library_records = lambda: {"1": {"rs": None, "dataset": "tank/movies", "compression": state["comp"]}}
         app.map_path = lambda p: p
         app.libraries = [{"key": "1", "title": "Movies", "type": "movie", "kind": "movie", "locations": [d]}]
+        app.refresh_library_files = lambda key: None  # (the files are made here by hand: not listed from the Plex stand-in)
         client = FakeOptimizer()
         app.optimizing = Optimizing(app, client)
         return app, app.optimizing, client, d, state
@@ -10759,6 +10766,10 @@ class ToolsTests(unittest.TestCase):
         self.assertTrue(os.path.exists(mkv) and os.path.exists(avi))
         (e,) = app.conversions.snapshot()["items"]
         self.assertEqual((e["state"], e["new"], e["rating_key"]), ("waiting", mkv, "301"))
+        for _ in range(100):                                                                        # (the run's last log entry lands just after the tool is free)
+            if app.jobs.log.jobs()[0]["status"] != "running":
+                break
+            time.sleep(0.05)
         job = app.jobs.log.jobs()[0]
         self.assertEqual((job["kind"], job["tool"], job["status"], job["revertable"]), ("tool", "convert", "finished", True))
         f = app.jobs.log.files(job["job"])["files"][0]
@@ -10811,6 +10822,7 @@ class ToolsTests(unittest.TestCase):
         app.conversions.act(mp4, "keep")
         self.assertIsNone(app.conversions.get(mp4))
         # a file that can't be converted without losing something: its row fails, says why, and the scan lists it flagged
+        # (the file reaches the scan through Plex's listing alone — Scan Again lists the files again — no app-wide scan needed)
         client.convert_result = "skipped"
         flv = os.path.join(root, "Clip (2003).flv")
         with open(flv, "wb") as fh:
@@ -10818,7 +10830,6 @@ class ToolsTests(unittest.TestCase):
         os.utime(flv, (time.time() - 3600, time.time() - 3600))
         plex.cat["movies"].append({"path": flv, "size": 100, "kbps": 1, "key": "304", "title": "Clip", "year": 2003, "guid": "plex://movie/304", "duration": 5400000})
         plex.changed_at = "3"
-        app.scan_library()
         for _ in range(400):
             if not tool.running:
                 break

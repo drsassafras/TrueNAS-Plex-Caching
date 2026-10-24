@@ -4462,7 +4462,7 @@ PCI18N.ready.then(function () {
   function pageConvert() {
     var kindOf = {};
     CONVERT_TYPES.forEach(function (t) { kindOf[t[0]] = t; });
-    return toolPage({ name: "convert", title: "Convert to MKV", types: ["movie", "tv"], options: convertKinds(),
+    return toolPage({ name: "convert", title: "Convert to MKV", types: ["movie", "show"], options: convertKinds(),
       blurb: H("Other containers converted to MKV — only when nothing in them would be lost — and seen into Plex before the original goes."),
       help: CONVERT_HELP + "<br><br>" + H("Why: MKV is the container the optimizer can lay out for caching — the index and metadata after the video, so the start of a file is all content — and it keeps every stream, chapter and subtitle the old containers hold. A converted file plays as before; it just caches better. Which kinds of file convert is ticked above, for every library."),
       summary: function (sc) {
