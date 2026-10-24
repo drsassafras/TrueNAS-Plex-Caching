@@ -398,10 +398,6 @@ class Optimizing:
             out["images"] = "compress"
         return out
 
-    def convert_types(self) -> dict:
-        """Which kinds of container Convert to MKV (tools/convert.py) converts."""
-        return dict(convert.DEFAULT_TYPES, **(self.app.settings.section("optimizer").get("convert_types") or {}))
-
     def convert_skipped(self, path: str, st: os.stat_result) -> str | None:
         """Why Convert to MKV last left this file as it is (what MKV wouldn't keep), while the file is
         unchanged since; None otherwise."""

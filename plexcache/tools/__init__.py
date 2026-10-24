@@ -7,7 +7,14 @@ A scan is a function over the library's data as the data layer has it (libdata.L
 records, the files on disk, the folder tree) — it asks Plex nothing and stats nothing itself, so one
 gathering serves every tool, a scan of fresh data is instant, and a change the data layer sees
 reaches the tool's rows and its count (analysis, counts) without a scan. The tests hold every tool
-to it (test_tools_read_through_the_data_layer). Each tool also says what it is to Library Health:
+to it (test_tools_read_through_the_data_layer).
+
+Options are per tool and per library (``options``, the ``tools`` settings section): each names the
+library kinds it's for, and a library shows only those. A scan finds everything the tool could do
+whatever the options say — each row names the issues it's about (``issues``, option ids) — and the
+options decide which rows are live: counted (counts), flagged on Library Health (flags) and open to
+Apply (apply_async). So a switch takes effect at once, over the rows already found, with no scan;
+the page draws the rows of a switched-off issue grey, after the live ones. Each tool also says what it is to Library Health:
 its title, the page it lives on, what its chip there means (flag_help), and which items its rows
 concern (flags), where the view shows one chip per tool.
 
@@ -38,6 +45,9 @@ class Tool:
     page = ""                               # its page ("/merge")
     flag_help = M("")                       # what its chip on Library Health means
     applies = ("movie", "tv", "audio")      # the library kinds it works on
+    # the options, per library: [{"id", "name": M, "help": M, "kinds": the library kinds it's for, "default"}] — a switch
+    # (default True/False: whether rows about that issue are live) or, with "choices": [(value, M)], a way to do it
+    options: list[dict] = []
     scan_version = 1  # (raised when a tool's rows change shape: an older scan on disk is dropped)
 
     def __init__(self, app):
@@ -51,7 +61,7 @@ class Tool:
         self.progress: dict | None = None
         self.error: str | None = None
         self.error_at: float = 0.0  # (when the last scan failed: the page tells it from an earlier one's)
-        self._analysis: dict[str, tuple[tuple, dict]] = {}  # library -> ((data stamp, options), the scan over that data)
+        self._analysis: dict[str, tuple[int, dict]] = {}  # library -> (data stamp, the scan over that data)
 
     def save(self) -> None:
         with self.lock:
@@ -59,10 +69,38 @@ class Tool:
         self.app._save_json(f"tools-{self.name}.json", data)
 
     # ------------------------------------------------------------ to be given by each tool
-    def scan(self, data, options: dict | None = None) -> dict:
+    def scan(self, data) -> dict:
         """What the tool could do in a library, from its data (libdata.LibraryData): {"library", "rows":
-        [{"id", "title", "rk" | "rks", ...}], ...}. Pure: reads ``data``, asks nothing else."""
+        [{"id", "title", "rk" | "rks", "issues": [option ids], ...}], ...}, whatever the options say. Pure: reads
+        ``data``, asks nothing else."""
         raise NotImplementedError
+
+    # ------------------------------------------------------------ the options, per library
+    def options_for(self, kind: str | None) -> list[dict]:
+        """The options a library of this kind has (all of them when the kind isn't known)."""
+        return [o for o in self.options if kind is None or kind in o["kinds"]]
+
+    def enabled(self, library: str | None) -> dict:
+        """Each option's value for a library: its default, under what's saved for every library ("*") and for this one
+        (settings tools.<name>). A switch is True or False; a choice is one of its values."""
+        kind = (self.app.library_info(library) or {}).get("kind") if library else None
+        saved = self.app.settings.section("tools").get(self.name) or {}
+        out = {}
+        for o in self.options_for(kind):
+            v = o["default"]
+            for layer in (saved.get("*") or {}, saved.get(str(library)) or {} if library else {}):
+                if o["id"] in layer:
+                    v = layer[o["id"]]
+            if o.get("choices"):
+                out[o["id"]] = v if v in [c[0] for c in o["choices"]] else o["default"]
+            else:
+                out[o["id"]] = v is True
+        return out
+
+    def live(self, library: str, rows: list[dict]) -> list[dict]:
+        """The rows the library's options leave live: about an issue whose switch is on."""
+        on = self.enabled(library)
+        return [r for r in rows if any(on.get(i) is True for i in r.get("issues") or [])]
 
     history: list[tuple[str, object]] = []  # the columns a run's files table shows for this tool: (id, name); common to all: poster, title, when, result
 
@@ -75,23 +113,23 @@ class Tool:
         return [r.get("title") or r.get("id") for r in rows]
 
     # ------------------------------------------------------------ the scan over the data layer
-    def analysis(self, data, options: dict | None = None) -> dict:
+    def analysis(self, data) -> dict:
         """The scan over the library's data as it is now — worked out once per state of the data (its stamp)."""
-        stamp = (data.stamp, json.dumps(options or {}, sort_keys=True))
+        stamp = data.stamp
         with self.lock:
             got = self._analysis.get(data.key)
         if got and got[0] == stamp:
             return got[1]
-        out = self.scan(data, options or {})
+        out = self.scan(data)
         out["rows"] = out.get("rows") or []
         with self.lock:
             self._analysis[data.key] = (stamp, out)
         return out
 
     def flags(self, data) -> dict[str, list[dict]]:
-        """The items the tool's rows concern (the rating keys), each with its rows: Library Health's chips."""
+        """The items the tool's live rows concern (the rating keys), each with its rows: Library Health's chips."""
         out: dict[str, list[dict]] = {}
-        for r in self.analysis(data).get("rows") or []:
+        for r in self.live(data.key, self.analysis(data).get("rows") or []):
             for rk in (r.get("rks") or ([r["rk"]] if r.get("rk") else [])):
                 out.setdefault(str(rk), []).append(r)
         return out
@@ -113,16 +151,17 @@ class Tool:
         return out
 
     def counts(self) -> dict:
-        """What the tool flags, from the analyses worked out (never worked out here: the state is asked every few
-        seconds), ignored items left out: {"total", "ignored", "libraries": {key: n}, "pending": [libraries not analysed yet]}."""
+        """What the tool flags — its live rows, per the library's options — from the analyses worked out (never worked out
+        here: the state is asked every few seconds), ignored items left out: {"total", "ignored", "libraries": {key: n},
+        "pending": [libraries not analysed yet]}."""
         libs, pending, ignored = {}, [], 0
         for key, d in list(self.app.libdata.libs.items()):
             if not d.ready or not self.works_on(key):
                 continue
             with self.lock:
                 got = self._analysis.get(key)
-            if got and got[0][0] == d.stamp:
-                rows = got[1].get("rows") or []
+            if got and got[0] == d.stamp:
+                rows = self.live(key, got[1].get("rows") or [])
                 quiet = len(self.ignored_rows(key, rows))
                 libs[key] = len(rows) - quiet
                 ignored += quiet
@@ -160,18 +199,18 @@ class Tool:
     def scan_async(self, library: str, options: dict | None = None, refresh: bool = True) -> bool:
         """The scan, in the background: the library's data gathered again first (a scan you ask for reads afresh), or
         taken as it is when fresh (``refresh=False``: the page's own scan on opening, instant), then the rows worked
-        out from it."""
+        out from it. (``options`` is taken for the API's sake and ignored: the options are the library's settings, and
+        they never change what a scan finds.)"""
         with self.lock:
             if self.running:
                 if self.progress and self.progress.get("what") == "scan":
                     # a scan under way already (the one that follows a run or a revert, say): this one runs after it, since
                     # the library may have changed since that one read it
-                    self._again = (str(library), dict(options or {}), refresh)
+                    self._again = (str(library), None, refresh)
                     return True
                 return False
             self.running, self.error = True, None
             self.progress = {"what": "scan", "library": library}
-            self.last_options = dict(options or {})  # (what a scan after a run or a revert scans with)
 
         def progress(p):
             with self.lock:
@@ -181,7 +220,7 @@ class Tool:
         def work():
             try:
                 data = self.app.libdata.gather(library, wait=True, progress=progress, refresh=refresh)
-                got = dict(self.analysis(data, options or {}))
+                got = dict(self.analysis(data))
                 got["at"] = time.time()
                 got["v"] = self.scan_version
                 got["rows"] = list(got.get("rows") or [])
@@ -220,7 +259,7 @@ class Tool:
         with self.lock:
             if self.running or not self.scan_result:
                 return False
-        rows = self.rows_for(ids, choices)
+        rows = self.live(key, self.rows_for(ids, choices))  # (a row about a switched-off issue isn't done)
         if not rows:
             return False
         if self.name in peers.FILE_TOOLS:  # (files change: room for it, and a backup that can be made, first)
@@ -304,16 +343,21 @@ class Tool:
         self.app.run_checks_async()
 
     def rescan(self, key: str) -> None:
-        """After a run, or a revert: the data layer reads the library again and the scan runs over it with the last options,
-        so the rows and counts say what's there now — no Scan Again needed."""
+        """After a run, or a revert: the data layer reads the library again and the scan runs over it, so the rows and
+        counts say what's there now — no Scan Again needed."""
         self.app.libdata.refresh(key)
-        self.scan_async(key, getattr(self, "last_options", None) or {}, refresh=True)
+        self.scan_async(key, refresh=True)
 
     def snapshot(self) -> dict:
+        libs = [str(lib["key"]) for lib in getattr(self.app, "libraries", None) or [] if self.works_on(str(lib["key"]))]
         with self.lock:
             return {"name": self.name, "title": self.title, "page": self.page, "running": self.running, "progress": dict(self.progress) if self.progress else None,
                     "error": self.error, "error_at": self.error_at,
-                    "scan": self.scan_result, "results": list(reversed(self.results[-50:])), "extra": json.loads(json.dumps(self.extra)), "keeps": self.keeps or ""}
+                    "scan": self.scan_result, "results": list(reversed(self.results[-50:])), "extra": json.loads(json.dumps(self.extra)), "keeps": self.keeps or "",
+                    # the options, for the page: each with the kinds it's for; and their values per library
+                    "options": [{"id": o["id"], "name": o["name"], "help": o.get("help") or "", "kinds": list(o["kinds"]), "default": o["default"],
+                                 "choices": [[v, n] for v, n in o["choices"]] if o.get("choices") else None} for o in self.options],
+                    "enabled": {key: self.enabled(key) for key in libs}}
 
     # ------------------------------------------------------------ what the tools share
     def mirror(self, library: str):

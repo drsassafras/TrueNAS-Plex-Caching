@@ -3,9 +3,10 @@ nothing in them would be lost — as a process like any tool's: the backup first
 
 Why MKV: it's the container the optimizer can lay out for caching (the index and metadata after
 the video, so the start of a file is all content), and it keeps every stream, chapter and subtitle
-the old containers hold. Which kinds convert is one setting (optimizer.convert_types): the scan
-lists every file of those kinds the library has, and says of a file left as it is last time why
-(what MKV wouldn't keep: the optimizer's record), so you can untick it.
+the old containers hold. Which kinds convert is the tool's options, per library (one switch per
+kind): the scan lists every file in another container the library has, whatever the switches say
+— a kind switched off shows grey — and says of a file left as it is last time why (what MKV
+wouldn't keep: the optimizer's record), so you can untick it.
 
 Each file is converted by the optimizer service (optimize/convert.py): inspected first, the MKV
 written next to the original and checked against it, then optimized. The original stays until
@@ -25,6 +26,9 @@ from ..paging import sort_key
 from . import MAX_ROWS, Tool
 
 KIND_NAMES = {"avi": "AVI", "ts": "MPEG-TS", "ps": "MPEG-PS", "flv": "FLV", "ogm": "OGM", "rm": "RealMedia", "3gp": "3GP", "mp4": "MP4", "mov": "MOV"}
+# the kinds as the options name them (the page's ⓘ for each is in app.js, CONVERT_TYPES)
+OPTION_NAMES = {"avi": M("AVI"), "ts": M("MPEG-TS / M2TS"), "ps": M("MPEG-PS (VOB, MPG)"), "flv": M("FLV"), "ogm": M("OGM / OGV"), "rm": M("RealMedia (RM, RMVB)"),
+                "3gp": M("3GP"), "mp4": M("MP4 / M4V"), "mov": M("MOV (QuickTime)")}
 
 
 def kind_name(kind: str | None) -> str:
@@ -36,24 +40,22 @@ class ConvertToMkv(Tool):
     title = M("Convert to MKV")
     page = "/convert"
     applies = ("movie", "tv")
+    options = [{"id": k, "name": OPTION_NAMES[k], "help": M("Files of this kind are converted."), "kinds": ("movie", "tv"), "default": convert.DEFAULT_TYPES[k]}
+               for k in convert.TYPES]
     flag_help = M("A video file in another container than MKV (AVI, MPEG-TS, VOB…). Convert to MKV writes an MKV next to it — only when nothing in the file would be lost — sees it into Plex as a version of the same item, then removes the original; the item keeps its edits and watch history.")
 
     def flag_lines(self, rows):
         return [M("{name}: left as it is — {why}", name=r.get("name") or "", why=r["skipped"]) if r.get("skipped")
                 else M("{name}: {kind}, converts to MKV", name=r.get("name") or "", kind=kind_name(r.get("kind"))) for r in rows]
 
-    def kinds(self) -> dict:
-        return self.app.optimizing.convert_types()
-
-    def scan(self, data, options: dict | None = None) -> dict:
+    def scan(self, data) -> dict:
         library = data.key
         lib = self.app.library_info(library)
         if not lib:
             raise ValueError(M("No such library."))
-        kinds = self.kinds()
         op = self.app.optimizing
         have = {f["local"] for f in data.files + data.unlisted if not f.get("missing")}
-        rows, other, waiting = [], 0, 0
+        rows, waiting = [], 0
         files = [f for f in data.files if not f.get("missing")]
         for i, f in enumerate(files):
             if i % 50 == 0:
@@ -61,19 +63,16 @@ class ConvertToMkv(Tool):
             kind = convert.type_of(f["path"])
             if not kind:
                 continue
-            other += 1
-            if not kinds.get(kind):
-                continue
             if convert.target_of(f["local"]) in have:  # converted already: its MKV is next to it, on its way into Plex
                 waiting += 1
                 continue
             skipped = op.convert_skipped(f["local"], data.stat_result(f))
             rows.append({"id": "conv:" + f["path"], "library": str(library), "rk": f.get("rk") or "", "title": f.get("title") or os.path.basename(f["path"]),
                          "poster": f.get("poster") or "", "path": f["path"], "local": f["local"], "name": os.path.basename(f["path"]), "kind": kind,
-                         "size": int(f.get("size") or 0), "skipped": skipped})
+                         "issues": [kind], "size": int(f.get("size") or 0), "skipped": skipped})
         rows.sort(key=lambda r: (bool(r["skipped"]), sort_key(r["title"])))
-        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "other": other, "waiting": waiting,
-                "skipped": sum(1 for r in rows if r["skipped"]), "kinds": kinds, "mirror": self.mirrored(library)}
+        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "waiting": waiting,
+                "skipped": sum(1 for r in rows if r["skipped"]), "mirror": self.mirrored(library)}
 
     history = [("what", M("What was done")), ("written", M("Written")), ("original", M("Original"))]
 

@@ -4,7 +4,7 @@ drift apart once either changes; a symlink is carried as a link, and dangles the
 isn't in the synced folder; and Plex lists only one of two paths to the same bytes, so the other
 looks like a file that's there while Plex ignores it.
 
-Two ways, the scan's option ``remove``:
+Two ways, the library's option ``remove`` (a choice):
 
 * **A file of its own** (the default, and the only way on a synced library): the bytes copied under
   the same path, the dates kept, so Plex and the folder sync see the same file as before. Nothing
@@ -34,21 +34,22 @@ class UnlinkFiles(Tool):
     name = "unlink"
     title = M("Unlink Files")
     page = "/unlink"
+    options = [{"id": "symlink", "name": M("Symlinks"), "help": M("A path that points at another file: Plex and the folder sync see the link, not the file it points at."), "kinds": ("movie", "tv", "audio"), "default": True},
+               {"id": "hardlink", "name": M("Hard links"), "help": M("One file under two paths. Plex lists one and ignores the others; a folder sync can’t carry the link, and makes whole copies at the other site."), "kinds": ("movie", "tv", "audio"), "default": True},
+               {"id": "remove", "name": M("What to do"), "help": M("<strong>A file of its own:</strong> the bytes copied under the same path, the dates kept — nothing disappears anywhere, so it’s the only way where the files are mirrored. This tool stops there: tidying the copies afterwards is <a href=\"/merge\" data-nav>Merge Duplicates</a> or <a href=\"/versions\" data-nav>Duplicate Versions</a>, run by you, the same way on each side.<br><br><strong>Remove the extra paths</strong> (no mirror): the paths to a file that Plex doesn’t list are removed, so the file is where Plex has it and nowhere else. A link whose every path Plex lists (two records) is made a file of its own instead."),
+                "kinds": ("movie", "tv", "audio"), "default": "copy", "choices": [("copy", M("Make each link a file of its own (a copy under the same path)")), ("remove", M("Remove the extra paths Plex doesn’t list (no mirror)"))]}]
     flag_help = M("A media file that’s a link: a hard link (one file under two paths — Plex lists one and ignores the other, and a folder sync turns it into two whole copies that drift apart) or a symlink. Unlink Files makes each a file of its own, or on a library that isn’t synced removes the extra paths.")
 
     def flag_lines(self, rows):
         return [M("{name}: a symlink to {target}", name=r.get("name") or "", target=r.get("target") or "") if r.get("kind") == "symlink"
                 else M("{name}: a hard link, {n} paths to one file", name=r.get("name") or "", n=r.get("links") or 2) for r in rows]
 
-    def scan(self, data, options: dict | None = None) -> dict:
+    def scan(self, data) -> dict:
         library = data.key
         lib = self.app.library_info(library)
         if not lib:
             raise ValueError(M("No such library."))
-        remove = bool((options or {}).get("remove"))
         mirror = self.mirrored(library)
-        if remove and mirror is not None:
-            raise ValueError(M("Not while the files may be mirrored ({name}): a path removed here is removed there too by the folder sync — and there it isn’t a link but the only copy. Make each link a file of its own instead, then tidy the copies with Merge Duplicates on each side; or say there’s no mirror on the Sync page.", name=mirror["name"]))
         rows, links = [], 0
         files = [f for f in data.files if not f.get("missing")]
         listed = data.listed()
@@ -65,10 +66,10 @@ class UnlinkFiles(Tool):
             # ones are what "remove" takes away (none when every path is a record of its own)
             others = [{"path": p, "listed": p in listed} for p in siblings.get((f["dev"], f["ino"]), []) if p != local] if kind == "hardlink" else []
             rows.append({"id": "link:" + f["path"], "library": str(library), "rk": f.get("rk") or "", "title": f.get("title") or os.path.basename(f["path"]), "poster": f.get("poster") or "",
-                         "path": f["path"], "local": local, "name": os.path.basename(f["path"]), "kind": kind, "links": n, "target": target, "size": f["size"],
-                         "others": others, "remove": remove, "removable": [o["path"] for o in others if not o["listed"]]})
+                         "path": f["path"], "local": local, "name": os.path.basename(f["path"]), "kind": kind, "issues": [kind], "links": n, "target": target, "size": f["size"],
+                         "others": others, "removable": [o["path"] for o in others if not o["listed"]]})
         rows.sort(key=lambda r: sort_key(r["title"]))
-        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "links": links, "remove": remove, "mirror": mirror}
+        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "links": links, "mirror": mirror}
 
     history = [("what", M("What was done")), ("written", M("Written")), ("paths", M("Paths"))]
 
@@ -97,17 +98,24 @@ class UnlinkFiles(Tool):
             return
         super().revert_row(row, outcome, backup, log)  # (the copy swapped out for the snapshot's file: a link again, as it was)
 
+    def removes(self, library: str) -> bool:
+        """Whether the library's choice is to remove the extra paths (else: a file of its own)."""
+        return self.enabled(library).get("remove") == "remove"
+
     def needed_bytes(self, rows: list[dict]) -> int:
-        return sum(int(r.get("size") or 0) for r in rows if not (r.get("remove") and r.get("removable")))  # (a link made a copy: a whole copy to write)
+        remove = bool(rows) and self.removes(str(rows[0].get("library") or ""))
+        return sum(int(r.get("size") or 0) for r in rows if not (remove and r.get("removable")))  # (a link made a copy: a whole copy to write)
 
     def apply_async(self, ids: list[str], choices: dict | None = None) -> bool:
-        sc = self.scan_result or {}
-        if sc.get("remove") and self.mirrored(str(sc.get("library") or "")) is not None:  # (a mirror appeared since the scan)
-            raise ValueError(M("Not on a synced library: scan again, and make each link a file of its own instead."))
+        key = str((self.scan_result or {}).get("library") or "")
+        mirror = self.mirrored(key)
+        if self.removes(key) and mirror is not None:
+            raise ValueError(M("Not while the files may be mirrored ({name}): a path removed here is removed there too by the folder sync — and there it isn’t a link but the only copy. Make each link a file of its own instead, then tidy the copies with Merge Duplicates on each side; or say there’s no mirror on the Sync page.", name=mirror["name"]))
         return super().apply_async(ids, choices)
 
     def apply_row(self, row: dict, log) -> dict:
-        if row.get("remove") and row.get("removable"):
+        remove = self.removes(str(row.get("library") or ""))
+        if remove and row.get("removable"):
             gone = []
             for p in row["removable"]:
                 self.file_action("unlink", p, to=row["local"])  # (only while row["local"] still holds the file)
@@ -117,7 +125,7 @@ class UnlinkFiles(Tool):
             return {"result": "done", "removed": len(gone)}
         got = self.file_action("make_real", row["local"])
         log(M("{file} is a file of its own now ({size} written)", file=row["name"], size=got.get("bytes", row["size"])))
-        if row.get("remove"):
+        if remove:
             log(M("Every path to it is listed in Plex, so none was removed: merge the records with Merge Duplicates."))
         self.app.activity.event("tools", M("{file} made a file of its own (was a {kind})", file=row["name"], kind=row["kind"]))
         return {"result": "done", "bytes": got.get("bytes", 0)}

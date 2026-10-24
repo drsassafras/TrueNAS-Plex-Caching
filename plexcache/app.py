@@ -37,7 +37,6 @@ from .libhealth import defaults as libhealth_defaults
 from .languages import language_name
 from .migrating import Migration
 from .optimizing import DEFAULTS as OPT_DEFAULTS, Optimizing
-from .optimize.convert import DEFAULT_TYPES as CONVERT_TYPES
 from .playback import PlaybackMonitor
 from .plex import PlexClient, PlexError
 from .reader import MiB, benchmark_file
@@ -1716,7 +1715,7 @@ class App:
             "queue_hold": self.jobs.hold_reason(),
             "settings_rev": self.settings.rev,
             # each library's optimizer choices and the converted kinds, by default: for their ↺ buttons
-            "optimizer_defaults": {"library": dict(OPT_DEFAULTS), "convert_types": dict(CONVERT_TYPES)},
+            "optimizer_defaults": {"library": dict(OPT_DEFAULTS)},
             "sync_defaults": {"what": dict(config.DEFAULTS["sync"]["what"])},
             "library_health_defaults": {"checks": libhealth_defaults(), "subtitle_language": "en", "audio_quality": "poor"},
             "retries": self.optimizing.retrying(),  # failed files to try again, after the file in hand

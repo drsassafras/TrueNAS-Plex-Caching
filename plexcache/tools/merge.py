@@ -142,12 +142,15 @@ class MergeDuplicates(Tool):
     title = M("Merge Duplicates")
     page = "/merge"
     applies = ("movie", "tv")
+    options = [{"id": "file", "name": M("The same file on two records"), "help": M("Two records hold the very same file — a link, or a copy in another folder with the same size and running time — whatever each is matched to."), "kinds": ("movie", "tv"), "default": True},
+               {"id": "matched", "name": M("Two records with the same match"), "help": M("Two records Plex matched to the same film or show, with running times that agree and the same edition."), "kinds": ("movie", "tv"), "default": True},
+               {"id": "named", "name": M("Unmatched records named alike"), "help": M("Two unmatched records whose files are named for the same title and year, with running times that agree."), "kinds": ("movie", "tv"), "default": True}]
     flag_help = M("The same film or show on several Plex records (the same match, or files named for the same title and year): twice in every list, two posters, watched on one but not the other. Merge Duplicates makes them one record with versions, keeping its edits, poster and watched state.")
 
     def flag_lines(self, rows):
         return [M("{n} records of {title}: {why}", n=len(r.get("others") or []) + 1, title=r.get("title") or "", why={"identical": M("the very same file"), "matched": M("the same match"), "named": M("named for the same title and year")}.get(r.get("why"), r.get("why") or "")) for r in rows]
 
-    def scan(self, data, options: dict | None = None) -> dict:
+    def scan(self, data) -> dict:
         library = data.key
         lib = self.app.library_info(library)
         if not lib or lib.get("type") not in TOP_TYPE:
@@ -171,7 +174,7 @@ class MergeDuplicates(Tool):
                     if k:
                         linked.append({"name": os.path.basename(path), "kind": k, "links": n})
             rows.append({"id": "rec:" + keep["key"], "library": str(library), "title": keep.get("label") or keep.get("title"), "rks": [r["key"] for r in cluster],
-                         "why": why, "keep": side(keep), "others": [side(o) for o in others], "kinds": kinds, "changes": changes, "linked": linked})
+                         "why": why, "issues": [why], "keep": side(keep), "others": [side(o) for o in others], "kinds": kinds, "changes": changes, "linked": linked})
         rows.sort(key=lambda r: sort_key(r["title"]))
         return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(recs)}
 

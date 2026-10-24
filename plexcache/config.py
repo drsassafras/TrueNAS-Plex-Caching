@@ -18,7 +18,7 @@ import threading
 import uuid
 
 from .i18n import CODES, M
-from .optimize.convert import DEFAULT_TYPES as CONVERT_DEFAULTS
+TOOL_NAMES = ("merge", "versions", "folders", "unlink", "convert")  # the tools (tools/), as the "tools" section keys them
 
 SECRET_MASK = "__unchanged__"
 SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"), ("mqtt", "password"))
@@ -138,11 +138,12 @@ DEFAULTS: dict = {
     # caching, "images": "unmatched" | "remove" | "compress" | "plex" — what an optimized MKV's cover
     # art becomes; "unmatched": Plex's poster only for items Plex hasn't matched, "tags": "keep" |
     # "excessive" | "strip"}.
-    # "convert_types": which containers Convert to MKV (tools/convert.py) converts (optimize/convert.py TYPES).
     "optimizer": {
         "libraries": {},
-        "convert_types": dict(CONVERT_DEFAULTS),
     },
+    # The tools' options (tools/: each tool's ``options``), per library: {tool: {library key, or "*" for every library:
+    # {option id: true/false for a switch, or a choice's value}}}. What isn't set is the option's default.
+    "tools": {name: {} for name in TOOL_NAMES},
     # MQTT (off until switched on): status on <base_topic>/state, commands on <base_topic>/set/<name>.
     # With "discovery", Home Assistant (and openHAB, Domoticz...) create the entities themselves.
     "mqtt": {
@@ -310,6 +311,16 @@ def _url(section: str, value) -> str:
 
 
 def _coerce(section: str, key: str, value, current):
+    if section == "tools":
+        if not isinstance(value, dict) or any(not isinstance(k, str) or not isinstance(v, dict) for k, v in value.items()):
+            raise SettingsError(M("tools.{tool} must map each library (or “*”) to its options", tool=key))
+        out = {}
+        for lib, opts in value.items():
+            if any(not isinstance(o, str) or not isinstance(v, (bool, str)) or (isinstance(v, str) and len(v) > 40) for o, v in opts.items()):
+                raise SettingsError(M("tools.{tool}: each option is true, false or a choice", tool=key))
+            if opts:
+                out[str(lib)] = dict(opts)
+        return out
     """Check an incoming value strictly against what the setting accepts, and return it."""
     where = f"{section}.{key}"
     if (section, key) in CHOICES:
@@ -442,11 +453,6 @@ def _coerce(section: str, key: str, value, current):
             if choice:
                 out[str(lib)] = dict(choice)
         return out
-    if (section, key) == ("optimizer", "convert_types"):
-        if not isinstance(value, dict) or any(k not in CONVERT_DEFAULTS or not isinstance(v, bool) for k, v in value.items()):
-            raise SettingsError(M("optimizer.convert_types must set each type to true or false; the types are {types}",
-                                  types=", ".join(CONVERT_DEFAULTS)))
-        return dict(CONVERT_DEFAULTS, **value)
     if key == "libraries":
         if not isinstance(value, dict) or len(value) > MAX_ITEMS:
             raise SettingsError(M("nextepisode.libraries must be an object"))
@@ -600,6 +606,9 @@ class Settings:
                 for choice in (o.get("libraries") or {}).values():
                     if isinstance(choice, dict):
                         choice.pop("convert", None)
+                kinds = o.pop("convert_types", None)
+                if isinstance(kinds, dict) and kinds and isinstance(saved.get("tools", {}), dict):  # (the kinds chosen once for every library: the tool's "*" options now)
+                    saved.setdefault("tools", {}).setdefault("convert", {}).setdefault("*", {k: bool(v) for k, v in kinds.items()})
             return _merge(DEFAULTS, saved)
         except FileNotFoundError:
             return copy.deepcopy(DEFAULTS)

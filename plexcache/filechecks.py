@@ -135,7 +135,7 @@ def check_file(app, f, path: str, m: dict | None, rec: dict, opts: dict, info: d
                 else M("Already compressed losslessly (the JPEG’s own tables).") if worst == "ideal"
                 else M("Not compressed by Plex Cache; whether it could be smaller isn’t known (PNG)."))
     if not audio and not mkv:  # (a video file in another container)
-        _container(app, add, path, opts)
+        _container(app, add, path, str(getattr(f, "library_key", "") or ""))
     if audio:
         # music and audiobooks: the file is the place for cover art (players and other libraries read it there)
         add("cover_setting", "ideal" if images else "pass",
@@ -158,12 +158,13 @@ def check_file(app, f, path: str, m: dict | None, rec: dict, opts: dict, info: d
     return out
 
 
-def _container(app, add, path: str, opts: dict) -> None:
-    """A video file that isn't MKV: what Convert to MKV does about it (tools/convert.py, converting.py)."""
+def _container(app, add, path: str, library: str) -> None:
+    """A video file that isn't MKV: what Convert to MKV does about it (tools/convert.py, converting.py) in its library."""
     from .optimize import convert
     name = (os.path.splitext(path)[1].lstrip(".") or "?").upper()
     kind = convert.type_of(path)
     op = getattr(app, "optimizing", None)
+    tool = (getattr(app, "tools", None) or {}).get("convert")
     conv = app.conversions.get(path) if app is not None and hasattr(app, "conversions") else None
     if conv or os.path.exists(convert.target_of(path)):
         add("container", "pass", M("Converted: its MKV is next to it, and this file goes once Plex has the MKV."))
@@ -177,8 +178,8 @@ def _container(app, add, path: str, opts: dict) -> None:
         why = None
     if why:
         add("container", "warn", M("Not MKV ({kind}), and not converted: {why}.", kind=name, why=why))
-    elif op and not op.convert_types().get(kind):
-        add("container", "warn", M("Not MKV ({kind}). Converting this kind of file is off: Tools → Convert to MKV.", kind=name))
+    elif tool is not None and not tool.enabled(library or None).get(kind):
+        add("container", "warn", M("Not MKV ({kind}). Converting this kind of file is off for this library: Tools → Convert to MKV.", kind=name))
     else:
         add("container", "warn", M("Not MKV ({kind}): Convert to MKV converts it, if nothing in it would be lost.", kind=name))
 

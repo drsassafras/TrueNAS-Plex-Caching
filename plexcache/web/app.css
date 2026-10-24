@@ -91,6 +91,12 @@ h2{font-size:17px;margin:0 0 4px;font-weight:600}
 .b-warn,.b-maybe,.b-stopped{background:var(--warn-bg);color:var(--warn)}
 .b-fail,.b-avoid,.b-failed,.b-errors{background:var(--bad-bg);color:var(--bad)}
 .b-info,.b-skip,.b-cancelled,.b-waiting,.b-manual{background:var(--info-bg);color:var(--info)}
+.b-off{background:var(--info-bg);color:var(--info)}  /* an issue whose switch is off for the library */
+.tbl.tool tr.off td{opacity:.6}
+.seg button .count{display:inline-block;min-width:20px;padding:0 6px;border-radius:10px;background:var(--line2);color:var(--ink);font-size:12px;font-weight:600;text-align:center;margin-left:4px}
+.seg button .count.warn{background:var(--warn-bg);color:var(--warn)}
+.tooloptions{flex-basis:100%;border-bottom:1px solid var(--line2);padding-bottom:8px}
+.tooloptions .toolway{grid-column:1 / -1}
 .b-reading,.b-running,.b-scanning{background:var(--run-bg);color:var(--run)}
 .what{font-weight:600}
 .det{color:var(--soft);font-size:14px;margin-top:3px}
@@ -219,6 +225,7 @@ h2 .info{vertical-align:2px}
 .infopop[hidden]{display:none}
 .infopop .mono{font-family:var(--mono);font-size:12px}
 .chk > .info,.convtype > .info{align-self:center;margin-left:0;margin-right:-8px}  /* the ⓘ first in every row, in one column; the box right after it */
+.convtype > .info{margin-right:4px}  /* the row's gap is 4px, not 18px: a clear 8px between the ⓘ and its box */
 .info.gap{visibility:hidden;cursor:default}  /* a row without an ⓘ keeps its place, so the boxes line up too */
 .sizing .tbl tr.sum th,.sizing .tbl tr.sum td{font-weight:600;border-top:1px solid var(--line)}
 .sizing .tbl th[scope=row]{text-align:left;text-transform:none;letter-spacing:0;font-size:14px;color:var(--ink)}

@@ -854,7 +854,8 @@ class PrefetchPlanTests(unittest.TestCase):
         # keyed on el.dataset.<name> has a data-<name>-revert button. Not: a what-if slider (est), where
         # your folders are (map) and measured disk speeds (speed) — they have no default.
         handled = set(re.findall(r"el\.dataset\.([a-z0-9]+) [!=]== undefined", js))
-        self.assertTrue({"optlib", "convtype", "libsec", "p2lib"} <= handled, handled)       # (the search finds them)
+        self.assertTrue({"optlib", "libsec", "p2lib"} <= handled, handled)                   # (the search finds them)
+        self.assertIn('data-act="tool-switch-revert"', js)                                  # (the tools' per-library options: their ↺, toolOptions)
         for name in sorted(handled - {"est", "map", "speed"}):
             self.assertIn(f"data-{name}-revert", js, f"the {name} controls have no ↺ back-to-default button")
         # ...and everything the builders are called with has a default the page is sent
@@ -4449,6 +4450,8 @@ class DataLayerTests(unittest.TestCase):
             body = re.search(r"\n  function " + fn + r"\(.*?\{(.*?)(?=\n  function |\n  var )", js, re.S)
             self.assertIsNotNone(body, fn)
             rows = body.group(1)
+            if fn != "fileLine":  # the issue a row is about is a chip marked with it (issue: the option id): orange on, grey off
+                self.assertRegex(rows if fn != "pageMerge" else js[js.index("  function mergeRows("):js.index("  function recLine(")], r"\bissue: ", f"{fn}: no chip names the row's issue")
             for key in ("row:", "sub:"):
                 if key in rows:
                     part = rows[rows.index(key):]
@@ -4478,6 +4481,18 @@ class DataLayerTests(unittest.TestCase):
                 self.assertRegex(js, r'\["' + name + r'", N\("', "not on the Tools page's cards")
                 self.assertIn(name + ": 1", js[js.index("var TOOL_PAGES"):js.index("\n", js.index("var TOOL_PAGES"))])
                 self.assertIsInstance(tool.flag_lines([]), list)
+                # its options, per library: each for some of its kinds, a switch (true/false) or a choice among values
+                self.assertTrue(tool.options, "no options")
+                ids = [o["id"] for o in tool.options]
+                self.assertEqual(len(ids), len(set(ids)), "an option twice")
+                for o in tool.options:
+                    self.assertTrue(o["id"] and en(o["name"]) and en(o.get("help") or ""), f"{o.get('id')}: no name or help")
+                    self.assertTrue(o["kinds"] and set(o["kinds"]) <= set(tool.applies), f"{o['id']}: kinds beyond the tool's")
+                    if o.get("choices"):
+                        self.assertIn(o["default"], [v for v, _ in o["choices"]], f"{o['id']}: the default isn't a choice")
+                    else:
+                        self.assertIsInstance(o["default"], bool, f"{o['id']}: a switch defaults to true or false")
+                self.assertTrue(any(not o.get("choices") for o in tool.options), "no switch: nothing for a row to be about")
                 # what the history keeps of a row: the tool's own columns, every one filled by history_row
                 self.assertTrue(tool.history and all(cid and en(name) for cid, name in tool.history), "no history columns")
                 sample = {"title": "x", "id": "y", "kind": "loose", "moves": [{"from": "/a/b.mkv", "to": "/a/B (2000)/b.mkv", "media": True}], "folder": "B (2000)",
@@ -4486,6 +4501,81 @@ class DataLayerTests(unittest.TestCase):
                 self.assertEqual(set(got), {cid for cid, _ in tool.history}, f"{name}: history_row doesn't fill its columns")
         self.assertEqual(set(app.state()["tool_counts"]), set(app.tools))
         self.assertIn("libdata", app.state())
+
+    def test_tool_options_are_per_library_and_take_effect_at_once(self):
+        """Every tool's options work the one way: a scan finds everything the tool could do whatever the options say, and each
+        row names the issues it's about (option ids); a switch, per library, says whether rows about its issue are live — counted,
+        flagged on Library Health and open to Apply — with no scan; a library has only the options for its kind; and the
+        settings keep a library's options apart from another's."""
+        from plexcache import libhealth
+        tt = ToolsTests()
+        app, plex, client, cat, _ = tt._app()
+        rootd = os.path.join(cat["root"], "Movies")
+        copy = os.path.join(rootd, "Film 1 (2011) [copy].mkv")
+        fakes.make_mkv(copy, 1024 * 1024)
+        plex.cat["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000})
+        twin = os.path.join(rootd, "Movie & Friends 2 (2012)", "Movie 2 twin.mkv")
+        shutil.copy2(cat["movies"][2]["path"], twin)
+        plex.cat["movies"][2]["more"] = [twin]
+        os.link(cat["movies"][3]["path"], os.path.join(rootd, "Film 3 (2013) link.mkv"))
+        avi = os.path.join(rootd, "Old Film (2001).avi")
+        with open(avi, "wb") as fh:
+            fh.write(b"x" * 100)
+        plex.cat["movies"].append({"path": avi, "size": 100, "kbps": 1, "key": "301", "title": "Old Film", "year": 2001, "guid": "plex://movie/301", "duration": 5400000})
+        app.scan_library()
+        data = app.libdata.gather("1", wait=True, refresh=True)
+        for name, tool in app.tools.items():
+            with self.subTest(tool=name):
+                ids = {o["id"] for o in tool.options}
+                switches = {o["id"] for o in tool.options if not o.get("choices")}
+                rows = tool.analysis(data)["rows"]
+                self.assertTrue(rows, "nothing found in this test's library")
+                for r in rows:
+                    self.assertTrue(r.get("issues") and set(r["issues"]) <= ids, f"a row without its issues (option ids): {r.get('id')}")
+                stamp = data.stamp
+                on, other = tool.enabled("1"), tool.enabled("2")
+                self.assertEqual(set(on), {o["id"] for o in tool.options_for("movie")})
+                live = tool.live("1", rows)
+                self.assertEqual(tool.counts()["libraries"]["1"], len(live))
+                self.assertEqual(set(tool.flags(data)), {rk for r in live for rk in (r.get("rks") or [r.get("rk")])})
+                # every switch off for this library: the rows as found, none live, nothing counted or flagged, Apply refuses them —
+                # without a scan (the data's stamp hasn't moved); another library's switches are untouched
+                app.settings.update({"tools": {name: {"1": {i: False for i in switches}}}})
+                self.assertEqual(tool.analysis(data)["rows"], rows)
+                self.assertEqual(data.stamp, stamp)
+                self.assertEqual((tool.live("1", rows), tool.counts()["libraries"]["1"], tool.flags(data)), ([], 0, {}))
+                self.assertEqual(tool.enabled("2"), other)                                           # (another library's options: untouched)
+                tool.scan_result = {"library": "1", "rows": rows, "v": tool.scan_version, "at": time.time()}
+                self.assertFalse(tool.apply_async([r["id"] for r in rows]))
+                self.assertNotIn("tool_" + name, {c["id"] for it in libhealth.library_health(app, "1")["items"] for c in it["results"]})
+                # one switch back on: just its rows are live again
+                first = rows[0]["issues"][0]
+                app.settings.update({"tools": {name: {"1": {i: i == first for i in switches}}}})
+                self.assertEqual([r["id"] for r in tool.live("1", rows)], [r["id"] for r in rows if first in r["issues"]])
+                # "*" sets every library; a library's own setting wins over it
+                app.settings.update({"tools": {name: {"*": {first: False}, "1": {first: True}}}})
+                self.assertEqual((tool.enabled("1")[first], tool.enabled("2").get(first, False)), (True, False))
+                app.settings.update({"tools": {name: {}}})
+                # a kind the option isn't for doesn't have it
+                for o in tool.options:
+                    for kind in ("movie", "tv", "audio"):
+                        self.assertEqual(o["id"] in {x["id"] for x in tool.options_for(kind)}, kind in o["kinds"])
+        # the settings section holds only well-formed options
+        with self.assertRaises(config.SettingsError):
+            app.settings.update({"tools": {"merge": {"1": {"file": "maybe" * 20}}}})
+        with self.assertRaises(config.SettingsError):
+            app.settings.update({"tools": {"merge": {"1": True}}})
+        with self.assertRaises(config.SettingsError):
+            app.settings.update({"tools": {"nosuch": {}}})
+        self.assertEqual(set(app.settings.section("tools")), set(app.tools))                        # (every tool has its key: config.TOOL_NAMES)
+        # the kinds once chosen for Convert to MKV in the optimizer's settings become the tool's "*" options
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "settings.json"), "w") as fh:
+            json.dump({"optimizer": {"convert_types": {"mp4": True, "avi": False}}}, fh)
+        from plexcache.config import Settings
+        st = Settings(d)
+        self.assertEqual(st.section("tools")["convert"], {"*": {"mp4": True, "avi": False}})
+        self.assertNotIn("convert_types", st.section("optimizer"))
 
     def test_one_gathering_serves_every_tool(self):
         """The request budget: one library gathered means one Plex listing of its records and one of its files — then every
@@ -4707,6 +4797,10 @@ class PageStructureTests(unittest.TestCase):
                 got = self._render(st, name)
                 html, text = got["html"], got["text"]
                 self.assertIn("Scan Again", text, "no Scan Again")
+                self.assertIn('data-act="tool-switch"', html, "no options block (the tool's switches for this library)")
+                self.assertLess(html.index('data-act="tool-switch"'), html.index('data-act="tool-scan"'), "the options come under the library tabs, before Scan Again")
+                self.assertRegex(html, r'data-act="tool-lib"[^>]*>.*?<span class="count warn"', "no count on the library tab")
+                self.assertIn("flagged", text)
                 table = html[html.index('class="det toolsum"'):]  # (the rows, however the tool draws them, follow the summary line)
                 self.assertTrue('class="poster"' in table or "ssposter" in table, "no poster on the rows")
                 self.assertRegex(text, r"Backup and Apply to \d+ Selected|Apply to \d+ Selected Without Backing Up|Apply to \d+ Selected", "no Apply")
@@ -4719,8 +4813,22 @@ class PageStructureTests(unittest.TestCase):
                     plain = re.sub(r"<[^>]+>", " ", plain)
                     for sentence in re.split(r"(?<=[.!?])\s+", plain):
                         self.assertLess(len(sentence.strip()), 110, f"{name}: a row explains itself in the open: {sentence.strip()[:80]!r}")
-        # the same pages with nothing found: a sentence, not a blank
+        # every switch off for the library: the rows stay, grey, after the live ones, with no Apply; the count drops to none
+        for name, tool in app.tools.items():
+            with self.subTest(page=name, when="switched off"):
+                app.settings.update({"tools": {name: {"1": {o["id"]: False for o in tool.options if not o.get("choices")}}}})
+                self.assertEqual(tool.counts()["libraries"]["1"], 0)
+                got = self._render(app.state(), name)
+                self.assertIn("0 flagged", got["text"])
+                self.assertIn("shown grey", got["text"])
+                self.assertIn("b-off", got["html"])
+                self.assertNotRegex(got["text"], r"Apply to \d+ Selected")
+                app.settings.update({"tools": {name: {}}})
+        # the same pages with nothing found: a sentence, not a blank (the films' folders named for them, so nothing is to rename)
         app2, _p2, _c2, _cat2, _ = tt._app()
+        for i, m in enumerate(_p2.cat["movies"]):
+            m["title"] = f"Movie & Friends {i}"
+        app2.scan_library()
         for name, tool in app2.tools.items():
             tt._run(tool, tool.scan_async("1"))
         st2 = app2.state()
@@ -5482,8 +5590,6 @@ class OptimizerTests(unittest.TestCase):
         # the old per-library switch is dropped quietly; the kinds are checked
         app.settings.update({"optimizer": {"libraries": {"1": {"convert": True, "sync": False}}}})
         self.assertNotIn("convert", op.options("1"))
-        with self.assertRaises(config.SettingsError):
-            app.settings.update({"optimizer": {"convert_types": {"wmv": True}}})
 
     def test_second_plex_server(self):
         """A second Plex server with the same files: its libraries paired with these by name and kind (or
@@ -10603,6 +10709,53 @@ class TranslationTests(unittest.TestCase):
                     continue
                 self.fail(f"not Title Case: {name!r} ({w!r})")
 
+    # Texts allowed to say "default", by how they start (a single word: the whole text), and why. Everything else mustn't: each
+    # setting's ↺ already shows its default (and puts it back), so help, ⓘ texts, choice notes and
+    # the explanations behind badges don't repeat it. Add a text here only when "default" means
+    # something other than a setting's own default.
+    DEFAULT_WORD_ALLOWED = {
+        # the ↺ button itself: the one place that names the default
+        "Back to the default ({value})": "↺",
+        "Reset to the default, {value}": "↺",
+        # the choice named "Default", in mode-dependent lists, and what it follows
+        "Default": "the choice's name",
+        "Default — {value}": "the choice's name",
+        "Follows the caching mode: this is the": "the Default choice's note",
+        "What Prefetch puts in the Lead-in Cache once": "Home Assistant: what the Default choice does",
+        "What Prefetch puts in the Whole File Cache near": "Home Assistant: what the Default choice does",
+        # the caching mode's RAM and L2ARC defaults: the system itself (the RAM/SSD icons), not one setting's
+        "RAM default": "caching mode",
+        "L2ARC default": "caching mode",
+        "L2ARC option": "caching mode",
+        "<strong>L2ARC</strong> — the media pool has an SSD cache": "caching mode",
+        "<strong>RAM only</strong> — no L2ARC was found": "caching mode",
+        "Needs an L2ARC. Using “{value}” (the RAM default)": "caching mode",
+        "Settings then always use their RAM-only defaults": "caching mode",
+        "How much cache it takes to keep every library’s lead-ins": "caching mode",
+        "What’s needed soon is read straight away, into RAM": "caching mode",
+        "Some choices only work with an SSD cache (L2ARC)": "caching mode",
+        "You chose not to use an L2ARC": "caching mode",
+        "These need an L2ARC, which the media pool doesn’t have": "caching mode",
+        "The media pool has an L2ARC, so settings use their L2ARC defaults": "caching mode",
+        "Caching is planned around an SSD cache (L2ARC)": "caching mode",
+        "Couldn’t tell whether the media pool has an L2ARC": "caching mode",
+        # an audio or subtitle track's "default" flag in the file
+        "default": "a track's flag",
+        # the login's built-in password
+        "sign-in refused: the default password": "the built-in password",
+        "The default password can’t be used": "the built-in password",
+    }
+
+    def test_texts_dont_say_the_default(self):
+        """No help text says what a setting's default is ("Off by default", "(the default)"): the ↺
+        beside it does. Exceptions are listed, with why, in DEFAULT_WORD_ALLOWED."""
+        said = [k for k in self.keys if re.search(r"\bdefaults?\b", k, re.I)
+                and not any(k == a or (" " in a and k.startswith(a)) for a in self.DEFAULT_WORD_ALLOWED)]
+        self.assertEqual(said, [], "say it without the default, or add it to DEFAULT_WORD_ALLOWED if it means something else")
+        # and no exception is left over from a text that's gone
+        unused = [a for a in self.DEFAULT_WORD_ALLOWED if not any(k == a or (" " in a and k.startswith(a)) for k in self.keys)]
+        self.assertEqual(unused, [])
+
     def test_texts_extract_cleanly(self):
         # Notes about helpers called on variables are expected (their texts are marked with N());
         # anything else means a text the tool couldn't read
@@ -10749,8 +10902,11 @@ class ToolsTests(unittest.TestCase):
         tool = app.tools["convert"]
         snap = self._run(tool, tool.scan_async("1"))
         sc = snap["scan"]
-        self.assertEqual([(r["name"], r["kind"], r["rk"], r["skipped"]) for r in sc["rows"]], [("Old Film (2001).avi", "avi", "301", None)])
-        self.assertEqual((sc["other"], sc["total"], sc["waiting"], sc["kinds"]["mp4"]), (2, 1, 0, False))
+        self.assertEqual([(r["name"], r["kind"], r["rk"], r["skipped"], r["issues"]) for r in sc["rows"]],
+                         [("Home (2002).mp4", "mp4", "302", None, ["mp4"]), ("Old Film (2001).avi", "avi", "301", None, ["avi"])])  # (every kind listed)
+        self.assertEqual((sc["total"], sc["waiting"]), (2, 0))
+        self.assertEqual([r["name"] for r in tool.live("1", sc["rows"])], ["Old Film (2001).avi"])  # (MP4 is off by default: grey, not live)
+        self.assertEqual((tool.enabled("1")["mp4"], tool.enabled("1")["avi"]), (False, True))
         self.assertEqual(tool.counts()["libraries"]["1"], 1)
         self.assertEqual(list(tool.flags(app.libdata.data("1"))), ["301"])
         self.assertIn("converts to MKV", en(tool.flag_lines(sc["rows"])[0]))
@@ -10760,7 +10916,8 @@ class ToolsTests(unittest.TestCase):
         self.assertIn("Convert to MKV converts it", en(container(avi)["text"]))
         self.assertIn("Converting this kind of file is off", en(container(mp4)["text"]))
         # Apply: a process; the MKV written next to the original, which stays; Plex asked to scan; the history's columns
-        self._run(tool, tool.apply_async([sc["rows"][0]["id"]]))
+        self.assertFalse(tool.apply_async([sc["rows"][0]["id"]]))                                   # (a grey row isn't done)
+        self._run(tool, tool.apply_async([sc["rows"][1]["id"]]))
         mkv = os.path.join(root, "Old Film (2001).mkv")
         self.assertEqual([x["path"] for x in client.sent if x.get("action") == "convert"], [avi])
         self.assertTrue(os.path.exists(mkv) and os.path.exists(avi))
@@ -10779,7 +10936,7 @@ class ToolsTests(unittest.TestCase):
                 break
             time.sleep(0.05)
         sc = tool.snapshot()["scan"]
-        self.assertEqual((sc["rows"], sc["waiting"]), ([], 1))
+        self.assertEqual(([r["name"] for r in sc["rows"]], sc["waiting"]), (["Home (2002).mp4"], 1))
         self.assertEqual(tool.snapshot()["conversions"][0]["state"], "waiting")
         self.assertEqual(container(avi)["status"], "pass")
         # Revert while the original is there: the MKV goes, nothing else needed; the follow-up forgets the file
@@ -10791,9 +10948,9 @@ class ToolsTests(unittest.TestCase):
             if not tool.running:
                 break
             time.sleep(0.05)
-        self.assertEqual([r["name"] for r in tool.snapshot()["scan"]["rows"]], ["Old Film (2001).avi"])  # (back on the rows)
+        self.assertIn("Old Film (2001).avi", [r["name"] for r in tool.snapshot()["scan"]["rows"]])  # (back on the rows)
         # converted again; Plex has the MKV as a version of the same item: the original goes at once, no hold
-        self._run(tool, tool.apply_async([tool.snapshot()["scan"]["rows"][0]["id"]]))
+        self._run(tool, tool.apply_async([next(r["id"] for r in tool.snapshot()["scan"]["rows"] if r["kind"] == "avi")]))
         plex.cat["movies"][4]["more"] = [mkv]
         app.conversions.act(avi, "check")
         self.assertEqual(app.conversions.get(avi)["state"], "deleted")
@@ -10804,13 +10961,14 @@ class ToolsTests(unittest.TestCase):
         self.assertTrue(os.path.exists(mkv))
         # Plex makes the MKV an item of its own: nothing is deleted, and both can be kept
         client.convert_result = "converted"
-        app.settings.update({"optimizer": {"convert_types": {"mp4": True}}})
+        app.settings.update({"tools": {"convert": {"1": {"mp4": True}}}})                           # (this library's switch: no scan needed)
         for _ in range(400):
             if not tool.running:
                 break
             time.sleep(0.05)
-        snap = self._run(tool, tool.scan_async("1"))
-        self.assertEqual([r["name"] for r in snap["scan"]["rows"]], ["Home (2002).mp4"])
+        snap = tool.snapshot()
+        self.assertEqual([r["name"] for r in tool.live("1", snap["scan"]["rows"])], ["Home (2002).mp4"])
+        self.assertEqual((tool.counts()["libraries"]["1"], snap["enabled"]["1"]["mp4"]), (1, True))
         self._run(tool, tool.apply_async([snap["scan"]["rows"][0]["id"]]))
         home_mkv = os.path.join(root, "Home (2002).mkv")
         plex.cat["movies"].append({"path": home_mkv, "size": 100, "kbps": 1, "key": "303", "title": "Home", "year": 2002, "guid": "plex://movie/303", "duration": 5400000})
@@ -11015,10 +11173,12 @@ class ToolsTests(unittest.TestCase):
         cat["movies"][3].update(title="Film 2", year=2012)
         app.scan_library()
         snap = self._run(tool, tool.scan_async("1"))
-        self.assertEqual([r["kind"] for r in snap["scan"]["rows"]], ["loose"])                      # (no Clean Up: folders left)
-        snap = self._run(tool, tool.scan_async("1", {"cleanup": True}))
         rows = {r["id"]: r for r in snap["scan"]["rows"]}
-        self.assertEqual(sorted(r["kind"] for r in rows.values()), ["loose", "rename", "rename", "rename"])
+        self.assertEqual(sorted(r["kind"] for r in rows.values()), ["loose", "rename", "rename", "rename"])  # (every issue found)
+        self.assertEqual([r["kind"] for r in tool.live("1", snap["scan"]["rows"])], ["loose"])     # (Clean Up off: the renames grey)
+        self.assertFalse(tool.apply_async([next(i for i in rows if i.startswith("folder:"))]))      # (a grey row isn't done)
+        app.settings.update({"tools": {"folders": {"1": {"rename": True}}}})
+        self.assertEqual(sorted(r["kind"] for r in tool.live("1", snap["scan"]["rows"])), ["loose", "rename", "rename", "rename"])
         self.assertEqual(sorted(r["folder"] for r in rows.values() if r["kind"] == "rename"), ["Film 1 (2011)", "Film 2 (2012) {tmdb-102}", "Film 2 (2012) {tmdb-103}"])
         row = rows["loose:" + loose]
         self.assertEqual(row["folder"], "Film 0 (2010)")
@@ -11075,7 +11235,7 @@ class ToolsTests(unittest.TestCase):
         other.cat["movies"][0]["path"] = loose
         app.scan_library()
         snap = self._run(tool, tool.scan_async("1"))
-        (row,) = snap["scan"]["rows"]
+        (row,) = tool.live("1", snap["scan"]["rows"])                                               # (the loose film; the folder renames found are grey)
         self.assertEqual(snap["scan"]["mirror"], {"name": "Starlit"})
         new = row["moves"][0]["to"]
         plex.on_scan = lambda folder: cat["movies"].append({"path": new, "size": 1, "kbps": 1, "key": "999", "title": "Film 0"}) if folder == os.path.dirname(new) and not any(x["path"] == new for x in cat["movies"]) else None
@@ -11152,9 +11312,10 @@ class ToolsTests(unittest.TestCase):
         self.assertIn("[Unlink Files](/unlink)", en(hl["detail"]))
         self.assertIn("drift apart", en(hl["detail"]))
         # "remove": the path Plex doesn't list goes, the file stays where Plex has it; a link listed under every path is copied
-        snap = self._run(tool, tool.scan_async("1", {"remove": True}))
+        app.settings.update({"tools": {"unlink": {"1": {"remove": "remove"}}}})
+        snap = self._run(tool, tool.scan_async("1"))
         row = next(r for r in snap["scan"]["rows"] if r["name"] == "Movie 0.mkv")
-        self.assertEqual((row["others"], row["removable"], snap["scan"]["remove"]), ([{"path": extra, "listed": False}], [extra], True))
+        self.assertEqual((row["others"], row["removable"], tool.enabled("1")["remove"]), ([{"path": extra, "listed": False}], [extra], "remove"))
         self.assertEqual(tool.needed_bytes([row]), 0)                                              # (nothing written: a path removed)
         client.sent.clear()
         snap = self._run(tool, tool.apply_async([row["id"]]))
@@ -11171,23 +11332,27 @@ class ToolsTests(unittest.TestCase):
         app2.scan_library()
         t2 = app2.tools["unlink"]
         self.assertIsNotNone(t2.mirror("1"))
-        snap = self._run(t2, t2.scan_async("1", {"remove": True}))
-        self.assertIn("may be mirrored (Starlit)", en(snap["error"]))
-        self.assertIsNone(snap["scan"])
-        snap = self._run(t2, t2.scan_async("1"))                                                  # (without it: copies, as ever)
-        self.assertEqual((snap["scan"]["remove"], snap["scan"]["mirror"]["how"]), (False, "watched"))
+        app2.settings.update({"tools": {"unlink": {"1": {"remove": "remove"}}}})
+        snap = self._run(t2, t2.scan_async("1"))
+        self.assertEqual(snap["scan"]["mirror"]["how"], "watched")
+        with self.assertRaises(ValueError) as cm:
+            t2.apply_async([snap["scan"]["rows"][0]["id"]])
+        self.assertIn("may be mirrored (Starlit)", en(cm.exception.args[0]))
+        app2.settings.update({"tools": {"unlink": {"1": {"remove": "copy"}}}})                     # (copies, as ever: allowed)
+        self.assertEqual(t2.enabled("1")["remove"], "copy")
         # a server of the account whose files are here too counts as a mirror until you say there's none
         app.settings.update({"sync": {"mirrors": "unknown"}})
         app.sync.candidates = [{"id": "zzz", "name": "Starlit", "url": "", "libraries": [], "rate": 0.95}]
         self.assertEqual(tool.mirrored("1"), {"name": "Starlit", "how": "suspected"})
-        snap3 = self._run(tool, tool.scan_async("1", {"remove": True}))
-        self.assertIn("may be mirrored (Starlit)", en(snap3["error"]))
+        with self.assertRaises(ValueError) as cm3:
+            tool.apply_async([snap["scan"]["rows"][0]["id"]])
+        self.assertIn("may be mirrored (Starlit)", en(cm3.exception.args[0]))
         app.settings.update({"sync": {"mirrors": "none"}})
         self.assertIsNone(tool.mirrored("1"))                                                       # (said: no mirror)
         js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
         self.assertIn("doesn’t carry a hard link", js)
         self.assertIn("removing the extra paths</strong> is the clean way", js)
-        self.assertIn('data-act="tool-opt" data-tool="unlink" data-opt="remove"', js)
+        self.assertEqual([o["id"] for o in tool.options if o.get("choices")], ["remove"])             # (the way: a choice among the options)
         self.assertIn("kept 30 days", "kept 30 days")
         self.assertEqual(sum(1 for r in snap["scan"]["rows"] if r["others"] and not r["others"][0]["listed"]), 1)
         # Merge Duplicates: a row whose files are links carries the warning
@@ -11341,7 +11506,8 @@ class ToolsTests(unittest.TestCase):
         os.link(cat["movies"][0]["path"], extra)
         app.scan_library()
         tool = app.tools["unlink"]
-        snap = self._run(tool, tool.scan_async("1", {"remove": True}))
+        app.settings.update({"tools": {"unlink": {"1": {"remove": "remove"}}}})
+        snap = self._run(tool, tool.scan_async("1"))
         row = next(r for r in snap["scan"]["rows"] if r["name"] == "Movie 0.mkv")
         self._run(tool, tool.apply_async([row["id"]]))
         self.assertFalse(os.path.exists(extra))
@@ -11407,7 +11573,7 @@ class ToolsTests(unittest.TestCase):
         link3 = os.path.join(root, "Movie 3 extra.mkv")
         os.link(cat["movies"][3]["path"], link3)
         app.scan_library()
-        snap = self._run(tool, tool.scan_async("1", {"remove": True}))
+        snap = self._run(tool, tool.scan_async("1"))
         row3 = next(r for r in snap["scan"]["rows"] if r["name"] == "Movie 3.mkv")
         TRUENAS.snapshots = {"tank/media": []}
         self._run(tool, tool.apply_async([row3["id"]]))

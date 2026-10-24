@@ -64,6 +64,8 @@ class OrganizeFolders(Tool):
     title = M("Organize Folders")
     page = "/folders"
     applies = ("movie",)
+    options = [{"id": "loose", "name": M("Loose files into folders of their own"), "help": M("A film in the library folder itself rather than in a folder of its own: Plex matches it less reliably, and its subtitles and artwork have nowhere to belong. It’s moved into a folder named as Plex recommends; its sidecars go with it."), "kinds": ("movie",), "default": True},
+               {"id": "rename", "name": M("Clean up folder names too"), "help": M("Folders that already hold one film are looked at: one whose name doesn’t carry the film’s title and year — <code>movie.2010.1080p</code>, say, or a folder named for another film — is renamed to <code>Title (Year)</code>, everything in it moving along. A folder you named with the title and year in it is left as it is."), "kinds": ("movie",), "default": False}]
     flag_help = M("A film loose in the library folder rather than in a folder of its own, or (with Clean up folder names) a folder not named for its film: Plex matches a film by its folder as much as by its file name, and a folder of its own is where subtitles, artwork and a second version belong. Organize Folders moves and renames without Plex losing anything.")
 
     def flag_lines(self, rows):
@@ -71,9 +73,8 @@ class OrganizeFolders(Tool):
                 else M("Folder {old} isn’t named for its film: to {folder}", old=r.get("from_folder") or "", folder=r.get("folder") or "") for r in rows]
 
     # ------------------------------------------------------------ the plan
-    def scan(self, data, options: dict | None = None) -> dict:
+    def scan(self, data) -> dict:
         library = data.key
-        cleanup = bool((options or {}).get("cleanup"))
         lib = self.app.library_info(library)
         if not lib or lib.get("type") != "movie":
             raise ValueError(M("Only movie libraries are organized: TV and music have folder layouts of their own."))
@@ -104,10 +105,10 @@ class OrganizeFolders(Tool):
                 to = f"{root}/{target[r['key']]}"
                 moves = [{"from": path, "to": f"{to}/{os.path.basename(path)}", "media": True}]
                 moves += [{"from": f"{root}/{n}", "to": f"{to}/{n}", "media": False} for n in self._sidecars(data, root, os.path.basename(path))]
-                rows.append({"id": "loose:" + path, "library": str(library), "kind": "loose", "title": r.get("label") or r.get("title"), "rk": r["key"],
+                rows.append({"id": "loose:" + path, "library": str(library), "kind": "loose", "issues": ["loose"], "title": r.get("label") or r.get("title"), "rk": r["key"],
                              "ptitle": r.get("title") or "", "guid": r.get("guid") or "", "thumb": r.get("thumb"), "poster": r.get("thumb") or "", "root": root,
                              "folder": target[r["key"]], "moves": moves})
-        if cleanup:
+        if True:  # folders whose names don't carry the title and year (the "rename" switch says whether they're live)
             for (root, top), keys in folder_recs.items():
                 if len(keys) != 1:
                     continue  # (several films in one folder: not a film's own folder)
@@ -120,12 +121,12 @@ class OrganizeFolders(Tool):
                 moves = [{"from": f"{old}/{n}", "to": f"{root}/{want}/{n}", "media": any(f"{old}/{n}" == p for p, _ in r["files"])} for n in names]
                 if not any(m["media"] for m in moves):
                     continue
-                rows.append({"id": "folder:" + old, "library": str(library), "kind": "rename", "title": r.get("label") or r.get("title"), "rk": r["key"],
+                rows.append({"id": "folder:" + old, "library": str(library), "kind": "rename", "issues": ["rename"], "title": r.get("label") or r.get("title"), "rk": r["key"],
                              "ptitle": r.get("title") or "", "guid": r.get("guid") or "", "thumb": r.get("thumb"), "poster": r.get("thumb") or "", "root": root,
                              "from_folder": top, "folder": want, "moves": moves})
         rows.sort(key=lambda x: (x["kind"] != "loose", sort_key(x["title"])))
         there = self.mirror(library)
-        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(recs), "cleanup": cleanup,
+        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(recs),
                 "folders": len(folder_recs), "mirror": {"name": self.mirror_name()} if there is not None else None}
 
     def _sidecars(self, data, root: str, media_name: str) -> list[str]:

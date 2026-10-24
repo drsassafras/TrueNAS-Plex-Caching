@@ -31,6 +31,8 @@ class DuplicateVersions(Tool):
     name = "versions"
     title = M("Duplicate Versions")
     page = "/versions"
+    options = [{"id": "versions", "name": M("The same file twice on one record"), "help": M("One Plex record holds the same file as two of its versions — the same size and running time, the same bytes at both ends."), "kinds": ("movie", "tv", "audio"), "default": True},
+               {"id": "unlisted", "name": M("A copy on disk Plex doesn’t list"), "help": M("A media file in the library folder that Plex doesn’t list, holding the same bytes as a file it does."), "kinds": ("movie", "tv", "audio"), "default": True}]
     scan_version = 2  # (each extra copy says whether the mirror lists it)
     keeps = M("the extra copies themselves: set aside in the library’s .plexcache-trash, kept for the hold (and put back from the page)")
     flag_help = M("One Plex item holding the same file twice — a copy that slipped in, a second path to one file — or a copy on disk that Plex doesn’t list: it takes space and is cached and optimized twice. Duplicate Versions sets the extra copies aside, and deletes them once every Plex has let go of them.")
@@ -38,7 +40,7 @@ class DuplicateVersions(Tool):
     def flag_lines(self, rows):
         return [M("{n} extra copies of {name}", one="{n} extra copy of {name}", n=len(r.get("extras") or []), name=(r.get("keep") or {}).get("name") or r.get("title") or "") for r in rows]
 
-    def scan(self, data, options: dict | None = None) -> dict:
+    def scan(self, data) -> dict:
         library = data.key
         lib = self.app.library_info(library)
         if not lib:
@@ -78,7 +80,7 @@ class DuplicateVersions(Tool):
                 cluster.sort(key=lambda x: (not x["sub"], -x["mtime"]))  # (stable: the first listed wins a tie)
                 keep, extras = cluster[0], cluster[1:]
                 rows.append({"id": f"{rk}:{n}", "library": str(library), "rk": rk, "title": group[0].get("title") or os.path.basename(keep["path"]),
-                             "poster": group[0].get("poster") or "", "keep": _brief(keep), "extras": [_brief(x, keep) for x in extras],
+                             "poster": group[0].get("poster") or "", "issues": ["versions"], "keep": _brief(keep), "extras": [_brief(x, keep) for x in extras],
                              "frees": sum(x["size"] for x in extras if not (keep["ino"] and x["ino"] == keep["ino"]))})
         rows += self._unlisted(data)
         rows.sort(key=lambda r: sort_key(r["title"]))
@@ -123,7 +125,7 @@ class DuplicateVersions(Tool):
             local_root = u["root"]
             x = {"path": u["path"], "local": u["local"], "size": u["size"], "ino": u["ino"], "mtime": u["mtime"], "root": local_root, "sub": "/" in u["local"][len(local_root) + 1:]}
             rows.append({"id": "disk:" + u["path"], "library": data.key, "rk": keep["rk"], "title": keep["title"] or os.path.basename(keep["path"]), "poster": keep["poster"],
-                         "keep": _brief(keep), "extras": [dict(_brief(x, keep), unlisted=True)], "unlisted": True, "frees": 0 if linked else u["size"]})
+                         "issues": ["unlisted"], "keep": _brief(keep), "extras": [dict(_brief(x, keep), unlisted=True)], "unlisted": True, "frees": 0 if linked else u["size"]})
         return rows
 
     history = [("set_aside", M("Set aside")), ("frees", M("Freed")), ("kept", M("Kept"))]
