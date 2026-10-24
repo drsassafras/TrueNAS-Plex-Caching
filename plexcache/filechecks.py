@@ -159,7 +159,7 @@ def check_file(app, f, path: str, m: dict | None, rec: dict, opts: dict, info: d
 
 
 def _container(app, add, path: str, opts: dict) -> None:
-    """A video file that isn't MKV: what the optimizer does about it (converting.py)."""
+    """A video file that isn't MKV: what Convert to MKV does about it (tools/convert.py, converting.py)."""
     from .optimize import convert
     name = (os.path.splitext(path)[1].lstrip(".") or "?").upper()
     kind = convert.type_of(path)
@@ -177,12 +177,10 @@ def _container(app, add, path: str, opts: dict) -> None:
         why = None
     if why:
         add("container", "warn", M("Not MKV ({kind}), and not converted: {why}.", kind=name, why=why))
-    elif not opts.get("convert"):
-        add("container", "warn", M("Not MKV ({kind}). Converting is off for this library: Optimizer → Optimize Files.", kind=name))
     elif op and not op.convert_types().get(kind):
-        add("container", "warn", M("Not MKV ({kind}). Converting this kind of file is off: Optimizer → Convert to MKV.", kind=name))
+        add("container", "warn", M("Not MKV ({kind}). Converting this kind of file is off: Tools → Convert to MKV.", kind=name))
     else:
-        add("container", "warn", M("Not MKV ({kind}): the optimizer converts it (Optimize Now), if nothing in it would be lost.", kind=name))
+        add("container", "warn", M("Not MKV ({kind}): Convert to MKV converts it, if nothing in it would be lost.", kind=name))
 
 
 def worst(checks: list[dict]) -> str | None:

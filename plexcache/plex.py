@@ -55,6 +55,7 @@ class Library:
     type: str
     kind: str | None
     locations: list[str] = field(default_factory=list)
+    changed: str = ""  # Plex's stamp of the last change to the library's content (contentChangedAt, else updatedAt): the data layer reads again when it moves
 
 
 @dataclass
@@ -172,7 +173,26 @@ def item_summary(item: ET.Element) -> dict:
             "locked": sorted(n for n in locked if n and n not in ART_FIELDS),  # every edited field: the tag ones too (genre, writer…)
             "collections": sorted(c.get("tag", "") for c in item.findall("Collection") if c.get("tag")),
             "labels": sorted(c.get("tag", "") for c in item.findall("Label") if c.get("tag")),
-            "art_locked": sorted(f for f in ART_FIELDS if f in locked)}
+            "art_locked": sorted(f for f in ART_FIELDS if f in locked),
+            "updated_at": _int(item.get("updatedAt")),
+            # the streams of each file, as Plex probed them (an item's own page lists them; the listings don't): what the
+            # file itself doesn't say — a track's bitrate, and Atmos or DTS:X in its name
+            "streams": [stream_summary(st, p.get("file") or "") for m in item.findall("Media") for p in m.findall("Part") for st in p.findall("Stream")]}
+
+
+STREAM_TYPES = {"1": "video", "2": "audio", "3": "subtitles", "4": "lyrics"}
+
+
+def stream_summary(st: ET.Element, file: str) -> dict:
+    """One stream of a file as Plex has it: {"file", "type", "index", "codec", "channels", "bitrate" (kbps), "sample_rate",
+    "bit_depth", "language", "forced", "default", "title", "display", "layout", "profile"}."""
+    return {"file": file, "type": STREAM_TYPES.get(st.get("streamType") or "", "other"), "index": _int(st.get("index"), -1),
+            "codec": (st.get("codec") or "").lower(), "channels": _int(st.get("channels")), "bitrate": _int(st.get("bitrate")),
+            "sample_rate": _int(st.get("samplingRate")), "bit_depth": _int(st.get("bitDepth")),
+            "language": st.get("languageTag") or st.get("languageCode") or st.get("language") or "",
+            "forced": st.get("forced") in ("1", "true"), "default": st.get("default") in ("1", "true"),
+            "title": st.get("title") or "", "display": st.get("extendedDisplayTitle") or st.get("displayTitle") or "",
+            "layout": st.get("audioChannelLayout") or "", "profile": st.get("profile") or ""}
 
 
 class PlexClient:
@@ -217,6 +237,11 @@ class PlexClient:
         """Ask Plex to scan one folder of a library now (as its own "Scan Library Files", just
         there): for libraries scanned by hand, or before Plex notices a change by itself."""
         self._request(f"/library/sections/{section_key}/refresh", {"path": folder})
+
+    def split(self, rating_key: str) -> None:
+        """A record's versions split into records of their own again (Plex's Split Apart): what undoes a merge — the
+        folded records' own metadata is gone, though; they're matched afresh."""
+        self._request(f"/library/metadata/{rating_key}/split", method="PUT")
 
     def merge(self, keep: str, others: list[str]) -> None:
         """Several items made one (Plex's own "Merge"): ``others`` become versions of ``keep``, whose
@@ -348,6 +373,7 @@ class PlexClient:
                     type=d.get("type", ""),
                     kind=KIND_BY_LIBRARY_TYPE.get(d.get("type", "")),
                     locations=[loc.get("path", "") for loc in d.findall("Location") if loc.get("path")],
+                    changed=d.get("contentChangedAt") or d.get("updatedAt") or "",
                 )
             )
         return libs

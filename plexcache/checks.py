@@ -232,8 +232,8 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
             # one record size per dataset, and these libraries need different ones
             row["recordsize"] = cell("warn", _fmt_rs(rs), badge=M("Split dataset"))
             row["recordsize"]["split"] = True  # the page links to the Optimizer page's folder-to-dataset steps
-            row["recordsize"]["lines"] = [M("Move {libraries} to datasets of their own; {keep} suits the rest.",
-                                            one="Move {libraries} to a dataset of its own; {keep} suits the rest.",
+            row["recordsize"]["lines"] = [M("[Move {libraries} to datasets of their own](/dataset); {keep} suits the rest.",
+                                            one="[Move {libraries} to a dataset of its own](/dataset); {keep} suits the rest.",
                                             n=len(shared["move"]), libraries=join(shared["move"]), keep=_fmt_rs(shared["keep"]))]
         else:
             row["recordsize"] = cell("warn" if lines else "pass", _fmt_rs(rs))
@@ -592,6 +592,7 @@ def check_cache_mode(app) -> dict:
     items.extend(_migration_items(app))
     items.extend(_sync_items(app))
     items.extend(_tool_items(app))
+    items.extend(_link_items(app))
     items.extend(_job_failures(app))
     return {"id": "mode", "title": M("Plex Cache"),
             "hint": M("How caching runs here — with an SSD cache (L2ARC) or RAM only — who can use the app, and the optimizer service."), "items": items}
@@ -632,29 +633,28 @@ def _sync_items(app) -> list[dict]:
         return []
     out = []
     s = sync.settings()
-    link = {"href": "/sync", "text": M("Open the Sync page")}
     if s.get("mirrors") == "unknown":
         out.append(dict(item("warn", M("Is there a mirrored Plex server?"),
                              M("Whether another Plex server has the same files (another site, kept in step by syncing the folders) hasn’t been chosen. "
                                "Until it is, converted files’ originals aren’t deleted: a mirror that isn’t watched could lose its item."),
-                             M("On the Sync page, choose None, or the server to watch.")), link=link))
+                             M("On the [Sync page](/sync), choose None, or the server to watch."))))
     elif s.get("mirrors") == "plex2" and not app.other.configured():
         out.append(dict(item("warn", M("The mirrored Plex server isn’t set up"), M("A mirror was chosen, but no server is watched yet."),
-                             M("On the Sync page, choose the server.")), link=link))
+                             M("On the [Sync page](/sync), choose the server."))))
     likely = [c for c in sync.candidates if (c.get("rate") or 0) >= 0.9 and c.get("id") != app.settings.section("plex2").get("machine_id")]
     if likely and s.get("mirrors") != "none":
         out.append(dict(item("info", M("A server that looks like a mirror: {names}", names=[c["name"] for c in likely]),
-                             M("Its files are here too, at the same places (a sample of them)."), M("Watch it on the Sync page, or say it isn’t a mirror.")), link=link))
+                             M("Its files are here too, at the same places (a sample of them)."), M("Watch it on the [Sync page](/sync), or say it isn’t a mirror."))))
     out.extend(_peer_items(app))
     rep = sync.report
     if rep and sum((rep.get("totals") or {}).values()):
         n = sum(rep["totals"].values())
         out.append(dict(item("info", M("{n} differences between this server and its mirror", one="{n} difference between this server and its mirror", n=n),
-                             M("As last compared, {when}. Nothing is changed by itself: look them over on the Sync page.", when=time.strftime("%Y-%m-%d %H:%M", time.localtime(rep.get("at") or 0)))), link=link))
+                             M("As last compared, {when}. Nothing is changed by itself: look them over on the [Sync page](/sync).", when=time.strftime("%Y-%m-%d %H:%M", time.localtime(rep.get("at") or 0))))))
     if sync.review_needed() and s.get("mode") != "off" and sync.decided() == "plex2":
         out.append(dict(item("info", M("Sync settings changed since they were reviewed"),
                              M("Applying stays paused until the differences are looked at again and approved. Comparing goes on."),
-                             M("Press I’ve Reviewed These on the Sync page once you have: it applies nothing.")), link=link))
+                             M("Press I’ve Reviewed These on the [Sync page](/sync) once you have: it applies nothing."))))
     return out
 
 
@@ -676,6 +676,28 @@ def _tool_items(app) -> list[dict]:
                              M("Its Plex doesn’t list the new folder after {days} days: {titles}. Is the folder synced there?", days=3, titles=[e["title"] for e in late[:3]])),
                         link={"href": "/folders", "text": M("Open Organize Folders")}))
     return out
+
+
+def _link_items(app) -> list[dict]:
+    """Hard links among a library's files (from the data layer): a warning per library, with why they're
+    trouble and where to start untangling them."""
+    from .libdata import link_of
+    counts: dict[str, int] = {}
+    libdata = getattr(app, "libdata", None)
+    for key, d in list(getattr(libdata, "libs", {}).items()):
+        if not d.ready:
+            continue
+        n = sum(1 for f in d.files if link_of(f)[0] == "hardlink")
+        if n:
+            counts[str(key)] = n
+    names = {str(lib["key"]): lib.get("title") or lib["key"] for lib in getattr(app, "libraries", []) or []}
+    return [dict(item("warn", M("{n} hard-linked files in {library}", one="{n} hard-linked file in {library}", n=n, library=names.get(key, key)),
+                      M("A hard link is one file under two paths. Plex lists one and ignores the other, so the folder looks to hold a file Plex hasn’t got; "
+                        "a folder sync can’t carry the link, so the other site gets two whole copies that drift apart once either changes, and show up as sync differences. "
+                        "Untangle them with the tools, starting with [Unlink Files](/unlink): each link made a file of its own (or, on a library that isn’t synced, its extra paths removed), "
+                        "then [Merge Duplicates](/merge) or [Duplicate Versions](/versions) to tidy the copies."),
+                      M("Open [Unlink Files](/unlink) and scan the library.")))
+            for key, n in sorted(counts.items(), key=lambda kv: names.get(kv[0], kv[0]))]
 
 
 def _peer_items(app) -> list[dict]:

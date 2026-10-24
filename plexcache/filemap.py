@@ -64,6 +64,15 @@ def _uint(b: bytes) -> int:
     return int.from_bytes(b, "big") if b else 0
 
 
+def _float(b: bytes) -> float:
+    """An EBML float: 4 or 8 bytes, big-endian (0 when neither)."""
+    import struct
+    try:
+        return struct.unpack(">f" if len(b) == 4 else ">d", b)[0] if len(b) in (4, 8) else 0.0
+    except struct.error:
+        return 0.0
+
+
 def _tracks(buf: bytes) -> list[dict]:
     """The tracks from a Tracks element's body: number, type, codec, language, name, size in pixels,
     and the compression its blocks are stored with (ContentEncodings)."""
@@ -97,6 +106,14 @@ def _tracks(buf: bytes) -> list[dict]:
                         t["width"] = _uint(buf[va:vb])
                     elif vid == 0xBA:
                         t["height"] = _uint(buf[va:vb])
+            elif cid == 0xE1:  # Audio: channels, sampling frequency, bit depth (what a lossless copy of it would hold)
+                for aid, aa, ab in _children(buf, ca, cb):
+                    if aid == 0x9F:
+                        t["channels"] = _uint(buf[aa:ab])
+                    elif aid == 0xB5:
+                        t["sample_rate"] = _float(buf[aa:ab])
+                    elif aid == 0x6264:
+                        t["bit_depth"] = _uint(buf[aa:ab])
             elif cid == 0x6D80:  # ContentEncodings → ContentEncoding → ContentCompression → algorithm
                 for _, ea, eb in _children(buf, ca, cb):
                     for kid, ka, kb in _children(buf, ea, eb):
@@ -106,6 +123,7 @@ def _tracks(buf: bytes) -> list[dict]:
                                 if zid == 0x4254:
                                     algo = _uint(buf[za:zb])
                             t["compression"] = COMPRESSION.get(algo, "other")
+        t["language_set"] = bool(bcp47 or t["language"])  # (written at all: without one, every Matroska player takes the track as English)
         t["language"] = bcp47 or t["language"] or "eng"  # (Matroska's default when neither is written)
         if not t["type"]:  # not recorded: from the codec ("V_…", "A_…", "S_…")
             t["type"] = {"V": "video", "A": "audio", "S": "subtitles"}.get(t["codec"][:1], "other")
@@ -617,6 +635,7 @@ def block_map(m: dict | None, size: int, plan: dict, record: int | None) -> dict
     kinds = {t.get("type") for t in m.get("tracks") or []}
     streams = [k for k in ("video", "audio", "subtitles") if k in kinds] or (["audio"] if m.get("format") in ("mp3", "flac", "stream") and not m.get("video_start") else ["video"])  # (MP4: not read, so just "video")
     return {"record": record, "start": start, "end": end, "lead_blocks": lead, "streams": streams,
+            "forced": sum(1 for t in m.get("tracks") or [] if t.get("type") == "subtitles" and t.get("forced")),  # (subtitle tracks shown by themselves)
             "total_blocks": total, "video": max(0, (m.get("video_end") or size) - vs)}
 
 

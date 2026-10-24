@@ -83,6 +83,22 @@ def _prune(base: str, folder: str) -> None:
         folder = os.path.dirname(folder)
 
 
+def copy_keeping_dates(src: str, dst: str) -> None:
+    """The bytes copied, then the mode and dates: what copy2 does, but a refusal to copy ownership, flags or
+    extended attributes (ACLs, in a container without the right to set them) isn't a failure — Plex and the
+    folder sync go by the bytes and the dates."""
+    shutil.copyfile(src, dst)
+    try:
+        shutil.copystat(src, dst)
+    except PermissionError:
+        st = os.stat(src)
+        try:
+            os.chmod(dst, stat.S_IMODE(st.st_mode))
+        except OSError:
+            pass
+        os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
 def make_real(path: str) -> dict:
     """A link — a hard link (two paths to one file) or a symlink — replaced by a file of its own at the
     same path: the bytes copied beside it, then swapped in, the dates kept. {"bytes": copied}."""
@@ -99,7 +115,7 @@ def make_real(path: str) -> dict:
         raise ValueError("not a file or a link")
     tmp = os.path.join(os.path.dirname(path), ".plexcache-copy-" + os.path.basename(path))
     try:
-        shutil.copy2(src, tmp)  # (the bytes and the dates: Plex and the folder sync see the same file)
+        copy_keeping_dates(src, tmp)  # (the bytes and the dates: Plex and the folder sync see the same file)
         os.replace(tmp, path)   # (the old path's inode drops a link; a symlink is replaced by the file)
     except OSError:
         try:
@@ -145,3 +161,23 @@ def unlink(path: str, keep: str | None = None) -> dict:
     except OSError:
         pass
     return {"removed": True}
+
+
+def copy_from(path: str, src: str) -> dict:
+    """A file put back from a backup's copy (a snapshot's .zfs/snapshot path, a set-aside copy): ``src`` copied beside
+    ``path`` and swapped in, dates kept. {"bytes"}."""
+    if not os.path.isfile(src):
+        raise ValueError("the backup's copy isn't there")
+    if os.path.lexists(path):
+        _plain(path)
+    tmp = os.path.join(os.path.dirname(path), ".plexcache-copy-" + os.path.basename(path))
+    try:
+        copy_keeping_dates(src, tmp)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return {"bytes": os.path.getsize(path)}

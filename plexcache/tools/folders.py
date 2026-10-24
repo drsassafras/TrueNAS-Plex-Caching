@@ -61,14 +61,23 @@ def _named_for(folder: str, rec: dict) -> bool:
 
 class OrganizeFolders(Tool):
     name = "folders"
+    title = M("Organize Folders")
+    page = "/folders"
+    applies = ("movie",)
+    flag_help = M("A film loose in the library folder rather than in a folder of its own, or (with Clean up folder names) a folder not named for its film: Plex matches a film by its folder as much as by its file name, and a folder of its own is where subtitles, artwork and a second version belong. Organize Folders moves and renames without Plex losing anything.")
+
+    def flag_lines(self, rows):
+        return [M("{file} is loose in the library folder: to {folder}", file=os.path.basename((r.get("moves") or [{}])[0].get("from") or ""), folder=r.get("folder") or "") if r.get("kind") == "loose"
+                else M("Folder {old} isn’t named for its film: to {folder}", old=r.get("from_folder") or "", folder=r.get("folder") or "") for r in rows]
 
     # ------------------------------------------------------------ the plan
-    def scan(self, library: str, options: dict | None = None) -> dict:
+    def scan(self, data, options: dict | None = None) -> dict:
+        library = data.key
         cleanup = bool((options or {}).get("cleanup"))
         lib = self.app.library_info(library)
         if not lib or lib.get("type") != "movie":
             raise ValueError(M("Only movie libraries are organized: TV and music have folder layouts of their own."))
-        recs = self.app.plex(timeout=120).library_items(lib["key"], 1)
+        recs = data.records
         roots = sorted((loc.rstrip("/") for loc in lib.get("locations") or []), key=len, reverse=True)
         named: dict[str, list] = {}
         for r in recs:
@@ -94,9 +103,9 @@ class OrganizeFolders(Tool):
                     continue
                 to = f"{root}/{target[r['key']]}"
                 moves = [{"from": path, "to": f"{to}/{os.path.basename(path)}", "media": True}]
-                moves += [{"from": f"{root}/{n}", "to": f"{to}/{n}", "media": False} for n in self._sidecars(root, os.path.basename(path))]
+                moves += [{"from": f"{root}/{n}", "to": f"{to}/{n}", "media": False} for n in self._sidecars(data, root, os.path.basename(path))]
                 rows.append({"id": "loose:" + path, "library": str(library), "kind": "loose", "title": r.get("label") or r.get("title"), "rk": r["key"],
-                             "ptitle": r.get("title") or "", "guid": r.get("guid") or "", "thumb": r.get("thumb"), "root": root,
+                             "ptitle": r.get("title") or "", "guid": r.get("guid") or "", "thumb": r.get("thumb"), "poster": r.get("thumb") or "", "root": root,
                              "folder": target[r["key"]], "moves": moves})
         if cleanup:
             for (root, top), keys in folder_recs.items():
@@ -107,40 +116,50 @@ class OrganizeFolders(Tool):
                 if top == want or _named_for(top, r):
                     continue
                 old = f"{root}/{top}"
-                names = self._listing(old)
+                names = self._listing(data, old)
                 moves = [{"from": f"{old}/{n}", "to": f"{root}/{want}/{n}", "media": any(f"{old}/{n}" == p for p, _ in r["files"])} for n in names]
                 if not any(m["media"] for m in moves):
                     continue
                 rows.append({"id": "folder:" + old, "library": str(library), "kind": "rename", "title": r.get("label") or r.get("title"), "rk": r["key"],
-                             "ptitle": r.get("title") or "", "guid": r.get("guid") or "", "thumb": r.get("thumb"), "root": root,
+                             "ptitle": r.get("title") or "", "guid": r.get("guid") or "", "thumb": r.get("thumb"), "poster": r.get("thumb") or "", "root": root,
                              "from_folder": top, "folder": want, "moves": moves})
         rows.sort(key=lambda x: (x["kind"] != "loose", sort_key(x["title"])))
         there = self.mirror(library)
         return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(recs), "cleanup": cleanup,
                 "folders": len(folder_recs), "mirror": {"name": self.mirror_name()} if there is not None else None}
 
-    def _sidecars(self, root: str, media_name: str) -> list[str]:
-        """Files next to a loose film that belong to it (its subtitles, artwork): the same stem."""
+    def _sidecars(self, data, root: str, media_name: str) -> list[str]:
+        """Files next to a loose film that belong to it (its subtitles, artwork): the same stem (from the folder tree as gathered)."""
         stem = os.path.splitext(media_name)[0]
-        try:
-            names = os.listdir(self.app.map_path(root))
-        except OSError:
-            return []
+        names = data.names_in(self.app.map_path(root))
         return sorted(n for n in names if n != media_name and n.startswith(stem) and n.lower().endswith(SIDECAR))
 
-    def _listing(self, folder: str) -> list[str]:
-        """A film's folder's files, with their paths within it (a subfolder's too)."""
-        local = self.app.map_path(folder)
-        out = []
-        for dirpath, dirs, files in os.walk(local):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
-            for n in files:
-                if not n.startswith("."):
-                    out.append(os.path.relpath(os.path.join(dirpath, n), local))
-        return sorted(out)
+    def _listing(self, data, folder: str) -> list[str]:
+        """A film's folder's files, with their paths within it (a subfolder's too), from the folder tree as gathered."""
+        return data.listing(self.app.map_path(folder))
 
     def needed_bytes(self, rows: list[dict]) -> int:
         return 0  # (hard links: nothing written; a file system without them copies, said when it happens)
+
+    history = [("what", M("What was done")), ("folder", M("Folder")), ("files", M("Files"))]
+
+    def history_row(self, row: dict, outcome: dict) -> dict:
+        return {"what": M("Loose file moved") if row.get("kind") == "loose" else M("Folder renamed"), "folder": row.get("folder") or "",
+                "files": len(row.get("moves") or [])}
+
+    def revert_row(self, row: dict, outcome: dict, backup: dict, log) -> None:
+        """Each file given its old path again (a link: the same file), the new path removed, Plex asked to scan both folders."""
+        for mv in row["moves"]:
+            self.file_action("link", self.app.map_path(mv["to"]), to=self.app.map_path(mv["from"]))
+        for mv in row["moves"]:
+            self.file_action("unlink", self.app.map_path(mv["to"]), to=self.app.map_path(mv["from"]))
+        log(M("{n} files back at their old paths", one="{n} file back at its old path", n=len(row["moves"])))
+        try:
+            plex = self.app.plex()
+            for folder in sorted({os.path.dirname(mv["from"]) for mv in row["moves"]} | {f"{row['root']}/{row['folder']}"}):
+                plex.scan(row["library"], folder)
+        except Exception as e:  # noqa: BLE001
+            log(M("Plex wasn’t asked to scan: {why}", why=str(e)))
 
     # ------------------------------------------------------------ doing it
     def apply_row(self, row: dict, log) -> dict:

@@ -54,10 +54,10 @@ DEFAULTS: dict = {
         "update_check": True,  # ask GitHub every few hours whether there's a newer version
         "page_size": 200,      # entries on a page of a long list (the Library views, a job's files)
         # Before anything changes files (safety.py): what stands in for a backup when there's no recent snapshot —
-        # "snapshot": one taken through TrueNAS when you press the button (kept snapshot_days, then deleted by the app);
+        # "snapshot": one taken through TrueNAS before the action (kept backup_days, then deleted by the app);
         # "manual": a backup you make yourself and say so; "copies": the copies the action keeps of its own, where it does.
         "backup": "snapshot",
-        "snapshot_days": 14,
+        "backup_days": 30,  # how long a backup — a snapshot, files set aside or copied — is kept, then deleted by the app
         "hdd_mb_per_sec": 150,
         "hdd_measured_at": None,
         # Measured uncached read speed per dataset (or mount, when it isn't ZFS):
@@ -137,13 +137,11 @@ DEFAULTS: dict = {
     # so they take the dataset's record size and compression, "mkv": false — lay MKV files out for
     # caching, "images": "unmatched" | "remove" | "compress" | "plex" — what an optimized MKV's cover
     # art becomes; "unmatched": Plex's poster only for items Plex hasn't matched, "tags": "keep" |
-    # "excessive" | "strip", "convert": false — convert other containers to MKV}.
-    # "convert_types": which containers are converted (optimize/convert.py TYPES), in every library
-    # that converts; "convert_hold_days": how long an original is kept once Plex has its MKV.
+    # "excessive" | "strip"}.
+    # "convert_types": which containers Convert to MKV (tools/convert.py) converts (optimize/convert.py TYPES).
     "optimizer": {
         "libraries": {},
         "convert_types": dict(CONVERT_DEFAULTS),
-        "convert_hold_days": 7,
     },
     # MQTT (off until switched on): status on <base_topic>/state, commands on <base_topic>/set/<name>.
     # With "discovery", Home Assistant (and openHAB, Domoticz...) create the entities themselves.
@@ -198,11 +196,10 @@ LIMITS = {
     ("nextepisode", "pacing_percent"): (5, 100),
     ("mqtt", "port"): (1, 65535),
     ("mqtt", "interval"): (5, 600),
-    ("optimizer", "convert_hold_days"): (0, 90),
     ("sync", "compare_hours"): (1, 168),
     ("sync", "ask_over"): (1, 1000),
     ("general", "page_size"): (25, 1000),
-    ("general", "snapshot_days"): (1, 365),
+    ("general", "backup_days"): (1, 365),
 }
 AUTO = -1  # a cooldown worked out from what's been measured (cachelog.CacheLog.auto_cooldown)
 COOLDOWN_RAM = (AUTO, 0, 10, 30, 60, 120, 180, 240, 360, 720)                    # minutes
@@ -358,9 +355,11 @@ def _coerce(section: str, key: str, value, current):
     if (section, key) == ("library_health", "checks"):
         from .libhealth import CHECKS
         ids = {c["id"] for cat in CHECKS.values() for c in cat}
-        if not isinstance(value, dict) or any(k not in ids or not isinstance(v, bool) for k, v in value.items()):
-            raise SettingsError(M("library_health.checks must set each of {ids} to true or false", ids=", ".join(sorted(ids))))
-        return {k: v for k, v in value.items()}
+        if not isinstance(value, dict) or any(not isinstance(v, bool) for v in value.values()):
+            raise SettingsError(M("library_health.checks must set each check’s id to true or false"))
+        # the checks' ids, and the tools' chips (tool_<name>); an id of a check that was renamed or retired is dropped,
+        # not refused — else every later save of the switches would fail on it
+        return {str(k): v for k, v in value.items() if k in ids or re.fullmatch(r"tool_[a-z_]+", str(k))}
     if (section, key) == ("sync", "what"):
         if not isinstance(value, dict) or any(k not in DEFAULTS["sync"]["what"] or not isinstance(v, bool) for k, v in value.items()):
             raise SettingsError(M("sync.what must set each of {keys} to true or false", keys=", ".join(DEFAULTS["sync"]["what"])))
@@ -432,13 +431,14 @@ def _coerce(section: str, key: str, value, current):
                 continue
             if isinstance(choice, dict) and choice.get("images") == "keep":
                 choice = dict(choice, images="compress")  # the name before the three choices
-            if (not isinstance(choice, dict) or any(k not in ("sync", "mkv", "images", "tags", "convert") for k in choice)
+            if isinstance(choice, dict):
+                choice = {k: v for k, v in choice.items() if k != "convert"}  # (a library's converting, before the Convert to MKV tool)
+            if (not isinstance(choice, dict) or any(k not in ("sync", "mkv", "images", "tags") for k in choice)
                     or choice.get("images", "unmatched") not in ("unmatched", "compress", "remove", "plex")
                     or choice.get("tags", "keep") not in ("keep", "excessive", "strip")
-                    or any(not isinstance(choice[k], bool) for k in ("sync", "mkv", "convert") if k in choice)):
+                    or any(not isinstance(choice[k], bool) for k in ("sync", "mkv") if k in choice)):
                 raise SettingsError(M("each library’s optimizer choices must be {\"sync\": true/false, \"mkv\": true/false, "
-                                      "\"images\": \"unmatched\", \"remove\", \"compress\" or \"plex\", \"tags\": \"keep\", \"excessive\" or \"strip\", "
-                                      "\"convert\": true/false}"))
+                                      "\"images\": \"unmatched\", \"remove\", \"compress\" or \"plex\", \"tags\": \"keep\", \"excessive\" or \"strip\"}"))
             if choice:
                 out[str(lib)] = dict(choice)
         return out
@@ -589,7 +589,18 @@ class Settings:
     def _load(self) -> dict:
         try:
             with open(self.path, encoding="utf-8") as fh:
-                return _merge(DEFAULTS, json.load(fh))
+                saved = json.load(fh)
+            g = saved.get("general") if isinstance(saved, dict) and isinstance(saved.get("general"), dict) else None
+            if g is not None and "snapshot_days" in g:  # (renamed: the one length covers snapshots and file backups alike)
+                g.setdefault("backup_days", g["snapshot_days"])
+                del g["snapshot_days"]
+            o = saved.get("optimizer") if isinstance(saved, dict) and isinstance(saved.get("optimizer"), dict) else None
+            if o is not None:  # (converting is the Convert to MKV tool's now: no hold, and no per-library switch)
+                o.pop("convert_hold_days", None)
+                for choice in (o.get("libraries") or {}).values():
+                    if isinstance(choice, dict):
+                        choice.pop("convert", None)
+            return _merge(DEFAULTS, saved)
         except FileNotFoundError:
             return copy.deepcopy(DEFAULTS)
         except (OSError, ValueError):

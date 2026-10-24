@@ -210,14 +210,15 @@ def folder_action(svc: Service, body: dict) -> tuple[int, dict]:
         if action == "make_real":  # a link made a file of its own (files.py)
             from . import files
             return 200, files.make_real(path)
-        if action in ("set_aside", "restore", "purge", "link", "unlink"):  # the tools' file actions (files.py)
+        if action in ("set_aside", "restore", "purge", "link", "unlink", "copy_from"):  # the tools' file actions (files.py)
             from . import files
             if action in ("set_aside", "restore", "purge") and not root:
                 return 400, {"error": "root is needed"}
-            if action in ("link", "unlink") and not to:
+            if action in ("link", "unlink", "copy_from") and not to:
                 return 400, {"error": "to is needed"}
             return 200, {"set_aside": lambda: files.set_aside(root, path), "restore": lambda: files.put_back(root, path),
-                         "purge": lambda: files.purge(root, path), "link": lambda: files.link(path, to), "unlink": lambda: files.unlink(path, to)}[action]()
+                         "purge": lambda: files.purge(root, path), "link": lambda: files.link(path, to), "unlink": lambda: files.unlink(path, to),
+                         "copy_from": lambda: files.copy_from(path, to)}[action]()
         if action == "probe":
             return 200, migrate.probe(path)
         if action == "copy":
@@ -232,6 +233,9 @@ def folder_action(svc: Service, body: dict) -> tuple[int, dict]:
         if action == "delete_original":  # a converted file's original, once Plex has its MKV (path: the original, to: the MKV)
             from .convert import delete_original
             return 200, delete_original(path, to or "")
+        if action == "remove_converted":  # a converted file's MKV, on a revert (path: the MKV, to: the original, which stays)
+            from .convert import remove_converted
+            return 200, remove_converted(path, to or "")
         if action == "cleanup":  # a work folder left by an optimizer stopped mid-way (only those)
             from .optimizer import WORK
             if not WORK.match(os.path.basename(path.rstrip("/"))) or not os.path.isdir(path) or os.path.islink(path):

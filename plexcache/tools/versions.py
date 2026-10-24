@@ -14,26 +14,11 @@ from __future__ import annotations
 import os
 
 from ..i18n import M
+from ..libdata import same_bytes
 from ..libhealth import _same_file
 from ..plex import PlexError
 from . import MAX_ROWS, Tool
 from ..paging import sort_key
-
-MEDIA = (".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".mpg", ".mpeg", ".vob", ".flv", ".wmv", ".ogm", ".ogv", ".webm",
-         ".mp3", ".flac", ".m4a", ".m4b", ".ogg", ".oga", ".opus", ".wav", ".aac", ".wma")
-SAMPLE = 64 * 1024  # bytes read at each end of two files of one size, to tell an identical copy
-
-
-def _ends(path: str, size: int) -> bytes | None:
-    try:
-        with open(path, "rb") as fh:
-            head = fh.read(SAMPLE)
-            if size > SAMPLE:
-                fh.seek(max(SAMPLE, size - SAMPLE))
-                return head + fh.read(SAMPLE)
-            return head
-    except OSError:
-        return None
 
 
 def _brief(x: dict, keep: dict | None = None) -> dict:
@@ -44,18 +29,25 @@ def _brief(x: dict, keep: dict | None = None) -> dict:
 
 class DuplicateVersions(Tool):
     name = "versions"
+    title = M("Duplicate Versions")
+    page = "/versions"
     scan_version = 2  # (each extra copy says whether the mirror lists it)
     keeps = M("the extra copies themselves: set aside in the library’s .plexcache-trash, kept for the hold (and put back from the page)")
+    flag_help = M("One Plex item holding the same file twice — a copy that slipped in, a second path to one file — or a copy on disk that Plex doesn’t list: it takes space and is cached and optimized twice. Duplicate Versions sets the extra copies aside, and deletes them once every Plex has let go of them.")
 
-    def scan(self, library: str, options: dict | None = None) -> dict:
+    def flag_lines(self, rows):
+        return [M("{n} extra copies of {name}", one="{n} extra copy of {name}", n=len(r.get("extras") or []), name=(r.get("keep") or {}).get("name") or r.get("title") or "") for r in rows]
+
+    def scan(self, data, options: dict | None = None) -> dict:
+        library = data.key
         lib = self.app.library_info(library)
         if not lib:
             raise ValueError(M("No such library."))
-        files = [f for f in list(self.app.files) if str(f.library_key) == str(library)]
+        files = [f for f in data.files if not f.get("missing")]
         by_item: dict[str, list] = {}
         for f in files:
-            if getattr(f, "rating_key", ""):
-                by_item.setdefault(f.rating_key, []).append(f)
+            if f.get("rk"):
+                by_item.setdefault(f["rk"], []).append(f)
         rows = []
         for i, (rk, group) in enumerate(by_item.items()):
             if i % 50 == 0:
@@ -64,14 +56,9 @@ class DuplicateVersions(Tool):
                 continue
             infos = []
             for f in group:
-                local = self.app.map_path(f.path)
-                try:
-                    st = os.lstat(local)
-                except OSError:
-                    continue
-                root = self.root_of(library, f.path)
-                infos.append({"path": f.path, "local": local, "size": st.st_size, "duration": getattr(f, "duration_ms", 0), "ino": st.st_ino, "dev": st.st_dev,
-                              "mtime": st.st_mtime, "root": root, "sub": bool(root) and "/" in local[len(root) + 1:]})
+                local, root = f["local"], f.get("root") or ""
+                infos.append({"path": f["path"], "local": local, "size": f["size"], "duration": f.get("duration") or 0, "ino": f["ino"], "dev": f["dev"],
+                              "mtime": f["mtime"], "root": root, "sub": bool(root) and "/" in local[len(root) + 1:]})
             # clusters of the same file (union-find over the pairs)
             parent = list(range(len(infos)))
 
@@ -90,10 +77,10 @@ class DuplicateVersions(Tool):
             for n, cluster in enumerate(c for c in clusters.values() if len(c) > 1):
                 cluster.sort(key=lambda x: (not x["sub"], -x["mtime"]))  # (stable: the first listed wins a tie)
                 keep, extras = cluster[0], cluster[1:]
-                rows.append({"id": f"{rk}:{n}", "library": str(library), "rk": rk, "title": getattr(group[0], "title", "") or os.path.basename(keep["path"]),
-                             "poster": getattr(group[0], "poster", ""), "keep": _brief(keep), "extras": [_brief(x, keep) for x in extras],
+                rows.append({"id": f"{rk}:{n}", "library": str(library), "rk": rk, "title": group[0].get("title") or os.path.basename(keep["path"]),
+                             "poster": group[0].get("poster") or "", "keep": _brief(keep), "extras": [_brief(x, keep) for x in extras],
                              "frees": sum(x["size"] for x in extras if not (keep["ino"] and x["ino"] == keep["ino"]))})
-        rows += self._unlisted(library, lib, files)
+        rows += self._unlisted(data)
         rows.sort(key=lambda r: sort_key(r["title"]))
         there = self.mirror(library)
         if there is not None:  # each extra copy on the mirrored server: listed there too (then its synced folder carries the deletion there)
@@ -108,59 +95,54 @@ class DuplicateVersions(Tool):
         return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "items": sum(1 for g in by_item.values() if len(g) > 1), "frees": sum(r["frees"] for r in rows),
                 "mirror": {"name": self.mirror_name()} if there is not None else None, "hold_days": self.app.trash.hold_days()}
 
-    def _unlisted(self, library: str, lib: dict, files: list) -> list[dict]:
-        """Media files in the library's folders that Plex doesn't list, and are a listed file over again:
-        a second path to it (the same inode), or an identical copy (the same size, the same bytes at
+    def _unlisted(self, data) -> list[dict]:
+        """Media files in the library's folders that Plex doesn't list (data.unlisted), and are a listed file over
+        again: a second path to it (the same inode), or an identical copy (the same size, the same bytes at
         both ends). Each a row: the listed file kept, the unlisted one set aside."""
-        listed: dict[str, dict] = {}
         by_ino: dict[tuple, dict] = {}
         by_size: dict[int, list] = {}
-        for f in files:
-            local = self.app.map_path(f.path)
-            try:
-                st = os.lstat(local)
-            except OSError:
+        for f in data.files:
+            if f.get("missing"):
                 continue
-            root = self.root_of(library, f.path)
-            info = {"path": f.path, "local": local, "size": st.st_size, "ino": st.st_ino, "dev": st.st_dev, "mtime": st.st_mtime, "root": root,
-                    "sub": bool(root) and "/" in local[len(root) + 1:], "rk": getattr(f, "rating_key", ""), "title": getattr(f, "title", ""), "poster": getattr(f, "poster", "")}
-            listed[local] = info
-            by_ino[(st.st_dev, st.st_ino)] = info
-            by_size.setdefault(st.st_size, []).append(info)
+            root = f.get("root") or ""
+            info = {"path": f["path"], "local": f["local"], "size": f["size"], "ino": f["ino"], "dev": f["dev"], "mtime": f["mtime"], "root": root,
+                    "sub": bool(root) and "/" in f["local"][len(root) + 1:], "rk": f.get("rk") or "", "title": f.get("title") or "", "poster": f.get("poster") or ""}
+            by_ino[(f["dev"], f["ino"])] = info
+            by_size.setdefault(f["size"], []).append(info)
         rows = []
-        for loc in lib.get("locations") or []:
-            loc = loc.rstrip("/")
-            local_root = self.app.map_path(loc)
-            for dirpath, dirs, names in os.walk(local_root):
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
-                for n in names:
-                    if n.startswith(".") or not n.lower().endswith(MEDIA):
-                        continue
-                    local = os.path.join(dirpath, n)
-                    if local in listed:
-                        continue
-                    try:
-                        st = os.lstat(local)
-                    except OSError:
-                        continue
-                    if not os.path.isfile(local) or os.path.islink(local):
-                        continue
-                    keep = by_ino.get((st.st_dev, st.st_ino))
-                    linked = keep is not None
-                    if keep is None:
-                        mine = None
-                        for cand in by_size.get(st.st_size) or []:
-                            mine = mine if mine is not None else _ends(local, st.st_size)
-                            if mine is not None and mine == _ends(cand["local"], st.st_size):
-                                keep = cand
-                                break
-                    if keep is None:
-                        continue
-                    plex_path = loc + local[len(local_root):]
-                    x = {"path": plex_path, "local": local, "size": st.st_size, "ino": st.st_ino, "mtime": st.st_mtime, "root": local_root, "sub": "/" in local[len(local_root) + 1:]}
-                    rows.append({"id": "disk:" + plex_path, "library": str(library), "rk": keep["rk"], "title": keep["title"] or os.path.basename(keep["path"]), "poster": keep["poster"],
-                                 "keep": _brief(keep), "extras": [dict(_brief(x, keep), unlisted=True)], "unlisted": True, "frees": 0 if linked else st.st_size})
+        for u in data.unlisted:
+            keep = by_ino.get((u["dev"], u["ino"]))
+            linked = keep is not None
+            if keep is None:
+                for cand in by_size.get(u["size"]) or []:
+                    if same_bytes(u["local"], cand["local"], u["size"]):
+                        keep = cand
+                        break
+            if keep is None:
+                continue
+            local_root = u["root"]
+            x = {"path": u["path"], "local": u["local"], "size": u["size"], "ino": u["ino"], "mtime": u["mtime"], "root": local_root, "sub": "/" in u["local"][len(local_root) + 1:]}
+            rows.append({"id": "disk:" + u["path"], "library": data.key, "rk": keep["rk"], "title": keep["title"] or os.path.basename(keep["path"]), "poster": keep["poster"],
+                         "keep": _brief(keep), "extras": [dict(_brief(x, keep), unlisted=True)], "unlisted": True, "frees": 0 if linked else u["size"]})
         return rows
+
+    history = [("set_aside", M("Set aside")), ("frees", M("Freed")), ("kept", M("Kept"))]
+
+    def history_row(self, row: dict, outcome: dict) -> dict:
+        return {"set_aside": int(outcome.get("set_aside") or len(row.get("extras") or [])), "frees": int(outcome.get("frees") or 0),
+                "kept": (row.get("keep") or {}).get("name") or ""}
+
+    def revert_row(self, row: dict, outcome: dict, backup: dict, log) -> None:
+        """The copies set aside put back (the trash keeps them for the hold), and Plex asked to scan."""
+        for x in row.get("extras") or []:
+            self.app.trash.act(x["local"], "restore")
+            log(M("{file} put back", file=x["name"]))
+        try:
+            plex = self.app.plex()
+            for folder in sorted({os.path.dirname(x["path"]) for x in row.get("extras") or []}):
+                plex.scan(row["library"], folder)
+        except Exception as e:  # noqa: BLE001
+            log(M("Plex wasn’t asked to scan: {why}", why=str(e)))
 
     def apply_row(self, row: dict, log) -> dict:
         library, folders = row["library"], []

@@ -35,7 +35,6 @@ LOW_KBPS = {"mp3": 96, "aac": 64, "vorbis": 64, "opus": 48, "wma": 80, "ac3": 64
 AUDIO_LEVELS = {"poor": 2 / 3, "fair": 1.0, "good": 4 / 3, "best": 5 / 3}  # (×LOW_KBPS; "poor" ships: only clearly poor files)
 DEFAULT_AUDIO_LEVEL = "poor"
 LOSSLESS = ("flac", "alac", "pcm", "truehd", "dts-hd", "mlp", "ape", "wavpack", "tta", "dsd")
-UNCOMPRESSED = ("pcm",)  # (WAV and AIFF hold PCM)
 # codecs that fall short of today's at any bitrate — the listening tests collected by Hydrogenaudio put
 # AAC, Opus and Vorbis well ahead of these at equal bitrates, and MP3 can't go above 320 kbps at all
 OUTDATED = {
@@ -54,14 +53,20 @@ CHECKS = {
          "help": M("Narrows No subtitles: a film needs a subtitle track in the language chosen beside this (any format, unless SRT/ASS is required too). Off unless you turn it on.")},
         {"id": "subtitles_text", "name": M("Must include SRT or ASS"), "default": False, "of": "no_subtitles", "applies": VIDEO,
          "help": M("Narrows No subtitles: a film needs a subtitle track in a text format — SRT, ASS or SSA — not only bitmap ones (PGS, VobSub). With a language chosen above as well, that language’s subtitle must be the text one. Text subtitles can be searched, styled and resized by every player, and are tiny. Off unless you turn it on.")},
+        {"id": "forced_subtitles_language", "name": M("Forced Subtitles Without Their Audio"), "applies": VIDEO,
+         "help": M("A forced subtitle track in a language none of the audio tracks is in — or whose audio language is unknown (und), so it can’t be told. Forced subtitles show by themselves, without the viewer turning subtitles on, and are made for the audio they go with — written in its language — for three things: speech in another language than the audio’s (a foreign line in a film), words one wants to read before they’re heard (a sing-along, an anime opening), and text shown on screen (a sign, a letter, a newspaper) — when a film is dubbed and the picture stays, the text on screen needs translating. So a forced German track without German audio is almost always a mistake: most likely it was made for a German-dubbed version that isn’t in this file. Unknown audio (und) is flagged too: tag the audio’s language first.")},
+        {"id": "audio_language_unknown", "name": M("Audio Language Unknown"), "applies": VIDEO,
+         "help": M("An audio track tagged und (language unknown), or with no language tag at all. Players and Plex pick the audio and subtitle tracks by language — the one matching your settings, or the forced subtitles that go with the audio — so an unknown one gets picked wrongly or not at all. A track with no tag is worse than it looks: Matroska’s rule, which ffmpeg (and so Plex), VLC and mpv all follow, is that an untagged track is English, so every player takes it for English and picks it as such; right only if it is, and then it should say so. A track marked zxx (no linguistic content: music, ambience) is fine and isn’t flagged.")},
         {"id": "subtitles_on_zxx", "name": M("Subtitles on a film without speech"), "applies": VIDEO,
          "help": M("A file whose audio is marked zxx (no linguistic content) yet holds subtitles that aren’t forced ones. One of three things is wrong: the audio’s language is tagged wrongly (it does have speech); the subtitles don’t belong to this file, or are empty; or they translate text shown on screen and should be marked forced. Forced subtitles carry written content and belong.")},
         {"id": "audio_low_bitrate", "name": M("Poor Audio Bitrate"), "applies": AUDIO,
          "help": M("A lossy track encoded below what its codec needs for the quality level chosen beside this, per channel (stereo: twice). Each codec has its own floor — MP3 needs the most, Opus the least — and the level scales them all alike: “Only clearly poor” (as it ships) flags MP3 under 128 kbps stereo, AAC or Vorbis under 85, Opus under 64; “Fair” MP3 192, AAC 128, Opus 96; “Good” and “Transparent” raise the bar further. Lossless codecs — FLAC, ALAC, PCM — are never flagged. The bitrate is the file’s, as Plex reads it; the codec from the file itself or its extension.")},
-        {"id": "audio_outdated", "name": M("Outdated Codec"), "default": False, "applies": ALL, "link": OUTDATED_LINK,
+        {"id": "audio_outdated", "name": M("Outdated Audio Codec"), "default": False, "applies": ALL, "link": OUTDATED_LINK,
          "help": M("An audio track in a codec that today’s codecs beat at every bitrate — MP3, MPEG Layer II, WMA, RealAudio, and in music libraries AC-3 (a film’s AC-3 track is the normal thing and isn’t flagged). Each finding says what the codec is and where it falls short. In the public listening tests collected by Hydrogenaudio, AAC, Opus and Vorbis come out clearly ahead of MP3 at equal bitrates. Off unless you turn it on: a well-made 320 kbps MP3 is fine for most ears, and the files are what they are unless you still have the source.")},
-        {"id": "audio_uncompressed", "name": M("Uncompressed audio"), "applies": ALL,
-         "help": M("PCM audio — WAV, AIFF, a raw PCM track, the LPCM track of a Blu-ray rip: the sound as it is, not compressed at all. A lossless codec holds the very same sound, bit for bit, in about half the space, and every player and Plex read them: FLAC (.flac, and inside an MKV), Apple Lossless (.m4a, ALAC) or WavPack (.wv). Re-encoding to one loses nothing. Lossy tracks (MP3, AAC, AC-3) aren’t flagged: a lossless copy of them would only be bigger.")},
+        {"id": "audio_compatibility", "name": M("Audio Compatibility"), "applies": VIDEO,
+         "help": M("A video’s audio track in a format most Plex clients can’t play as it is — Dolby TrueHD, DTS-HD Master Audio, DTS, Apple Lossless, PCM — where a FLAC version would play everywhere at about the same size or less. What Plex does with such a track: unless the client (or a receiver behind it, with passthrough on) decodes the format, Plex transcodes the audio to AAC or AC-3, lossy, at a bitrate cut to fit the stream’s quality setting — so a lossless track that can’t be played is heard lossy, and your bandwidth and the server’s CPU go on the transcode. FLAC is decoded by every current Plex client, so a FLAC track direct plays. Named here: TrueHD (FLAC comes out about the same size), DTS-HD MA (a tenth smaller), Apple Lossless (the same), PCM (half), and DTS (a stereo track shrinks; a 5.1 track at 1.5 Mbps grows to about twice — said per track from the bitrate Plex read). Dolby Atmos and DTS:X tracks are left alone: their object metadata doesn’t survive, and they’re what a receiver setup is for. What’s lost otherwise: a legacy receiver that decodes DTS or TrueHD itself gets PCM from the player instead, which some setups can’t pass through.")},
+        {"id": "audio_compressible", "name": M("Audio Safely Compressed"), "applies": ALL,
+         "help": M("Audio that FLAC would hold — the very same sound, bit for bit — in less space. <strong>PCM</strong> (WAV, AIFF, a raw PCM track, a Blu-ray rip’s LPCM): not compressed at all; FLAC (.flac, and inside an MKV), Apple Lossless or WavPack hold it in about half the space, and every player and Plex read them. <strong>DTS-HD Master Audio</strong>, in a video: FLAC comes out a tenth or so smaller, and every Plex client plays it directly, where DTS-HD is transcoded by many — a phone, a browser, a TV app — and at a lower bitrate the same stream fits a limited upload for remote viewers, which can be the difference between a transcode and a direct stream. <strong>DTS</strong> (the lossy core, and DTS-HD High Resolution) is judged per track, from the bitrate Plex read against what FLAC would need for its channels and bit depth: a 1.5 Mbps stereo track shrinks to about 0.9 Mbps and is flagged; a 5.1 track at the same bitrate would grow to about twice and isn’t. What FLAC wouldn’t shrink isn’t flagged: Dolby TrueHD comes out about the same size; the other lossy tracks — AC-3, E-AC-3, AAC, MP3 — would get bigger, since FLAC keeps every bit of what the lossy decoder gives, which is more than the track held. Dolby Atmos and DTS:X tracks are left alone too: their object metadata doesn’t survive re-encoding, and the app takes a 7.1 DTS-HD or TrueHD track, or one named for them, to carry it. What’s lost in re-encoding: a legacy receiver that decodes DTS itself gets PCM from the player instead, which some setups can’t pass through; modern hardware doesn’t mind.")},
         {"id": "linked_file", "name": M("Linked file"), "applies": ALL,
          "help": M("A media file that’s a link: a hard link (one file under two paths) or a symlink. Syncthing can’t carry a hard link — the other site gets two whole copies, which drift apart once either changes — and carries a symlink as a link, which dangles there when its target isn’t in the synced folder. Plex lists only one of two paths to the same bytes. The Unlink Files tool makes each a file of its own.")},
         {"id": "duplicate_versions", "name": M("The same file twice on one item"), "applies": ALL,
@@ -79,6 +84,55 @@ CHECKS = {
     ],
 }
 NO_SPEECH = ("zxx", "und")  # audio marked as having no linguistic content (and unknown: not flagged either way)
+UNKNOWN_LANGUAGE = ("und",)  # audio whose language isn't known (zxx — no linguistic content — is a statement, not an unknown)
+# what FLAC makes of a video's audio track, by codec: smaller (worth re-encoding), the same, or bigger
+FLAC_SMALLER = {"dts-hd": M("DTS-HD Master Audio: FLAC holds the same sound, bit for bit, in about a tenth less space — and every Plex client plays it directly, where DTS-HD is transcoded by many."),
+                "pcm": M("Uncompressed PCM: FLAC (.flac, or inside the MKV) or Apple Lossless (.m4a) would hold the same sound, bit for bit, in about half the space.")}
+FLAC_RATIO = 0.6        # what FLAC makes of PCM, as a share: film audio with quiet channels does better, dense music worse
+FLAC_MARGIN = 0.85      # a DTS track is flagged when FLAC's estimate is at most this share of its bitrate
+# the formats most Plex clients can't play as they are (Plex transcodes the audio to AAC or AC-3, lossy) and what a FLAC version
+# costs in space: a share of the track's size. Atmos and DTS:X carriers are left alone (object_audio).
+INCOMPATIBLE = {"truehd": (1.0, M("Dolby TrueHD: transcoded to lossy AAC or AC-3 by most Plex clients unless a receiver decodes it; FLAC holds the same sound at about the same size and plays everywhere.")),
+                "mlp": (1.0, M("MLP (Dolby TrueHD’s forebear): transcoded by most Plex clients; FLAC holds the same sound at about the same size and plays everywhere.")),
+                "dts-hd": (0.9, M("DTS-HD Master Audio: transcoded to lossy AAC or AC-3 by most Plex clients unless a receiver decodes it; FLAC holds the same sound, a tenth smaller, and plays everywhere.")),
+                "alac": (1.0, M("Apple Lossless in a video: played as it is by Apple’s clients, transcoded by most others; FLAC holds the same sound at the same size and plays everywhere.")),
+                "pcm": (0.5, M("PCM: transcoded by many Plex clients; FLAC holds the same sound in half the space and plays everywhere.")),
+                "dts": (None, M("DTS: transcoded to lossy AAC or AC-3 by most Plex clients unless a receiver decodes it; FLAC would hold what the decoder gives — {flac} against {now} here — and play everywhere."))}
+
+
+def flac_estimate(track: dict) -> int | None:
+    """What a FLAC version of a track would run to, in kbps, from its channels, sampling rate and bit depth (the file's or
+    Plex's); None when they aren't known."""
+    ch, rate = int(track.get("channels") or 0), int(track.get("sample_rate") or 0)
+    depth = int(track.get("bit_depth") or 0) or (24 if audio_codec(track, "") in LOSSLESS else 16)
+    if not ch or not rate:
+        return None
+    return int(round(FLAC_RATIO * ch * rate * depth / 1000))
+
+
+def with_plex(track: dict, stream: dict | None) -> dict:
+    """A file's track with what Plex probed of it where the file doesn't say: the bitrate, channels, sampling rate, bit
+    depth, and a name carrying Atmos or DTS:X."""
+    if not stream:
+        return track
+    out = dict(track)
+    for k in ("channels", "sample_rate", "bit_depth"):
+        if not out.get(k) and stream.get(k):
+            out[k] = stream[k]
+    if stream.get("bitrate"):
+        out["bitrate"] = stream["bitrate"]
+    if stream.get("display") and not out.get("name"):
+        out["name"] = stream["display"]
+    return out
+
+
+def dts_verdict(track: dict) -> tuple[bool, int | None, int | None]:
+    """A DTS track (the core, or DTS-HD High Resolution): (smaller as FLAC?, FLAC's kbps, the track's kbps) — when
+    both are known, else (False, est, None)."""
+    est, now = flac_estimate(track), int(track.get("bitrate") or 0) or None
+    return (bool(est and now and est <= now * FLAC_MARGIN), est, now)
+OBJECT_AUDIO = ("atmos", "dts:x", "dts-x", "dtsx", "dts x")  # a track named for object audio: its metadata wouldn't survive re-encoding
+OBJECT_CHANNELS = 8  # (a 7.1 DTS-HD or TrueHD track carries Atmos or DTS:X more often than not: left alone)
 TEXT_SUBS = ("s_text/utf8", "s_text/ascii", "s_text/ass", "s_text/ssa", "subrip", "srt", "ass", "ssa")  # subtitle codecs that are text
 DEFAULT_LANGUAGE = "en"
 
@@ -128,12 +182,15 @@ def audio_floor(codec: str, level: str = DEFAULT_AUDIO_LEVEL, channels: int = 2)
     return int(round(LOW_KBPS[codec] * AUDIO_LEVELS.get(level, 1.0) * max(1, channels) / 8) * 8)
 
 
-def audio_checks(m: dict | None, on: dict, path: str, kbps: int | None, channels: int = 2, level: str = DEFAULT_AUDIO_LEVEL, kind: str = "audio") -> list[dict]:
+def audio_checks(m: dict | None, on: dict, path: str, kbps: int | None, channels: int = 2, level: str = DEFAULT_AUDIO_LEVEL, kind: str = "audio",
+                 streams: list[dict] | None = None) -> list[dict]:
     """The checks on a file's audio: an audio library's file (its codec and bitrate — the file's, as Plex
     reads it), or a video's audio tracks (their codecs: a video's bitrate is mostly its picture, so
-    the bitrate check is for audio libraries alone)."""
+    the bitrate check is for audio libraries alone). ``streams``: the file's streams as Plex probed them
+    (the data layer's details), joined to the tracks in order: a track's bitrate comes from there."""
     tracks = (m or {}).get("tracks") or []
-    audio = [t for t in tracks if t.get("type") == "audio"]
+    plex_audio = [st for st in streams or [] if st.get("type") == "audio"]
+    audio = [with_plex(t, plex_audio[i] if i < len(plex_audio) else None) for i, t in enumerate(t for t in tracks if t.get("type") == "audio")]
     out = []
     if kind == "audio":
         codec = audio_codec(audio[0] if audio else None, path)
@@ -144,13 +201,62 @@ def audio_checks(m: dict | None, on: dict, path: str, kbps: int | None, channels
         codecs = [codec] if codec else []
     else:
         codecs = sorted({audio_codec(t, "") for t in audio if audio_codec(t, "")})
+    if on.get("audio_compressible"):
+        if kind == "audio":  # (the file's codec: music, an audiobook)
+            if codecs and codecs[0] in FLAC_SMALLER:
+                out.append({"id": "audio_compressible", "category": "file", "status": "warn", "text": FLAC_SMALLER[codecs[0]]})
+        else:
+            for t in audio:  # (each track of a video, named)
+                codec = audio_codec(t, "")
+                if object_audio(t):
+                    continue
+                if codec in FLAC_SMALLER:
+                    out.append({"id": "audio_compressible", "category": "file", "status": "warn", "text": M("{what}: {why}", what=_track_label(t), why=FLAC_SMALLER[codec])})
+                elif codec == "dts":  # (the core, or DTS-HD HRA: judged from the bitrate Plex read)
+                    smaller, est, now = dts_verdict(t)
+                    if smaller:
+                        out.append({"id": "audio_compressible", "category": "file", "status": "warn",
+                                    "text": M("{what}: DTS at {now} kbps — FLAC would hold what the decoder gives in about {flac} kbps, and play on every Plex client where DTS is transcoded by many.", what=_track_label(t), now=now, flac=est)})
+    if kind != "audio" and on.get("audio_compatibility"):
+        for t in audio:
+            codec = audio_codec(t, "")
+            if codec not in INCOMPATIBLE or object_audio(t):
+                continue
+            share, why = INCOMPATIBLE[codec]
+            if share is None:  # DTS: only where FLAC wouldn't cost much more (the margin: a tenth)
+                est, now = flac_estimate(t), int(t.get("bitrate") or 0) or None
+                if not (est and now and est <= now * 1.1):
+                    continue
+                why = M(str(why._t) if hasattr(why, "_t") else str(why), flac=f"{est} kbps", now=f"{now} kbps")
+            out.append({"id": "audio_compatibility", "category": "file", "status": "warn", "text": M("{what}: {why}", what=_track_label(t), why=why)})
     for codec in codecs:
         if on.get("audio_outdated") and codec in OUTDATED and not (kind != "audio" and codec in VIDEO_AUDIO_OK):
             out.append({"id": "audio_outdated", "category": "file", "status": "warn", "text": OUTDATED[codec]})
-        if on.get("audio_uncompressed") and codec in UNCOMPRESSED:
-            out.append({"id": "audio_uncompressed", "category": "file", "status": "warn",
-                        "text": M("Uncompressed {codec}: FLAC (.flac, or inside the MKV) or Apple Lossless (.m4a) would hold the same sound, bit for bit, in about half the space.", codec=codec.upper())})
     return out
+
+
+def _lname(code) -> str:
+    """A language's name for a sentence — "German" — or its code when the name isn't known."""
+    c = str(code or "").strip()
+    return language_name(c) or c or "?"
+
+
+def object_audio(t: dict) -> bool:
+    """Whether an audio track carries object audio (Dolby Atmos, DTS:X), as far as the file tells: named for
+    it, or a 7.1 (or more) DTS-HD or TrueHD track, which carries it more often than not."""
+    name = str(t.get("name") or "").lower()
+    if any(x in name for x in OBJECT_AUDIO):
+        return True
+    return audio_codec(t, "") in ("dts-hd", "truehd") and int(t.get("channels") or 0) >= OBJECT_CHANNELS
+
+
+def _track_label(t: dict) -> str:
+    """"English 5.1" — what names an audio track in a finding."""
+    bits = [_lname(t.get("language"))]
+    ch = int(t.get("channels") or 0)
+    if ch:
+        bits.append({1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}.get(ch, f"{ch} ch"))
+    return " ".join(bits)
 
 
 def file_title_year(path: str) -> tuple[str, str]:
@@ -188,7 +294,33 @@ def file_checks(m: dict | None, on: dict, lang: str = DEFAULT_LANGUAGE) -> list[
             out.append({"id": "no_subtitles", "category": "file", "status": "warn",
                         "text": M("Spoken audio ({langs}) and no subtitle track.", langs=spoken) if not subs
                         else M("Spoken audio ({langs}) and no {what} subtitle track (has: {have}).", langs=spoken, what=what, have=have)})
-    if on.get("subtitles_on_zxx") and audio and not speech:
+    unknown = [t for t in audio if str(t.get("language") or "").lower().split("-")[0] in UNKNOWN_LANGUAGE or t.get("language_set") is False]
+    if on.get("audio_language_unknown") and unknown:
+        unset = [t for t in unknown if t.get("language_set") is False]
+        if unset:
+            out.append({"id": "audio_language_unknown", "category": "file", "status": "warn",
+                        "text": M("{n} audio tracks have no language tag: every player takes an untagged track for English and picks it as such — right only if it is, and then it should say so.",
+                                  one="An audio track has no language tag: every player takes an untagged track for English and picks it as such — right only if it is, and then it should say so.", n=len(unset))})
+        if len(unset) < len(unknown):
+            out.append({"id": "audio_language_unknown", "category": "file", "status": "warn",
+                        "text": M("{n} audio tracks are tagged und, language unknown: players and Plex can’t pick them by language, nor match forced subtitles to them.",
+                                  one="An audio track is tagged und, language unknown: players and Plex can’t pick it by language, nor match forced subtitles to it.", n=len(unknown) - len(unset))})
+    if on.get("forced_subtitles_language") and audio and (speech or unknown):
+        # a forced track is written in the language of the audio it goes with: one with no audio in its language was
+        # made for another version (a dubbed one, most likely); with the audio's language unknown, it can't be told.
+        # (A film without speech — zxx — has no audio language: its forced subtitles translate the text on screen.)
+        forced = [t for t in subs if t.get("forced") and str(t.get("language") or "").lower().split("-")[0] not in NO_SPEECH]
+        orphans = [t for t in forced if not any(same_language(t.get("language"), a.get("language")) for a in audio)]
+        if orphans and unknown:
+            out.append({"id": "forced_subtitles_language", "category": "file", "status": "warn",
+                        "text": M("Forced {langs} subtitles, and the audio’s language is unknown (und): whether they go with it can’t be told. Tag the audio’s language first.",
+                                  langs=", ".join(sorted({_lname(t.get("language")) for t in orphans})))})
+        elif orphans:
+            out.append({"id": "forced_subtitles_language", "category": "file", "status": "warn",
+                        "text": M("Forced {langs} subtitles, but the audio is {audio}: forced subtitles are written in the language of the audio they go with, so these were most likely made for a {langs}-dubbed version that isn’t in this file.",
+                                  langs=", ".join(sorted({_lname(t.get("language")) for t in orphans})),
+                                  audio=", ".join(sorted({_lname(l) for l in langs if l})) or M("untagged"))})
+    if on.get("subtitles_on_zxx") and audio and not speech and not unknown:  # (zxx said; an unknown language says nothing)
         odd = [t for t in subs if not t.get("forced")]
         if odd:
             out.append({"id": "subtitles_on_zxx", "category": "file", "status": "warn",
@@ -230,22 +362,6 @@ def plex_checks(item: dict, on: dict) -> list[dict]:
     return out
 
 
-SAMPLE = 64 * 1024  # bytes read at each end of two files of one size, to tell the same bytes
-
-
-def _ends(path: str, size: int) -> bytes | None:
-    """The first and last SAMPLE bytes of a file (what two copies of one file share and two files of one size don't)."""
-    try:
-        with open(path, "rb") as fh:
-            head = fh.read(SAMPLE)
-            if size > SAMPLE:
-                fh.seek(max(SAMPLE, size - SAMPLE))
-                return head + fh.read(SAMPLE)
-            return head
-    except OSError:
-        return None
-
-
 def _same_file(a: dict, b: dict) -> bool:
     """Two entries that are one file: the same inode, or the very same size and running time (to the
     half second) and — when both can be read ("local" paths) — the same bytes at both ends. Over
@@ -255,8 +371,8 @@ def _same_file(a: dict, b: dict) -> bool:
     if not (a.get("duration") and b.get("duration")) or abs(a["duration"] - b["duration"]) > 500 or a.get("size", 0) != b.get("size", 0) or not a.get("size"):
         return False
     if a.get("local") and b.get("local"):
-        x = _ends(a["local"], a["size"])
-        return x is not None and x == _ends(b["local"], b["size"])
+        from .libdata import same_bytes
+        return same_bytes(a["local"], b["local"], a["size"])
     return True
 
 
@@ -335,13 +451,16 @@ def library_health(app, key: str) -> dict:
     lang = lh.get("subtitle_language") or DEFAULT_LANGUAGE
     level = lh.get("audio_quality") or DEFAULT_AUDIO_LEVEL
     languages: set = set()
-    files = [f for f in list(app.files) if str(f.library_key) == str(key)]
+    data = app.libdata.data(key)
+    if not data.ready:  # (the library's records and files as the data layer has them: gathered now if never yet; the item pages follow in the background)
+        data = app.libdata.gather(key, ("records", "files"), wait=True)
+    files = [f for f in data.files]
     counts: dict[str, int] = {}
     items: list[dict] = []
     unread = 0
     by_item: dict[str, list] = {}
     for f in files:
-        by_item.setdefault(getattr(f, "rating_key", "") or f.path, []).append(f)
+        by_item.setdefault(f.get("rk") or f["path"], []).append(f)
     sync_sides = {}
     rep = (getattr(app, "sync", None) and app.sync.report) or {}
     for row in ((rep.get("libraries") or {}).get(str(key)) or {}).get("items") or []:
@@ -352,24 +471,30 @@ def library_health(app, key: str) -> dict:
     for rk, group in by_item.items():
         rows = []
         for f in group:
-            local = app.map_path(f.path)
-            try:
-                st = os.lstat(local)
-                ino, dev, size, nlink, sym = st.st_ino, st.st_dev, st.st_size, st.st_nlink, os.path.islink(local)
-            except OSError:
-                ino, dev, size, nlink, sym = 0, 0, getattr(f, "size", 0), 1, False
-            rows.append({"path": f.path, "local": local if ino else "", "size": size, "duration": getattr(f, "duration_ms", 0), "ino": ino, "dev": dev, "nlink": nlink, "symlink": sym})
+            ok = not f.get("missing")
+            rows.append({"path": f["path"], "local": f["local"] if ok else "", "size": f["size"], "duration": f.get("duration") or 0,
+                         "ino": f["ino"] if ok else 0, "dev": f["dev"] if ok else 0, "nlink": f.get("nlink") or 1, "symlink": bool(f.get("symlink"))})
         dup_groups[rk] = rows
     dups = duplicate_checks(dup_groups, on)
     quiet = ignored(app).get(str(key)) or {}
+    # the tools' findings, one chip per tool per item (tools/__init__.py flags): what each tool would do about the item
+    tool_checks, tool_flags = [], {}
+    chosen = (app.settings.get().get("library_health") or {}).get("checks") or {}
+    for name, tool in (getattr(app, "tools", None) or {}).items():
+        if kind and kind not in tool.applies:
+            continue
+        tid = "tool_" + name
+        tool_checks.append({"id": tid, "name": tool.title, "help": tool.flag_help, "applies": tool.applies, "link": tool.page, "on": chosen.get(tid, True)})
+        try:
+            tool_flags[tid] = (tool, tool.flags(data))
+        except Exception as e:  # noqa: BLE001 — a tool's scan refusing this library (the wrong kind): no chips from it
+            tool_flags[tid] = (tool, {})
+            tool_checks[-1]["error"] = str(e)
     for rk, group in by_item.items():
         results = list(dups.get(rk) or [])
         for f in group:
-            path = app.map_path(f.path)
-            try:
-                m = app.file_maps.get(path, os.stat(path))
-            except OSError:
-                m = None
+            path = f["local"]
+            m = None if f.get("missing") else app.file_maps.get(path, data.stat_result(f))
             if m is None:
                 unread += 1
             for t in (m or {}).get("tracks") or []:
@@ -377,25 +502,43 @@ def library_health(app, key: str) -> dict:
                     languages.add(str(t["language"]).lower().split("-")[0])
             for r in file_checks(m, on, lang):
                 results.append(dict(r, file=os.path.basename(path)))
-            for r in audio_checks(m, on, path, getattr(f, "kbps", 0) or 0, level=level, kind=kind or "movie"):
+            for r in audio_checks(m, on, path, f.get("kbps") or 0, level=level, kind=kind or "movie", streams=data.streams(rk, path)):
                 results.append(dict(r, file=os.path.basename(path)))
-        item = {"files": [f.path for f in group], "durations": [getattr(f, "duration_ms", 0) for f in group], "locked": None}
+        item = {"files": [f["path"] for f in group], "durations": [f.get("duration") or 0 for f in group], "locked": None}
+        detail = data.details.get(str(rk))
+        if detail:  # (the item's own page, as the data layer read it: the fields you locked)
+            item.update(locked=detail.get("locked") or [], fields=detail.get("fields") or {}, tags=detail.get("tags") or {})
         sd = sync_sides.get(rk)
         if sd:
             item.update(locked=sd.get("locked") or [], fields=sd.get("fields") or {}, tags=sd.get("tags") or {})
         results += plex_checks(item, on)
+        for tid, (tool, fl) in tool_flags.items():
+            rows = fl.get(str(rk))
+            if rows:  # (several findings by one tool: one chip, its lines under it)
+                results.append({"id": tid, "category": "tools", "status": "warn", "count": len(rows), "link": tool.page,
+                                "text": M("{n} things {tool} would do about it", one="{tool} has something to do about it", n=len(rows), tool=tool.title), "lines": tool.flag_lines(rows)})
         if results:
             muted = set(quiet.get(rk) or [])
             for r in results:
                 r["ignored"] = r["id"] in muted  # (greyed out, not counted: ignored on this item)
                 if not r["ignored"]:
                     counts[r["id"]] = counts.get(r["id"], 0) + 1
-            items.append({"key": rk, "label": getattr(group[0], "title", "") or os.path.basename(group[0].path), "poster": getattr(group[0], "poster", ""),
-                          "files": [os.path.basename(f.path) for f in group], "results": results, "live": sum(1 for r in results if not r["ignored"])})
+            items.append({"key": rk, "label": group[0].get("title") or os.path.basename(group[0]["path"]), "poster": group[0].get("poster") or "",
+                          "files": [os.path.basename(f["path"]) for f in group], "results": results, "live": sum(1 for r in results if not r["ignored"])})
     from .paging import sort_key
     items.sort(key=lambda it: (it["live"] == 0, sort_key(it["label"])))  # (items with nothing live left at the bottom)
     langs = sorted(languages | {lang, DEFAULT_LANGUAGE}, key=lambda c: (language_name(c) or c).lower())
-    return {"checks": {cat: [dict(c, on=on_all[c["id"]]) for c in cs if not kind or kind in c.get("applies", ALL)] for cat, cs in CHECKS.items()}, "counts": counts, "kind": kind,
-            "items": items[:2000], "total": len(items), "checked": len(by_item), "unread": unread, "pages_read": len(sync_sides),
+    checks_out = {cat: [dict(c, on=on_all[c["id"]]) for c in cs if not kind or kind in c.get("applies", ALL)] for cat, cs in CHECKS.items()}
+    checks_out["tools"] = tool_checks
+    flagged = sum(1 for it in items if it["live"])
+    multi = sum(1 for it in items if len({r["id"] for r in it["results"] if not r["ignored"]}) > 1)
+    # a folder of this library on its way to a dataset of its own (migrating.py): said at the top of the view
+    mig = (getattr(app, "migration", None) and app.migration.state) or {}
+    migration = {"step": mig.get("step"), "folder": mig.get("folder") or mig.get("source") or ""} if str(mig.get("library") or "") == str(key) and mig.get("step") else None
+    return {"checks": checks_out, "counts": counts, "kind": kind,
+            "items": items[:2000], "total": len(items), "checked": len(by_item), "unread": unread, "pages_read": len({*sync_sides, *data.details}),
+            "stats": {"items": len(by_item), "flagged": flagged, "clean": len(by_item) - flagged, "multi": multi,
+                      "clean_pct": round(100 * (len(by_item) - flagged) / len(by_item)) if by_item else None},
+            "migration": migration, "data_at": data.files_at,
             "language": lang, "languages": [{"code": c, "name": language_name(c) or c} for c in langs if c not in NO_SPEECH],
             "audio_quality": level, "audio_levels": list(AUDIO_LEVELS)}

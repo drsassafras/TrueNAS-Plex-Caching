@@ -196,3 +196,16 @@ def delete_original(path: str, new: str) -> dict:
         raise ValueError("not a plain file")
     os.remove(path)
     return {"deleted": True}
+
+
+def remove_converted(new: str, original: str) -> dict:
+    """Remove a converted file's MKV (a revert) — only while its original is there, a plain file, and
+    ``new`` is the MKV written for it."""
+    if os.path.abspath(new) == os.path.abspath(original) or target_of(original) != new:
+        raise ValueError("not the file's MKV")
+    if not os.path.isfile(original) or os.path.islink(original):
+        raise ValueError("the original isn't there")
+    if not os.path.isfile(new) or os.path.islink(new):
+        raise ValueError("the MKV isn't there")
+    os.remove(new)
+    return {"removed": True}

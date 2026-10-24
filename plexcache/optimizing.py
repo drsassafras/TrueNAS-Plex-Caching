@@ -46,7 +46,7 @@ from .plex import PlexError
 from .projection import family
 
 IMAGE_MODES = ("unmatched", "remove", "compress", "plex")
-DEFAULTS = {"sync": True, "mkv": False, "images": "unmatched", "tags": "keep", "convert": False}  # each library's choices unless set
+DEFAULTS = {"sync": True, "mkv": False, "images": "unmatched", "tags": "keep"}  # each library's choices unless set
 TAG_MODES = ("keep", "excessive", "strip")
 SYNC_PROBLEMS = ("compression", "blocks")  # fixed by writing the file again
 RECORD = "optimized.json"
@@ -391,26 +391,19 @@ class Optimizing:
             out["images"] = DEFAULTS["images"]
         if out["tags"] not in TAG_MODES:
             out["tags"] = DEFAULTS["tags"]
-        out["convert"] = out["convert"] is True
         info = getattr(self.app, "library_info", lambda k: None)(library_key) or {}
         if info.get("kind") == "audio":
             # music and audiobooks: the file is the place for cover art (players, other libraries and
             # iTunes read it there; Plex's own lookups for music are thin) — always kept, compressed
             out["images"] = "compress"
-            out["convert"] = False  # (converting is for video)
         return out
 
     def convert_types(self) -> dict:
-        """Which kinds of container are converted to MKV, in the libraries that convert."""
+        """Which kinds of container Convert to MKV (tools/convert.py) converts."""
         return dict(convert.DEFAULT_TYPES, **(self.app.settings.section("optimizer").get("convert_types") or {}))
 
-    def converts(self, path: str, opts: dict) -> str | None:
-        """The file's container type (convert.TYPES) if its library converts that kind, else None."""
-        kind = convert.type_of(path)
-        return kind if kind and opts.get("convert") and self.convert_types().get(kind) else None
-
     def convert_skipped(self, path: str, st: os.stat_result) -> str | None:
-        """Why the optimizer last left this file unconverted (what MKV wouldn't keep), while the file is
+        """Why Convert to MKV last left this file as it is (what MKV wouldn't keep), while the file is
         unchanged since; None otherwise."""
         with self.lock:
             e = self.record.get(path) or {}
@@ -471,24 +464,12 @@ class Optimizing:
         blocks of the dataset's record size)."""
         opts = self.options(library_key)
         is_mkv = path.lower().endswith(mkv.MKV_EXT)
-        kind = None if is_mkv else self.converts(path, opts)
-        if not (opts["sync"] or (opts["mkv"] and is_mkv) or kind) or conflict_original(path):
+        if not (opts["sync"] or (opts["mkv"] and is_mkv)) or conflict_original(path):
             return {"applies": False, "mkv": is_mkv}
         try:
             st = os.stat(path)
         except OSError:
             return {"applies": False, "missing": True, "mkv": is_mkv}
-        if kind:
-            # converted already (waiting for Plex, or by another system sharing the files): nothing to do
-            # here — it goes once Plex has its MKV
-            conv = self.app.conversions.get(path) if hasattr(self.app, "conversions") else None
-            if conv or os.path.exists(convert.target_of(path)):
-                return {"applies": True, "mkv": False, "problems": [], "converted": (conv or {}).get("state") or "there"}
-            why = self.convert_skipped(path, st)
-            if not why:
-                return {"applies": True, "mkv": False, "problems": ["convert"], "convert": kind}
-            if not opts["sync"]:
-                return {"applies": True, "mkv": False, "problems": [], "convert_skipped": why}
         problems, comp = [], None
         if opts["mkv"] and is_mkv:
             info = self._mkv_info(path, st)
@@ -566,7 +547,7 @@ class Optimizing:
                 s = self.file_status(path, key, rec, getattr(f, "poster", ""), getattr(f, "matched", None))
                 lib = out.get(key)
                 if lib is None:
-                    lib = out[key] = {"files": 0, "mkv": 0, "mkv_done": 0, "sync_todo": 0, "todo": 0,
+                    lib = out[key] = {"files": 0, "mkv": 0, "mkv_done": 0, "sync_todo": 0, "todo": 0, "todo_bytes": 0,
                                       "compression_setting": rec.get("compression"), "dataset": rec.get("dataset"),
                                       "why": {}, "compression": {}, "conflicts": [], "zfs": self.zfs_config(key, rec)}
                 if s.get("missing") or conflict_original(path):
@@ -578,6 +559,7 @@ class Optimizing:
                     lib["mkv_done"] += 1
                 lib["sync_todo"] += any(p in SYNC_PROBLEMS for p in probs)
                 lib["todo"] += bool(probs)
+                lib["todo_bytes"] += int(getattr(f, "size", 0) or 0) if probs else 0  # (what a snapshot keeps of the files rewritten)
                 for p in probs:
                     lib["why"][p] = lib["why"].get(p, 0) + 1
                 if s.get("compression"):
@@ -1067,16 +1049,7 @@ class Optimizing:
         opts = self.options(key)
         problems = item.get("problems") or []
         try:
-            if "convert" in problems:  # converted to MKV (and optimized), next to the original
-                images = self.images_mode(opts["images"], poster, item.get("matched"), {})
-                cover = None
-                if images == "plex":
-                    try:
-                        cover = self._poster(poster)
-                    except PlexError as e:
-                        return {"result": "failed", "reason": msg(e)}
-                send = lambda: self.client.convert(path, images, cover, opts["tags"])
-            elif item.get("cover"):  # Sync Cover Art: written again with the new cover art
+            if item.get("cover"):  # Sync Cover Art: written again with the new cover art
                 cover = self._poster(poster) if item["cover"] == "plex" else None
                 send = lambda: self.client.optimize(path, item["cover"], True, cover, opts["tags"])
             elif any(p not in SYNC_PROBLEMS for p in problems):
@@ -1096,13 +1069,34 @@ class Optimizing:
         r = self._send(path, send, st.st_size)
         if r.get("result") in ("optimized", "already", "rewritten"):
             self.note(path, key, r, rec)
-        elif r.get("result") == "converted" and r.get("new"):
-            self.note(r["new"], key, dict(r, result="optimized"), rec)  # (the MKV: optimized, written with the dataset's settings)
-            f = next((x for x in list(self.app.files) if self.app.map_path(x.path) == path), None)
-            if f is not None:
-                self.app.conversions.add(f, path, r["new"])
-        elif "convert" in problems and r.get("result") == "skipped":
-            # what MKV wouldn't keep: not tried again while the file stays as it is
+        return r
+
+    def convert_one(self, path: str, key: str, poster: str = "", log=None) -> dict:
+        """One file converted to MKV by the optimizer service, next to the original (Convert to MKV's apply_row): the
+        service's result — "converted" with "new" (the MKV, optimized and noted like any), "skipped" with the reason
+        (what MKV wouldn't keep: remembered, so the scan says it while the file stays as it is), "failed", "cancelled"."""
+        if path in self.app.monitor.playing_paths():
+            return {"result": "skipped", "reason": "playing"}
+        try:
+            st = os.stat(path)
+        except OSError as e:
+            return {"result": "failed", "reason": str(e)}
+        if time.time() - st.st_mtime < RECENT_SECONDS:
+            return {"result": "skipped", "reason": "just written"}
+        opts = self.options(key)
+        images = self.images_mode(opts["images"], poster, None, {})
+        cover = None
+        if images == "plex":
+            try:
+                cover = self._poster(poster)
+            except PlexError as e:
+                return {"result": "failed", "reason": msg(e)}
+        if log:
+            log(M("Inspecting what MKV would keep of it, then writing the MKV next to it"))
+        r = self._send(path, lambda: self.client.convert(path, images, cover, opts["tags"]), st.st_size)
+        if r.get("result") == "converted" and r.get("new"):
+            self.note(r["new"], key, dict(r, result="optimized"), self.app.library_records().get(key) or {})  # (the MKV: optimized, written with the dataset's settings)
+        elif r.get("result") == "skipped" and r.get("reason") not in ("playing", "just written"):
             with self.lock:
                 self.record[path] = dict(self.record.get(path) or {}, convert_skip={
                     "reason": r.get("reason"), "size": st.st_size, "mtime_ns": st.st_mtime_ns, "ino": st.st_ino})

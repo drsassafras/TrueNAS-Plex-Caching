@@ -39,6 +39,13 @@ _dup = os.path.join(media, "Movies", "Glass Harbour (2012) [copy].mkv")
 _sh.copy(_m2["path"], _dup)
 cat["movies"].append({"path": _dup, "size": _m2["size"], "kbps": _m2["kbps"], "key": "190", "title": _m2["title"], "year": _m2["year"], "guid": _m2["guid"], "guids": _m2["guids"]})
 cat["movies"][2]["locked"] = ["title", "summary"]
+# a film in another container, for Convert to MKV
+_avi = os.path.join(media, "Movies", "Tin Lanterns (1998)", "Tin Lanterns (1998).avi")
+os.makedirs(os.path.dirname(_avi), exist_ok=True)
+with open(_avi, "wb") as _fh:
+    _fh.write(b"RIFF" + b"\0" * (3 * 1024 * 1024))
+os.utime(_avi, (time.time() - 86400, time.time() - 86400))
+cat["movies"].append({"path": _avi, "size": 3 * 1024 * 1024, "kbps": 1200, "key": "191", "title": "Tin Lanterns", "year": 1998, "guid": "plex://movie/191", "guids": ["tmdb://1998"], "duration": 5000000})
 _copy = os.path.join(os.path.dirname(_m3["path"]), "Paper Moons (2013) - copy.mkv")
 _sh.copy(_m3["path"], _copy)
 _m3["more"] = [_copy]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import os
 import time
 import ssl
@@ -203,8 +204,11 @@ class FakePlex:
         size = item["size"]
         media_br = f' bitrate="{item["kbps"]}"' if item["kbps"] else ""
         dur = item.get("duration", 0)
+        # the streams Plex probed, on the item's own page (item["streams"]: [{"type": 2, "codec", "channels", "bitrate", ...}])
+        streams = "".join('<Stream id="%d" streamType="%s" index="%d" %s/>' % (i + 1, st.get("type", 2), i, " ".join(
+            f'{k}={quoteattr(str(v))}' for k, v in st.items() if k != "type")) for i, st in enumerate(item.get("streams") or []))
         out = (f'<Media id="1"{media_br} duration="{dur}"><Part id="1" file={quoteattr(item["path"])} size="{size}"'
-               f' duration="{dur}"/></Media>')
+               f' duration="{dur}">{streams}</Part></Media>')
         for i, p in enumerate(item.get("more", [])):  # more versions (paths) on the same record
             out += f'<Media id="{i + 2}"{media_br} duration="{dur}"><Part id="{i + 2}" file={quoteattr(p)} size="{size}" duration="{dur}"/></Media>'
         return out + extra
@@ -257,7 +261,26 @@ class FakePlex:
                     self.cat["movies"].remove(other)
             self.merged = getattr(self, "merged", []) + [(parts[3], q.get("ids", [""])[0])]
             return True
+        if len(parts) == 5 and parts[1:3] == ["library", "metadata"] and parts[4] == "split":  # Split Apart: each version a record again
+            keep = next((m for m in self.cat["movies"] if m["key"] == parts[3]), None)
+            if keep is None:
+                return False
+            for i, path in enumerate(keep.pop("more", [])):
+                self.cat["movies"].append({"path": path, "size": keep["size"], "kbps": keep["kbps"], "key": f"{keep['key']}{i + 1}", "title": keep.get("title"), "year": keep.get("year"),
+                                           "guid": keep.get("guid"), "duration": keep.get("duration")})
+            self.split = getattr(self, "split", []) + [parts[3]]
+            return True
         return len(parts) == 5 and parts[1:3] == ["library", "sections"] and parts[4] == "emptyTrash"
+
+    def _movie_xml(self, m):
+        return (f'<Video type="movie" ratingKey="{m["key"]}" title={quoteattr(m.get("title", "Movie"))}'
+                + (f' year="{m["year"]}"' if m.get("year") else "") + (f' guid={quoteattr(m["guid"])}' if m.get("guid") else "")
+                + (f' editionTitle={quoteattr(m["edition"])}' if m.get("edition") else "")
+                + (f' thumb="/library/metadata/{m["key"]}/thumb/1"' if m.get("guid") else "") + (f' updatedAt="{m["updated_at"]}"' if m.get("updated_at") else "") + ">"
+                + "".join(f'<Guid id={quoteattr(g)}/>' for g in m.get("guids", []))
+                + "".join(f'<Field locked="1" name="{n}"/>' for n in m.get("locked", []))
+                + "".join(f'<Collection tag={quoteattr(c)}/>' for c in m.get("collections", [])) + "".join(f'<Label tag={quoteattr(c)}/>' for c in m.get("labels", []))
+                + f"{self._part(m)}</Video>")
 
     def _episode_xml(self, ep, extra_attrs=""):
         return (f'<Video type="episode" ratingKey="{ep["key"]}" grandparentRatingKey="500" grandparentTitle={quoteattr(self.show_name)} '
@@ -273,7 +296,7 @@ class FakePlex:
             return '<MediaContainer friendlyName="Test Server" version="1.41.0" machineIdentifier="abc"/>'
         if u.path == "/library/sections":
             dirs = "".join(
-                f'<Directory key="{k}" title="{t}" type="{ty}">'
+                f'<Directory key="{k}" title="{t}" type="{ty}" contentChangedAt="{getattr(self, "changed_at", "1")}">'
                 + "".join(f'<Location id="{k}{i}" path={quoteattr(p)}/>' for i, p in enumerate(loc.split("|")))
                 + "</Directory>"
                 for k, t, ty, loc in self.libraries
@@ -289,14 +312,7 @@ class FakePlex:
             typ = q.get("type", [""])[0]
             if key == "1" and typ == "1":
                 movies = [m for m in self.cat["movies"] if not q.get("title") or m.get("title", "Movie") == q["title"][0]]
-                items = [f'<Video type="movie" ratingKey="{m["key"]}" title={quoteattr(m.get("title", "Movie"))}'
-                         + (f' year="{m["year"]}"' if m.get("year") else "") + (f' guid={quoteattr(m["guid"])}' if m.get("guid") else "")
-                         + (f' editionTitle={quoteattr(m["edition"])}' if m.get("edition") else "")
-                         + (f' thumb="/library/metadata/{m["key"]}/thumb/1"' if m.get("guid") else "") + ">"
-                         + "".join(f'<Guid id={quoteattr(g)}/>' for g in m.get("guids", []))
-                         + "".join(f'<Field locked="1" name="{n}"/>' for n in m.get("locked", []))
-                         + "".join(f'<Collection tag={quoteattr(c)}/>' for c in m.get("collections", [])) + "".join(f'<Label tag={quoteattr(c)}/>' for c in m.get("labels", []))
-                         + f"{self._part(m)}</Video>" for m in movies]
+                items = [self._movie_xml(m) for m in movies]
             elif key == "2" and typ == "4":
                 items = [self._episode_xml(e) for e in self.cat["episodes"]]
             elif key == "3" and typ == "10":
@@ -309,6 +325,18 @@ class FakePlex:
             size = int(headers.get("X-Plex-Container-Size", 10 ** 9))
             page = items[start:start + size]
             return f'<MediaContainer size="{len(page)}" totalSize="{len(items)}" offset="{start}">{"".join(page)}</MediaContainer>'
+        m_item = re.fullmatch(r"/library/metadata/(\d+)", u.path)
+        if m_item:  # an item's own page: the record with its files' streams
+            key = m_item.group(1)
+            movie = next((m for m in self.cat["movies"] if m["key"] == key), None)
+            if movie and movie.get("guid"):  # (a test's own records; the plain catalogue's movies fall through to the page with their collection)
+                return f"<MediaContainer>{self._movie_xml(movie)}</MediaContainer>"
+            ep = next((e for e in self.cat["episodes"] if e["key"] == key), None)
+            if ep:
+                return f"<MediaContainer>{self._episode_xml(ep)}</MediaContainer>"
+            tr = next((t for t in self.cat["tracks"] + self.cat.get("tracks_b", []) if t["key"] == key), None)
+            if tr:
+                return f'<MediaContainer><Track type="track" ratingKey="{tr["key"]}" title="Chapter">{self._part(tr)}</Track></MediaContainer>'
         if u.path in ("/library/metadata/600/children", "/library/metadata/601/children"):  # a book's tracks, in order
             book, name = (self.cat["tracks"], "Chapter") if "600" in u.path else (self.cat["tracks_b"], "Book 2, chapter")
             return "<MediaContainer>" + "".join(
@@ -487,7 +515,7 @@ class FakeTrueNAS:
                 elif req["method"] == "core.get_methods":  # (every method this TrueNAS has, by name; methods_missing: left out)
                     have = ["auth.login_with_api_key", "system.version", "pool.query", "pool.dataset.query", "zfs.dataset.query", "disk.query",
                             "app.query", "app.pull_images", "app.redeploy", "core.get_methods"] + \
-                           [getattr(self, "snapshot_api", "pool.snapshot") + x for x in (".query", ".create", ".delete")]
+                           [getattr(self, "snapshot_api", "pool.snapshot") + x for x in (".query", ".create", ".delete", ".rollback")]
                     result = {m: {"description": ""} for m in have if m not in getattr(self, "methods_missing", ())}
                 elif req["method"] == "system.version":
                     result = "TrueNAS-25.10.0"
@@ -513,7 +541,7 @@ class FakeTrueNAS:
                     result = [{"name": "nvme1n1", "size": 480 * 10 ** 9}]
                 # the snapshot API by TrueNAS version: pool.snapshot.* from 25.04, zfs.snapshot.* before (snapshot_api
                 # says which this fake TrueNAS has; the other name is "Method does not exist", as TrueNAS answers)
-                elif req["method"].endswith((".snapshot.query", ".snapshot.delete", ".snapshot.create")) and \
+                elif req["method"].endswith((".snapshot.query", ".snapshot.delete", ".snapshot.create", ".snapshot.rollback")) and \
                         req["method"].rsplit(".", 1)[0] != getattr(self, "snapshot_api", "pool.snapshot"):
                     self.snapshot_calls = getattr(self, "snapshot_calls", []) + [req["method"]]
                     error = {"code": -32601, "message": "Method does not exist", "data": {"reason": f"Method {req['method']} does not exist"}}
@@ -526,6 +554,10 @@ class FakeTrueNAS:
                     ds, _, n = req["params"][0].partition("@")
                     self.snapshots = getattr(self, "snapshots", {})
                     self.snapshots[ds] = [x for x in self.snapshots.get(ds, []) if x[0] != n]
+                    result = True
+                elif req["method"].endswith(".snapshot.rollback"):
+                    self.snapshot_calls = getattr(self, "snapshot_calls", []) + [req["method"]]
+                    self.rolled_back = getattr(self, "rolled_back", []) + [req["params"][0]]
                     result = True
                 elif req["method"].endswith(".snapshot.create"):
                     self.snapshot_calls = getattr(self, "snapshot_calls", []) + [req["method"]]

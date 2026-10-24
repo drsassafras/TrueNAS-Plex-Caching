@@ -22,7 +22,7 @@ from .plex import PlexError, check_pin, create_pin
 
 log = logging.getLogger("plexcache")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
-PAGES = {"/", "/health", "/caching", "/ssd", "/library", "/tools", "/optimizer", "/convert", "/dataset", "/merge", "/versions", "/folders", "/unlink", "/processes", "/sync", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
+PAGES = {"/", "/health", "/caching", "/ssd", "/library", "/tools", "/optimizer", "/convert", "/dataset", "/merge", "/versions", "/folders", "/unlink", "/filechecks", "/plexchecks", "/processes", "/sync", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
 MAX_BODY = 1024 * 1024
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
@@ -243,7 +243,14 @@ def make_handler(app):
                         need = max(0, int(need))
                     except ValueError:
                         need = 0
-                return self._json(jsonable(readiness(app, key, need, keeps=(rq.get("keeps") or [""])[0] == "1")))
+                try:
+                    retained = max(0, int((rq.get("retained") or ["0"])[0]))
+                except ValueError:
+                    retained = 0
+                tool = (rq.get("tool") or [""])[0]
+                if tool == "optimizer":  # (what a snapshot keeps of a library's rewrite: the files still to do)
+                    retained = retained or int(((app.optimizing.summary or {}).get(key) or {}).get("todo_bytes") or 0)
+                return self._json(jsonable(readiness(app, key, need, keeps=(rq.get("keeps") or [""])[0] == "1", retained=retained, tool=tool)))
             if path.startswith("/api/library"):
                 # The Library Health page: a library's files with their layouts, or one file in full
                 q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
@@ -264,6 +271,7 @@ def make_handler(app):
                         return self._error(str(e), 400)
                     return self._json({"blocks": got}) if got is not None else self._error("not found", 404)
                 if path == "/api/library/health":  # Library Health: one library's items through the content checks
+                    app.libdata.fast_track(arg("key"))  # (the library opened: its data gathered first)
                     from .libhealth import library_health
                     if not app.library_info(arg("key")):
                         return self._error("not found", 404)
@@ -315,7 +323,9 @@ def make_handler(app):
                     d = app.jobs.log.files(arg("job"), off, lim, sort=arg("sort") or "file", fill=lambda rows: app.optimizing.describe(rows, arg("job")))
                     for f in d["files"]:  # each written file's chart: what caching keeps of it, just before and after
                         f["views"] = filehistory.file_views(f.pop("mix_before", None), f.pop("mix_after", None))
-                    return self._json(d)
+                    tool = app.tools.get(str(d.get("tool") or "")) if d.get("kind") == "tool" else None
+                    d["columns"] = [{"id": cid, "name": name} for cid, name in tool.history] if tool else []  # (a tool's run: its own columns)
+                    return self._json(jsonable(d))
                 if path == "/api/processes/export":
                     fmt = "json" if arg("format") == "json" else "csv"
                     body, ctype = app.jobs.log.export(fmt)
@@ -442,10 +452,11 @@ def make_handler(app):
                     why = peers.optimizer_conflict(app, key)
                     if why:
                         raise SettingsError(why)  # (another Plex Cache would undo it: said on Health too)
-                    if mode == "optimize":  # files are rewritten: room for the largest, and a recent snapshot, first
-                        ready = safety.readiness(app, key, "largest")
+                    if mode == "optimize":  # files are rewritten: room for the largest (and what a snapshot keeps of the rewritten), and a backup that can be made
+                        sums = (app.optimizing.summary or {}).get(key) or {}
+                        ready = safety.readiness(app, key, "largest", retained=int(sums.get("todo_bytes") or 0), tool="optimizer")
                         if not ready["ready"]:
-                            raise SettingsError(M("Not yet: {why}", why=ready["space"]["text"] if ready["space"]["status"] != "ok" else ready["snapshot"]["text"]))
+                            raise SettingsError(M("Not yet: {why}", why=safety.why_not(ready)))
                     got = app.optimizing.queue(key, mode)  # now, or after the jobs before it
                     return self._json({"started": got == "started", "queued": got == "queued"})
                 if path.startswith("/api/sync/"):
@@ -488,9 +499,7 @@ def make_handler(app):
                     if not app.library_info(key):
                         raise SettingsError(M("unknown library: {key}", key=key))
                     try:
-                        if body.get("action") == "ack":
-                            safety.acknowledge_backup(app, key, str(body.get("how") or "manual"))
-                        elif body.get("action") == "dismiss":
+                        if body.get("action") == "dismiss":
                             safety.errors(app).pop(key, None)
                         else:
                             safety.take_snapshot(app, key, str(body.get("tool") or ""))
@@ -504,7 +513,8 @@ def make_handler(app):
                         raise SettingsError(M("unknown tool"))
                     action = body.get("action")
                     if action == "scan":
-                        started = tool.scan_async(str(body.get("library") or ""), body.get("options") if isinstance(body.get("options"), dict) else {})
+                        started = tool.scan_async(str(body.get("library") or ""), body.get("options") if isinstance(body.get("options"), dict) else {},
+                                                  refresh=bool(body.get("refresh", True)))  # (Scan Again gathers the data again; the page's own first scan takes it as it is)
                     elif action == "apply":
                         choices = body.get("choices") if isinstance(body.get("choices"), dict) else {}
                         try:
@@ -540,9 +550,9 @@ def make_handler(app):
                         if action in ("copy", "catchup"):
                             if action == "copy":  # the folder copied into the new dataset: a recent snapshot first (room is among its own checks)
                                 from . import safety
-                                ready = safety.readiness(app, str((mig.state or {}).get("library") or ""), 0, keeps=True)
+                                ready = safety.readiness(app, str((mig.state or {}).get("library") or ""), 0, keeps=True, tool="dataset")
                                 if not ready["ready"]:
-                                    raise SettingsError(M("Not yet: {why}", why=ready["snapshot"]["text"] if ready["snapshot"]["status"] == "warn" else ready["space"]["text"]))
+                                    raise SettingsError(M("Not yet: {why}", why=safety.why_not(ready)))
                             return self._json(jsonable(mig.start_copy(mirror=action == "catchup")))
                         if action in ("pause", "resume"):
                             app.jobs.pause(action == "pause")
@@ -606,6 +616,12 @@ def make_handler(app):
                         return self._json({"ok": got is not None})
                     if a == "remove":  # queued work, taken off the queue
                         return self._json({"ok": app.jobs.remove(str(body.get("id") or ""))})
+                    if a in ("revert", "rollback"):  # a tool's run undone: its changed files put back from the backup, or the whole snapshot rolled back
+                        from .tools import revert_job, rollback_job
+                        try:
+                            return self._json((revert_job if a == "revert" else rollback_job)(app, str(body.get("job") or "")))
+                        except ValueError as e:
+                            raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
                     ok = app.jobs.pause(a == "pause") if a in ("pause", "resume") else app.jobs.cancel() if a == "cancel" else None
                     if ok is None:
                         raise SettingsError(M("unknown action"))

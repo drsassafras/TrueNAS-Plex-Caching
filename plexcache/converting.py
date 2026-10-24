@@ -4,16 +4,15 @@ Converting (optimize/convert.py) leaves the original where it was, with ``<name>
 Then, the way that keeps Plex's metadata (edits, watch history, collections): Plex is asked to scan
 the folder, and picks the MKV up as a second version of the same item. Once it has — checked here
 by asking Plex for the item's files, and on a second Plex server with the same files too (plex2.py)
-— the original waits ``optimizer.convert_hold_days`` (so a
-second Plex server on a synced copy of the files, scanned by hand, sees the MKV too before the
-original's deletion reaches it), then it's deleted and the folder scanned again. Plex keeps the
-item, now with just the MKV.
+— the original is deleted and the folder scanned again. Plex keeps the item, now with just the MKV.
+The run that converted it took a backup first (tools/convert.py, a ToolJob): while it lasts, Revert
+on the run puts the original back and removes the MKV.
 
 If Plex makes the MKV an item of its own instead, nothing is deleted: the page says to merge them in
 Plex (which brings the check back on track) or to keep both. Kept in conversions.json.
 
-States: "waiting" (Plex doesn't have the MKV yet), "seen" (it's a version of the same item: the
-original's deletion is due ``hold`` after), "separate" (another item), "deleted", "missing" (the MKV
+States: "waiting" (Plex doesn't have the MKV yet), "seen" (it's a version of the same item, and the
+original's deletion failed: tried again), "separate" (another item), "deleted", "missing" (the MKV
 is gone: the original stays).
 """
 
@@ -49,23 +48,26 @@ class Conversions:
             data = {"items": [dict(e) for e in self.items]}
         self.app._save_json(STORE, data)
 
-    def hold_days(self) -> int:
-        return int(self.app.settings.section("optimizer").get("convert_hold_days", 7))
-
     def get(self, path: str) -> dict | None:
         """The conversion a file is part of (as its original or its MKV), or None."""
         with self.lock:
             return next((dict(e) for e in self.items if path in (e["original"], e["new"])), None)
 
-    def add(self, f, original: str, new: str) -> None:
-        """A file just converted (``f``: its MediaFile from Plex; paths as this app sees them)."""
-        plex_new = os.path.splitext(f.path)[0] + ".mkv"
-        e = {"original": original, "new": new, "plex_original": f.path, "plex_new": plex_new, "library": str(f.library_key),
-             "rating_key": getattr(f, "rating_key", "") or "", "title": getattr(f, "title", "") or os.path.basename(f.path),
+    def add(self, library: str, plex_original: str, original: str, new: str, rating_key: str = "", title: str = "") -> None:
+        """A file just converted: its path as Plex has it and as this app sees it, and its MKV's."""
+        plex_new = os.path.splitext(plex_original)[0] + ".mkv"
+        e = {"original": original, "new": new, "plex_original": plex_original, "plex_new": plex_new, "library": str(library),
+             "rating_key": rating_key or "", "title": title or os.path.basename(plex_original),
              "converted": time.time(), "state": "waiting", "checked": 0.0, "scanned": 0.0}
         with self.lock:
             self.items = [x for x in self.items if x["original"] != original] + [e]
         self._scan(e)
+        self.save()
+
+    def forget(self, original: str) -> None:
+        """A conversion no longer followed (reverted): its entry dropped."""
+        with self.lock:
+            self.items = [x for x in self.items if x["original"] != original]
         self.save()
 
     def _scan(self, e: dict) -> None:
@@ -151,15 +153,14 @@ class Conversions:
                 e["state"] = "separate"
             elif where == "same" and there in (None, "same", "absent"):
                 e.update(state="seen", seen=now)
-                self.app.activity.event("optimizer", M("Plex has the MKV of {title}: the original goes in {n} days",
-                                                       one="Plex has the MKV of {title}: the original goes in {n} day",
-                                                       title=e["title"], n=self.hold_days()))
+                self.app.activity.event("optimizer", M("Plex has the MKV of {title}: the original goes", title=e["title"]))
+                self._delete(e)
             else:
                 e["state"] = "waiting"
                 if where != "same" and now - e.get("scanned", 0) >= RESCAN_EVERY:
                     self._scan(e)
             return True
-        if state == "seen" and now >= e.get("seen", now) + self.hold_days() * 86400 and now - e.get("failed", 0) >= RETRY_DELETE:
+        if state == "seen" and now - e.get("failed", 0) >= RETRY_DELETE:
             self._delete(e)
             return True
         return False
@@ -210,8 +211,4 @@ class Conversions:
     def snapshot(self) -> dict:
         with self.lock:
             items = [dict(e) for e in self.items]
-        hold = self.hold_days()
-        for e in items:
-            if e["state"] == "seen":
-                e["due"] = e.get("seen", 0) + hold * 86400
-        return {"items": sorted(items, key=lambda e: -e.get("converted", 0)), "hold_days": hold}
+        return {"items": sorted(items, key=lambda e: -e.get("converted", 0))}

@@ -1748,10 +1748,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.post("/api/optimize/library", {"library": "999"})[0], 400)
         key = app.libraries[0]["key"]
         self.assertEqual(self.post("/api/optimize/library", {"library": key, "mode": "x"})[0], 400)
-        # optimizing follows the same formula as the file tools: without a recent snapshot or a backup, it does not start
-        self.assertEqual(self.post("/api/optimize/library", {"library": key})[0], 400)
-        from plexcache import safety
-        safety.acknowledge_backup(app, key)
+        # optimizing follows the same formula as the file tools: a backup plan first (the preference's), then it may start
         self.assertEqual(self.post("/api/optimize/library", {"library": key}), (200, {"started": False, "queued": False}))
         self.assertEqual(self.post("/api/optimizer/check", {})[0], 200)
         # the folder move: with none in progress, each step says why it can't (never a server error)
@@ -1992,7 +1989,7 @@ class AppTests(unittest.TestCase):
         rs = dsrow["recordsize"]
         if rs["status"] == "warn" and en(rs.get("badge", "")) == "Split dataset":
             self.assertEqual(len(rs["lines"]), 1)
-            self.assertIn("to a dataset of its own;", en(rs["lines"][0]))
+            self.assertIn("to a dataset of its own](/dataset);", en(rs["lines"][0]))
         self.assertNotIn("optimized", media["Movies"])                        # the Optimizer page has its own
         # one row per dataset, naming the libraries on it
         rows = {r["dataset"]: r for r in groups["datasets"]["datasets"]}
@@ -4357,7 +4354,7 @@ class TrueNASWatchTests(unittest.TestCase):
         os.makedirs(os.path.join(d, "service"))
         w = lambda rel, text: open(os.path.join(d, rel), "w", encoding="utf-8").write(text)
         w("plugins/pool_/snapshot.py", "class PoolSnapshotService(CRUDService):\n\n    class Config:\n        namespace = 'pool.snapshot'\n\n"
-          "    @api_method(A, B)\n    def do_create(self, data):\n        pass\n\n    async def do_delete(self, id_):\n        pass\n")
+          "    @api_method(A, B)\n    def do_create(self, data):\n        pass\n\n    async def do_delete(self, id_):\n        pass\n\n    def rollback(self, id_, options):\n        pass\n")
         w("plugins/pool_/pool.py", "class PoolService(CRUDService):\n    def do_update(self, id_, data):\n        pass\n")
         w("plugins/pool_/dataset.py", "class PoolDatasetService(CRUDService):\n\n    class Config:\n        namespace = 'pool.dataset'\n")
         w("plugins/auth.py", "class AuthService(Service):\n\n    class Config:\n        cli_namespace = \"auth\"\n\n    async def login_with_api_key(self, app, key):\n        pass\n")
@@ -4367,7 +4364,7 @@ class TrueNASWatchTests(unittest.TestCase):
           "    @job()\n    def redeploy(self, job, name):\n        pass\n\n    def pull_images(self, job, name, options):\n        pass\n")
         w("service/core_service.py", "class CoreService(Service):\n    def get_methods(self, prefix=''):\n        pass\n")
         have = truenas_api.services(d)
-        self.assertEqual(have["pool.snapshot"], {"create", "delete", "query"})
+        self.assertEqual(have["pool.snapshot"], {"create", "delete", "query", "rollback"})
         self.assertEqual(have["pool"], {"update", "query"})
         self.assertEqual((have["auth"], have["system"], have["core"]), ({"login_with_api_key"}, {"version"}, {"get_methods"}))
         self.assertNotIn("other", have)
@@ -4401,11 +4398,193 @@ class TrueNASWatchTests(unittest.TestCase):
         self.assertGreaterEqual(len(called), 8, called)
         self.assertEqual(sorted(called - watched), [], "TrueNAS calls not in truenas.METHODS: add them, so the checks cover them")
         for api in safety.SNAPSHOT_APIS:
-            for what in ("query", "create", "delete"):
+            for what in ("query", "create", "delete", "rollback"):
                 self.assertIn(f"{api}.{what}", watched)
         # and nothing watched that the app no longer calls (a name kept for an older TrueNAS is still called through its list)
-        snapshot_names = {f"{api}.{what}" for api in safety.SNAPSHOT_APIS for what in ("query", "create", "delete")}
+        snapshot_names = {f"{api}.{what}" for api in safety.SNAPSHOT_APIS for what in ("query", "create", "delete", "rollback")}
         self.assertEqual(sorted(watched - called - snapshot_names), [])
+
+
+class DataLayerTests(unittest.TestCase):
+    """The library data layer (libdata.py): the tools and Library Health read one gathered copy of a library —
+    Plex's records, the files on disk, the folder tree — never Plex or the disk themselves; one gathering serves
+    every check; a change the layer sees reaches every tool's rows and count without a scan. Tests that hold
+    every tool, present and future, to it."""
+
+    # what a scan may not call: Plex, and the disk (apply-time methods may: they go through the optimizer service)
+    FORBIDDEN_ATTRS = {"plex", "library_items", "item_detail", "library_files", "lstat", "stat", "walk", "listdir", "scandir", "islink", "isfile", "exists", "getsize", "statvfs"}
+    APPLY_TIME = {"apply_row", "apply_async", "revert_row", "run_rows", "finished_job", "tick", "waiting", "stuck", "_wait_for", "file_action", "mirror", "mirror_name", "save", "snapshot", "root_of", "run", "revert_job"}
+
+    def _calls(self, src: str):
+        """(function name, called name) for every call in a module's functions and methods, apply-time ones left out."""
+        import ast
+        out = []
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name not in self.APPLY_TIME:
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call):
+                        f = sub.func
+                        name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+                        out.append((node.name, name))
+        return out
+
+    def test_tools_read_through_the_data_layer(self):
+        """No tool's scan (nor Library Health's checks) asks Plex or the disk for itself: every read goes through
+        libdata, so a new tool that fetches on its own fails here. (Apply-time methods may: they act.)"""
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache")
+        files = [os.path.join(root, "tools", n) for n in sorted(os.listdir(os.path.join(root, "tools"))) if n.endswith(".py")] + [os.path.join(root, "libhealth.py")]
+        checked = 0
+        for path in files:
+            src = open(path, encoding="utf-8").read()
+            if "(Tool)" not in src and not path.endswith(("__init__.py", "libhealth.py")):
+                continue  # (rewrite_blocks.py: the shell script the README gives, not a tool of the pages)
+            checked += 1
+            bad = [(fn, name) for fn, name in self._calls(src) if name in self.FORBIDDEN_ATTRS or name == "open"]
+            self.assertEqual(bad, [], f"{os.path.relpath(path, root)} reads outside the data layer: {bad}")
+        self.assertGreaterEqual(checked, 6)  # (the base, the four tools, Library Health)
+        # the page: what a row says comes through chips (chips(): a badge that opens to its explanation), never a bare
+        # badge, nor an ⓘ in a row — the one style, the Sync and Health views' — so every tool reads alike
+        js = open(os.path.join(root, "web", "app.js"), encoding="utf-8").read()
+        for fn in ("fileLine",) + tuple("page" + n.capitalize() for n in ("merge", "versions", "folders", "unlink", "convert")):
+            body = re.search(r"\n  function " + fn + r"\(.*?\{(.*?)(?=\n  function |\n  var )", js, re.S)
+            self.assertIsNotNone(body, fn)
+            rows = body.group(1)
+            for key in ("row:", "sub:"):
+                if key in rows:
+                    part = rows[rows.index(key):]
+                    part = part[:part.index("\n      ", 1) if "\n      " in part[1:] else len(part)]
+                    self.assertNotRegex(part, r"\bbadge\(|\binfo\(|\bfact\(", f"{fn}'s {key} draws a bare badge or ⓘ: use chips()")
+            if fn == "fileLine":
+                self.assertNotRegex(rows, r"\bbadge\(|\binfo\(", "fileLine draws a bare badge or ⓘ: use chips()")
+        self.assertNotIn("function fact(", js)
+        # and the data layer itself is where those reads live
+        self.assertIn("os.walk(", open(os.path.join(root, "libdata.py"), encoding="utf-8").read())
+
+    def test_every_tool_declares_itself(self):
+        """Each tool says what it is to the Tools page and Library Health: a title, its page, what its chip means, the
+        library kinds it works on, lines for its rows — and the page lists it (TOOLS, TOOL_PAGES), the state counts it."""
+        from plexcache import server
+        from plexcache.app import App
+        app = App(tempfile.mkdtemp(dir=TMP))
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        self.assertGreaterEqual(len(app.tools), 4)
+        for name, tool in app.tools.items():
+            with self.subTest(tool=name):
+                self.assertTrue(en(tool.title) and en(tool.title) != "Tool", "no title")
+                self.assertIn(tool.page, server.PAGES, "its page isn't a page")
+                self.assertEqual(tool.page, "/" + name)
+                self.assertTrue(en(tool.flag_help), "no help for its chip on Library Health")
+                self.assertTrue(set(tool.applies) <= {"movie", "tv", "audio"} and tool.applies, "applies: which library kinds")
+                self.assertRegex(js, r'\["' + name + r'", N\("', "not on the Tools page's cards")
+                self.assertIn(name + ": 1", js[js.index("var TOOL_PAGES"):js.index("\n", js.index("var TOOL_PAGES"))])
+                self.assertIsInstance(tool.flag_lines([]), list)
+                # what the history keeps of a row: the tool's own columns, every one filled by history_row
+                self.assertTrue(tool.history and all(cid and en(name) for cid, name in tool.history), "no history columns")
+                sample = {"title": "x", "id": "y", "kind": "loose", "moves": [{"from": "/a/b.mkv", "to": "/a/B (2000)/b.mkv", "media": True}], "folder": "B (2000)",
+                          "keep": {"key": "1", "name": "b.mkv", "label": "B (2000)"}, "others": [], "extras": [{"name": "c.mkv"}], "links": 2, "why": "matched"}
+                got = tool.history_row(sample, {"bytes": 5, "removed": 0, "set_aside": 1, "frees": 7, "merged": 1})
+                self.assertEqual(set(got), {cid for cid, _ in tool.history}, f"{name}: history_row doesn't fill its columns")
+        self.assertEqual(set(app.state()["tool_counts"]), set(app.tools))
+        self.assertIn("libdata", app.state())
+
+    def test_one_gathering_serves_every_tool(self):
+        """The request budget: one library gathered means one Plex listing of its records — then every tool's scan,
+        Library Health and a scan of fresh data ask Plex nothing more. A tool that fetched for itself would break it."""
+        from plexcache import libhealth
+        tt = ToolsTests()
+        app, plex, client, cat, _ = tt._app()
+        link = os.path.join(cat["root"], "Movies", "Film 1 (2011) link.mkv")
+        os.link(cat["movies"][1]["path"], link)
+        plex.requests.clear()
+        data = app.libdata.gather("1", wait=True, refresh=True)
+        self.assertTrue(data.ready)
+        # one listing of the records, one page per item for its streams and locked fields — and nothing else
+        self.assertEqual(len([r for r in plex.requests if "/library/sections/1/all" in r]), 1, plex.requests)
+        pages = [r for r in plex.requests if "/library/metadata/" in r]
+        self.assertEqual(len(pages), len({f["rk"] for f in data.files if f["rk"]}), pages)
+        self.assertEqual(len([r for r in plex.requests if "/library/" in r]), 1 + len(pages), plex.requests)
+        before = len(plex.requests)
+        for tool in app.tools.values():
+            if tool.works_on("1"):
+                self.assertIsInstance(tool.analysis(data)["rows"], list)
+        libhealth.library_health(app, "1")
+        self.assertEqual(len(plex.requests), before, "a tool or check asked Plex for itself")
+        self.assertTrue(tt._run(app.tools["unlink"], app.tools["unlink"].scan_async("1", refresh=False))["scan"]["rows"])
+        self.assertEqual(len(plex.requests), before, "a scan of fresh data asked Plex again")
+        self.assertTrue(data.details and all("streams" in v for v in data.details.values()))
+        # the files on disk: stat and walked once — the tools read the layer's copy
+        self.assertEqual({f["local"] for f in data.files if f.get("nlink", 1) > 1}, {cat["movies"][1]["path"]})
+        self.assertEqual(sorted(data.by_inode()[(os.stat(link).st_dev, os.stat(link).st_ino)]), sorted([cat["movies"][1]["path"], link]))
+        self.assertEqual([u["local"] for u in data.unlisted], [link])
+        self.assertIn(os.path.basename(link), data.names_in(os.path.join(cat["root"], "Movies")))
+        # saved: a restart starts from the copy, not from Plex
+        from plexcache.app import App
+        again = App(app.config_dir)
+        again.settings.update({"plex": {"url": plex.url, "token": "good-token"}})
+        d2 = again.libdata.data("1")
+        self.assertTrue(d2.ready and len(d2.files) == len(data.files) and d2.stamp == data.stamp)
+
+    def test_a_change_reaches_every_tool_without_a_scan(self):
+        """What the layer learns, every tool knows: Plex's change stamp moved — the records read again, a new duplicate
+        counted by Merge Duplicates and chipped on Library Health; a folder's mtime moved — the files read again, a new
+        hard link counted by Unlink Files. Nobody pressed Scan."""
+        from plexcache import libdata, libhealth
+        tt = ToolsTests()
+        app, plex, client, cat, _ = tt._app()
+        app.libdata.start()
+        for _ in range(400):
+            c0 = app.tools["merge"].counts()
+            if app.libdata.data("1").ready and "1" in c0["libraries"] and "2" in c0["libraries"] and not c0["pending"]:
+                break
+            time.sleep(0.05)
+        self.assertEqual(app.tools["merge"].counts(), {"total": 0, "ignored": 0, "libraries": {"1": 0, "2": 0}, "pending": []})
+        self.assertEqual(app.tools["unlink"].counts()["total"], 0)
+        # Plex: a second record of Film 1 (its stamp moves); the tick sees it
+        copy = os.path.join(cat["root"], "Movies", "Film 1 (2011) [copy].mkv")
+        fakes.make_mkv(copy, 1024 * 1024)
+        plex.cat["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000})
+        plex.changed_at = "2"
+        app.scan_library()                                                                        # (the app's own listing of files: the scheduler's, or a check's)
+        stamp = app.libdata.data("1").stamp
+        app.libdata.last_tick = 0
+        self.assertIn("1", app.libdata.tick())                                                      # (the listing read again made every library's files stale: all queued, 1 first)
+        for _ in range(200):
+            if app.libdata.data("1").stamp > stamp and "1" not in app.tools["merge"].counts()["pending"]:
+                break
+            time.sleep(0.05)
+        self.assertEqual(app.tools["merge"].counts()["libraries"]["1"], 1)
+        got = libhealth.library_health(app, "1")
+        chips = {r["id"] for it in got["items"] for r in it["results"]}
+        self.assertIn("tool_merge", chips)
+        self.assertEqual([c["id"] for c in got["checks"]["tools"]], ["tool_merge", "tool_versions", "tool_folders", "tool_unlink", "tool_convert"])
+        self.assertEqual(got["counts"]["tool_merge"], 2)                                             # (both records of the pair carry the chip)
+        self.assertTrue(got["stats"]["items"] and got["stats"]["clean_pct"] is not None)
+        # (the other libraries settle: one whose gathering began before the listing changed reads its records once more)
+        for _ in range(40):
+            for _w in range(400):
+                with app.libdata.lock:
+                    idle = not app.libdata.queue and not app.libdata.current
+                if idle:
+                    break
+                time.sleep(0.05)
+            app.libdata.last_tick = 0
+            if not app.libdata.tick():
+                break
+        # the disk: a hard link appears (the folder's mtime moves); the next tick sees it, without Plex having changed
+        link = os.path.join(cat["root"], "Movies", "Film 2 (2012) link.mkv")
+        os.link(cat["movies"][2]["path"], link)
+        self.assertTrue(app.libdata.dirs_changed("1"))
+        stamp = app.libdata.data("1").stamp
+        app.libdata.last_tick = 0
+        self.assertEqual(app.libdata.tick(), ["1"])
+        for _ in range(200):
+            if app.libdata.data("1").stamp > stamp and "1" not in app.tools["unlink"].counts()["pending"]:
+                break
+            time.sleep(0.05)
+        self.assertEqual(app.tools["unlink"].counts()["libraries"]["1"], 1)                         # (Plex lists one path of the pair)
+        self.assertFalse(app.libdata.dirs_changed("1"))
+        self.assertEqual(libdata.link_of(app.libdata.data("1").file(cat["movies"][2]["path"])), ("hardlink", 2, ""))
+        self.assertEqual(libdata.link_of(None), ("", 0, ""))
 
 
 class PageStructureTests(unittest.TestCase):
@@ -4476,6 +4655,100 @@ class PageStructureTests(unittest.TestCase):
         self.assertIn("API compatibility: all", text)
         self.assertNotIn("Reading your libraries", self._render(app.state(), "folders")["text"])
         self.assertNotIn("Checking", self._render(app.state(), "ssd")["text"].split("I won’t use an L2ARC")[0])
+
+    def test_tool_pages_follow_the_standard(self):
+        """Every tool's page is the standard one (toolPage): drawn with rows, each shows a poster for the item, Scan Again,
+        the one-line summary and Apply saying what the process does first; drawn with no rows, it says so in a sentence
+        rather than showing nothing; the long explanation sits behind the heading's ⓘ, never as a paragraph on the page;
+        and a row's explanations sit behind an ⓘ too (fact()). A new tool page that isn't built on toolPage fails here."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        tt = ToolsTests()
+        app, plex, client, cat, _ = tt._app()
+        from plexcache import server
+        tool_pages = [n for n in app.tools]
+        # every page under the Tools nav is a tool's (built on toolPage, held to the standard below), or one of these — the
+        # optimizer's and the dataset migration's, processes of their own with their own cards, and the two check pages,
+        # Library Health's view (checksPage) — named here with its reason: a new page there can't slip past the standard
+        nav = re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)
+        self.assertEqual(set(re.findall(r"(\w+): 1", nav)) - set(tool_pages), {"optimizer", "dataset", "filechecks", "plexchecks"},
+                         "a page under the Tools nav that's neither a tool (app.tools, on toolPage) nor named here with why")
+        for name in tool_pages:
+            body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S)
+            self.assertIsNotNone(body, f"no page{name.capitalize()}()")
+            self.assertIn("toolPage({", body.group(1), f"page{name.capitalize()} isn't built on toolPage")
+            self.assertNotIn('<p class="help">', body.group(1), f"page{name.capitalize()} explains itself in a paragraph: put it behind the heading's ⓘ")
+        # a library with something for every tool: a duplicate record, a duplicate file, a loose film, a hard link
+        rootd = os.path.join(cat["root"], "Movies")
+        copy = os.path.join(rootd, "Film 1 (2011) [copy].mkv")
+        fakes.make_mkv(copy, 1024 * 1024)
+        plex.cat["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000})
+        twin = os.path.join(rootd, "Movie & Friends 2 (2012)", "Movie 2 twin.mkv")
+        shutil.copy2(cat["movies"][2]["path"], twin)
+        plex.cat["movies"][2]["more"] = [twin]
+        os.link(cat["movies"][3]["path"], os.path.join(rootd, "Film 3 (2013) link.mkv"))
+        avi = os.path.join(rootd, "Old Film (2001).avi")
+        with open(avi, "wb") as fh:
+            fh.write(b"x" * 100)
+        plex.cat["movies"].append({"path": avi, "size": 100, "kbps": 1, "key": "301", "title": "Old Film", "year": 2001, "guid": "plex://movie/301", "duration": 5400000})
+        app.scan_library()
+        for name, tool in app.tools.items():
+            tt._run(tool, tool.scan_async("1"))
+        st = app.state()
+        for name in tool_pages:
+            with self.subTest(page=name, when="rows"):
+                self.assertTrue(st["tools"][name]["scan"]["rows"], f"{name}: nothing to show in this test's library")
+                got = self._render(st, name)
+                html, text = got["html"], got["text"]
+                self.assertIn("Scan Again", text, "no Scan Again")
+                table = html[html.index('class="det toolsum"'):]  # (the rows, however the tool draws them, follow the summary line)
+                self.assertTrue('class="poster"' in table or "ssposter" in table, "no poster on the rows")
+                self.assertRegex(text, r"Backup and Apply to \d+ Selected|Apply to \d+ Selected Without Backing Up|Apply to \d+ Selected", "no Apply")
+                self.assertNotIn("Nothing found", text)
+                self.assertNotIn("Why:", text, "an explanation on the page itself")
+                # the row's words are facts: nothing long enough to be an explanation outside an ⓘ
+                cells = re.findall(r"<td[^>]*>(.*?)</td>", table, re.S)
+                for c in cells:
+                    plain = re.sub(r"<button class=\"info\".*?</button>", "", c)
+                    plain = re.sub(r"<[^>]+>", " ", plain)
+                    for sentence in re.split(r"(?<=[.!?])\s+", plain):
+                        self.assertLess(len(sentence.strip()), 110, f"{name}: a row explains itself in the open: {sentence.strip()[:80]!r}")
+        # the same pages with nothing found: a sentence, not a blank
+        app2, _p2, _c2, _cat2, _ = tt._app()
+        for name, tool in app2.tools.items():
+            tt._run(tool, tool.scan_async("1"))
+        st2 = app2.state()
+        for name in tool_pages:
+            with self.subTest(page=name, when="empty"):
+                self.assertEqual(st2["tools"][name]["scan"]["rows"], [])
+                text = self._render(st2, name)["text"]
+                self.assertIn("Nothing found", text)
+                self.assertIn("Scan Again", text)
+        # a run, and its card at the bottom of the tool's page: the one card the Processes page lists too, with the ways back
+        self.assertIn("toolHistory(name)", js[js.index("  function toolPage("):js.index("  function toolTable(")])
+        self.assertEqual(js.count('data-act="job-revert"'), 1)                                         # (only undoButtons draws it: on the run's card)
+        self.assertIn("mine.slice(0, 20).map(runCard)", js)
+        self.assertIn("jobs.forEach(function (j) { out += runCard(j); });", js)
+        tt._run(app.tools["unlink"], app.tools["unlink"].apply_async([st["tools"]["unlink"]["scan"]["rows"][0]["id"]]))
+        st3 = app.state()
+        st3["_proc"] = {"job": app.jobs.snapshot(), "queue": app.jobs.queued(), "jobs": app.jobs.log.jobs()}
+        text = self._render(st3, "unlink")["text"]
+        self.assertIn("Show history (1 run)", text)                                                 # (no run going: the history on request)
+        self.assertNotIn("Revert Changed Files", text)
+        self.assertNotIn("Done Item Result", text)                                                  # (no table of results outside the history)
+        self.assertNotIn("history", self._render(st3, "folders")["text"])                            # (another tool's page: not its run)
+        ptext = self._render(st3, "processes")["text"]
+        self.assertIn("Unlink Files in Movies Library", ptext)
+        self.assertIn("Revert Changed Files", ptext)
+        self.assertIn("function renderStill()", js)                                                  # (what opens or closes under a click leaves the page where it is)
+        self.assertIn('data-act="tool-history"', js)
+        # the two check pages: the Health view, one category each, every item of the library listed
+        for name, said in (("filechecks", "File Checks"), ("plexchecks", "Plex Checks")):
+            self.assertIn("/" + name, server.PAGES)
+            text = self._render(st, name)["text"]
+            self.assertIn(said, text)
+            self.assertIn("Movies", text)                                                           # (the library tabs)
+            self.assertTrue("Running the checks" in text or "items checked" in text, text[:300])   # (the Health view: fetched when the page opens)
 
     def test_paged_lists_use_the_pager(self):
         """Every list shown a page at a time uses the one pager(): spans of what each page holds (its
@@ -4568,6 +4841,9 @@ class PageStructureTests(unittest.TestCase):
         pages = re.findall(r"\n  function (page[A-Z]\w*)\(\) \{(.*?)(?=\n  function |\n  var |\Z)", src, re.S)
         self.assertGreater(len(pages), 10)
         for name, body in pages:
+            if re.search(r"\b(toolPage|checksPage)\(\{", body) or re.search(r"\bchecksPage\(", body):
+                self.assertRegex(body, r"blurb: H\(|checksPage\(\"\w+\", \"\w+\", \"[^\"]+\", H\(", f"{name}: the standard page needs a blurb (its description)")
+                continue
             m = re.search(r"\btop\(([^,]+),\s*(.+)", body)
             self.assertIsNotNone(m, f"{name} doesn't call top(title, description)")
             desc = m.group(2).strip()
@@ -5007,10 +5283,11 @@ class FakeOptimizer:
         return {"marked": claims.mark(folder, instance, info)}
 
     def file_action(self, action, path, to="", root=""):
-        from plexcache.optimize import files
+        from plexcache.optimize import convert, files
         self.sent.append({"action": action, "path": path, "to": to, "root": root})
         return {"set_aside": lambda: files.set_aside(root, path), "restore": lambda: files.put_back(root, path), "purge": lambda: files.purge(root, path),
-                "link": lambda: files.link(path, to), "unlink": lambda: files.unlink(path, to), "make_real": lambda: files.make_real(path)}[action]()
+                "link": lambda: files.link(path, to), "unlink": lambda: files.unlink(path, to), "make_real": lambda: files.make_real(path),
+                "copy_from": lambda: files.copy_from(path, to), "remove_converted": lambda: convert.remove_converted(path, to)}[action]()
 
     def claim(self, folder, key, instance, release=False):
         mine = self.claims.setdefault(key, {})
@@ -5174,78 +5451,33 @@ class OptimizerTests(unittest.TestCase):
                         self.assertAlmostEqual(sum(want["removed"].values()), max(0, gone), delta=8192, msg=kw)
 
     def test_converting_to_mkv(self):
-        """Converting other containers to MKV: off until a library asks for it, and then only the kinds
-        chosen. A converted file's MKV is put next to it and Plex asked to scan the folder; the original
-        goes only once Plex has the MKV as a version of the same item (and the hold is over) — never
-        while Plex has it as an item of its own. A file that can't be converted without losing something
-        isn't tried again, and Library Health says why."""
-        from plexcache import filechecks
+        """Converting is the Convert to MKV tool's (tools/convert.py): the optimizer's own runs never convert, whatever
+        a file is. convert_one converts one file for the tool — the MKV next to the original, noted like any optimized
+        file — and remembers why a file was left as it is, while the file stays as it is."""
         app, op, client, d, state = self._app(names=("old.avi", "home.mp4", "film.mkv"))
-        avi, mp4 = os.path.join(d, "old.avi"), os.path.join(d, "home.mp4")
-        for f in app.files:
-            f.rating_key, f.title = "r-" + os.path.basename(f.path), os.path.basename(f.path)
-        scans, items = [], {}
-        plex = types.SimpleNamespace(scan=lambda key, folder: scans.append(folder), item_files=lambda rk: items.get(rk))
-        app.plex = lambda timeout=30: plex
-        self.assertNotIn("convert", op.file_status(avi, "1", {}).get("problems") or [])          # off by default
-        app.settings.update({"optimizer": {"libraries": {"1": {"convert": True, "sync": False}}}, "sync": {"mirrors": "none"}})  # (no mirror: originals needn't wait)
-        self.assertEqual(op.file_status(avi, "1", {})["problems"], ["convert"])
-        self.assertFalse(op.file_status(mp4, "1", {})["applies"])                                  # MP4 isn't converted by default
-        warn = lambda path: next(c for c in filechecks.check_file(app, None, path, {"format": "stream", "size": 10, "tracks": [{"type": "video"}]},
-                                                                     {}, op.options("1"), None, None) if c["id"] == "container")
-        self.assertIn("converts it", en(warn(avi)["text"]))
-        self.assertIn("this kind of file is off", en(warn(mp4)["text"]))
+        avi = os.path.join(d, "old.avi")
+        self.assertNotIn("convert", op.file_status(avi, "1", {}).get("problems") or [])
         run_job(op)
-        self.assertEqual([x["path"] for x in client.sent if x.get("action") == "convert"], [avi])
-        (e,) = app.conversions.snapshot()["items"]
-        self.assertEqual((e["state"], e["new"], scans), ("waiting", os.path.join(d, "old.mkv"), [d]))
-        self.assertEqual(op.file_status(avi, "1", {})["problems"], [])                             # converted: waiting for Plex
-        self.assertEqual(warn(avi)["status"], "pass")
-        with self.assertRaises(ValueError):
-            app.conversions.act(avi, "delete")                                                     # not before Plex has it
-        # Plex adds it as a second version of the same item: the original waits out the hold
-        items["r-old.avi"] = [avi, os.path.join(d, "old.mkv")]
-        app.conversions.act(avi, "check")
-        self.assertEqual(app.conversions.get(avi)["state"], "seen")
-        app.conversions.tick()
-        self.assertTrue(os.path.exists(avi))                                                       # 7 days by default
-        app.settings.update({"optimizer": {"convert_hold_days": 0}})
-        app.conversions.tick()
-        self.assertEqual((app.conversions.get(avi)["state"], os.path.exists(avi)), ("deleted", False))
-        self.assertEqual(len(scans), 2)                                                            # scanned again after
-        # MP4 chosen too: Plex makes its MKV an item of its own — nothing is deleted
-        app.settings.update({"optimizer": {"convert_types": {"mp4": True}, "convert_hold_days": 0}})
-        app.files.append(types.SimpleNamespace(path=os.path.join(d, "home.mkv"), library_key="1", kind="movie", size=1, kbps=1,
-                                               library="Movies", rating_key="r-new", title="home"))
-        run_job(op)
-        items["r-home.mp4"] = [mp4]
-        app.conversions.act(mp4, "check")
-        self.assertEqual(app.conversions.get(mp4)["state"], "separate")
-        app.conversions.tick()
-        self.assertTrue(os.path.exists(mp4))
-        app.conversions.act(mp4, "keep")                                                           # both files stay
-        self.assertIsNone(app.conversions.get(mp4))
-        # a file that can't be converted without losing something: not tried again, and said why
+        self.assertEqual([x for x in client.sent if x.get("action") == "convert"], [])
+        r = op.convert_one(avi, "1")
+        self.assertEqual((r["result"], r["new"]), ("converted", os.path.join(d, "old.mkv")))
+        self.assertTrue(os.path.exists(avi) and os.path.exists(r["new"]))                           # (the original stays: Plex first)
+        # a file that can't be converted without losing something: the reason kept while the file is unchanged
         clip = os.path.join(d, "clip.flv")
         with open(clip, "wb") as fh:
             fh.write(b"x" * 100)
         os.utime(clip, (time.time() - 3600, time.time() - 3600))
-        app.files.append(types.SimpleNamespace(path=clip, library_key="1", kind="movie", size=1, kbps=1, library="Movies", rating_key="r-c", title="clip"))
         client.convert_result = "skipped"
-        run_job(op)
-        self.assertEqual(op.file_status(clip, "1", {})["problems"], [])
-        self.assertIn("chapters wouldn't be kept", en(warn(clip)["text"]))
-        self.assertEqual(len([x for x in client.sent if x.get("action") == "convert" and x["path"] == clip]), 1)
-        run_job(op)
-        self.assertEqual(len([x for x in client.sent if x.get("action") == "convert" and x["path"] == clip]), 1)
-        # music isn't converted, whatever's set
-        app.libraries.append({"key": "2", "title": "Music", "type": "artist", "kind": "audio", "locations": []})
-        app.settings.update({"optimizer": {"libraries": {"2": {"convert": True}}}})
-        self.assertFalse(op.options("2")["convert"])
+        self.assertEqual(op.convert_one(clip, "1")["result"], "skipped")
+        self.assertEqual(op.convert_skipped(clip, os.stat(clip)), "its chapters wouldn't be kept")
+        os.utime(clip, (time.time() - 1800, time.time() - 1800))
+        self.assertIsNone(op.convert_skipped(clip, os.stat(clip)))                                  # (changed since: tried again)
+        self.assertEqual(op.convert_one(os.path.join(d, "film.mkv"), "1")["result"], "skipped")    # (written just now: left for later)
+        # the old per-library switch is dropped quietly; the kinds are checked
+        app.settings.update({"optimizer": {"libraries": {"1": {"convert": True, "sync": False}}}})
+        self.assertNotIn("convert", op.options("1"))
         with self.assertRaises(config.SettingsError):
             app.settings.update({"optimizer": {"convert_types": {"wmv": True}}})
-        with self.assertRaises(config.SettingsError):
-            app.settings.update({"optimizer": {"convert_hold_days": 400}})
 
     def test_second_plex_server(self):
         """A second Plex server with the same files: its libraries paired with these by name and kind (or
@@ -5258,7 +5490,7 @@ class OptimizerTests(unittest.TestCase):
         avi = os.path.join(d, "old.avi")
         for f in app.files:
             f.rating_key, f.title = "r-" + os.path.basename(f.path), os.path.basename(f.path)
-        app.settings.update({"optimizer": {"libraries": {"1": {"convert": True, "sync": False}}, "convert_hold_days": 0}})
+        app.settings.update({"optimizer": {"libraries": {"1": {"sync": False}}}})
         here = {"r-old.avi": None}
         app.plex = lambda timeout=30: types.SimpleNamespace(scan=lambda k, f: None, item_files=lambda rk: here.get(rk))
         there_dir = "/srv/other/Movies"
@@ -5286,7 +5518,9 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(app.other.paths_there("1", avi, app.other.pairs()["1"]), [there_dir + "/old.avi"])
         app.other.refresh()
         self.assertEqual(app.other.snapshot()["rates"], {"1": 1.0})
-        run_job(op)
+        with open(os.path.join(d, "old.mkv"), "wb") as fh:                                       # (converted by the tool)
+            fh.write(b"m" * 100)
+        app.conversions.add("1", avi, avi, os.path.join(d, "old.mkv"), "r-old.avi", "old.avi")
         here["r-old.avi"] = [avi, os.path.join(d, "old.mkv")]                                    # this server has it…
         app.conversions.act(avi, "check")
         e = app.conversions.get(avi)
@@ -5294,8 +5528,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(scans, [there_dir])                                                    # its folder scanned there
         items["t1"] = [there_dir + "/old.avi", there_dir + "/old.mkv"]
         app.conversions.act(avi, "check")
-        self.assertEqual(app.conversions.get(avi)["state"], "seen")
-        app.conversions.tick()
+        self.assertEqual(app.conversions.get(avi)["state"], "deleted")                          # (both have it: the original goes at once)
         self.assertFalse(os.path.exists(avi))
         # the other server doesn't have a file at all: nothing there to lose (its paths line up)
         b = os.path.join(d, "b.avi")
@@ -5624,13 +5857,49 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(ids2({"tracks": [v, au("eng"), pgs("fra")]}, subtitles_language=True, no_subtitles=False), [])  # (the options narrow the check: off with it)
         self.assertEqual(ids2({"tracks": [v, au("zxx"), pgs("eng")]}, subtitles_language=True, subtitles_text=True), ["subtitles_on_zxx"])  # (no speech)
         self.assertTrue(libhealth.same_language("eng", "en") and not libhealth.same_language("eng", "fra") and not libhealth.same_language("", "en"))
+        # forced subtitles go with audio in their language: a forced German track without German audio was made for
+        # another (dubbed) version; with the audio's language unknown it can't be told — said, and the unknown flagged too
+        self.assertEqual(ids({"tracks": [v, au("eng"), sub("deu", forced=True), sub("eng")]}), ["forced_subtitles_language"])
+        txt = en(res({"tracks": [v, au("eng"), sub("deu", forced=True), sub("eng")]})[0]["text"])
+        self.assertIn("Forced German subtitles, but the audio is English", txt)
+        self.assertIn("German-dubbed version", txt)
+        self.assertEqual(ids({"tracks": [v, au("eng"), au("deu"), sub("deu", forced=True), sub("eng")]}), [])        # (German audio is there)
+        self.assertEqual(ids({"tracks": [v, au("en-US"), sub("eng", forced=True), sub("eng")]}), [])                 # (one language, two codes)
+        self.assertEqual(ids({"tracks": [v, au("und"), sub("deu", forced=True), sub("eng")]}), ["audio_language_unknown", "forced_subtitles_language"])
+        self.assertIn("audio’s language is unknown (und)", en(res({"tracks": [v, au("und"), sub("deu", forced=True), sub("eng")]})[1]["text"]))
+        self.assertEqual(ids({"tracks": [v, au("und"), sub("eng")]}), ["audio_language_unknown"])
+        self.assertIn("tagged und", en(res({"tracks": [v, au("und"), sub("eng")]})[0]["text"]))
+        self.assertEqual(ids({"tracks": [v, au("zxx"), sub("eng", forced=True)]}), [])                               # (zxx is a statement, not an unknown)
+        self.assertEqual(ids2({"tracks": [v, au("und"), sub("deu", forced=True), sub("eng")]}, audio_language_unknown=False, forced_subtitles_language=False), [])
+        for cid, applies in (("forced_subtitles_language", libhealth.VIDEO), ("audio_language_unknown", libhealth.VIDEO), ("audio_compressible", libhealth.ALL)):
+            c = next(c for c in libhealth.CHECKS["file"] if c["id"] == cid)
+            self.assertEqual(c["applies"], applies, cid)
+        # a track with no language tag at all reads as English to every player: said so, apart from und
+        self.assertEqual(ids({"tracks": [v, dict(au("eng"), language_set=False), sub("eng")]}), ["audio_language_unknown"])
+        self.assertIn("no language tag", en(res({"tracks": [v, dict(au("eng"), language_set=False), sub("eng")]})[0]["text"]))
+        self.assertEqual(ids({"tracks": [v, dict(au("eng"), language_set=True), sub("eng")]}), [])
+        self.assertEqual(len(res({"tracks": [v, dict(au("eng"), language_set=False), au("und"), sub("eng")]})), 2)                # (one finding each)
+        self.assertIn("sing-along", en(next(c for c in libhealth.CHECKS["file"] if c["id"] == "forced_subtitles_language")["help"]))
+        # the file map reads what the checks and the Caching view's track table need: a track's forced flag, and an
+        # audio track's channels, sampling frequency and bit depth (tests/fixtures/feature-rich.mkv)
+        from plexcache import filemap
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        m = filemap.describe(os.path.join(root, "tests", "fixtures", "feature-rich.mkv"))
+        signs = next(t for t in m["tracks"] if t["name"] == "Signs")
+        self.assertEqual((signs["type"], signs["forced"], signs["language"]), ("subtitles", True, "en"))
+        ac3 = next(t for t in m["tracks"] if t["codec"] == "A_AC3")
+        self.assertEqual((ac3["channels"], ac3["sample_rate"], ac3["language"]), (6, 44100.0, "fr-CA"))
+        self.assertEqual([r["id"] for r in libhealth.file_checks(m, on)], [])                                     # (its forced Signs track is English, like its audio)
+        fsize = os.path.getsize(os.path.join(root, "tests", "fixtures", "feature-rich.mkv"))
+        bm = filemap.block_map(m, fsize, filemap.cache_plan(m, fsize, 5000, 60, 1 << 20, "movie"), 1 << 20)
+        self.assertEqual((bm["streams"], bm["forced"]), (["video", "audio", "subtitles"], 1))
         # each check says which libraries it applies to; an audio library gets only its own
         self.assertTrue(all(c.get("applies") for cat in libhealth.CHECKS.values() for c in cat))
         audio_on = libhealth.for_kind(on, "audio")
         self.assertFalse(audio_on["no_subtitles"] or audio_on["no_audio"] or audio_on["versions_named_differently"])
-        self.assertTrue(audio_on["duplicate_items"] and audio_on["audio_low_bitrate"] and audio_on["audio_uncompressed"])
+        self.assertTrue(audio_on["duplicate_items"] and audio_on["audio_low_bitrate"] and audio_on["audio_compressible"])
         self.assertFalse(libhealth.for_kind(on, "movie")["audio_low_bitrate"])                      # (a video's bitrate is its picture)
-        self.assertTrue(libhealth.for_kind(on, "movie")["audio_uncompressed"])                      # (its audio tracks are checked, though)
+        self.assertTrue(libhealth.for_kind(on, "movie")["audio_compressible"])                      # (its audio tracks are checked, though)
         # the audio checks: a lossy track below its codec's floor (per channel), uncompressed PCM
         ac = lambda m, path, kbps, ch=2, level="fair": [r["id"] for r in libhealth.audio_checks(m, audio_on, path, kbps, ch, level)]
         mp3 = {"tracks": [{"type": "audio", "codec": "A_MPEG/L3"}]}
@@ -5655,12 +5924,46 @@ class OptimizerTests(unittest.TestCase):
         # a video's audio tracks: outdated and uncompressed codecs flagged by track (AC-3 is normal in a film); no bitrate check
         film = {"tracks": [{"type": "video", "codec": "V_X"}, {"type": "audio", "codec": "A_AC3"}, {"type": "audio", "codec": "A_MPEG/L3"}, {"type": "audio", "codec": "A_PCM/INT/LIT"}]}
         video_on = dict(libhealth.for_kind(on, "movie"), audio_outdated=True)
-        self.assertEqual([r["id"] for r in libhealth.audio_checks(film, video_on, "/m/f.mkv", 15000, kind="movie")], ["audio_outdated", "audio_uncompressed"])
-        self.assertIn("inside the MKV", en(libhealth.audio_checks(film, video_on, "/m/f.mkv", 15000, kind="movie")[1]["text"]))
+        self.assertEqual([r["id"] for r in libhealth.audio_checks(film, video_on, "/m/f.mkv", 15000, kind="movie")], ["audio_compressible", "audio_compatibility", "audio_outdated"])
+        self.assertIn("inside the MKV", en(libhealth.audio_checks(film, video_on, "/m/f.mkv", 15000, kind="movie")[0]["text"]))
         self.assertEqual([r["id"] for r in libhealth.audio_checks({"tracks": [{"type": "video"}, {"type": "audio", "codec": "A_AC3"}]}, video_on, "/m/f.mkv", 15000, kind="movie")], [])
+        # a video's audio that FLAC would shrink: DTS-HD MA (not DTS:X: named so, or 7.1), and PCM; not TrueHD (the same size), not
+        # lossy DTS (bigger), not Atmos; each finding names the track
+        dtshd = lambda **k: dict({"type": "audio", "codec": "A_DTS/LOSSLESS", "language": "eng", "channels": 6}, **k)
+        flac_ids = lambda *tracks: [r["id"] for r in libhealth.audio_checks({"tracks": [{"type": "video", "codec": "V_X"}] + list(tracks)}, video_on, "/m/f.mkv", 15000, kind="movie")]
+        self.assertEqual(flac_ids(dtshd()), ["audio_compressible", "audio_compatibility"])              # (DTS-HD MA: smaller as FLAC, and plays everywhere)
+        self.assertIn("English 5.1: DTS-HD Master Audio", en(libhealth.audio_checks({"tracks": [dtshd()]}, video_on, "/m/f.mkv", 15000, kind="movie")[0]["text"]))
+        self.assertEqual(flac_ids(dtshd(channels=8)), [])                                                        # (7.1 DTS-HD: DTS:X more often than not)
+        self.assertEqual(flac_ids(dtshd(name="DTS:X 5.1")), [])
+        self.assertEqual(flac_ids({"type": "audio", "codec": "A_TRUEHD", "channels": 6}), ["audio_compatibility"])  # (TrueHD: FLAC comes out the same size — not smaller, but played everywhere)
+        self.assertEqual(flac_ids({"type": "audio", "codec": "A_TRUEHD", "channels": 8, "name": "Atmos"}), [])
+        self.assertEqual(flac_ids({"type": "audio", "codec": "A_DTS", "channels": 6}), [])                      # (lossy: FLAC of its decode is bigger)
+        self.assertEqual(flac_ids({"type": "audio", "codec": "A_PCM/INT/LIT", "channels": 2}), ["audio_compressible", "audio_compatibility"])  # (PCM: both — half the size, and plays everywhere)
+        # DTS, by the computed verdict from the bitrate Plex read: a 1.5 Mbps stereo track shrinks (and gains compatibility); a 5.1 one grows
+        dts = lambda **k: dict({"type": "audio", "codec": "A_DTS", "language": "eng"}, **k)
+        plex = lambda **k: [dict({"type": "audio", "codec": "dca", "bitrate": 1509, "sample_rate": 48000, "bit_depth": 16, "channels": 2}, **k)]
+        with_streams = lambda t, st: [r["id"] for r in libhealth.audio_checks({"tracks": [{"type": "video", "codec": "V_X"}, t]}, video_on, "/m/f.mkv", 15000, kind="movie", streams=st)]
+        self.assertEqual(with_streams(dts(), plex()), ["audio_compressible", "audio_compatibility"])
+        self.assertEqual(libhealth.dts_verdict(libhealth.with_plex(dts(), plex()[0])), (True, 922, 1509))
+        self.assertEqual(with_streams(dts(), plex(channels=6)), [])                                            # (5.1: FLAC about twice the size)
+        self.assertEqual(with_streams(dts(), []), [])                                                          # (no bitrate known: no verdict)
+        self.assertEqual(with_streams(dts(channels=6), plex(channels=6, display="DTS:X 7.1")), [])            # (object audio: left alone)
+        txt = en(libhealth.audio_checks({"tracks": [{"type": "video", "codec": "V_X"}, dts()]}, video_on, "/m/f.mkv", 15000, kind="movie", streams=plex())[0]["text"])
+        self.assertIn("DTS at 1,509 kbps", txt)
+        self.assertIn("922 kbps", txt)
+        # compatibility: TrueHD and ALAC in a video — about the same size as FLAC, played by few clients as they are; Atmos left alone
+        self.assertEqual(with_streams({"type": "audio", "codec": "A_TRUEHD", "channels": 6}, []), ["audio_compatibility"])
+        self.assertEqual(with_streams({"type": "audio", "codec": "A_TRUEHD", "channels": 8}, []), [])
+        self.assertEqual(with_streams({"type": "audio", "codec": "A_ALAC", "channels": 2}, []), ["audio_compatibility"])
+        self.assertEqual(with_streams({"type": "audio", "codec": "A_AAC", "channels": 2}, []), [])
+        self.assertIn("transcoded to lossy AAC or AC-3", en(libhealth.audio_checks({"tracks": [{"type": "video", "codec": "V_X"}, {"type": "audio", "codec": "A_TRUEHD", "channels": 6}]}, video_on, "/m/f.mkv", 15000, kind="movie")[0]["text"]))
+        self.assertEqual(next(c for c in libhealth.CHECKS["file"] if c["id"] == "audio_compatibility")["applies"], libhealth.VIDEO)
+        self.assertEqual([r["id"] for r in libhealth.audio_checks({"tracks": [{"type": "audio", "codec": "A_TRUEHD"}]}, audio_on, "/m/a.mka", 3000)], [])  # (an audio library: no compatibility check)
+        self.assertEqual([r["id"] for r in libhealth.audio_checks({"tracks": [dtshd()]}, dict(video_on, audio_compressible=False, audio_compatibility=False), "/m/f.mkv", 15000, kind="movie")], [])
+        self.assertEqual(ac({"tracks": [dtshd()]}, "/m/a.dts", 1500), ["audio_compressible"])                    # (an audio library: by the file's codec)
         self.assertEqual(ac({"tracks": [{"type": "audio", "codec": "A_FLAC"}]}, "/m/a.flac", 40), [])  # (lossless: never low)
-        self.assertEqual(ac({"tracks": []}, "/m/a.wav", 1411), ["audio_uncompressed"])
-        self.assertEqual(ac({"tracks": [{"type": "audio", "codec": "A_PCM/INT/LIT"}]}, "/m/a.mka", 1411), ["audio_uncompressed"])
+        self.assertEqual(ac({"tracks": []}, "/m/a.wav", 1411), ["audio_compressible"])
+        self.assertEqual(ac({"tracks": [{"type": "audio", "codec": "A_PCM/INT/LIT"}]}, "/m/a.mka", 1411), ["audio_compressible"])
         self.assertIn("Apple Lossless", en(libhealth.audio_checks({"tracks": []}, audio_on, "/m/a.wav", 1411)[0]["text"]))
         self.assertEqual(libhealth.audio_codec({"codec": "A_DTS/LOSSLESS"}, ""), "dts-hd")
 
@@ -5797,8 +6100,10 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual((got["counts"]["audio_low_bitrate"], next(c for c in got["checks"]["file"] if c["id"] == "audio_low_bitrate")["on"]), (1, False))
         app.settings.update({"library_health": {"audio_quality": "best"}})
         f.kbps = 300
+        app.libdata.invalidate_files("1")                                                           # (Plex's listing changed: the data layer reads the files again)
         self.assertEqual(libhealth.library_health(app, "1")["counts"]["audio_low_bitrate"], 1)      # (320 is the bar at "best")
         f.kbps = 320
+        app.libdata.invalidate_files("1")
         self.assertNotIn("audio_low_bitrate", libhealth.library_health(app, "1")["counts"])
         with self.assertRaises(config.SettingsError):
             app.settings.update({"library_health": {"audio_quality": "loud"}})
@@ -5901,8 +6206,12 @@ class OptimizerTests(unittest.TestCase):
                 self.assertEqual(libhealth.enabled(settings.get())[c["id"]], not c.get("default", True), f"{cat}: {c['id']} can't be switched")
                 self.assertTrue(c.get("name") and c.get("help"), c["id"])
         self.assertEqual(libhealth.defaults()["subtitles_language"], False)
+        settings.update({"library_health": {"checks": {"made_up": True, "no_audio": False}}})        # (a check renamed or retired: dropped, not refused — every later save would fail on it)
+        self.assertEqual(settings.section("library_health")["checks"], {"no_audio": False})
+        settings.update({"library_health": {"checks": {"tool_merge": False}}})                      # (a tool's chip on Library Health: a switch too)
+        self.assertEqual(settings.section("library_health")["checks"], {"tool_merge": False})
         with self.assertRaises(config.SettingsError):
-            settings.update({"library_health": {"checks": {"made_up": True}}})
+            settings.update({"library_health": {"checks": {"no_audio": "yes"}}})
         settings.update({"library_health": {"subtitle_language": "FR"}})
         self.assertEqual(settings.section("library_health")["subtitle_language"], "fr")
         with self.assertRaises(config.SettingsError):
@@ -6701,7 +7010,7 @@ class OptimizerTests(unittest.TestCase):
         app, op, client, d, state = self._app()
         lib = lambda: op.snapshot()["libraries"]["1"]
         # The defaults: TrueNAS compression & record size on, MKV off, Plex's cover art for unmatched items only
-        self.assertEqual(op.options("1"), {"sync": True, "mkv": False, "images": "unmatched", "tags": "keep", "convert": False})
+        self.assertEqual(op.options("1"), {"sync": True, "mkv": False, "images": "unmatched", "tags": "keep"})
         app.libraries.append({"key": "2", "title": "Music", "type": "artist", "kind": "audio", "locations": []})
         app.settings.update({"optimizer": {"libraries": {"2": {"mkv": True, "images": "remove"}}}})
         self.assertEqual(op.options("2")["images"], "compress")             # music keeps its cover art, whatever's set
@@ -8454,7 +8763,7 @@ class HealthBranchTests(unittest.TestCase):
                                return_value={"needs": [], "move": ["Audiobooks"], "keep": 1024 * 1024}):
             r = self.row(self.ds())
         self.assertEqual((r["recordsize"]["status"], en(r["recordsize"]["badge"]), r["recordsize"]["text"]), ("warn", "Split dataset", "1M"))
-        self.assertEqual([en(x) for x in r["recordsize"]["lines"]], ["Move Audiobooks to a dataset of its own; 1M suits the rest."])
+        self.assertEqual([en(x) for x in r["recordsize"]["lines"]], ["[Move Audiobooks to a dataset of its own](/dataset); 1M suits the rest."])  # (the first half is the link)
         # compression: the badge says what's used; ZSTD-3 is all that passes
         self.assertEqual((r["compression"]["status"], r["compression"]["text"]), ("info", "Not checked"))
         r = self.row(self.ds(props={"primarycache": "all", "secondarycache": "all", "recordsize": 1048576, "compression": "lz4"}))
@@ -9336,13 +9645,13 @@ class MQTTTests(unittest.TestCase):
         for bad in ({"port": 0}, {"interval": 1}, {"report_period": "year"}, {"base_topic": "a/#"}, {"discovery_prefix": ""}):
             with self.assertRaises(config.SettingsError, msg=bad):
                 self.app.settings.update({"mqtt": bad})
-        for bad in ({"backup": "none"}, {"page_size": 10}, {"page_size": 5000}, {"snapshot_days": 0}, {"snapshot_days": "14"}):
+        for bad in ({"backup": "none"}, {"page_size": 10}, {"page_size": 5000}, {"backup_days": 0}, {"backup_days": "14"}):
             with self.assertRaises(config.SettingsError, msg=bad):
                 self.app.settings.update({"general": bad})
-        self.app.settings.update({"general": {"backup": "manual", "page_size": 50, "snapshot_days": 30}})
+        self.app.settings.update({"general": {"backup": "manual", "page_size": 50, "backup_days": 30}})
         g = self.app.settings.section("general")
-        self.assertEqual((g["backup"], g["page_size"], g["snapshot_days"]), ("manual", 50, 30))
-        self.app.settings.update({"general": {"backup": "snapshot", "page_size": 200, "snapshot_days": 14}})
+        self.assertEqual((g["backup"], g["page_size"], g["backup_days"]), ("manual", 50, 30))
+        self.app.settings.update({"general": {"backup": "snapshot", "page_size": 200, "backup_days": 14}})
         self.app.settings.update({"mqtt": {"password": "pw"}})
         pub = self.app.settings.public()["mqtt"]
         self.assertTrue(pub["password_set"])
@@ -10391,7 +10700,7 @@ class ToolsTests(unittest.TestCase):
             m.update(title=f"Film {i}", year=2010 + i, guid=f"plex://movie/{i}", guids=[f"tmdb://{100 + i}"], duration=5400000 + i * 1000)
         plex = fakes.FakePlex(cat)
         self.addCleanup(plex.close)
-        app = _new_app(plex={"url": plex.url, "token": "good-token"}, sync={"mirrors": "none"}, optimizer={"convert_hold_days": 0})
+        app = _new_app(plex={"url": plex.url, "token": "good-token"}, sync={"mirrors": "none"})
         client = FakeOptimizer()
         app.optimizing = Optimizing(app, client)
         other = None
@@ -10401,8 +10710,7 @@ class ToolsTests(unittest.TestCase):
             self.addCleanup(other.close)
             app.settings.update({"plex2": {"url": other.url, "token": "other-token", "name": "Starlit", "machine_id": "xyz"}, "sync": {"mirrors": "plex2"}})
         app.scan_library()
-        from plexcache import safety
-        safety.acknowledge_backup(app, "1")  # (the file tools wait for a recent snapshot or a backup you say you made: said here)
+        app.settings.update({"general": {"backup": "manual"}})  # (the file tools' process backs up first, per the preference: here you do)
         return app, plex, client, cat, other
 
     def _run(self, tool, started):
@@ -10412,6 +10720,120 @@ class ToolsTests(unittest.TestCase):
                 return tool.snapshot()
             time.sleep(0.05)
         raise AssertionError("the tool didn't finish")
+
+    def test_convert_to_mkv(self):
+        """Convert to MKV, a tool like the others: the scan lists the files of the kinds ticked (MP4 off by default),
+        with why one was left as it is last time; Apply is a process — the backup first, then each file converted by the
+        optimizer service, the MKV next to the original and Plex asked to scan — with the tool's columns in its history;
+        the original goes as soon as Plex has the MKV as a version of the same item, with no hold; Revert removes the
+        MKV while the original is there, and needs the snapshot once it has gone."""
+        from plexcache import filechecks, libhealth
+        from plexcache.tools import revert_job
+        app, plex, client, cat, _ = self._app()
+        root = os.path.join(cat["root"], "Movies")
+        avi, mp4 = os.path.join(root, "Old Film (2001).avi"), os.path.join(root, "Home (2002).mp4")
+        for p in (avi, mp4):
+            with open(p, "wb") as fh:
+                fh.write(b"x" * 100)
+            os.utime(p, (time.time() - 3600, time.time() - 3600))
+        plex.cat["movies"] += [{"path": avi, "size": 100, "kbps": 1, "key": "301", "title": "Old Film", "year": 2001, "guid": "plex://movie/301", "duration": 5400000},
+                               {"path": mp4, "size": 100, "kbps": 1, "key": "302", "title": "Home", "year": 2002, "guid": "plex://movie/302", "duration": 5400000}]
+        app.scan_library()
+        tool = app.tools["convert"]
+        snap = self._run(tool, tool.scan_async("1"))
+        sc = snap["scan"]
+        self.assertEqual([(r["name"], r["kind"], r["rk"], r["skipped"]) for r in sc["rows"]], [("Old Film (2001).avi", "avi", "301", None)])
+        self.assertEqual((sc["other"], sc["total"], sc["waiting"], sc["kinds"]["mp4"]), (2, 1, 0, False))
+        self.assertEqual(tool.counts()["libraries"]["1"], 1)
+        self.assertEqual(list(tool.flags(app.libdata.data("1"))), ["301"])
+        self.assertIn("converts to MKV", en(tool.flag_lines(sc["rows"])[0]))
+        found = lambda key, cid: next(r for it in libhealth.library_health(app, "1")["items"] if str(it.get("key")) == key for r in it["results"] if r["id"] == cid)
+        self.assertTrue(found("301", "tool_convert"))
+        container = lambda path: next(c for c in filechecks.check_file(app, None, path, {"format": "stream", "size": 10, "tracks": [{"type": "video"}]}, {}, app.optimizing.options("1"), None, None) if c["id"] == "container")
+        self.assertIn("Convert to MKV converts it", en(container(avi)["text"]))
+        self.assertIn("Converting this kind of file is off", en(container(mp4)["text"]))
+        # Apply: a process; the MKV written next to the original, which stays; Plex asked to scan; the history's columns
+        self._run(tool, tool.apply_async([sc["rows"][0]["id"]]))
+        mkv = os.path.join(root, "Old Film (2001).mkv")
+        self.assertEqual([x["path"] for x in client.sent if x.get("action") == "convert"], [avi])
+        self.assertTrue(os.path.exists(mkv) and os.path.exists(avi))
+        (e,) = app.conversions.snapshot()["items"]
+        self.assertEqual((e["state"], e["new"], e["rating_key"]), ("waiting", mkv, "301"))
+        job = app.jobs.log.jobs()[0]
+        self.assertEqual((job["kind"], job["tool"], job["status"], job["revertable"]), ("tool", "convert", "finished", True))
+        f = app.jobs.log.files(job["job"])["files"][0]
+        self.assertEqual((f["result"], en(f["history"]["what"]), f["history"]["written"] > 0), ("done", "AVI → MKV", True))
+        for _ in range(400):                                                                        # (the scan after the run: the file is on its way)
+            if not tool.running:
+                break
+            time.sleep(0.05)
+        sc = tool.snapshot()["scan"]
+        self.assertEqual((sc["rows"], sc["waiting"]), ([], 1))
+        self.assertEqual(tool.snapshot()["conversions"][0]["state"], "waiting")
+        self.assertEqual(container(avi)["status"], "pass")
+        # Revert while the original is there: the MKV goes, nothing else needed; the follow-up forgets the file
+        self.assertEqual(revert_job(app, job["job"]), {"reverted": 1, "failed": 0})
+        self.assertTrue(os.path.exists(avi) and not os.path.exists(mkv))
+        self.assertEqual(app.conversions.snapshot()["items"], [])
+        self.assertEqual([x for x in client.sent if x.get("action") == "remove_converted"][0]["to"], avi)
+        for _ in range(400):
+            if not tool.running:
+                break
+            time.sleep(0.05)
+        self.assertEqual([r["name"] for r in tool.snapshot()["scan"]["rows"]], ["Old Film (2001).avi"])  # (back on the rows)
+        # converted again; Plex has the MKV as a version of the same item: the original goes at once, no hold
+        self._run(tool, tool.apply_async([tool.snapshot()["scan"]["rows"][0]["id"]]))
+        plex.cat["movies"][4]["more"] = [mkv]
+        app.conversions.act(avi, "check")
+        self.assertEqual(app.conversions.get(avi)["state"], "deleted")
+        self.assertTrue(os.path.exists(mkv) and not os.path.exists(avi))
+        jid = app.jobs.log.jobs()[0]["job"]
+        self.assertEqual(revert_job(app, jid), {"reverted": 0, "failed": 1})                        # (you back up yourself here: the original can't come back)
+        self.assertIn("No snapshot", en(app.jobs.log.files(jid)["files"][0]["reason"]))
+        self.assertTrue(os.path.exists(mkv))
+        # Plex makes the MKV an item of its own: nothing is deleted, and both can be kept
+        client.convert_result = "converted"
+        app.settings.update({"optimizer": {"convert_types": {"mp4": True}}})
+        for _ in range(400):
+            if not tool.running:
+                break
+            time.sleep(0.05)
+        snap = self._run(tool, tool.scan_async("1"))
+        self.assertEqual([r["name"] for r in snap["scan"]["rows"]], ["Home (2002).mp4"])
+        self._run(tool, tool.apply_async([snap["scan"]["rows"][0]["id"]]))
+        home_mkv = os.path.join(root, "Home (2002).mkv")
+        plex.cat["movies"].append({"path": home_mkv, "size": 100, "kbps": 1, "key": "303", "title": "Home", "year": 2002, "guid": "plex://movie/303", "duration": 5400000})
+        plex.changed_at = "2"
+        app.scan_library()
+        app.conversions.act(mp4, "check")
+        self.assertEqual(app.conversions.get(mp4)["state"], "separate")
+        self.assertTrue(os.path.exists(mp4) and os.path.exists(home_mkv))
+        app.conversions.act(mp4, "keep")
+        self.assertIsNone(app.conversions.get(mp4))
+        # a file that can't be converted without losing something: its row fails, says why, and the scan lists it flagged
+        client.convert_result = "skipped"
+        flv = os.path.join(root, "Clip (2003).flv")
+        with open(flv, "wb") as fh:
+            fh.write(b"x" * 100)
+        os.utime(flv, (time.time() - 3600, time.time() - 3600))
+        plex.cat["movies"].append({"path": flv, "size": 100, "kbps": 1, "key": "304", "title": "Clip", "year": 2003, "guid": "plex://movie/304", "duration": 5400000})
+        plex.changed_at = "3"
+        app.scan_library()
+        for _ in range(400):
+            if not tool.running:
+                break
+            time.sleep(0.05)
+        snap = self._run(tool, tool.scan_async("1"))
+        self._run(tool, tool.apply_async([next(r["id"] for r in snap["scan"]["rows"] if r["kind"] == "flv")]))
+        f = app.jobs.log.files(app.jobs.log.jobs()[0]["job"])["files"][0]
+        self.assertEqual((f["result"], en(f["reason"])), ("failed", "Left as it is: its chapters wouldn't be kept"))
+        for _ in range(400):
+            if not tool.running:
+                break
+            time.sleep(0.05)
+        row = next(r for r in tool.snapshot()["scan"]["rows"] if r["kind"] == "flv")
+        self.assertEqual(row["skipped"], "its chapters wouldn't be kept")
+        self.assertIn("left as it is", en(tool.flag_lines([row])[0]))
 
     def test_merge_duplicates(self):
         """The same film on two records (the same match; or unmatched, files named for the same title
@@ -10512,9 +10934,13 @@ class ToolsTests(unittest.TestCase):
         tr.tick()
         self.assertTrue(tr.items[0]["stuck"])
         self.assertIn("can’t be deleted yet", en(next(i for i in checks._tool_items(app) if "set-aside" in en(i["title"]))["title"]))
-        # Plex let go of it (a scan), the hold is 0: purged
+        # Plex let go of it (a scan): purged once the backup length (System → Preferences) has passed, not before
         m.pop("more")
         app.scan_library()
+        tr.items[0]["checked"] = 0
+        tr.tick()
+        self.assertEqual((tr.items[0]["state"], os.path.exists(trashed)), ("waiting", True))
+        tr.items[0]["clear_at"] -= 31 * 86400
         tr.items[0]["checked"] = 0
         tr.tick()
         self.assertEqual((tr.items[0]["state"], os.path.exists(trashed), os.listdir(os.path.dirname(trashed))), ("purged", False, [".plexignore"]))  # (the trash folder stays, empty)
@@ -10619,7 +11045,7 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual(snap["results"][0]["result"], "failed")
         self.assertIn("didn’t list", en(snap["results"][0]["reason"]))
         self.assertTrue(os.path.exists(row["moves"][0]["from"]) and not os.path.exists(row["moves"][0]["to"]))
-        self.assertEqual(len(snap["scan"]["rows"]), 2)                                                # still to do
+        self.assertIn(row["id"], [r["id"] for r in snap["scan"]["rows"]])                              # (still to do: the scan after the run lists it again)
 
     def test_organize_folders_follows_the_mirror(self):
         """With a mirrored server, a moved film is followed there: the synced folder brings the files, and
@@ -10702,9 +11128,68 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual(os.path.getsize(soft), os.path.getsize(m2["path"]))
         self.assertEqual([x["action"] for x in client.sent], ["make_real", "make_real"])
         self.assertEqual(self._run(tool, tool.scan_async("1"))["scan"]["rows"], [])                 # (Movie 1.mkv is on its own too once its twin was copied: none left)
+        # Health warns of hard links in a library, by count, pointing at the tools (symlinks are Library Health's)
+        from plexcache import checks
+        m0 = cat["movies"][0]
+        extra = os.path.join(root, "Movie 0 extra.mkv")                                           # (a path Plex doesn't list)
+        os.link(m0["path"], extra)
+        app.libdata.gather("1", wait=True, refresh=True)                                          # (the data layer reads the folders again: the tick does this by itself)
+        titles = [en(i["title"]) for i in checks.check_cache_mode(app)["items"]]
+        self.assertIn("1 hard-linked file in Movies", titles)
+        hl = next(i for i in checks.check_cache_mode(app)["items"] if en(i["title"]).startswith("1 hard-linked"))
+        self.assertEqual(hl["status"], "warn")
+        self.assertIn("[Unlink Files](/unlink)", en(hl["detail"]))
+        self.assertIn("drift apart", en(hl["detail"]))
+        # "remove": the path Plex doesn't list goes, the file stays where Plex has it; a link listed under every path is copied
+        snap = self._run(tool, tool.scan_async("1", {"remove": True}))
+        row = next(r for r in snap["scan"]["rows"] if r["name"] == "Movie 0.mkv")
+        self.assertEqual((row["others"], row["removable"], snap["scan"]["remove"]), ([{"path": extra, "listed": False}], [extra], True))
+        self.assertEqual(tool.needed_bytes([row]), 0)                                              # (nothing written: a path removed)
+        client.sent.clear()
+        snap = self._run(tool, tool.apply_async([row["id"]]))
+        self.assertEqual([r["result"] for r in snap["results"]][:1], ["done"])
+        self.assertEqual([(x["action"], x.get("to")) for x in client.sent], [("unlink", m0["path"])])
+        self.assertFalse(os.path.exists(extra))
+        self.assertEqual(os.stat(m0["path"]).st_nlink, 1)
+        app.libdata.gather("1", wait=True, refresh=True)
+        self.assertNotIn("hard-linked", " ".join(en(i["title"]) for i in checks.check_cache_mode(app)["items"]))
+        # on a synced library the removal is refused: a path removed here would go at the mirror too, where it's the only copy
+        app2, _plex2, _client2, cat2, _ = self._app(mirror=True)
+        r2 = os.path.join(cat2["root"], "Movies")
+        os.link(cat2["movies"][0]["path"], os.path.join(r2, "Movie 0 extra.mkv"))
+        app2.scan_library()
+        t2 = app2.tools["unlink"]
+        self.assertIsNotNone(t2.mirror("1"))
+        snap = self._run(t2, t2.scan_async("1", {"remove": True}))
+        self.assertIn("may be mirrored (Starlit)", en(snap["error"]))
+        self.assertIsNone(snap["scan"])
+        snap = self._run(t2, t2.scan_async("1"))                                                  # (without it: copies, as ever)
+        self.assertEqual((snap["scan"]["remove"], snap["scan"]["mirror"]["how"]), (False, "watched"))
+        # a server of the account whose files are here too counts as a mirror until you say there's none
+        app.settings.update({"sync": {"mirrors": "unknown"}})
+        app.sync.candidates = [{"id": "zzz", "name": "Starlit", "url": "", "libraries": [], "rate": 0.95}]
+        self.assertEqual(tool.mirrored("1"), {"name": "Starlit", "how": "suspected"})
+        snap3 = self._run(tool, tool.scan_async("1", {"remove": True}))
+        self.assertIn("may be mirrored (Starlit)", en(snap3["error"]))
+        app.settings.update({"sync": {"mirrors": "none"}})
+        self.assertIsNone(tool.mirrored("1"))                                                       # (said: no mirror)
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        self.assertIn("doesn’t carry a hard link", js)
+        self.assertIn("removing the extra paths</strong> is the clean way", js)
+        self.assertIn('data-act="tool-opt" data-tool="unlink" data-opt="remove"', js)
+        self.assertIn("kept 30 days", "kept 30 days")
+        self.assertEqual(sum(1 for r in snap["scan"]["rows"] if r["others"] and not r["others"][0]["listed"]), 1)
         # Merge Duplicates: a row whose files are links carries the warning
         from plexcache.optimize import files
         self.assertEqual(files.make_real(hard)["already"], True)
+        # the copy keeps the dates even where the ownership, flags or ACLs can't be copied (a container without the right)
+        with mock.patch.object(files.shutil, "copystat", side_effect=PermissionError(1, "Operation not permitted")):
+            link3 = os.path.join(root, "Film 3 (2013) perm.mkv")
+            os.link(cat["movies"][3]["path"], link3)
+            st0 = os.stat(link3)
+            self.assertEqual(files.make_real(link3)["bytes"], st0.st_size)
+            st1 = os.stat(link3)
+            self.assertEqual((st1.st_nlink, int(st1.st_mtime)), (1, int(st0.st_mtime)))
         link2 = os.path.join(root, "Film 3 (2013) twin.mkv")
         os.link(cat["movies"][3]["path"], link2)
         cat["movies"].append({"path": link2, "size": cat["movies"][3]["size"], "kbps": 1, "key": "193", "title": "Film 3", "year": 2013, "guid": "plex://movie/3", "duration": cat["movies"][3]["duration"]})
@@ -10713,14 +11198,18 @@ class ToolsTests(unittest.TestCase):
         row = next(r for r in snap["scan"]["rows"] if r["keep"]["key"] in ("103", "193"))
         self.assertEqual(sorted(l["name"] for l in row["linked"]), ["Film 3 (2013) twin.mkv", "Movie 3.mkv"])
 
-    def test_file_tools_wait_for_room_and_a_snapshot(self):
-        """Before a tool changes files: room for what it writes, and a snapshot of the library's dataset
-        within the last half hour (or a backup you say you made). Apply is refused until both are so;
-        Take a Snapshot makes one through TrueNAS; the acknowledgement counts for the same half hour."""
+    def test_file_tools_back_up_first(self):
+        """Before a tool changes files: room for what it writes (and what a snapshot keeps of the files it changes),
+        and a backup plan per the Backup preference — a snapshot, taken by the process as its first step and named for
+        the tool; the copies an action keeps; or none where you back up yourself. Apply is refused with no room or
+        no backup possible; a snapshot TrueNAS refuses stops the process before anything changes; both TrueNAS
+        snapshot APIs are spoken; the snapshots are pruned after the backup days."""
         from plexcache import safety
         app, plex, client, cat, _ = self._app()
         root = os.path.join(cat["root"], "Movies")
         app.zfs = {"datasets": [{"dataset": "tank/media", "mountpoint": cat["root"], "keys": ["1"]}]}
+        app.run_checks_async = lambda *a, **k: None  # (the checks after a run would probe ZFS for real: not this test's subject)
+        app.settings.update({"general": {"backup": "snapshot"}})
         tool = app.tools["unlink"]
         link = os.path.join(root, "Film 1 (2011) link.mkv")
         os.link(cat["movies"][1]["path"], link)
@@ -10728,112 +11217,226 @@ class ToolsTests(unittest.TestCase):
         snap = self._run(tool, tool.scan_async("1"))
         ids = [r["id"] for r in snap["scan"]["rows"]]
         self.assertEqual(tool.needed_bytes(snap["scan"]["rows"]), os.path.getsize(link))         # (Plex lists one path of the pair: one copy to write)
-        app._backup_acks = {}                                                                    # (no backup said, no snapshot anywhere)
-        app._save_json(safety.ACKS, {})
-        # no snapshot anywhere: not ready, Apply refused
-        r = safety.readiness(app, "1", 1000)
-        self.assertEqual((r["space"]["status"], r["snapshot"]["status"], r["ready"], r["can_snapshot"]), ("ok", "warn", False, True))
+        # the plan, per preference
+        r = safety.readiness(app, "1", 1000, tool="unlink")
+        self.assertEqual((r["space"]["status"], r["backup"]["kind"], r["backup"]["status"], r["backup"]["label"], r["ready"], r["can_snapshot"]), ("ok", "snapshot", "ok", "backup", True, True))
+
+        self.assertIn("/system#prefs", en(r["backup"]["text"]))                                      # (the snapshot words link to the preference)
+        app.settings.update({"general": {"backup": "copies"}})
+        self.assertEqual(safety.readiness(app, "1", 0, keeps=True)["backup"]["kind"], "copies")   # (an action that keeps copies of its own)
+        self.assertEqual(safety.readiness(app, "1", 0, keeps=False)["backup"]["kind"], "snapshot")  # (one that keeps none: a snapshot after all)
+        app.settings.update({"general": {"backup": "manual"}})
+        r = safety.readiness(app, "1", 0)
+        self.assertEqual((r["backup"]["kind"], r["backup"]["status"], r["backup"]["label"], r["ready"]), ("manual", "off", "none", True))
+        app.settings.update({"general": {"backup": "snapshot"}, "truenas": {"api_key": ""}})
+        r = safety.readiness(app, "1", 0)
+        self.assertEqual((r["backup"]["kind"], r["backup"]["status"], r["ready"]), ("none", "warn", False))  # (no TrueNAS: no snapshot possible)
+        self.assertIn("/system#prefs", en(r["backup"]["text"]))
         with self.assertRaises(ValueError) as cm:
             tool.apply_async(ids)
-        self.assertIn("No snapshot", en(cm.exception.args[0]))
-        # not enough room: said, and refused
+        self.assertIn("No backup is possible", en(cm.exception.args[0]))
+        app.settings.update({"truenas": {"url": TRUENAS.url, "api_key": "good-key"}})
+        # room: what's written, and under a snapshot what it keeps of the files changed
         with mock.patch.object(safety.os, "statvfs", lambda p: types.SimpleNamespace(f_bavail=10, f_frsize=4096)):
             r = safety.readiness(app, "1", 1000)
             self.assertEqual((r["space"]["status"], r["ready"]), ("warn", False))
             self.assertIn("make room", en(r["space"]["text"]))
-        # a snapshot taken through TrueNAS: green, named for what it's for, and deleted by the app after its two weeks
-        made = safety.take_snapshot(app, "1", "unlink")
-        self.assertEqual(len(made), 1)
-        self.assertTrue(made[0].startswith("tank/media@plexcache-unlink-movies-"), made[0])
+        r = safety.readiness(app, "1", 1000, retained=5 * 10**6)                                   # (small: the test machine's free space isn't the point)
+        self.assertEqual(r["space"]["needed"], 1000 + 5 * 10**6)
+        self.assertIn("the snapshot keeps", en(r["space"]["text"]))
+        self.assertEqual(safety.readiness(app, "1", "largest")["space"]["needed"], max(f.size for f in app.files if f.library_key == "1"))
+        # the process: a snapshot first, named for the tool, then the rows; logged on the Processes page
+        TRUENAS.snapshots = {"tank/media": []}
+        TRUENAS.snapshot_calls = []
+        snap = self._run(tool, tool.apply_async(ids))
+        self.assertEqual([x["result"] for x in snap["results"]], ["done"])
+        self.assertEqual(os.stat(link).st_nlink, 1)
+        names = [n for n, _ in TRUENAS.snapshots["tank/media"]]
+        self.assertEqual(len(names), 1)
+        self.assertTrue(names[0].startswith("plexcache-unlink-movies-"), names)
         self.assertEqual([s["tool"] for s in safety.taken(app)], ["unlink"])
-        self.assertEqual(safety.prune_snapshots(app), 0)                                           # (fresh: kept)
-        app._snapshots[0]["at"] -= safety.LIFE + 1
+        self.assertIn("pool.snapshot.create", TRUENAS.snapshot_calls)
+        jobs = app.jobs.log.jobs()
+        job = next(j for j in jobs if j["kind"] == "tool")
+        self.assertEqual((job["status"], job["files"], job["failed"]), ("finished", 1, 0))
+        ev = next(e for e in job["events"] if e["event"] == "backup")
+        self.assertEqual((ev["backup"]["kind"], ev["backup"]["names"]), ("snapshot", ["tank/media@" + names[0]]))
+        self.assertGreater(ev["backup"]["until"], time.time() + 29 * 86400)
+        self.assertTrue(job["revertable"])
+        # the snapshots are pruned after the backup days; both TrueNAS APIs are spoken
+        self.assertEqual(safety.prune_snapshots(app), 0)
+        app._snapshots[0]["at"] -= safety.life(app) + 1
         self.assertEqual(safety.prune_snapshots(app), 1)
         self.assertEqual((safety.taken(app), TRUENAS.snapshots.get("tank/media")), ([], []))
-        safety.take_snapshot(app, "1", "unlink")
-        r = safety.readiness(app, "1", 1000)
-        self.assertEqual((r["snapshot"]["status"], r["ready"]), ("ok", True))
-        self.assertIn("minutes ago", en(r["snapshot"]["text"]))
-        # an old snapshot alone doesn't do; "I've made a manual backup" does, for half an hour (grey)
-        TRUENAS.snapshots = {"tank/media": [("old", time.time() - 2 * safety.FRESH)]}
-        self.assertEqual(safety.readiness(app, "1")["snapshot"]["status"], "warn")
-        safety.acknowledge_backup(app, "1")
-        r = safety.readiness(app, "1")
-        self.assertEqual((r["snapshot"]["status"], r["snapshot"]["ack"], r["snapshot"]["how"], r["ready"]), ("off", True, "manual", True))
-        safety.acknowledge_backup(app, "1", "trash")                                             # (the action's own set-aside copies will do)
-        self.assertIn("copies set aside", en(safety.readiness(app, "1")["snapshot"]["text"]))
-        self.assertEqual(safety.readiness(app, "1", "largest")["space"]["needed"], max(f.size for f in app.files if f.library_key == "1"))
-        app._backup_acks = None                                                                  # (a restart: kept on disk)
-        self.assertTrue(safety.readiness(app, "1")["ready"])
-        # both TrueNAS snapshot APIs: pool.snapshot.* (25.04 and later) is tried first, and zfs.snapshot.* (before)
-        # when TrueNAS says the first doesn't exist; the one that worked is remembered
-        self.assertIn("pool.snapshot.create", TRUENAS.snapshot_calls)
-        self.assertNotIn("zfs.snapshot.create", TRUENAS.snapshot_calls)
         TRUENAS.snapshot_api, TRUENAS.snapshot_calls, app._snapshot_api = "zfs.snapshot", [], None
         safety.take_snapshot(app, "1", "unlink")
         self.assertEqual(TRUENAS.snapshot_calls, ["pool.snapshot.create", "zfs.snapshot.create"])
         self.assertEqual(app._snapshot_api, "zfs.snapshot")
-        safety.take_snapshot(app, "1", "unlink")
-        self.assertEqual(TRUENAS.snapshot_calls[-1], "zfs.snapshot.create")                      # (remembered: not tried again)
         TRUENAS.snapshot_api, app._snapshot_api = "pool.snapshot", None
-        # a snapshot TrueNAS refuses: said with the lights until the next one is taken (or dismissed), and logged
+        # a snapshot TrueNAS refuses: the process stops before anything changes, says why, and the error stays on the lights
+        link2 = os.path.join(root, "Film 2 (2012) link.mkv")
+        os.link(cat["movies"][2]["path"], link2)
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1"))
+        ids2 = [r["id"] for r in snap["scan"]["rows"]]
         TRUENAS.snapshot_refused = "not allowed for this key"
         before = len(app.activity.events)
-        with self.assertRaises(ValueError):
-            safety.take_snapshot(app, "1", "unlink")
-        r = safety.readiness(app, "1")
-        self.assertIn("not allowed for this key", en(r["error"]["text"]))
-        logged = [e for e in list(app.activity.events)[before:]]
-        self.assertEqual([(e["kind"], e["level"]) for e in logged], [("tools", "warn")])
-        self.assertIn("snapshot not taken", en(logged[0]["message"]))
+        snap = self._run(tool, tool.apply_async(ids2))
+        self.assertEqual(snap["results"][-1]["result"], "done")                                     # (the earlier run's result: nothing new)
+        self.assertEqual(os.stat(link2).st_nlink, 2)                                                # (untouched)
+        self.assertIn("not allowed for this key", en(safety.readiness(app, "1")["error"]["text"]))
+        self.assertTrue(any("snapshot not taken" in en(e["message"]) for e in list(app.activity.events)[before:]))
+        job = app.jobs.log.jobs()[0]
+        self.assertEqual((job["kind"], job["status"], job["files"], job["revertable"]), ("tool", "failed", 0, False))
+        self.assertIn("not allowed", en(next(e for e in job["events"] if e["event"] == "backup_failed")["why"]))
         TRUENAS.snapshot_refused = ""
         safety.take_snapshot(app, "1", "unlink")
         self.assertIsNone(safety.readiness(app, "1")["error"])
-        self.assertIn("snapshot taken", en(list(app.activity.events)[-1]["message"]))
-        # the Backup preference (System → Preferences): "copies" — the action's own set-aside copies do, where it keeps some
-        TRUENAS.snapshots = {"tank/media": []}
-        app._backup_acks = {}
-        app.settings.update({"general": {"backup": "copies", "snapshot_days": 1}})
-        r = safety.readiness(app, "1", 0, keeps=True)
-        self.assertEqual((r["snapshot"]["status"], r["snapshot"]["how"], r["ready"], r["backup"], r["life_days"]), ("off", "trash", True, "copies", 1))
-        self.assertIn("Preferences", en(r["snapshot"]["text"]))
-        self.assertFalse(safety.readiness(app, "1", 0, keeps=False)["ready"])                   # (an action that keeps none: a snapshot or a backup)
-        app.settings.update({"general": {"backup": "snapshot", "snapshot_days": 14}})
-        self.assertFalse(safety.readiness(app, "1", 0, keeps=True)["ready"])
-        app._backup_acks = None
-        # the dataset's own .zfs/snapshot folder tells too, with no API
-        app.settings.update({"truenas": {"api_key": ""}})
-        app._backup_acks = {}
-        self.assertEqual(safety.readiness(app, "1")["snapshot"]["status"], "warn")
-        sdir = os.path.join(cat["root"], ".zfs", "snapshot", "auto-now")
-        os.makedirs(sdir)
-        r = safety.readiness(app, "1")
-        self.assertEqual((r["snapshot"]["status"], r["snapshot"]["name"], r["can_snapshot"]), ("ok", "auto-now", False))
-        with self.assertRaises(ValueError):
-            safety.take_snapshot(app, "1")                                                       # (no API: make one yourself)
-        snap = self._run(tool, tool.apply_async(ids))                                              # (ready now: it goes)
-        self.assertEqual([x["result"] for x in snap["results"]], ["done"])
-        # the page: every tool that changes files passes the gate (its Apply goes through toolApply, which holds the lights)
+        # where a file sits in a snapshot
+        self.assertEqual(safety.snapshot_path(app, "1", link2, "tank/media@plexcache-x"), os.path.join(cat["root"], ".zfs", "snapshot", "plexcache-x", "Movies", "Film 2 (2012) link.mkv"))
+        self.assertIsNone(safety.snapshot_path(app, "1", "/elsewhere/x.mkv", "tank/media@plexcache-x"))
+        # the page: every tool that changes files passes the gate; Apply says what the process does first; no choice on the page
         js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
         from plexcache import peers
         for name in peers.FILE_TOOLS:
-            self.assertIn(f'toolApply("{name}"', js, f"{name}'s page doesn't apply through toolApply (the lights)")
             self.assertRegex(js, r"var FILE_TOOLS = .*\b" + name + r": function", f"{name} isn't among the page's FILE_TOOLS: its Apply wouldn't wait for the lights")
         self.assertIn("if (!gate.ready) u.confirm = false;", js)
         self.assertRegex(js, r'readinessPanel\(key, "largest", "optimizer"')                       # (Optimize Now)
         self.assertRegex(js, r'readinessPanel\(String\(st\.library\), 0, "dataset"')             # (Start Copying, on the dataset page)
-        self.assertEqual(app.tools["versions"].keeps != "", True)
-        # the lights say which backup stands in, link to the preference, and hold the Take a Snapshot button and the kept error
+        self.assertIn('H("Backup and Apply to {n} Selected"', js)
+        self.assertIn('H("Apply to {n} Selected Without Backing Up"', js)
         panel = js[js.index("  function readinessPanel("):]
         panel = panel[:panel.index("\n  function ", 10)]
         self.assertIn('href=\\"/system#prefs\\" data-nav', panel)
-        self.assertIn('data-act="tool-backup" data-how="snapshot"', panel)
-        self.assertIn('data-act="tool-backup" data-how="manual"', panel)
+        self.assertNotIn('data-how="snapshot"', panel)
+        self.assertNotIn('data-how="manual"', panel)
         self.assertIn('data-how="dismiss"', panel)
-        self.assertNotIn("tool-fallback", js)                                                      # (no choice on the page itself any more)
+        self.assertIn('data-act="job-revert"', js)                                                 # (Revert, on the Processes page)
         self.assertIn('id="prefs"', js)
-        for key in ("page_size", "backup", "snapshot_days"):
+        for key in ("page_size", "backup", "backup_days"):
             self.assertIn(f'"general", "{key}"', js)
+
+    def test_tool_runs_revert_from_their_backup(self):
+        """Revert on a tool's run (Processes): the paths Unlink Files removed are made again as links to the file;
+        a merge is split apart again; set-aside copies are put back; a moved film's files are back at their old
+        paths. While the backup lasts, and only once."""
+        from plexcache.tools import revert_job
+        app, plex, client, cat, _ = self._app()
+        root = os.path.join(cat["root"], "Movies")
+        app.zfs = {"datasets": [{"dataset": "tank/media", "mountpoint": cat["root"], "keys": ["1"]}]}
+        app.run_checks_async = lambda *a, **k: None
+        # Unlink Files, removing the extra paths (no mirror): reverted, the paths are back as links
+        extra = os.path.join(root, "Movie 0 extra.mkv")
+        os.link(cat["movies"][0]["path"], extra)
+        app.scan_library()
+        tool = app.tools["unlink"]
+        snap = self._run(tool, tool.scan_async("1", {"remove": True}))
+        row = next(r for r in snap["scan"]["rows"] if r["name"] == "Movie 0.mkv")
+        self._run(tool, tool.apply_async([row["id"]]))
+        self.assertFalse(os.path.exists(extra))
+        job = app.jobs.log.jobs()[0]
+        self.assertEqual((job["kind"], job["status"], job["backup"]["kind"], job["revertable"]), ("tool", "finished", "manual", True))  # (you back up yourself: still revertable, by the tool's own way)
+        app.jobs.log.add({"job": "cx", "kind": "tool", "tool": "unlink", "library": "1", "type": "job", "event": "started"})
+        app.jobs.log.add({"job": "cx", "kind": "tool", "tool": "unlink", "library": "1", "type": "job", "event": "backup", "backup": {"kind": "manual", "until": time.time() + 86400}})
+        app.jobs.log.add({"job": "cx", "kind": "tool", "tool": "unlink", "library": "1", "type": "file", "file": "/x.mkv", "result": "done", "row": {"id": "r"}})
+        app.jobs.log.add({"job": "cx", "kind": "tool", "tool": "unlink", "library": "1", "type": "job", "event": "cancelled"})
+        cx = next(j for j in app.jobs.log.jobs() if j["job"] == "cx")
+        self.assertEqual((cx["status"], cx["revertable"], cx["tool"]), ("cancelled", True, "unlink"))        # (a run cancelled after a file: undone the same way)
+        # the run's files, with the tool's own columns and the common ones (the Processes list and the tool's history)
+        files = app.jobs.log.files(job["job"])
+        self.assertEqual((files["kind"], files["tool"]), ("tool", "unlink"))
+        self.assertEqual((files["files"][0]["result"], files["files"][0]["history"]["paths"], en(files["files"][0]["history"]["what"])), ("done", 2, "1 path removed"))
+        jid = job["job"]
+        got = revert_job(app, jid)
+        self.assertEqual(got, {"reverted": 1, "failed": 0})
+        self.assertTrue(os.path.exists(extra))
+        self.assertEqual(os.stat(extra).st_ino, os.stat(cat["movies"][0]["path"]).st_ino)
+        job = next(j for j in app.jobs.log.jobs() if j["job"] == jid)
+        self.assertTrue(job["reverted"] and not job["revertable"])
+        with self.assertRaises(ValueError):
+            revert_job(app, job["job"])                                                              # (once)
+        # a hard link made a file of its own (the copy option): reverted, the copy goes and the path is a link again — from the
+        # other path that still holds the file, no snapshot needed
+        extra2 = os.path.join(root, "Movie 1 extra.mkv")
+        os.link(cat["movies"][1]["path"], extra2)
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1"))
+        row1 = next(r for r in snap["scan"]["rows"] if r["name"] == "Movie 1.mkv")
+        self.assertEqual([o["path"] for o in row1["others"]], [extra2])
+        self._run(tool, tool.apply_async([row1["id"]]))
+        self.assertEqual(os.stat(cat["movies"][1]["path"]).st_nlink, 1)                             # (a copy now)
+        jid1 = app.jobs.log.jobs()[0]["job"]
+        self.assertEqual(revert_job(app, jid1), {"reverted": 1, "failed": 0})
+        self.assertEqual(os.stat(cat["movies"][1]["path"]).st_ino, os.stat(extra2).st_ino)          # (a link again)
+        for _ in range(400):                                                                        # (the scan runs again by itself: the row is back)
+            if not tool.running:
+                break
+            time.sleep(0.05)
+        self.assertIn("Movie 1.mkv", [r["name"] for r in tool.snapshot()["scan"]["rows"]])
+        files = app.jobs.log.files(jid1)
+        self.assertEqual((files["files"][0]["result"], files["files"][0]["history"]["paths"]), ("reverted", 2))  # (the file's own entry, now reverted)
+        # a revert that puts nothing back isn't a revert: said so, the file says why, and the run can be tried again
+        soft = os.path.join(root, "Film 2 (2012) soft.mkv")
+        os.symlink(cat["movies"][2]["path"], soft)
+        plex.cat["movies"][2]["more"] = [soft]
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1"))
+        rows = next(r for r in snap["scan"]["rows"] if r["kind"] == "symlink")
+        self._run(tool, tool.apply_async([rows["id"]]))
+        jid2 = app.jobs.log.jobs()[0]["job"]
+        self.assertEqual(revert_job(app, jid2), {"reverted": 0, "failed": 1})                       # (no snapshot was taken: a symlink's copy can't go back)
+        j2 = next(j for j in app.jobs.log.jobs() if j["job"] == jid2)
+        self.assertTrue(j2["revert_failed"] and j2["revertable"] and not j2.get("reverted"))
+        f2 = app.jobs.log.files(jid2)["files"][0]
+        self.assertEqual(f2["result"], "revert_failed")
+        self.assertIn("No snapshot", en(f2["reason"]))
+        # the other way back: the whole dataset rolled back to the run's snapshot (through TrueNAS), once
+        from plexcache.tools import rollback_job
+        app.settings.update({"general": {"backup": "snapshot"}})
+        link3 = os.path.join(root, "Movie 3 extra.mkv")
+        os.link(cat["movies"][3]["path"], link3)
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1", {"remove": True}))
+        row3 = next(r for r in snap["scan"]["rows"] if r["name"] == "Movie 3.mkv")
+        TRUENAS.snapshots = {"tank/media": []}
+        self._run(tool, tool.apply_async([row3["id"]]))
+        job = app.jobs.log.jobs()[0]
+        self.assertEqual(job["backup"]["kind"], "snapshot")
+        self.assertEqual(rollback_job(app, job["job"]), {"rolled_back": job["backup"]["names"]})
+        self.assertEqual(TRUENAS.rolled_back, job["backup"]["names"])
+        self.assertIn("rollback", TRUENAS.snapshot_calls[-1])
+        job = app.jobs.log.jobs()[0]
+        self.assertEqual((job["undone_how"], job["revertable"]), ("rolled_back", False))
+        with self.assertRaises(ValueError):
+            revert_job(app, job["job"])                                                              # (undone already)
+        app.settings.update({"general": {"backup": "manual"}})
+        # Merge Duplicates: the kept record split apart again
+        copy = os.path.join(root, "Film 1 (2011) [copy].mkv")
+        fakes.make_mkv(copy, 1024 * 1024)
+        plex.cat["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000})
+        plex.changed_at = "2"
+        app.scan_library()
+        mg = app.tools["merge"]
+        snap = self._run(mg, mg.scan_async("1"))
+        (mrow,) = snap["scan"]["rows"]
+        self._run(mg, mg.apply_async([mrow["id"]]))
+        self.assertEqual(plex.merged, [("101", "190")])
+        self.assertEqual(revert_job(app, app.jobs.log.jobs()[0]["job"]), {"reverted": 1, "failed": 0})
+        self.assertEqual(plex.split, ["101"])
+        self.assertEqual(len(plex.cat["movies"]), 5)                                                 # (the folded record is a record again)
+        # Duplicate Versions: the copies set aside put back
+        twin = os.path.join(root, "Movie & Friends 2 (2012)", "Movie 2 twin.mkv")
+        shutil.copy2(cat["movies"][2]["path"], twin)
+        plex.cat["movies"][2]["more"] = [twin]
+        plex.changed_at = "3"
+        app.scan_library()
+        dv = app.tools["versions"]
+        snap = self._run(dv, dv.scan_async("1"))
+        vrow = next(r for r in snap["scan"]["rows"] if r["rk"] == "102")
+        self._run(dv, dv.apply_async([vrow["id"]]))
+        self.assertFalse(os.path.exists(twin))
+        self.assertEqual(revert_job(app, app.jobs.log.jobs()[0]["job"]), {"reverted": 1, "failed": 0})
+        self.assertTrue(os.path.exists(twin))
 
     def test_tool_api_and_state(self):
         """The Tools API: a scan and an apply started through it, each tool's state in the app's state,
@@ -10853,8 +11456,8 @@ class ToolsTests(unittest.TestCase):
         self.assertTrue(got["started"])
         self._run(app.tools["merge"], True)
         st = json.loads(urllib.request.urlopen(base + "/api/state", timeout=10).read())
-        self.assertEqual(sorted(st["tools"]), ["folders", "merge", "unlink", "versions"])
-        self.assertEqual((st["tools"]["merge"]["scan"]["library"], st["trash"]["items"], st["trash"]["hold_days"]), ("1", [], 0))
+        self.assertEqual(sorted(st["tools"]), ["convert", "folders", "merge", "unlink", "versions"])
+        self.assertEqual((st["tools"]["merge"]["scan"]["library"], st["trash"]["items"], st["trash"]["hold_days"]), ("1", [], 30))  # (the hold: the backup length)
         with self.assertRaises(urllib.error.HTTPError):
             post("/api/tools/nothing", {"action": "scan", "library": "1"})
         with self.assertRaises(urllib.error.HTTPError):

@@ -32,6 +32,7 @@ from .tools.merge import MergeDuplicates
 from .tools.versions import DuplicateVersions
 from .tools.folders import OrganizeFolders
 from .tools.unlink import UnlinkFiles
+from .tools.convert import ConvertToMkv
 from .libhealth import defaults as libhealth_defaults
 from .languages import language_name
 from .migrating import Migration
@@ -44,6 +45,7 @@ from . import platform as platform_mod
 from . import peers, safety
 from .scheduler import TIMED, due, next_run
 from .truenas import METHODS as TRUENAS_METHODS, TrueNASClient, TrueNASError, describe_pool, missing_methods, probe as probe_truenas
+from . import libdata
 from .warmup import KIND_SECONDS, KINDS, L2ARC_RATE_SHARE, NEXT_DAY, next_day_check, LibraryStats, WarmupRun, plan, resolve_schedule
 
 GiB = 1024 ** 3
@@ -192,7 +194,14 @@ class App:
         self.trash = Trash(self)  # files the tools set aside, purged once Plex (here and mirrored) no longer lists them
         self.tool_runs: dict = self._load_json("tool-runs.json") or {}  # {library: {tool: when}} — told to the other Plex Cache (peers.py)
         self.peers_summary: dict | None = None
-        self.tools = {t.name: t for t in (MergeDuplicates(self), DuplicateVersions(self), OrganizeFolders(self), UnlinkFiles(self))}  # the Tools pages
+        self.libdata = libdata.Gatherer(self)  # the library data layer: records and files, gathered once, read by every check and tool
+        self.tools = {t.name: t for t in (MergeDuplicates(self), DuplicateVersions(self), OrganizeFolders(self), UnlinkFiles(self), ConvertToMkv(self))}  # the Tools pages
+        for t in self.tools.values():
+            self.libdata.listeners.append(t.data_changed)  # (a gathering done: the tool's rows worked out again, its count fresh)
+        from .tools import ToolJob
+        self.jobs.register("tool", lambda args, saved: ToolJob(self, args, saved))  # a tool's Apply: the backup, then the rows (Processes)
+        self.health_counts: dict[str, dict] = {}  # library -> {"file": n, "plex": n, "ignored": n, "items": n, "stamp"}: Library Health's counts for the cards
+        self.libdata.listeners.append(self._count_health)
         # what's where in each media file (the Library Health page), and the job that reads it
         self.file_maps = FileMaps(self.config_dir)
         self.inspector = Inspector(self)  # Library Health: each library's files read, one library at a time
@@ -302,6 +311,8 @@ class App:
             if time.time() - last_publish > peers.PUBLISH_EVERY and self.libraries:  # our marker in the shared folders (peers.py)
                 last_publish = time.time()
                 threading.Thread(target=self.publish_peers, name="peers", daemon=True).start()
+            if self.libdata.started:  # the library data layer: a changed library (Plex's stamp, a folder's mtime) gathered again
+                threading.Thread(target=self.libdata.tick, name="libdata-tick", daemon=True).start()
             if time.time() - last_tools > 300:  # the tools' follow-ups on the mirror (Organize Folders)
                 last_tools = time.time()
                 for tool in self.tools.values():
@@ -326,7 +337,7 @@ class App:
             excluded = set(self.settings.section("general")["excluded_libraries"])
             files, lib_info = [], []
             for lib in libs:
-                info = {"key": lib.key, "title": lib.title, "type": lib.type, "kind": lib.kind,
+                info = {"key": lib.key, "title": lib.title, "type": lib.type, "kind": lib.kind, "changed": lib.changed,
                         "locations": lib.locations, "excluded": lib.key in excluded or lib.title in excluded, "count": 0}
                 if lib.kind and not info["excluded"]:
                     lf = client.library_files(lib)
@@ -343,6 +354,7 @@ class App:
                 self.files, self.libraries = files, lib_info
                 self.stats = LibraryStats.from_files(files, {i["key"]: i["title"] for i in lib_info})
                 self.scan_error = None
+            self.libdata.invalidate_files()  # (Plex's listing read again: the data layer's files follow)
             self._share_out_old_choices()
         except PlexError as e:
             with self.lock:
@@ -613,6 +625,28 @@ class App:
         """A library from the last scan ({key, title, kind, ...}), or None."""
         return next((lib for lib in self.libraries if lib["key"] == str(key)), None)
 
+    def _count_health(self, key: str, what) -> None:
+        """Library Health's findings counted for a library whose data changed: per category, ignored items apart
+        (what the File Checks and Plex Checks cards and the menu's count show)."""
+        from . import libhealth
+        d = self.libdata.data(key)
+        if not d.ready or not (self.library_info(key) or {}).get("kind"):
+            return
+        try:
+            got = libhealth.library_health(self, key)
+        except Exception:  # noqa: BLE001 — said when the page asks
+            return
+        cat_of = {c["id"]: cat for cat, cs in got["checks"].items() for c in cs}
+        counts: dict[str, int] = {"file": 0, "plex": 0, "tools": 0}
+        ignored = 0
+        for it in got["items"]:
+            live = {r["id"] for r in it["results"] if not r.get("ignored")}
+            for cat in set(cat_of.get(i, "") for i in live):
+                if cat in counts:
+                    counts[cat] += 1  # (an item once per category, however many of its checks found something)
+            ignored += any(r.get("ignored") for r in it["results"])
+        self.health_counts[str(key)] = dict(counts, ignored=ignored, items=got["stats"]["items"], flagged=got["stats"]["flagged"], stamp=d.stamp)
+
     def check_prefetch_libraries(self, libs) -> None:
         """Prefetch choices must be for a library Plex has, of a kind Prefetch covers, and offered
         for that kind (music has no "next album"). Raises SettingsError."""
@@ -871,6 +905,8 @@ class App:
                 self.mapping_choices = mapping.choices(locations)
             self.probe_zfs()  # needs the locations: it checks the dataset under each library
             self.optimizing.survey_soon()  # the Optimizer page's counts, in the background (reads new files' tags)
+            if not self.libdata.started:
+                self.libdata.start()  # every library's records and files gathered in the background, the ones opened lately first
             result = checks.run_all(self)
             with self.lock:
                 self.health = result
@@ -1653,6 +1689,9 @@ class App:
             "plex2": self.other.snapshot(),
             "sync": self.sync.snapshot(),
             "tools": {name: t.snapshot() for name, t in self.tools.items()},  # the Tools pages: each one's last scan, run, results
+            "tool_counts": {name: t.counts() for name, t in self.tools.items()},  # what each tool flags, per library and in all (from the data layer)
+            "health_counts": dict(self.health_counts),  # Library Health's findings per library and category, ignored apart (the check cards)
+            "libdata": self.libdata.snapshot(),  # the data layer: what's gathered, what's being read
             "trash": self.trash.snapshot(),  # files the tools set aside, waiting to be purged
             "job": self.jobs.snapshot(),
             "inspect": self.inspector.snapshot(),  # the file job running now (or the last one): one card for every kind

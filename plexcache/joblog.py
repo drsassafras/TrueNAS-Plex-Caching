@@ -133,7 +133,7 @@ class JobLog:
             jid = e.get("job")
             if not jid:
                 continue
-            j = by.setdefault(jid, {"job": jid, "kind": e.get("kind"), "mode": e.get("mode"), "library": e.get("library"),
+            j = by.setdefault(jid, {"job": jid, "kind": e.get("kind"), "mode": e.get("mode"), "library": e.get("library"), "tool": e.get("tool"),
                                     "title": e.get("title"), "started": e.get("at"), "ended": None, "status": "running",
                                     "events": [], "counts": {}, "files": 0, "failed": 0, "tally": {}})
             if e.get("type") in ("disk", "plan"):
@@ -141,14 +141,23 @@ class JobLog:
                     j.setdefault("_planned", set()).update(e.get("files") or [])
                 continue
             if e.get("type") == "file":
+                if e.get("result") in ("reverted", "revert_failed"):
+                    continue  # (the undoing of a tool's run: the reverted event says so; the file's own entry stands)
                 files.setdefault(jid, {})[e.get("file")] = e
                 if j["kind"] == "discovered":  # (found, not run: done as each file is found)
                     j.update(status="finished", ended=e.get("at"))
                 continue
-            j["events"].append({k: e.get(k) for k in ("event", "at", "done", "total", "why", "counts") if e.get(k) is not None})
-            for k in ("mode", "library", "title"):
+            j["events"].append({k: e.get(k) for k in ("event", "at", "done", "total", "why", "counts", "backup") if e.get(k) is not None})
+            if e.get("event") == "backup_failed":
+                j.update(status="failed", ended=e.get("at"))
+            if e.get("event") in ("reverted", "rolled_back"):
+                j["reverted"] = e.get("at")
+                j["undone_how"] = e.get("event")
+            if e.get("event") == "revert_failed":
+                j["revert_failed"] = e.get("at")  # (nothing put back: the run still stands, and can be tried again)
+            for k in ("mode", "library", "title", "tool"):
                 j[k] = e.get(k) or j[k]  # the latest known (a title may be missing while Plex wasn't reachable)
-            if e.get("event") in ("finished", "cancelled"):
+            if e.get("event") in ("finished", "cancelled") and j["status"] != "failed":  # (a run that stopped at its backup stays "failed")
                 j.update(status=e["event"], ended=e.get("at"), counts=e.get("counts") or {})
         for jid, mine in files.items():
             j = by[jid]
@@ -156,6 +165,8 @@ class JobLog:
             for e in mine.values():
                 if e.get("result") == "cancelled":
                     continue  # never tried: not counted
+                if e.get("result") in ("reverted", "revert_failed"):
+                    continue  # (the undoing: said by the reverted event, not counted as files tried)
                 j["files"] += 1
                 j["failed"] += e.get("result") == "failed"
                 tally_file(j["tally"], dict(e, disk_after=disk.get((jid, e.get("file")))))
@@ -165,8 +176,15 @@ class JobLog:
                 j["counts"] = dict(j["counts"], **{k: counts.get(k, 0) for k in ("optimized", "rewritten", "skipped", "failed")})
         for j in by.values():  # every file it set out to do (tried or not)
             j["planned"] = len(j.pop("_planned", set()) | set(files.get(j["job"], {})))
-        # a job that ended without trying a single file (cancelled straight away, or nothing to do): not shown
-        by = {k: j for k, j in by.items() if j["files"] or j["status"] == "running"}
+        for j in by.values():  # a tool's run: whether Revert is on (its backup still there, nothing reverted yet)
+            if j["kind"] == "tool":
+                bk = next((ev.get("backup") for ev in j["events"] if ev.get("event") == "backup"), None)
+                j["backup"] = bk
+                j["revertable"] = bool(bk and j["status"] in ("finished", "cancelled") and not j.get("reverted") and j["files"] > j["failed"]
+                                       and (not bk.get("until") or bk["until"] > time.time()))
+        # a job that ended without trying a single file (cancelled straight away, or nothing to do): not shown — but a
+        # tool's run that stopped at the backup is: its reason is what you need to see
+        by = {k: j for k, j in by.items() if j["files"] or j["status"] in ("running", "failed")}
         return sorted(by.values(), key=lambda j: j["started"] or 0, reverse=True)[:limit]
 
     def files(self, job: str, offset: int = 0, limit: int = 200, sort: str = "", fill=None) -> dict:
@@ -181,6 +199,9 @@ class JobLog:
             if e.get("job") != job:
                 continue
             if e.get("type") == "file":
+                if e.get("result") in ("reverted", "revert_failed") and e.get("file") in latest:  # (the undoing: its result and reason on the file's own entry)
+                    latest[e["file"]] = dict(latest[e["file"]], result=e["result"], reason=e.get("reason"), reverted_at=e.get("at"))
+                    continue
                 latest[e.get("file")] = e  # (a dict keeps the first one's place)
             elif e.get("type") == "plan":
                 planned.update(dict.fromkeys(e.get("files") or []))
@@ -193,7 +214,9 @@ class JobLog:
             rows = sorted(rows, key=SORTS[sort])  # (stable: the order done, within each)
         from .paging import page_ranges
         label = (lambda r: str(r.get("result") or "")) if sort == "result" else (lambda r: str(r.get("title") or os.path.basename(str(r.get("file") or ""))))
-        return {"total": len(rows), "failed": failed, "files": rows[offset:offset + limit], "pages": page_ranges([label(r) for r in rows], limit)}
+        first = next((e for e in every if e.get("job") == job), {})
+        return {"total": len(rows), "failed": failed, "files": rows[offset:offset + limit], "pages": page_ranges([label(r) for r in rows], limit),
+                "kind": first.get("kind"), "tool": first.get("tool")}
 
     @staticmethod
     def _disk(rows: list[dict]) -> dict:

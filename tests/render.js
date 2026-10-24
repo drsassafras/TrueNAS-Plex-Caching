@@ -48,6 +48,7 @@ const sandbox = {
   fetch(url) {
     if (process.env.RENDER_DEBUG) console.error("render.js: fetch " + url);
     if (String(url).startsWith("/api/state")) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(state) });
+    if (String(url).startsWith("/api/processes") && state._proc) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(state._proc) });
     return never;
   },
   setTimeout, clearTimeout, setInterval() { return 0; }, clearInterval() {}, requestAnimationFrame(f) { return setTimeout(f, 0); },

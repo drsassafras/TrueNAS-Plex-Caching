@@ -3,13 +3,11 @@ the dataset to fall back on? Two lights per library, both green before Apply ope
 
 * **Space**: the free space on each of the library's folders (statvfs), against what the action
   would write (each tool says, from its scan), with a margin kept clear (MARGIN).
-* **Snapshot**: the newest snapshot of the library's datasets — read from the dataset's own
-  .zfs/snapshot folder where the app's mount reaches it, and from the TrueNAS API when connected
-  — within FRESH of now. What stands in for one is the Backup preference (System → Preferences):
-  Take a Snapshot makes one through the API (pool.snapshot.create on TrueNAS 25.04 and later,
-  zfs.snapshot.create before: both are tried), kept general.snapshot_days; "I've made a backup"
-  counts as one for FRESH; or the copies the action keeps of its own, where it does. The light
-  goes grey for each. A snapshot that couldn't be taken is kept as an error until the next try.
+* **Backup**: what the process does first, per the Backup preference (System → Preferences): a
+  snapshot through the API (pool.snapshot.create on TrueNAS 25.04 and later, zfs.snapshot.create
+  before: both are tried), kept general.backup_days and named for the action; the copies the action
+  keeps of its own, where it does; or none, where you back up yourself. The light says the plan;
+  a snapshot that couldn't be taken aborts the process, and is kept as an error until the next try.
 """
 
 from __future__ import annotations
@@ -21,11 +19,10 @@ from .i18n import M
 
 FRESH = 30 * 60          # a snapshot (or a backup you made) this recent counts
 MARGIN = 1 << 30         # free space kept clear beyond what's written (1 GiB)
-LIFE = 14 * 86400        # how long a snapshot the app takes is kept (the default of general.snapshot_days), then deleted by the app itself
+LIFE = 30 * 86400        # how long a backup — a snapshot the app takes, files set aside — is kept (the default of general.backup_days), then deleted by the app itself
 # The snapshot methods, by TrueNAS version: pool.snapshot.* from 25.04, zfs.snapshot.* before. The first that TrueNAS
 # knows is used, and remembered.
 SNAPSHOT_APIS = ("pool.snapshot", "zfs.snapshot")
-ACKS = "backup-acks.json"
 SNAPS = "snapshots.json"  # the snapshots the app took: {"name", "dataset", "at", "library", "tool"}
 
 
@@ -60,9 +57,9 @@ def space(app, key: str, needed: int) -> dict:
 
 
 def life(app) -> int:
-    """How long a snapshot the app takes is kept, in seconds (general.snapshot_days)."""
+    """How long a backup is kept, in seconds (general.backup_days): a snapshot the app takes, files set aside or copied."""
     try:
-        return int(app.settings.section("general").get("snapshot_days") or LIFE // 86400) * 86400
+        return int(app.settings.section("general").get("backup_days") or LIFE // 86400) * 86400
     except (TypeError, ValueError):
         return LIFE
 
@@ -138,20 +135,6 @@ def newest_snapshot(app, key: str) -> tuple[float | None, str]:
             except Exception:  # noqa: BLE001 — not allowed, or an older TrueNAS: the folder's word stands
                 pass
     return best
-
-
-def acks(app) -> dict:
-    if getattr(app, "_backup_acks", None) is None:
-        app._backup_acks = app._load_json(ACKS) or {}
-    return app._backup_acks
-
-
-def acknowledge_backup(app, key: str, how: str = "manual") -> None:
-    """A fallback you chose instead of a snapshot: "manual" (a backup you made), or "trash" (the copies the
-    action sets aside in .plexcache-trash will do). Counts for FRESH."""
-    a = acks(app)
-    a[str(key)] = {"at": time.time(), "how": how if how in ("manual", "trash") else "manual"}
-    app._save_json(ACKS, a)
 
 
 def _slug(text: str) -> str:
@@ -239,36 +222,86 @@ def prune_snapshots(app) -> int:
     return len(gone)
 
 
+def rollback(app, names: list[str]) -> list[str]:
+    """The datasets rolled back to the snapshots named, through TrueNAS: everything written to them since is gone — the
+    whole dataset as it was, not only the files a run changed. The snapshots rolled back."""
+    t = app.settings.section("truenas")
+    if not (t.get("url") and t.get("api_key")):
+        raise ValueError(M("Rolling back is done through the TrueNAS API: connect it in [System → TrueNAS](/system#truenas)."))
+    done = []
+    try:
+        with app.truenas() as tn:
+            for n in names:
+                snap_call(app, tn, "rollback", [n, {"force": True}])
+                done.append(n)
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(M("TrueNAS didn’t roll back {name}: {why}", name=names[len(done)] if len(done) < len(names) else "", why=str(e))) from None
+    app.activity.event("tools", M("rolled back to {names}: the datasets as they were then", names=", ".join(done)), level="warn")
+    return done
+
+
 def snapshot(app, key: str, keeps: bool = False) -> dict:
-    """{"status": "ok" | "warn" | "off", "at", "name", "text"}: a snapshot (or a backup you made) within FRESH —
-    or, with the Backup preference on the action's own copies and ``keeps`` (this action keeps some), those."""
+    """{"status": "ok" | "warn" | "off", "at", "name", "text"}: the newest snapshot of the library's dataset within FRESH
+    (what's there already, before the process takes its own)."""
     at, name = newest_snapshot(app, key)
-    if backup_kind(app) == "copies" and keeps:
-        return {"status": "off", "at": None, "name": "", "ack": True, "how": "trash",
-                "text": M("The copies this keeps are the backup, as chosen in [System → Preferences](/system#prefs).")}
-    ack = acks(app).get(str(key))
-    if isinstance(ack, (int, float)):  # (as kept before the fallback had a kind)
-        ack = {"at": ack, "how": "manual"}
     now = time.time()
-    if ack and now - float(ack.get("at") or 0) < FRESH:
-        m = int((now - float(ack["at"])) / 60)
-        return {"status": "off", "at": ack["at"], "name": "", "ack": True, "how": ack.get("how") or "manual",
-                "text": M("The copies set aside will do, you said, {m} minutes ago.", m=m) if ack.get("how") == "trash" else M("A manual backup, you said, {m} minutes ago.", m=m)}
     if at and now - at < FRESH:
-        return {"status": "ok", "at": at, "name": name, "ack": False, "text": M("Snapshot {name}, {m} minutes ago.", name=name, m=int((now - at) / 60))}
-    return {"status": "warn", "at": at, "name": name, "ack": False,
-            "text": M("The newest snapshot is {name}, {h} hours old: take one first, or make a backup and say so.", name=name, h=int((now - at) / 3600)) if at
-            else M("No snapshot of the library’s dataset is in reach: take one first, or make a backup and say so.")}
+        return {"status": "ok", "at": at, "name": name, "text": M("Snapshot {name}, {m} minutes ago.", name=name, m=int((now - at) / 60))}
+    return {"status": "warn", "at": at, "name": name,
+            "text": M("The newest snapshot is {name}, {h} hours old.", name=name, h=int((now - at) / 3600)) if at else M("No snapshot of the library’s dataset is in reach.")}
 
 
-def readiness(app, key: str, needed: int | str = 0, keeps: bool = False) -> dict:
-    """Both lights, and whether a file-changing action may go ahead (no orange left). ``needed``: bytes,
-    or "largest" — the library's largest file (what a rewrite needs room for). ``keeps``: the action keeps
-    copies of its own (they do, when that's the Backup preference)."""
+def plan(app, key: str, keeps: bool = False, tool: str = "") -> dict:
+    """What the process does for a backup before it changes files, per the Backup preference (System → Preferences):
+    {"kind": "snapshot" | "copies" | "manual" | "none", "status": "ok" | "off" | "warn", "text", "label"} — ``label``: what the
+    Apply button says. A snapshot is the process's first step; the copies an action keeps are its own; "manual" says you
+    back up yourself, so Apply goes ahead without one; "none" blocks: no backup is possible as things are."""
+    how = backup_kind(app)
+    can = bool(app.settings.section("truenas").get("api_key")) and any(r["dataset"] for r in _roots(app, key))
+    days = life(app) // 86400
+    title = (app.library_info(key) or {}).get("title") or key
+    name = "plexcache-" + (_slug(tool) + "-" if tool else "") + _slug(title) + "-<time>"
+    if how == "copies" and keeps:
+        return {"kind": "copies", "status": "off", "label": "backup", "days": days,
+                "text": M("[The copies this keeps are the backup](/system#prefs): put back from its page or from the [history](/processes) of the job.")}
+    if how == "manual":
+        return {"kind": "manual", "status": "off", "label": "none", "days": days,
+                "text": M("[You back up yourself](/system#prefs), as chosen: Apply goes ahead without one.")}
+    if can:  # (a snapshot: the preference, or the fallback where the action keeps no copies of its own)
+        return {"kind": "snapshot", "status": "ok", "label": "backup", "days": days, "name": name,
+                "text": M("[A snapshot is taken first](/system#prefs), then the files change. It can be reverted through TrueNAS, or from the [history](/processes) of the job.")
+                if how == "snapshot" else M("This action keeps no copies of its own, so [a snapshot is taken first](/system#prefs), then the files change. It can be reverted through TrueNAS, or from the [history](/processes) of the job.")}
+    return {"kind": "none", "status": "warn", "label": "none", "days": days,
+            "text": M("No backup is possible as things are: a snapshot needs TrueNAS connected in [System → TrueNAS](/system#truenas) with a key allowed to take one — or choose a backup you make yourself in [System → Preferences](/system#prefs).")}
+
+
+def readiness(app, key: str, needed: int | str = 0, keeps: bool = False, retained: int = 0, tool: str = "") -> dict:
+    """The lights before a file-changing action, and whether it may go ahead: room for what it writes — and, under a
+    snapshot, for what the snapshot keeps of the files it rewrites or deletes (``retained``) until it expires — and the
+    backup plan (plan()). ``needed``: bytes, or "largest" — the library's largest file (what a rewrite needs room for)."""
     if needed == "largest":
         needed = max((getattr(f, "size", 0) or 0 for f in list(app.files) if str(f.library_key) == str(key)), default=0)
-    sp, sn = space(app, key, int(needed or 0)), snapshot(app, key, keeps)
-    can_snapshot = bool(app.settings.section("truenas").get("api_key")) and any(r["dataset"] for r in _roots(app, key))
-    return {"library": str(key), "space": sp, "snapshot": sn, "ready": sp["status"] == "ok" and sn["status"] != "warn", "can_snapshot": can_snapshot,
-            "backup": backup_kind(app), "keeps": bool(keeps), "error": errors(app).get(str(key)),
-            "fresh_minutes": FRESH // 60, "life_days": life(app) // 86400}
+    bp = plan(app, key, keeps, tool)
+    total = int(needed or 0) + (int(retained or 0) if bp["kind"] == "snapshot" else 0)
+    sp = space(app, key, total)
+    if bp["kind"] == "snapshot" and retained and sp["status"] == "ok":
+        sp["text"] = M("{free} free; this writes about {needed}, and the snapshot keeps the {retained} of files it changes until it expires.",
+                       free=_gb(sp["free"]), needed=_gb(int(needed or 0)), retained=_gb(int(retained)))
+    return {"library": str(key), "space": sp, "backup": bp, "snapshot": snapshot(app, key, keeps), "ready": sp["status"] == "ok" and bp["status"] != "warn",
+            "can_snapshot": bool(app.settings.section("truenas").get("api_key")) and any(r["dataset"] for r in _roots(app, key)),
+            "kind": backup_kind(app), "keeps": bool(keeps), "error": errors(app).get(str(key)), "fresh_minutes": FRESH // 60, "life_days": life(app) // 86400}
+
+
+def why_not(ready: dict):
+    """One sentence for a refusal: the light that isn't green."""
+    return ready["space"]["text"] if ready["space"]["status"] != "ok" else ready["backup"]["text"]
+
+
+def snapshot_path(app, key: str, local: str, snapshot_name: str) -> str | None:
+    """Where a file sits inside a snapshot of its dataset: <mountpoint>/.zfs/snapshot/<name>/<its path within the dataset>."""
+    for r in _roots(app, key):
+        mp = r.get("mountpoint") or ""
+        ds = r.get("dataset") or ""
+        if mp and ds and (local == mp or local.startswith(mp.rstrip("/") + "/")) and snapshot_name.split("@")[0] == ds:
+            return os.path.join(mp, ".zfs", "snapshot", snapshot_name.split("@", 1)[1], local[len(mp.rstrip("/")) + 1:])
+    return None

@@ -337,8 +337,7 @@ PCI18N.ready.then(function () {
     var x = r.recordsize;
     if (!x) return '<span class="muted">—</span>';
     return badge(x.status, x.badge || STATUS_TEXT[x.status] || x.status) + (x.text ? '<div class="det mono">' + esc(x.text) + "</div>" : "") +
-      (x.lines || []).map(function (l) { return '<div class="det">' + esc(l) + "</div>"; }).join("") +
-      (x.split ? '<div class="det"><a href="/dataset" data-nav>' + H("Convert the folder to a child dataset") + "</a></div>" : "");
+      (x.lines || []).map(function (l) { return '<div class="det">' + links(msg(l)) + "</div>"; }).join("");
   }
 
 
@@ -368,7 +367,8 @@ PCI18N.ready.then(function () {
       // {APP} in a command is this app's own address (e.g. to download a script it serves).
       var cmd = it.fix_cmd ? it.fix_cmd.split("{APP}").join(location.origin) : "";
       out += '<div class="fix">' + links(it.fix);
-      if (cmd) out += '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) + '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button></div>";
+      if (cmd) out += '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) + '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button>" +
+        '<button class="btn" type="button" data-act="recheck"' + (ST.checking ? " disabled" : "") + ">" + (ST.checking ? H("Checking…") : H("Re-test")) + "</button></div>";
       out += "</div>";
     }
     if (it.link && it.link.job) out += '<div class="det"><button class="link" type="button" data-act="proc-failed" data-job="' + esc(it.link.job) + '">' + esc(it.link.text) + "</button></div>";
@@ -1032,7 +1032,8 @@ PCI18N.ready.then(function () {
   }
   function jobTitle(job) {
     var lib = jobLibrary(job), t;
-    if (job.kind === "copy") t = T("Converting {library} Folder to a Child Dataset", { library: lib });
+    if (job.kind === "tool") t = T("{tool} in {library} Library", { tool: toolTitle(job.tool), library: lib });
+    else if (job.kind === "copy") t = T("Converting {library} Folder to a Child Dataset", { library: lib });
     else if (job.kind === "discovered") t = T("Found Optimized Elsewhere in {library} Library", { library: lib });
     else if (job.mode === "covers") t = T("Syncing Cover Art in {library} Library", { library: lib });
     else t = T("Optimizing {library} Library", { library: lib });
@@ -1066,7 +1067,7 @@ PCI18N.ready.then(function () {
     var pauseBtn = job.paused ? '<button class="btn pri" type="button" data-act="job" data-job="resume"' + (job.paused_by === "resilver" ? " disabled" : "") + ">" + H("Resume") + "</button> "
       : '<button class="btn" type="button" data-act="job" data-job="pause">' + H("Pause") + "</button> ";
     if (job.paused_by === "resilver" && !job.paused) pauseBtn = "";  // a resilver pause can't be overridden
-    return pauseBtn + '<button class="btn" type="button" data-act="job" data-job="cancel">' + H("Cancel") + "</button> ";
+    return pauseBtn + (job.stopping ? '<button class="btn" type="button" disabled>' + H("Cancelling…") + "</button> " : '<button class="btn" type="button" data-act="job" data-job="cancel">' + H("Cancel") + "</button> ");
   }
   function jobCard(inlineCopy) {
     var job = ST.job;
@@ -1091,7 +1092,7 @@ PCI18N.ready.then(function () {
     if (job.paused_by === "resilver" && !job.paused) pauseBtn = "";  // a resilver pause can't be overridden
     var sub = job.kind === "copy" ? H("{folder} → {dataset}", { folder: job.folder || "", dataset: job.child || "" }) : "";
     return '<section class="card">' + heading(esc(jobTitle(job)), sub) + jobProgress(job, jobFailures(job)) +
-      '<div style="margin-top:10px">' + pauseBtn + '<button class="btn" type="button" data-act="job" data-job="cancel">' + H("Cancel") + "</button> " +
+      '<div style="margin-top:10px">' + pauseBtn + (job.stopping ? '<button class="btn" type="button" disabled>' + H("Cancelling…") + "</button> " : '<button class="btn" type="button" data-act="job" data-job="cancel">' + H("Cancel") + "</button> ") +
       '<span class="muted">' + (job.kind === "copy" ? H("Pausing and cancelling take effect straight away; a copy carries on where it was.")
         : H("Pausing and cancelling take effect after the file in hand.")) + " " + H("File jobs started meanwhile wait in the queue.") + "</span></div></section>";
   }
@@ -1145,13 +1146,12 @@ PCI18N.ready.then(function () {
     out += '<div class="tbl-wrap"><table class="tbl optlibs"><thead><tr><th scope="col">' + H("Library") + '</th><th scope="col">' + H("Optimize") +
       '</th><th scope="col">' + H("MKV metadata") + '</th><th scope="col">' + H("Dataset") + info(ZFS_CFG_HELP, T("Dataset")) +
       '</th><th scope="col">' + H("To optimize") + '</th><th scope="col"></th></tr></thead><tbody>';
+    var gates = "";  // the readiness lights of the libraries that could optimize now, shown under the table
     libs.forEach(function (l) {
       var key = String(l.key), c = optChoices(key), sm = sums[key];
       // what to do: two checkboxes; the cover art choice in its own column (it applies to MKV files)
       var opts = '<div class="optline"><label><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="sync"' + (c.sync ? " checked" : "") + "> " + H("TrueNAS compression &amp; record size") + optRevert(key, "sync") + "</label>" +
-        '<label><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="mkv"' + (c.mkv ? " checked" : "") + "> " + H("Optimize MKV files") + optRevert(key, "mkv") + "</label>" +
-        (l.kind === "audio" ? "" : '<label><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="convert"' + (c.convert ? " checked" : "") + "> " +
-          H("Convert to MKV") + optRevert(key, "convert") + "</label>" + '<a href="/convert" class="det optkinds" data-nav>' + H("Which kinds") + "</a>") + "</div>";
+        '<label><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="mkv"' + (c.mkv ? " checked" : "") + "> " + H("Optimize MKV files") + optRevert(key, "mkv") + "</label></div>";
       var cover = '<span class="muted">—</span>';
       var audioLib = l.kind === "audio";
       if (audioLib) c.images = "compress";  // (optimizing.options: an audio library's cover art stays in the file)
@@ -1191,10 +1191,12 @@ PCI18N.ready.then(function () {
         // one file job at a time: while one runs, these add to the queue (shown at the top)
         var later = fileBusy(), off = !op.configured;
         var canGo = !off && sm && (sm.todo || (sm.conflicts || []).length);
-        var gateO = canGo && !qOpt && !runs("optimize") ? readinessPanel(key, "largest", "optimizer", "") : { ready: true, html: "" };
+        var gateO = canGo && !qOpt && !runs("optimize") ? readinessPanel(key, "largest", "optimizer", "", 0) : { ready: true, html: "" };
+        if (gateO.html) gates += '<div class="optgate"><div class="what">' + libIcon(l.key) + esc(l.title) + "</div>" + gateO.html + "</div>";  // (under the table: room to read)
         if (qOpt || runs("optimize")) act = badge("info", qOpt ? T("Queued") : T("Running"));
-        else act = gateO.html + '<button class="btn pri" type="button" data-act="optimize-lib" data-key="' + esc(key) + '"' +
-          (!canGo || !gateO.ready ? " disabled" : "") + ">" + (later ? H("Add to Queue") : H("Optimize Now")) + "</button>";
+        else act = '<button class="btn pri" type="button" data-act="optimize-lib" data-key="' + esc(key) + '"' +
+          (!canGo || !gateO.ready ? " disabled" : "") + ">" + (later ? H("Add to Queue") : H("Optimize Now")) + "</button>" +
+          (gateO.html && !gateO.ready ? '<div class="det">' + H("See the lights below.") + "</div>" : "");
         // cover art is set when a file is first optimized; this brings optimized files in line with the choice and Plex now
         if (c.mkv && c.images !== "compress") act += " " + (qCov || runs("covers") ? badge("info", qCov ? T("Cover art sync queued") : T("Syncing cover art"))
           : '<button class="btn" type="button" data-act="optimize-covers" data-key="' + esc(key) + '"' +
@@ -1206,7 +1208,7 @@ PCI18N.ready.then(function () {
       }
       out += '<tr><td class="nw">' + libIcon(l.key) + esc(l.title) + "</td><td>" + opts + "</td><td>" + cover + "</td><td>" + zcell + "</td><td>" + st + "</td><td>" + act + "</td></tr>";
     });
-    return out + "</tbody></table></div></section></div>";
+    return out + "</tbody></table></div>" + gates + "</section></div>";
   }
 
   // ------------------------------------------------------------ a folder into its own dataset
@@ -1240,9 +1242,8 @@ PCI18N.ready.then(function () {
     return "";
   }
   function rsOr(n) { return n ? fmtRs(n) : "?"; }
-  // Converting to MKV (optimize/convert.py, converting.py): which kinds, how long originals are kept,
-  // and the converted files on their way into Plex
-  // Each kind: [key, name, what it is, what could be lost, how converting handles it] — for its ⓘ
+  // Converting to MKV (tools/convert.py, optimize/convert.py, converting.py): which kinds, and the converted files on their
+  // way into Plex. Each kind: [key, name, what it is, what could be lost, how converting handles it] — for its ⓘ
   var CONVERT_TYPES = [
     ["avi", N("AVI"), N("Old DivX and Xvid files. MKV keeps every frame’s timing better and adds a proper index."),
       [N("DivX subtitles (XSUB): MKVToolNix can’t carry them."), N("The file’s own notes (comments, software) beyond a title.")],
@@ -1272,8 +1273,9 @@ PCI18N.ready.then(function () {
     ["mov", N("MOV (QuickTime)"), N("Off by default. Camera and editing files."),
       [N("The timecode track: dropped — nothing you watch."), N("Camera details: where and when it was filmed, make and model."), N("Trims made without re-encoding (edit lists) — kept as far as MKV can; worth a look after.")],
       N("A file with camera details is left as it is; the timecode track is dropped.")]];
-  var CONVERT_HELP = H("Each file is inspected first: what MKVToolNix reads of it against everything in it. If anything wouldn’t be kept — a track, chapters, cover art, details like an iTunes show and episode — or it’s protected by DRM, it’s left as it is, with the reason (in Processes, and on Library Health). Converted, the MKV is checked against the original (every video and audio track with the same number of packets, every subtitle track, captions in the video), then optimized like any MKV.") +
-    "<br><br>" + H("<strong>Plex keeps its metadata.</strong> The MKV is written next to the original, and Plex is asked to scan that folder (needed when libraries are scanned by hand). Plex adds it as a second version of the same item. Once it has, the original waits the time you set — so a second Plex server on a synced copy of the files can pick the MKV up too — then it’s deleted and the folder scanned again: the item keeps its edits, watch history and collections. If Plex makes the MKV an item of its own instead, nothing is deleted: merge the two in Plex, or keep both.");
+  var CONVERT_HELP = H("Each file is inspected first: what MKVToolNix reads of it against everything in it. If anything wouldn’t be kept — a track, chapters, cover art, details like an iTunes show and episode — or it’s protected by DRM, it’s left as it is, with the reason on its row, and isn’t tried again while it stays as it is. Converted, the MKV is checked against the original (every video and audio track with the same number of packets, every subtitle track, captions in the video), then optimized like any MKV.") +
+    "<br><br>" + H("<strong>Plex keeps its metadata.</strong> The MKV is written next to the original, and Plex is asked to scan that folder (needed when libraries are scanned by hand). Plex adds it as a second version of the same item; once it has — on the mirrored server too, where one is watched (<a href=\"/sync#plex2\" data-nav>Sync → Second Plex Server</a>) — the original is deleted and the folder scanned again: the item keeps its edits, watch history and collections. If Plex makes the MKV an item of its own instead, nothing is deleted: merge the two in Plex, or keep both.") +
+    "<br><br>" + H("<strong>The way back.</strong> The run backs up first, like every tool that changes files; while the backup lasts, Revert on the run removes the MKVs and puts back any original that has gone, and the run is on the <a href=\"/processes\" data-nav>Processes page</a> like any other.");
   // Where each Plex server is with a converted file: this one, and the second one if it's watched
   function serversLine(e) {
     var sv = e.servers || {};
@@ -1282,44 +1284,42 @@ PCI18N.ready.then(function () {
       unpaired: T("paths don’t line up (Sync → Second Plex Server)") };
     return '<div class="det">' + esc(T("This server: {here} · {name}: {there}", { here: words[sv.here] || sv.here, name: (ST.plex2 || {}).name || T("the other server"), there: words[sv.there] || sv.there })) + "</div>";
   }
-  function convertCard() {
-    var o = S.optimizer || {}, types = o.convert_types || {}, cv = ST.conversions || { items: [] };
-    var out = '<section class="card" id="convert">' + heading(esc(T("Convert to MKV")), CONVERT_HELP) +
-      '<p class="help">' + H("Why: MKV is the container the optimizer can lay out for caching — the index and metadata after the video, so the start of a file is all content — and it keeps every stream, chapter and subtitle the old containers hold. A converted file plays as before; it just caches better. Which libraries convert is ticked per library on the <a href=\"/optimizer\" data-nav>Optimizer page</a> (<strong>Convert to MKV</strong>); which kinds of file, here.") + "</p>" +
-      '<div class="convtypes">' + CONVERT_TYPES.map(function (t) {
-        var help = H(t[2]) + "<br><br><strong>" + H("What could be lost") + "</strong><ul>" + t[3].map(function (x) { return "<li>" + H(x) + "</li>"; }).join("") + "</ul>" +
-          "<strong>" + H("How converting handles it") + "</strong><br>" + H(t[4]);
-        var d = ((ST.optimizer_defaults || {}).convert_types || {})[t[0]];
-        var rv = d === undefined || !!types[t[0]] === d ? "" : ' <button type="button" class="revert" data-convtype-revert="' + t[0] + '" title="' + H("Back to the default ({value})", { value: d ? T("on") : T("off") }) + '">↺</button>';
-        return '<div class="convtype">' + info(help, T(t[1])) + '<label><input type="checkbox" data-convtype="' + t[0] + '"' + (types[t[0]] ? " checked" : "") + "> " + esc(T(t[1])) + "</label>" + rv + "</div>";
-      }).join("") + "</div>";
-    out += '<div class="row"><div class="grow"><div class="what">' + H("Keep each original after Plex has its MKV") + '</div><div class="det">' +
-      H("Counted from when Plex has it — both servers, with a second one watched (<a href=\"/sync#plex2\" data-nav>Sync → Second Plex Server</a>). Time lets any other copy of the files catch up first: another server that isn’t watched, or a backup. With every server watched, none is needed.") + "</div></div>" +
-      select("optimizer", "convert_hold_days", T("Keep for"), [0, 1, 3, 7, 14, 30].map(function (d) {
-        return [d, d ? P(d, "{n} day", "{n} days", { n: d }) : T("No time: delete it straight away")];
-      })) + "</div>";
-    var items = cv.items || [];
-    if (!items.length) return out + "</section>";
+  // The kinds converted (one setting, for every library), each with its ⓘ: the options block of the Convert to MKV page
+  function convertKinds() {
+    var types = (S.optimizer || {}).convert_types || {};
+    return '<div class="convtypes" style="flex-basis:100%">' + CONVERT_TYPES.map(function (t) {
+      var help = "<strong>" + H("What it is") + "</strong><br>" + H(t[2]) + "<br><br><strong>" + H("What MKV wouldn’t keep") + "</strong><ul>" + t[3].map(function (x) { return "<li>" + H(x) + "</li>"; }).join("") + "</ul>" +
+        "<strong>" + H("How converting handles it") + "</strong><br>" + H(t[4]);
+      var d = ((ST.optimizer_defaults || {}).convert_types || {})[t[0]];
+      var rv = d === undefined || !!types[t[0]] === d ? "" : ' <button type="button" class="revert" data-convtype-revert="' + t[0] + '" title="' + H("Back to the default ({value})", { value: d ? T("on") : T("off") }) + '">↺</button>';
+      return '<div class="convtype">' + info(help, T(t[1])) + '<label><input type="checkbox" data-convtype="' + t[0] + '"' + (types[t[0]] ? " checked" : "") + "> " + esc(T(t[1])) + "</label>" + rv + "</div>";
+    }).join("") + "</div>";
+  }
+  // The converted files on their way into Plex, under the tool's runs: where Plex is with each, and the originals gone
+  function convertWaiting(t) {
+    var items = (t || {}).conversions || [];
+    if (!items.length) return "";
     var state = function (e) {
       if (e.state === "waiting") return badge("info", T("Waiting for Plex")) + '<div class="det">' + H("Its folder was scanned; Plex hasn’t added the MKV yet.") + "</div>" + serversLine(e);
-      if (e.state === "seen") return badge("pass", T("In Plex")) + '<div class="det">' + H("A version of the same item. The original is deleted {when}.", { when: fmtWhen(e.due) }) + "</div>";
+      if (e.state === "seen") return badge("pass", T("In Plex")) + '<div class="det">' + H("A version of the same item: the original goes next.") + "</div>";
       if (e.state === "separate") return badge("warn", T("A separate item")) + '<div class="det">' + H("Plex added the MKV as an item of its own. Merge the two in Plex (select both → Merge) and this carries on — or keep both files.") + "</div>" + serversLine(e);
       if (e.state === "missing") return badge("warn", T("MKV missing")) + '<div class="det">' + H("The MKV isn’t there any more: the original stays.") + "</div>";
       if (e.state === "deleted") return badge("pass", T("Done")) + '<div class="det">' + H("Original deleted {when}.", { when: fmtWhen(e.deleted) }) + "</div>";
       return esc(e.state);
     };
-    var act = function (e, a, label, pri) {
-      return '<button class="btn sm' + (pri ? " pri" : "") + '" type="button" data-act="conv" data-conv="' + a + '" data-orig="' + esc(e.original) + '">' + label + "</button> ";
+    var act = function (e, a, label) {
+      return '<button class="btn sm" type="button" data-act="conv" data-conv="' + a + '" data-orig="' + esc(e.original) + '">' + label + "</button> ";
     };
-    out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Converted") + '</th><th scope="col">' + H("Now") + '</th><th scope="col"></th></tr></thead><tbody>' +
+    return '<section class="card" id="conversions">' + heading(esc(T("Converted Files in Plex")),
+      H("Each converted file, and where Plex is with it: the original is deleted only once Plex has the MKV as a version of the same item — on the mirrored server too, where one is watched. <strong>Check Again</strong> asks Plex now; <strong>Keep Both</strong> stops following the file, both staying; <strong>Delete Original Now</strong> is there when Plex has the MKV but the original couldn’t go yet (it was playing, say).")) +
+      '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Converted") + '</th><th scope="col">' + H("Now") + '</th><th scope="col"></th></tr></thead><tbody>' +
       items.map(function (e) {
         return "<tr><td>" + esc(e.title) + '<div class="det mono">' + esc(e.original.split("/").pop()) + " → " + esc(e.new.split("/").pop()) + "</div></td><td>" + state(e) +
           (e.error ? '<div class="det bad">' + esc(e.error) + "</div>" : "") + (e.note ? '<div class="det muted">' + esc(e.note) + "</div>" : "") + "</td><td>" +
           (e.state === "seen" ? act(e, "delete", H("Delete Original Now")) : "") +
           (e.state === "waiting" || e.state === "separate" ? act(e, "check", H("Check Again")) : "") +
           (e.state !== "deleted" ? act(e, "keep", H("Keep Both")) : "") + "</td></tr>";
-      }).join("") + "</tbody></table></div>";
-    return out + "</section>";
+      }).join("") + "</tbody></table></div></section>";
   }
   // The folder copy (or the last pass) as it runs, inside the Convert Folder card: its progress, Pause, Cancel
   function migProgress() {
@@ -1372,7 +1372,7 @@ PCI18N.ready.then(function () {
       out += '<p class="help">' + H("✓ The dataset {name} is created.", { name: temp }) + "</p>";
       out += migChecks(checks);
       var ready0 = checks.length && checks.every(function (c) { return c.ok; });
-      var gateM = readinessPanel(String(st.library), 0, "dataset", T("the old folder itself: set aside once the copy is checked, deleted only when you say"));
+      var gateM = readinessPanel(String(st.library), 0, "dataset", T("the old folder itself: set aside once the copy is checked, deleted only when you say"), 0);
       out += gateM.html + '<div style="margin-top:10px">' + btn("check", H("Check Again")) + btn("copy", H("Start Copying"), true, !ready0 || !gateM.ready) + btn("cancel", H("Cancel")) + "</div>";
     } else if (st.step === "create") {
       out += '<p class="help">' + H("Create the new dataset next to the folder, with these settings. It’s checked before anything is copied.") + "</p>";
@@ -1434,9 +1434,9 @@ PCI18N.ready.then(function () {
   // job with its resume points and pauses, and its files. The log is fetched on its own.
   var PROC = null, procAt = 0, procOpen = null, procFiles = {}, procOffset = {}, procSort = {}, procChart = {};  // procChart: "job|file" -> its chart shown
   function procFetch(force) {
-    if (!force && Date.now() - procAt < 10000) return;
+    if (!force && PROC && Date.now() - procAt < 10000) return;
     procAt = Date.now();
-    api("/api/processes").then(function (d) { PROC = d; if (page === "processes" && !editing()) render(); }).catch(function () { procAt = 0; });
+    api("/api/processes").then(function (d) { PROC = d; if ((page === "processes" || TOOL_PAGES[page]) && !editing()) render(); }).catch(function () { procAt = 0; });
     if (procOpen) procFilesFetch(procOpen, procOffset[procOpen] || 0);  // the open list follows too: files done, retries' results
   }
   // A retry starting or ending: the lists again straight away (not on the next round)
@@ -1509,7 +1509,13 @@ PCI18N.ready.then(function () {
   function procEvent(ev) {
     var at = fmtWhen(ev.at), where = ev.total ? T("{done} of {total}", { done: fmtNum(ev.done || 0), total: fmtNum(ev.total) }) : "";
     var name = { started: T("Started"), resumed: T("Resumed after a restart, at {where}", { where: where || "0" }), paused: T("Paused: {why}", { why: ev.why || "" }),
-      unpaused: T("Carried on"), finished: T("Finished"), cancelled: T("Cancelled") }[ev.event] || ev.event;
+      unpaused: T("Carried on"), finished: T("Finished"), cancelled: T("Cancelled"),
+      backup: ev.backup && ev.backup.kind === "snapshot" ? T("Snapshot taken first: {names} (kept until {until})", { names: (ev.backup.names || []).join(", "), until: fmtWhen(ev.backup.until) })
+        : ev.backup && ev.backup.kind === "copies" ? T("The copies the tool keeps are the backup (kept until {until})", { until: fmtWhen(ev.backup.until) }) : T("No backup taken, as chosen in Preferences"),
+      backup_failed: T("Stopped before anything changed: the backup couldn’t be made — {why}", { why: msg(ev.why || "") }),
+      reverted: T("Reverted: {ok} put back, {failed} not", { ok: (ev.counts || {}).reverted || 0, failed: (ev.counts || {}).failed || 0 }),
+      rolled_back: T("Rolled back: the whole dataset as it was at the snapshot"),
+      revert_failed: T("Revert failed: nothing put back ({failed} not) — the files say why", { failed: (ev.counts || {}).failed || 0 }) }[ev.event] || ev.event;
     return "<li>" + esc(at) + " — " + esc(name) + "</li>";
   }
   function pageProcesses() {
@@ -1523,27 +1529,95 @@ PCI18N.ready.then(function () {
     if (!PROC) return out + '<p class="muted">' + H("Loading…") + "</p></section></div>";
     var jobs = PROC.jobs || [];
     if (!jobs.length) return out + '<p class="muted">' + H("Nothing yet.") + "</p></section></div>";
-    jobs.forEach(function (j) {
-      var titleJob = { kind: j.kind, mode: j.mode, library: j.library, title: j.title, resumes: j.events.filter(function (e) { return e.event === "resumed"; }).length };
-      var now = ST.job && ST.job.id === j.job && (ST.job.running || ST.job.waiting);
-      var status = j.status === "running" ? (now ? badge("info", ST.job.waiting ? T("Waiting") : T("Running")) : badge("warn", T("Stopped")))
-        : { finished: badge("pass", T("Finished")), cancelled: badge("warn", T("Cancelled")) }[j.status] || "";
-      var c = j.counts || {};
-      out += '<div class="row" id="proc-' + esc(j.job) + '">' + status + '<div class="grow"><div class="what">' + esc(jobTitle(titleJob)) + "</div>" +
-        '<div class="det">' + (j.planned > j.files ? H("{start} → {end} · {files} of {planned} files tried", { start: fmtWhen(j.started), end: j.ended ? fmtWhen(j.ended) : T("now"), files: fmtNum(j.files), planned: fmtNum(j.planned) })
-          : H("{start} → {end} · {files} files logged", { start: fmtWhen(j.started), end: j.ended ? fmtWhen(j.ended) : T("now"), files: fmtNum(j.files) })) +
-        (j.status === "running" && !now ? " · " + H("Stopped without finishing (the app was stopped or restarted)") : "") +
-        (j.kind === "discovered" ? " · " + H("Brought here optimized differently (by Syncthing from another NAS, say): their history carries on") : "") +
-        (j.status !== "running" && j.kind !== "copy" && j.kind !== "discovered" ? " · " + H("{optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed",
-          { optimized: c.optimized || 0, rewritten: c.rewritten || 0, skipped: c.skipped || 0, failed: c.failed || 0 }) : "") + "</div>" +
-        procTally(j.tally) +
-        (j.events.length > 2 ? '<ul class="help">' + j.events.map(procEvent).join("") + "</ul>" :
-          '<ul class="help">' + j.events.filter(function (e) { return e.event !== "started"; }).map(procEvent).join("") + "</ul>") +
-        '<div class="det"><button class="link" type="button" data-act="proc-open" data-job="' + esc(j.job) + '">' + (procOpen === j.job ? H("Hide files") : H("Show files")) + "</button></div>" +
-        "</div></div>" + (procOpen === j.job ? '<div class="procfiles">' + procFilesTable(j.job) + "</div>" : "");
-    });
+    jobs.forEach(function (j) { out += runCard(j); });
     // one export, under the history it's of: every job and file, for a spreadsheet
     return out + '</section><div><a class="btn" href="/api/processes/export?format=csv" download>' + H("Export CSV") + "</a></div></div>";
+  }
+  // One run of the history (jobs.py / joblog.py), as a card: its status, when, what it did, its backup and the ways back
+  // (undoButtons), its events, and its files on request. The Processes page lists every run so; a tool's page lists its own
+  // (toolHistory), the one running first with its progress — the one card everywhere, so the ways back travel with it.
+  function runCard(j) {
+    var titleJob = { kind: j.kind, mode: j.mode, library: j.library, title: j.title, tool: j.tool, resumes: j.events.filter(function (e) { return e.event === "resumed"; }).length };
+    var live = ST.job && ST.job.id === j.job ? ST.job : null, now = live && (live.running || live.waiting);
+    var status = j.status === "running" ? (now ? badge("info", live.waiting ? T("Waiting") : T("Running")) : badge("warn", T("Stopped")))
+      : j.reverted ? badge("info", j.undone_how === "rolled_back" ? T("Rolled back") : T("Reverted")) : { finished: badge("pass", T("Finished")), cancelled: badge("warn", T("Cancelled")), failed: badge("warn", T("Not run")) }[j.status] || "";
+    var c = j.counts || {}, bk = j.backup || (live && live.backup) || null;
+    var progress = "";
+    if (now && live.running) {  // the run under way: its step and progress, on the card
+      progress = '<div class="migprog"><div class="what">' + (live.stopping ? H("Cancelling… (after the file in hand)") : live.phase === "backup" ? H("Backing up…") : H("Applying…")) + "</div>" +
+        (live.step ? '<div class="det">' + esc(live.step) + "</div>" : "") + (live.phase !== "backup" ? '<div class="det">' + H("{done} of {total}", { done: fmtNum(live.done || 0), total: fmtNum(live.total || 0) }) + (live.current ? " · " + esc(live.current) : "") + "</div>" : "") +
+        '<div class="meter thin' + (live.phase === "backup" ? " busy" : "") + '" role="progressbar"><div' + (live.phase === "backup" ? "" : ' style="width:' + (live.total ? Math.round(100 * (live.done || 0) / live.total) : 0) + '%"') + "></div></div></div>";
+    }
+    var backupLine = !bk ? "" : bk.kind === "snapshot" ? '<div class="det">' + badge("pass", T("Backup created")) + " " + esc(T("Snapshot {names}, kept until {until}.", { names: (bk.names || []).join(", "), until: fmtWhen(bk.until) })) + "</div>"
+      : bk.kind === "copies" ? '<div class="det">' + badge("pass", T("Backup")) + " " + esc(T("The copies this tool keeps, until {until}.", { until: fmtWhen(bk.until) })) + "</div>"
+      : '<div class="det">' + badge("info", T("No backup")) + " " + esc(T("As chosen in Preferences: you back up yourself.")) + "</div>";
+    var failedWhy = j.status === "failed" ? '<div class="det bad">' + esc(msg((j.events.filter(function (e) { return e.event === "backup_failed"; })[0] || {}).why || "")) + "</div>" : "";
+    return '<div class="row runcard" id="proc-' + esc(j.job) + '">' + status + '<div class="grow"><div class="what">' + esc(jobTitle(titleJob)) + "</div>" +
+      '<div class="det">' + (j.planned > j.files ? H("{start} → {end} · {files} of {planned} files tried", { start: fmtWhen(j.started), end: j.ended ? fmtWhen(j.ended) : T("now"), files: fmtNum(j.files), planned: fmtNum(j.planned) })
+        : H("{start} → {end} · {files} files logged", { start: fmtWhen(j.started), end: j.ended ? fmtWhen(j.ended) : T("now"), files: fmtNum(j.files) })) +
+      (j.status === "running" && !now ? " · " + H("Stopped without finishing (the app was stopped or restarted)") : "") +
+      (j.kind === "discovered" ? " · " + H("Brought here optimized differently (by Syncthing from another NAS, say): their history carries on") : "") +
+      (j.status !== "running" && j.kind === "tool" ? " · " + H("{done} done, {failed} failed", { done: fmtNum(Math.max(0, (j.files || 0) - (j.failed || 0))), failed: fmtNum(j.failed || 0) }) : "") +
+      (j.status !== "running" && j.kind !== "copy" && j.kind !== "discovered" && j.kind !== "tool" ? " · " + H("{optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed",
+        { optimized: c.optimized || 0, rewritten: c.rewritten || 0, skipped: c.skipped || 0, failed: c.failed || 0 }) : "") + "</div>" +
+      progress + (j.kind === "tool" ? backupLine : "") + failedWhy +
+      (j.revertable ? undoButtons(j.job, j.backup) : "") +
+      procTally(j.tally) +
+      (j.events.length > 2 ? '<ul class="help">' + j.events.map(procEvent).join("") + "</ul>" :
+        '<ul class="help">' + j.events.filter(function (e) { return e.event !== "started"; }).map(procEvent).join("") + "</ul>") +
+      '<div class="det"><button class="link" type="button" data-act="proc-open" data-job="' + esc(j.job) + '">' + (procOpen === j.job ? H("Hide files") : H("Show files")) + "</button></div>" +
+      "</div></div>" + (procOpen === j.job ? '<div class="procfiles">' + procFilesTable(j.job) + "</div>" : "");
+  }
+  // A tool's run, file by file: the common columns — poster, the item as Plex names it, when, the result as a badge — then the
+  // tool's own (its `history`, sent as the columns), each value as logged (a number, a size, a text)
+  function toolFilesTable(id, d) {
+    var cols = d.columns || [];
+    var res = { done: badge("pass", T("Done")), failed: badge("fail", T("Failed")), reverted: badge("info", T("Reverted")), revert_failed: badge("warn", T("Not reverted")),
+      waiting: badge("info", T("Waiting")), "not done": badge("info", T("Not done")), cancelled: badge("warn", T("Cancelled")), pending: badge("info", T("Waiting")) };
+    // the general rule for every run: the item in hand says Processing — or Paused while the run is — whatever the log has for it yet
+    var live = ST.job && ST.job.id === id && ST.job.running ? ST.job : null;
+    var inHand = function (f) { return live && live.current && (live.current === f.label || live.current === f.title || live.current_file === f.file); };
+    var cell = function (cid, v) {
+      if (v == null || v === "") return "—";
+      if (typeof v === "number") return /written|frees|freed|bytes|size/.test(cid) ? fmtBytesShort(v) : fmtNum(v);
+      return esc(msg(v));
+    };
+    var out = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"><button class="link hidelist" type="button" data-act="proc-open" data-job="' + esc(id) +
+      '" title="' + esc(T("Hide files")) + '">▲ ' + H("Hide") + "</button></th><th scope=\"col\">" + H("Item") + '</th><th scope="col">' + H("Result") + "</th>" +
+      cols.map(function (c) { return '<th scope="col">' + esc(msg(c.name)) + "</th>"; }).join("") + "</tr></thead><tbody>";
+    d.files.forEach(function (f) {
+      var h = f.history || {};
+      out += "<tr><td>" + posterImg(f.poster) + '</td><td style="min-width:240px">' + fileTitle(f.label || f.title, f.file) +
+        (f.reason && (f.result === "failed" || f.result === "revert_failed") ? '<div class="det bad">' + esc(sentence(f.reason)) + "</div>" : "") +
+        (f.at ? '<div class="det muted">' + esc(fmtWhen(f.reverted_at || f.at)) + "</div>" : "") + "</td><td>" + (inHand(f) ? badge("info", live.paused || live.paused_by ? T("Paused") : T("Processing")) : res[f.result] || esc(f.result || "")) + "</td>" +
+        cols.map(function (c) { return "<td>" + cell(c.id, h[c.id]) + "</td>"; }).join("") + "</tr>";
+    });
+    return out + "</tbody></table></div>";
+  }
+  // The process under way, as the Processes page shows it (its progress, Pause and Cancel), on a tool's page while it's this
+  // tool's: above its history, so the page reads checks, Apply, process, history
+  function toolProcess(name) {
+    var j = ST.job;
+    return j && j.kind === "tool" && j.tool === name && (j.running || j.waiting) ? jobCard() : "";
+  }
+  // A tool's own runs, at the bottom of its page: the history's cards for this tool, the one under way first. Every tool page
+  // has it (toolPage), so the ways back travel with the card.
+  function toolHistory(name) {
+    procFetch();
+    var u = TOOL[name];
+    var mine = ((PROC || {}).jobs || []).filter(function (j) { return j.kind === "tool" && j.tool === name; });
+    var live = ST.job && ST.job.kind === "tool" && ST.job.tool === name && (ST.job.running || ST.job.waiting) ? ST.job : null;
+    var queued = (ST.queue || []).some(function (q) { return q.kind === "tool" && (q.args || {}).tool === name; });
+    if (live && !mine.some(function (j) { return j.job === live.id; })) {  // (just started: not in the log's listing yet)
+      mine.unshift({ job: live.id, kind: "tool", tool: name, library: live.library, title: live.title, started: live.started, ended: null, status: "running", events: [], counts: {}, files: 0, failed: 0, planned: live.total || 0, backup: live.backup || null });
+    }
+    if (live && u.openLatest) { procOpen = live.id; u.openLatest = false; procFilesFetch(live.id, 0); }  // (a run just started: its files open, every other run's hidden)
+    if (!mine.length) return "";
+    var open = u.history !== undefined ? u.history : !!(live || queued);  // (shown by itself while a run goes, or is about to; else on request)
+    var toggle = '<button class="link" type="button" data-act="tool-history" data-tool="' + name + '">' + (open ? H("Hide history") : esc(P(mine.length, "Show history ({n} run)", "Show history ({n} runs)", { n: fmtNum(mine.length) }))) + "</button>";
+    if (!open) return '<section class="card toolhistory"><div class="det">' + toggle + "</div></section>";
+    return '<section class="card toolhistory">' + heading(esc(T("History")), H("This tool’s runs: each with its backup and the ways back while it lasts. Every run is on the <a href=\"/processes\" data-nav>Processes page</a> too."), '<div class="det">' + toggle + "</div>") +
+      mine.slice(0, 20).map(runCard).join("") + "</section>";
   }
   // A job's running tally, as its files are done: what was put right, the space saved, the posters
   function procTally(t) {
@@ -1589,6 +1663,7 @@ PCI18N.ready.then(function () {
     var d = procFiles[id];
     if (!d) return '<p class="muted">' + H("Loading…") + "</p>";
     if (!d.files.length) return '<p class="muted">' + H("No files logged.") + "</p>";
+    if (d.kind === "tool") return toolFilesTable(id, d);
     // a header sorts by its column (Result: failed at the top; Size: most smaller first, then the biggest); again, back to the order done
     var th = function (key, label) {
       var on = procSort[id] === key || (!procSort[id] && key === "file");
@@ -1824,7 +1899,7 @@ PCI18N.ready.then(function () {
   // What a file's streams are: "Video, Audio, Subs", or just "Audio"
   function streamNames(bm) {
     var names = { video: T("Video"), audio: T("Audio"), subtitles: T("Subs") };
-    return (bm.streams || ["video"]).map(function (k) { return names[k]; }).join(", ");
+    return (bm.streams || ["video"]).map(function (k) { return names[k] + (k === "subtitles" && bm.forced ? " " + T("({n} forced)", { n: bm.forced }) : ""); }).join(", ");
   }
   // A file's blocks: the start's, then the video (its size, not to scale), then the end's
   function libBlocks(row, big, path) {
@@ -2106,10 +2181,14 @@ PCI18N.ready.then(function () {
         (bm.lead_blocks ? " · " + esc(P(bm.lead_blocks, "the first {n} cached with the lead-in", "the first {n} cached with the lead-in", { n: fmtNum(bm.lead_blocks + bm.start.length) })) : "") + "</div>";
       if ((d.tracks || []).length) {
         out += '<table class="tbl compact"><thead><tr><th scope="col">#</th><th scope="col">' + H("Track") + '</th><th scope="col">' + H("Codec") +
-          '</th><th scope="col">' + H("Language") + '</th><th scope="col">' + H("Name") + '</th><th scope="col">' + H("Compression") + "</th></tr></thead><tbody>" +
+          '</th><th scope="col">' + H("Language") + '</th><th scope="col">' + H("Name") + '</th><th scope="col">' + H("Flags") + '</th><th scope="col">' + H("Compression") + "</th></tr></thead><tbody>" +
           d.tracks.map(function (t) {
             return "<tr><td>" + esc(t.number) + "</td><td>" + esc(T({ video: "Video", audio: "Audio", subtitles: "Subtitles" }[t.type] || t.type || "")) + (t.width ? ' <span class="muted">' + esc(t.width + "×" + t.height) + "</span>" : "") +
-              '</td><td>' + (t.codec_name ? '<span title="' + esc(t.codec) + '">' + esc(t.codec_name) + "</span>" : '<span class="mono">' + esc(t.codec) + "</span>") + "</td><td>" + (t.language ? (t.language_name ? esc(t.language_name) + ' <span class="muted">(' + esc(t.language) + ")</span>" : esc(t.language)) : "—") + "</td><td>" + esc(t.name || "—") + "</td><td>" + esc(t.compression || "—") + "</td></tr>";
+              '</td><td>' + (t.codec_name ? '<span title="' + esc(t.codec) + '">' + esc(t.codec_name) + "</span>" : '<span class="mono">' + esc(t.codec) + "</span>") + "</td><td>" + (t.language ? (t.language_name ? esc(t.language_name) + ' <span class="muted">(' + esc(t.language) + ")</span>" : esc(t.language)) : "—") + "</td><td>" + esc(t.name || "—") + "</td><td>" +
+              // a subtitle track shown by itself (forced), and the track a player picks first (default)
+              ((t.forced ? badge("info", T("Forced")) + " " : "") + (t.default && t.type !== "video" ? '<span class="muted">' + H("default") + "</span>" : "") || "—") +
+              (t.channels ? '<div class="det">' + esc(T("{n} channels", { n: t.channels })) + (t.sample_rate ? " · " + esc(T("{khz} kHz", { khz: dec(t.sample_rate / 1000, 1) })) : "") + (t.bit_depth ? " · " + esc(T("{n}-bit", { n: t.bit_depth })) : "") + "</div>" : "") +
+              "</td><td>" + esc(t.compression || "—") + "</td></tr>";
           }).join("") + "</tbody></table>";
       }
       out += "</div>";
@@ -2410,18 +2489,24 @@ PCI18N.ready.then(function () {
     return '<div class="loading"><div class="meter thin busy" role="progressbar" aria-busy="true" aria-label="' + esc(text || T("Loading")) + '"><div></div></div><div class="det">' + esc(text || T("Loading…")) + "</div></div>";
   }
   var LH_OPEN = {};  // the issue chips opened on the Health view: "item key/check id" -> true
-  function libHealthView() {
+  var HEALTH_PAGES = { library: 1, filechecks: 1, plexchecks: 1 };  // the pages that draw the Health view
+  function libHealthView(only) {
     var key = LIB.key, d = LIB.health[key];
     if (d === undefined) {
       LIB.health[key] = null;
-      api("/api/library/health?key=" + encodeURIComponent(key)).then(function (got) { LIB.health[key] = got; if (page === "library") render(); })
-        .catch(function () { LIB.health[key] = { error: true }; if (page === "library") render(); });
+      api("/api/library/health?key=" + encodeURIComponent(key)).then(function (got) { LIB.health[key] = got; if (HEALTH_PAGES[page]) render(); })
+        .catch(function () { LIB.health[key] = { error: true }; if (HEALTH_PAGES[page]) render(); });
       return loadingBar(T("Running the checks…"));
     }
     if (!d || d.error) return loadingBar(T("Running the checks…"));
-    var cats = { file: [T("File checks"), T("What’s in each file, as inspected: its tracks.")], plex: [T("Plex checks"), T("How Plex has each item.")] };
+    var cats = { file: [T("File checks"), T("What’s in each file, as inspected: its tracks.")], plex: [T("Plex checks"), T("How Plex has each item.")],
+      tools: [T("Tools"), T("What each tool would do about an item: one chip per tool, its page a click away.")] };
     var dflt = ((ST.library_health_defaults || {}).checks) || {};
-    var out = '<div class="det" style="margin:8px 0">' + esc(T("{n} items checked", { n: fmtNum(d.checked || 0) })) +
+    var stt = d.stats || {};
+    var out = (d.migration ? '<div class="note">' + H("A folder of this library is on its way to a dataset of its own ({step}): <a href=\"/dataset\" data-nav>Child Dataset</a> carries on.", { step: d.migration.step }) + "</div>" : "") +
+      (stt.items ? '<div class="lhstats">' + esc(T("{pct}% of items have nothing flagged", { pct: stt.clean_pct })) + ' <span class="muted">(' + esc(T("{clean} of {total}", { clean: fmtNum(stt.clean), total: fmtNum(stt.items) })) + ")</span>" +
+        (stt.multi ? " · " + esc(P(stt.multi, "{n} item with more than one issue", "{n} items with more than one issue", { n: fmtNum(stt.multi) })) : "") + "</div>" : "") +
+      '<div class="det" style="margin:8px 0">' + esc(T("{n} items checked", { n: fmtNum(d.checked || 0) })) +
       (d.unread ? " · " + esc(P(d.unread, "{n} file not inspected yet", "{n} files not inspected yet", { n: fmtNum(d.unread) })) : "") +
       (d.pages_read != null ? " · " + esc(T("{n} items’ pages read (the locked-field check needs them: a Library Sync compare reads them)", { n: fmtNum(d.pages_read) })) : "") + "</div>";
     // the language the subtitle check wants: chosen beside it, from the languages the library's files hold
@@ -2438,10 +2523,15 @@ PCI18N.ready.then(function () {
     var chosen = (S.library_health || {}).checks || {}, onIds = {}, parentOn = {};
     Object.keys(d.checks).forEach(function (cat) { (d.checks[cat] || []).forEach(function (c) { c.on = chosen[c.id] !== undefined ? !!chosen[c.id] : dflt[c.id] !== undefined ? dflt[c.id] : !!c.on; parentOn[c.id] = c.on; }); });
     Object.keys(d.checks).forEach(function (cat) { (d.checks[cat] || []).forEach(function (c) { onIds[c.id] = c.on && (!c.of || !!parentOn[c.of]); }); });
-    var shownItems = (d.items || []).map(function (it) { return Object.assign({}, it, { results: it.results.filter(function (r) { return onIds[r.id]; }) }); }).filter(function (it) { return it.results.length; });
+    // every item of the library: the ones flagged (by the checks switched on — and, on a check page, that page's) first,
+    // then the ones with nothing flagged, each said so
+    var catOf = {};
+    Object.keys(d.checks).forEach(function (cat) { (d.checks[cat] || []).forEach(function (c) { catOf[c.id] = cat; }); });
+    var shownItems = (d.items || []).map(function (it) { return Object.assign({}, it, { results: it.results.filter(function (r) { return onIds[r.id] && (!only || catOf[r.id] === only); }) }); });
+    var flaggedItems = shownItems.filter(function (it) { return it.results.length; }).length;
     var counts = {};
     shownItems.forEach(function (it) { it.results.forEach(function (r) { if (!r.ignored) counts[r.id] = (counts[r.id] || 0) + 1; }); });
-    out += '<div class="lhgrid">' + Object.keys(cats).map(function (cat) {
+    out += '<div class="lhgrid">' + Object.keys(cats).filter(function (cat) { return !only || cat === only; }).map(function (cat) {
       var all = d.checks[cat] || [], byId = {};
       all.forEach(function (c) { byId[c.id] = c; });
       var row = function (c) {
@@ -2460,7 +2550,8 @@ PCI18N.ready.then(function () {
         return row(c) + (c.on ? all.filter(function (o) { return o.of === c.id; }).map(row).join("") : "");
       }).join("") + "</div>";
     }).join("") + "</div>";
-    if (!shownItems.length) return out + '<p class="muted">' + H("Nothing flagged.") + "</p>";
+    if (!shownItems.length) return out + '<p class="muted">' + H("No items in this library yet.") + "</p>";
+    out += '<div class="det">' + esc(P(flaggedItems, "{n} item flagged", "{n} items flagged", { n: fmtNum(flaggedItems) })) + " · " + esc(P(shownItems.length - flaggedItems, "{n} with nothing flagged", "{n} with nothing flagged", { n: fmtNum(shownItems.length - flaggedItems) })) + "</div>";
     var hpages = { pages: pageRanges(shownItems.map(function (it) { return it.label; }), perPage()), total: shownItems.length };
     if (LIB.healthOffset >= shownItems.length) LIB.healthOffset = 0;
     var hoff = LIB.healthOffset;
@@ -2483,11 +2574,16 @@ PCI18N.ready.then(function () {
         var name = ((d.checks[r.category] || []).filter(function (c) { return c.id === r.id; })[0] || {}).name;
         chips += '<button type="button" class="badge b-' + (r.ignored ? "grey" : "warn") + " sschip" + (on ? " on" : "") + '" aria-expanded="' + on + '" data-act="lh-open" data-key="' + esc(key) + '" data-id="' + esc(id) + '"' +
           (r.ignored ? ' title="' + H("Ignored") + '"' : "") + ">" + esc(name ? msg(name) : r.id) + (rs.length > 1 ? " ×" + rs.length : "") + "</button>";
-        if (on) rs.forEach(function (x) { shown += '<div class="ssval' + (x.ignored ? " muted" : "") + '">' + esc(msg(x.text)) + (x.file && (it.files || []).length > 1 ? ' <span class="mono muted">' + esc(x.file) + "</span>" : "") + "</div>"; });
+        if (on) rs.forEach(function (x) {
+          shown += '<div class="ssval' + (x.ignored ? " muted" : "") + '">' + esc(msg(x.text)) + (x.file && (it.files || []).length > 1 ? ' <span class="mono muted">' + esc(x.file) + "</span>" : "") +
+            (x.lines || []).map(function (l) { return '<div class="det">' + esc(msg(l)) + "</div>"; }).join("") +
+            (x.link ? '<div class="det"><a href="' + esc(x.link) + '" data-nav>' + H("Open {tool}", { tool: name ? msg(name) : r.id }) + "</a></div>" : "") + "</div>";
+        });
       });
       // ignored: the item's issues as they are now greyed out and kept so (a new kind of issue still warns); brought back on request
       var acts = (live.length ? '<button class="btn sm" type="button" data-act="lh-ignore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" data-ids="' + esc(live.join(",")) + '" title="' + H("Greys out this item’s issues as they are now, for good. A new kind of issue on it still shows as a warning.") + '">' + H("Ignore") + "</button> " : "") +
         (muted ? '<button class="btn sm" type="button" data-act="lh-restore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" title="' + H("Shows this item’s ignored issues as warnings again.") + '">' + H("Bring Back") + "</button>" : "");
+      if (!it.results.length) chips = badge("pass", T("Nothing flagged"));
       return '<div class="ssitem lhitem' + (live.length ? "" : " lhquiet") + '"><div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(it.label) + '</div><div class="lhacts">' + acts + "</div></div></div></div>" +
         '<div class="ssarrow"></div><div class="lhflags"><div class="sschips">' + chips + "</div>" + shown + "</div></div>";
     }).join("");
@@ -3659,7 +3755,7 @@ PCI18N.ready.then(function () {
           more: H("<strong>A snapshot</strong> is the whole dataset as it is this minute, taken through TrueNAS when you press Take a Snapshot on the action’s page, named <code>plexcache-&lt;tool&gt;-&lt;library&gt;-&lt;time&gt;</code> and deleted by the app after the days set below. Needs TrueNAS connected with a key allowed to make snapshots (TrueNAS 24.10 and later).<br><br>" +
           "<strong>A backup I make myself</strong>: you make one, and say so on the action’s page; it counts for half an hour.<br><br>" +
           "<strong>The copies the action keeps</strong>: where an action sets files aside rather than deleting them (Duplicate Versions, Child Dataset), those are the backup. An action that keeps none asks for a snapshot or a backup instead.") }) +
-      number("general", "snapshot_days", T("Keep snapshots for (days)"), 1, 365, H("The snapshots the app takes are deleted after this long, by the app itself (TrueNAS keeps a snapshot for ever otherwise). Until then a snapshot holds the space the changed files took.")) +
+      number("general", "backup_days", T("Keep backups for (days)"), 1, 365, H("How long a backup made before files change is kept: a snapshot the app takes is deleted after this long, by the app itself (TrueNAS keeps a snapshot for ever otherwise); files set aside or copied as a backup are deleted after it too. Until then a backup holds the space the changed files took, and a change can be reverted from it.")) +
       "</div></section>";
     // ---- Updates
     out += '<section class="card" id="updates"><h2>' + H("Updates") + '</h2>' +
@@ -3902,7 +3998,7 @@ PCI18N.ready.then(function () {
       var ds = (ST.zfs.datasets || []).filter(function (d) { return d.dataset === l.dataset || d.mountpoint === l.dataset; })[0];
       if (!pending && !excluded && l.status === "ok" && ds) {
         var pc = ds.props && ds.props.primarycache;
-        detail = pc && pc !== "all" ? T("On {dataset} — primarycache={value}, so it can’t be cached until that’s fixed ([see Health](/health#datasets)).", { dataset: ds.dataset, value: pc }) : T("On {dataset}", { dataset: ds.dataset });
+        detail = pc && pc !== "all" ? T("On {dataset} — primarycache={value}, so it can’t be cached until that’s fixed in [Health](/health#datasets).", { dataset: ds.dataset, value: pc }) : T("On {dataset}", { dataset: ds.dataset });
         if (pc && pc !== "all") st = "warn";
       }
       // One tick box and name per library, spanning all of its folders.
@@ -3925,31 +4021,53 @@ PCI18N.ready.then(function () {
 
   // --------------------------------------------------------------- render
   var PAGES = { health: pageHealth, caching: pageCaching, ssd: pageSsd, library: pageLibrary, tools: pageTools, optimizer: pageOptimizer, convert: pageConvert, dataset: pageDataset,
-    merge: pageMerge, versions: pageVersions, folders: pageFolders, unlink: pageUnlink, processes: pageProcesses, sync: pageSync, activity: pageActivity, system: pageSystem };
+    merge: pageMerge, versions: pageVersions, folders: pageFolders, unlink: pageUnlink, filechecks: pageFilechecks, plexchecks: pagePlexchecks,
+    processes: pageProcesses, sync: pageSync, activity: pageActivity, system: pageSystem };
   // the tools, under the Tools entry in the menu: [page, name, what it does]
   var TOOLS = [
     ["optimizer", N("Optimizer"), N("Rewrites media files so they suit caching: the dataset’s record size and compression, and MKV files laid out with their metadata at the end.")],
-    ["convert", N("Convert to MKV"), N("Converts other containers (AVI, MPEG-TS, VOB…) to MKV when nothing in them would be lost, and sees the new file into Plex on every server before the original goes.")],
+    ["convert", N("Convert to MKV"), N("Converts other containers (AVI, MPEG-TS, VOB…) to MKV when nothing in them would be lost — backed up first, revertable after — and sees the new file into Plex on every server before the original goes.")],
     ["dataset", N("Convert Folder to Child Dataset"), N("Turns a library folder into a dataset of its own, at the same path, with the record size that suits it."), N("Child Dataset")],
     ["merge", N("Merge Duplicates"), N("Finds the same film on several Plex records and makes them versions of one, keeping its edits, poster and watched state. No file is touched.")],
     ["versions", N("Duplicate Versions"), N("Where one Plex item holds the same file twice, removes the extra copy — the file and Plex’s part — after a hold.")],
     ["folders", N("Organize Folders"), N("Moves loose files into a folder of their own, and renames folders to Title (Year) {edition}, without Plex losing anything.")],
-    ["unlink", N("Unlink Files"), N("Replaces hard links and symlinks with files of their own — the same bytes — so synced folders match everywhere and the duplicate tools can tidy them safely.")]];
-  var TOOL_PAGES = { optimizer: 1, convert: 1, dataset: 1, merge: 1, versions: 1, folders: 1, unlink: 1 };
+    ["unlink", N("Unlink Files"), N("Replaces hard links and symlinks with files of their own — the same bytes — so synced folders match everywhere and the duplicate tools can tidy them safely.")],
+    ["filechecks", N("File Checks"), N("What’s in each file, as inspected: its tracks — audio, subtitles, their languages and codecs — checked against what a good file has. Each check can be turned off.")],
+    ["plexchecks", N("Plex Checks"), N("How Plex has each item: its versions, their names and lengths, the fields you locked. Each check can be turned off.")]];
+  var TOOL_PAGES = { optimizer: 1, convert: 1, dataset: 1, merge: 1, versions: 1, folders: 1, unlink: 1, filechecks: 1, plexchecks: 1 };
   function toolsNav(current) {
     return '<div class="lctl" style="margin-bottom:14px"><div class="seg small" role="tablist" aria-label="' + H("Tools") + '">' +
       '<a role="tab" href="/tools" data-nav aria-selected="' + (current === "tools") + '">' + H("All tools") + "</a>" +
       TOOLS.map(function (t) { return '<a role="tab" href="/' + t[0] + '" data-nav aria-selected="' + (current === t[0]) + '">' + esc(T(t[3] || t[1])) + "</a>"; }).join("") + "</div></div>";
   }
+  // What each tool flags, from the state: the four data-layer tools' counts (tool_counts), files still to optimize, folders
+  // that could be datasets of their own. null while nothing is known yet (nothing gathered), so the card shows no number.
+  function toolCount(name) {
+    var tc = (ST.tool_counts || {})[name];
+    if (tc) return Object.keys(tc.libraries || {}).length ? tc.total : null;
+    if (name === "optimizer") {
+      var sums = (ST.optimizer || {}).libraries || {}, keys = Object.keys(sums);
+      return keys.length ? keys.reduce(function (a, k) { return a + ((sums[k] || {}).todo || 0); }, 0) : null;
+    }
+    if (name === "dataset") { var c = (ST.migration || {}).candidates; return c ? c.filter(function (x) { return x.suggested && x.child; }).length : null; }
+    if (name === "filechecks" || name === "plexchecks") {  // Library Health's findings, per category, ignored items apart
+      var hc = ST.health_counts || {}, hk = Object.keys(hc), cat = name === "filechecks" ? "file" : "plex";
+      return hk.length ? hk.reduce(function (a, k) { return a + ((hc[k] || {})[cat] || 0); }, 0) : null;
+    }
+    return null;
+  }
+  function toolsTotal() { return TOOLS.reduce(function (a, t) { return a + (toolCount(t[0]) || 0); }, 0); }
   function pageTools() {
-    var out = top(T("Tools"), H("What Plex Cache can do to your library beyond caching it. Each tool has a page of its own; none changes anything until you ask it to."), "");
+    var out = top(T("Tools"), H("What Plex Cache can do to your library beyond caching it. Each tool has a page of its own; none changes anything until you ask it to. The number on a card is what the tool has found to do, across your libraries."), "");
     out += '<div class="stack">' + toolsNav("tools") + '<div class="grid">' + TOOLS.map(function (t) {
-      return '<section class="card toolcard"><h2><a href="/' + t[0] + '" data-nav>' + esc(T(t[1])) + " →</a></h2><p>" + esc(T(t[2])) + "</p></section>";
+      var n = toolCount(t[0]);
+      return '<section class="card toolcard"><h2><a href="/' + t[0] + '" data-nav>' + esc(T(t[1])) + " →</a>" +
+        (n != null ? ' <span class="count' + (n ? " warn" : "") + '" title="' + H("Found to do") + '">' + fmtNum(n) + "</span>" : "") + "</h2><p>" + esc(T(t[2])) + "</p></section>";
     }).join("") + "</div></div>";
     return out;
   }
   // ---- the tools that scan a library and do the rows you tick (tools/): Merge Duplicates, Duplicate Versions, Organize Folders
-  var TOOL = { merge: { key: null, sel: {}, opts: {}, confirm: false, keep: {} }, versions: { key: null, sel: {}, opts: {}, confirm: false }, folders: { key: null, sel: {}, opts: {}, confirm: false }, unlink: { key: null, sel: {}, opts: {}, confirm: false } };
+  var TOOL = { merge: { key: null, sel: {}, opts: {}, confirm: false, keep: {} }, versions: { key: null, sel: {}, opts: {}, confirm: false }, folders: { key: null, sel: {}, opts: {}, confirm: false }, unlink: { key: null, sel: {}, opts: {}, confirm: false }, convert: { key: null, sel: {}, opts: {}, confirm: false } };
   function toolState(name) { return ((ST.tools || {})[name]) || { results: [], extra: {} }; }
   // the library tabs: the ones the tool can work on
   function toolLibs(name, types) {
@@ -3980,10 +4098,60 @@ PCI18N.ready.then(function () {
         (spct != null ? '<div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + spct + '"><div style="width:' + spct + '%"></div></div>'
           : '<div class="meter thin busy" role="progressbar" aria-busy="true"><div></div></div>') + "</div>";
     }
-    var pct = pg.total ? Math.round(100 * pg.done / pg.total) : 0;
-    return '<div class="migprog"><div class="what">' + H("Applying…") + '</div><div class="det">' + H("{done} of {total} · {pct}%", { done: fmtNum(pg.done), total: fmtNum(pg.total), pct: pct }) + "</div>" +
-      (pg.row ? '<div class="det">' + esc(pg.row) + (pg.step ? ' <span class="muted">(' + esc(msg(pg.step)) + ")</span>" : "") + "</div>" : "") +
-      '<div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div></div>';
+    if (pg.queued && !(ST.job && ST.job.kind === "tool" && ST.job.running)) return '<div class="migprog"><div class="what">' + H("Queued") + '</div><div class="det">' + H("Starts once the file job before it is done (<a href=\"/processes\" data-nav>Processes</a>).") + "</div></div>";
+    return "";  // (the process's own progress is shown with Apply: toolApply)
+  }
+  // ---- The standard tool page. Every tool's page is one (test_tool_pages_follow_the_standard): the title with a one-line
+  // blurb; the card's heading with the long explanation behind its ⓘ — never a paragraph on the page; the library tabs; the
+  // options and Scan / Scan Again, with the scanning state; one line on what the last scan found; the rows — a poster and the
+  // item's name first, the tool's own columns after — or, with none, a sentence saying so; Apply, with the backup plan; and
+  // whatever the tool adds under it. What's in a row is fact (names, sizes, badges); an explanation goes behind an ⓘ (fact()).
+  // spec: {name, title, blurb, help, types?, options?, summary(sc), empty, columns: [names], row(r, sc) -> [cells after the item],
+  //        sub?(r) (under the item's name), rows?(sc) (a tool's own rows, posters included), confirm(n), note?(sc), after?(t, sc)}
+  function toolPage(spec) {
+    var name = spec.name, t = toolState(name), out = top(T(spec.title), spec.blurb, "");
+    out += '<div class="stack">' + toolsNav(name) + '<section class="card">' + heading(esc(T(spec.title)), spec.help) + toolLibs(name, spec.types) +
+      toolScanBar(name, t, spec.options || "") + toolRun(t);
+    toolAutoScan(name);
+    var sc = toolRows(name, t);
+    if (sc && spec.stale && spec.stale(sc)) sc = null;  // (a scan from an older version: scan again)
+    if (sc) {
+      var quiet = ((ST.tool_counts || {})[name] || {}).ignored || 0;
+      out += '<div class="det toolsum" style="margin:8px 0">' + spec.summary(sc) + (quiet ? " · " + esc(P(quiet, "{n} ignored on Library Health", "{n} ignored on Library Health", { n: fmtNum(quiet) })) : "") + "</div>";
+      if (!sc.rows.length) out += '<p class="muted toolempty">' + badge("pass", T("Nothing found")) + " " + spec.empty + "</p>";
+      else {
+        out += spec.rows ? spec.rows(sc) : toolTable(name, sc, spec);
+        if (spec.before) out += spec.before(sc);  // (what to read and choose before applying: a warning, the way to do it)
+        out += toolApply(name, t, sc.rows, spec.confirm);
+        if (spec.note) out += spec.note(sc);
+      }
+    }
+    return out + "</section>" + (spec.after ? spec.after(t, sc) : "") + toolProcess(name) + toolHistory(name) + "</div>";
+  }
+  // the rows as a table: the tick, the item (poster and name), then the tool's columns
+  function toolTable(name, sc, spec) {
+    return '<div class="tbl-wrap"><table class="tbl tool"><thead><tr><th scope="col"></th><th scope="col">' + H("Item") + "</th>" +
+      spec.columns.map(function (c) { return '<th scope="col">' + esc(c) + "</th>"; }).join("") + "</tr></thead><tbody>" +
+      sc.rows.map(function (r) {
+        return "<tr><td>" + toolCheck(name, r) + "</td><td>" + toolItem(r, spec.sub ? spec.sub(r) : "") + "</td>" + spec.row(r, sc).map(function (c) { return "<td>" + c + "</td>"; }).join("") + "</tr>";
+      }).join("") + "</tbody></table></div>";
+  }
+  // an item in a row: its poster (Plex's) and its name, with anything the tool adds under it
+  function toolItem(r, sub) {
+    return '<div class="row toolitem" style="gap:8px;align-items:center">' + posterImg(r.poster) + "<div><span>" + esc(r.title) + "</span>" + (sub ? '<div class="det">' + sub + "</div>" : "") + "</div></div>";
+  }
+  // What a tool's row says about its item: chips (the Sync and Health views' kind), each a badge that opens on a click to its
+  // explanation and details underneath — the one way a row carries a warning, a note or a green mark (the standard the tests
+  // hold the tool pages to). items: [{id, status: "warn" | "info" | "pass", label, text (html), lines: [html]}]
+  var TOOL_OPEN = {};
+  function chips(name, rowId, items) {
+    var out = '<div class="sschips">', shown = "";
+    items.forEach(function (c) {
+      var id = rowId + "/" + c.id, on = !!TOOL_OPEN[name + ":" + id];
+      out += '<button type="button" class="badge b-' + esc(c.status) + " sschip" + (on ? " on" : "") + '" aria-expanded="' + on + '" data-act="tool-chip" data-tool="' + name + '" data-id="' + esc(id) + '">' + esc(c.label) + "</button>";
+      if (on) shown += '<div class="ssval">' + (c.text || "") + (c.lines || []).map(function (l) { return '<div class="det">' + l + "</div>"; }).join("") + "</div>";
+    });
+    return out + "</div>" + shown;
   }
   // the Scan button (with a tool's own options before it), and what the last scan found
   function toolScanBar(name, t, optsHtml) {
@@ -4001,7 +4169,7 @@ PCI18N.ready.then(function () {
     u.tried = u.tried || {};
     if (toolAutoPlan(u.key, t, u.tried) === "scan") {
       u.tried[u.key] = true; u.scanAt = Date.now() / 1000;
-      api("/api/tools/" + name, { action: "scan", library: u.key, options: u.opts }).then(function () { load(); }).catch(function () { u.scanAt = 0; });
+      api("/api/tools/" + name, { action: "scan", library: u.key, options: u.opts, refresh: false }).then(function () { load(); }).catch(function () { u.scanAt = 0; });  // (the data as gathered: instant)
     }
   }
   // @testable: toolAutoPlan — pure: what a tool page does by itself for library `key`. "scan" when the
@@ -4015,59 +4183,80 @@ PCI18N.ready.then(function () {
   // the rows to tick, and the Apply button: a confirmation first, since the tool then acts on your library
   // Before files change: two lights — room for what's written, and a recent snapshot (or a backup you made) — both
   // green (or grey) before Apply opens. The tools that change files (peers.py FILE_TOOLS) and what each writes.
-  var FILE_TOOLS = { versions: function (rows) { return 0; }, folders: function (rows) { return 0; }, unlink: function (rows) { return rows.reduce(function (a, r) { return a + (r.size || 0); }, 0); } };
+  var FILE_TOOLS = { versions: function (rows) { return 0; }, folders: function (rows) { return 0; }, unlink: function (rows) { return rows.reduce(function (a, r) { return a + (r.size || 0); }, 0); }, convert: function (rows) { return rows.reduce(function (a, r) { return a + (r.size || 0); }, 0); } };
   var READY = {};  // "key/needed" -> {at, data}
-  // The lights before anything changes files, the same everywhere, and what the Backup preference (System → Preferences)
-  // puts in for a snapshot when there's none: Take a Snapshot (named for what it's for, kept the days set there), a backup
-  // you've made and say so, or — where the action keeps copies of its own (`keeps`, a tool's text for them) — those, by
-  // themselves. Every one is said here with a link to change it; a snapshot that couldn't be taken stays said until the
-  // next one is, or it's dismissed. `tool` names the snapshot. {ready, html}.
-  function readinessPanel(key, needed, tool, keeps) {
-    var id = key + "/" + needed + "/" + (keeps ? 1 : 0), got = READY[id];
+  // The lights before anything changes files, the same everywhere: room for what's written (and what a snapshot keeps),
+  // and the backup plan — what the process does first, per the Backup preference (System → Preferences): a snapshot
+  // named for the action, the copies the action keeps, or none where you back up yourself. `keeps`: the action keeps
+  // copies of its own (a tool's text for them); `retained`: what a snapshot keeps of the files changed; `tool` names
+  // the snapshot. A snapshot that couldn't be taken stays said until the next one is, or it's dismissed. {ready, html, label}.
+  function readinessPanel(key, needed, tool, keeps, retained) {
+    var id = key + "/" + needed + "/" + (keeps ? 1 : 0) + "/" + (retained || 0) + "/" + (tool || ""), got = READY[id];
     if (!got || Date.now() - got.at > 20000) {
       READY[id] = got = { at: Date.now(), data: got ? got.data : null };
-      api("/api/tools/readiness?key=" + encodeURIComponent(key) + "&needed=" + encodeURIComponent(needed) + (keeps ? "&keeps=1" : "")).then(function (d) { READY[id].data = d; render(); }).catch(function () {});
+      api("/api/tools/readiness?key=" + encodeURIComponent(key) + "&needed=" + encodeURIComponent(needed) + (keeps ? "&keeps=1" : "") +
+        (retained ? "&retained=" + encodeURIComponent(retained) : "") + "&tool=" + encodeURIComponent(tool || "")).then(function (d) { READY[id].data = d; render(); }).catch(function () {});
     }
     var d = got.data;
-    if (!d) return { ready: false, html: loadingBar(T("Checking room and snapshots…")) };
-    var change = " " + H("Change it in <a href=\"/system#prefs\" data-nav>System → Preferences</a>.");
-    var how = d.backup === "manual" ? H("<strong>Backup:</strong> one you make yourself, and say so here.")
-      : d.backup === "copies" ? (keeps ? H("<strong>Backup:</strong> the copies this keeps — {what}.", { what: msg(keeps) }) : H("<strong>Backup:</strong> the copies an action keeps — but this one keeps none, so it needs a snapshot or a backup you’ve made."))
-      : H("<strong>Backup:</strong> a ZFS snapshot taken through TrueNAS, named <code>plexcache-{tool}-{library}-{time}</code> and deleted by the app after <strong>{n} days</strong>.", { n: d.life_days, tool: tool || "tool", library: "library", time: "date" });
-    var about = info(H("<strong>A snapshot</strong> is the whole dataset as it is this minute, taken through TrueNAS when you press Take a Snapshot and named for what it’s for, so you can tell it apart in TrueNAS → Datasets → Snapshots. The app deletes it after <strong>{n} days</strong> (the days are yours to set in <a href=\"/system#prefs\" data-nav>System → Preferences</a>): check the result before then, and roll back or restore from it if something went wrong. Until then it holds the space the changed files took.<br><br>" +
-      "<strong>A backup you’ve made</strong> says you have one elsewhere; it counts for half an hour.<br><br>" +
-      "<strong>The copies an action keeps</strong> are its own: files it sets aside rather than deletes, kept for the hold and put back from its page. Not every action keeps some; one that doesn’t asks for a snapshot or a backup instead.<br><br>" +
-      "Which stands in for a snapshot is set once, in <a href=\"/system#prefs\" data-nav>System → Preferences</a>, for every action that changes files.", { n: d.life_days }), T("Backup"));
-    var acts = "";
-    if (d.snapshot.status === "warn") {
-      var wantSnap = d.backup === "snapshot" || (d.backup === "copies" && !keeps);
-      if (wantSnap && d.can_snapshot) acts += '<button class="btn" type="button" data-act="tool-backup" data-how="snapshot" data-key="' + esc(key) + '" data-tool="' + esc(tool || "") + '">' + H("Take a Snapshot") + "</button> ";
-      if (wantSnap && !d.can_snapshot) acts += '<span class="det">' + H("Snapshots are taken through the TrueNAS API: connect it in <a href=\"/system#truenas\" data-nav>System → TrueNAS</a> with a key allowed to make snapshots — or say you’ve made a backup:") + "</span> ";
-      if (d.backup !== "snapshot" || !d.can_snapshot) acts += '<button class="btn" type="button" data-act="tool-backup" data-how="manual" data-key="' + esc(key) + '">' + H("I’ve Made a Backup") + "</button>";
-    }
+    if (!d) return { ready: false, label: "backup", html: loadingBar(T("Checking room and the backup plan…")) };
+    var bp = d.backup || {};
+    var change = "";
+    var about = info(H("<strong>A snapshot</strong> is the whole dataset as it is this minute, taken through TrueNAS as the process’s first step and named for what it’s for, so you can tell it apart in TrueNAS → Datasets → Snapshots. The app deletes it after <strong>{n} days</strong> (the days are yours to set in <a href=\"/system#prefs\" data-nav>System → Preferences</a>); until then Revert on the <a href=\"/processes\" data-nav>Processes page</a> puts the changed files back from it, and it holds the space those files took.<br><br>" +
+      "<strong>The copies an action keeps</strong> are its own: files it sets aside rather than deletes, kept for the same days and put back from its page. An action that keeps none takes a snapshot instead.<br><br>" +
+      "<strong>A backup you make yourself</strong>: the process goes ahead without one, and Apply says so.<br><br>" +
+      "Which it is, is set once, in <a href=\"/system#prefs\" data-nav>System → Preferences</a>, for every action that changes files.", { n: d.life_days }), T("Backup"));
     var err = d.error ? '<div class="det bad">' + links(msg(d.error.text)) + ' <button class="link" type="button" data-act="tool-backup" data-how="dismiss" data-key="' + esc(key) + '">' + H("Dismiss") + "</button></div>" : "";
     var html = '<div class="lights ready">' + light(d.space.status, T("Room for it"), msg(d.space.text), false) +
-      light(d.snapshot.status, T("A recent snapshot"), msg(d.snapshot.text), false) +
-      '<div class="det fallback">' + about + "<span>" + how + change + "</span></div>" + (acts ? '<div class="det fallback">' + acts + "</div>" : "") + err + "</div>";
-    return { ready: !!d.ready, html: html };
+      lightInfo({ status: bp.status || "warn", text: T("Backup"), detail: msg(bp.text || "") + change + (d.snapshot && d.snapshot.status === "ok" ? " " + T("A snapshot from the last half hour is there too: {name}.", { name: d.snapshot.name }) : "") }, T("Backup"), false, about) + err + "</div>";
+    return { ready: !!d.ready, label: bp.label || "backup", html: html };
   }
   function readiness(name, key, rows) {
-    return readinessPanel(key, FILE_TOOLS[name](rows), name, (toolState(name) || {}).keeps);
+    return readinessPanel(key, FILE_TOOLS[name](rows), name, (toolState(name) || {}).keeps, 0);
+  }
+  // a tool's title, from the Tools page's list
+  function toolTitle(name) { var t = TOOLS.filter(function (x) { return x[0] === name; })[0]; return t ? T(t[1]) : name || ""; }
+  // the process a tool's Apply became (jobs.py ToolJob): running or queued for this tool, or the last one that ended
+  function toolJob(name) {
+    var j = ST.job;
+    if (j && j.kind === "tool" && j.tool === name) return j;
+    return null;
+  }
+  var ROLLBACK_CONFIRM = null;  // the run whose whole-snapshot rollback waits for a yes
+  function undoButtons(jobId, bk) {
+    bk = bk || {};
+    var out = '<div class="det undo"><button class="btn sm" type="button" data-act="job-revert" data-job="' + esc(jobId) + '">' + H("Revert Changed Files") + "</button> " +
+      '<span class="muted">' + (bk.kind === "snapshot" ? H("Puts back only the files this run changed, from the backup.") : H("Puts back only what this run changed, by the tool’s own way back.")) + "</span></div>";
+    if (bk.kind === "snapshot") {
+      out += ROLLBACK_CONFIRM === jobId
+        ? '<div class="det undo bad">' + H("Roll the whole dataset back to the snapshot? Everything written to it since — by anything, not only this run — is lost.") + " " +
+          '<button class="btn sm" type="button" data-act="job-rollback" data-job="' + esc(jobId) + '">' + H("Yes, Roll Back") + "</button> " + '<button class="link" type="button" data-act="job-rollback-no">' + H("Cancel") + "</button></div>"
+        : '<div class="det undo"><button class="btn sm" type="button" data-act="job-rollback-ask" data-job="' + esc(jobId) + '">' + H("Roll Back Whole Snapshot") + "</button> " +
+          '<span class="muted">' + H("The dataset as it was at the snapshot: every change since, by anything, is lost.") + "</span></div>";
+    }
+    return out;
   }
   function toolApply(name, t, rows, what) {
     var u = TOOL[name], n = rows.filter(function (r) { return u.sel[r.id]; }).length;
     if (!rows.length) return "";
     var all = rows.every(function (r) { return u.sel[r.id]; });
-    var gate = FILE_TOOLS[name] ? readiness(name, u.key, rows.filter(function (r) { return u.sel[r.id]; })) : { ready: true, html: "" };
-    var out = gate.html + '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px"><label class="det"><input type="checkbox" data-act="tool-all" data-tool="' + name + '"' + (all ? " checked" : "") + "> " + H("All") + "</label>";
+    var job = toolJob(name), busy = !!(job && job.running) || (t.running && (t.progress || {}).what === "apply") || (ST.queue || []).some(function (q) { return q.kind === "tool" && (q.args || {}).tool === name; });
+    var picked = rows.filter(function (r) { return u.sel[r.id]; });
+    var gate = FILE_TOOLS[name] ? readiness(name, u.key, picked.length ? picked : rows) : { ready: true, html: "", label: "backup" };  // (nothing ticked yet: the room all of them would take)
+    var out = gate.html;
+    // the process: its steps while it runs (the backup first), and how it ended until dismissed
+    if (job && !job.running && (job.errors || []).length && (job.done || 0) === 0 && !busy) {
+      out += '<div class="det bad">' + H("Not done — the backup couldn’t be made: {why}", { why: msg(job.errors[0].reason || "") }) + ' <button class="link" type="button" data-act="job" data-job="dismiss">' + H("Dismiss") + "</button></div>";
+    }
+    out += '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px"><label class="det"><input type="checkbox" data-act="tool-all" data-tool="' + name + '"' + (all ? " checked" : "") + "> " + H("All") + "</label>";
     if (!gate.ready) u.confirm = false;
+    var label = gate.label === "none" ? H("Apply to {n} Selected Without Backing Up", { n: fmtNum(n) }) : FILE_TOOLS[name] ? H("Backup and Apply to {n} Selected", { n: fmtNum(n) }) : H("Apply to {n} Selected", { n: fmtNum(n) });
     if (u.confirm && n) {
       out += '<span>' + esc(what(n)) + "</span>" +
         '<button class="btn pri" type="button" data-act="tool-apply-yes" data-tool="' + name + '">' + H("Yes, Do It") + "</button>" +
         '<button class="btn" type="button" data-act="tool-apply-no" data-tool="' + name + '">' + H("Cancel") + "</button>";
     } else {
-      out += '<button class="btn pri" type="button" data-act="tool-apply" data-tool="' + name + '"' + (!n || t.running || !gate.ready ? " disabled" : "") + ">" + H("Apply to {n} Selected", { n: fmtNum(n) }) + "</button>" +
-        (!gate.ready && n ? ' <span class="det">' + H("Apply opens once both lights above are green.") + "</span>" : "");
+      out += '<button class="btn pri" type="button" data-act="tool-apply" data-tool="' + name + '"' + (!n || busy || !gate.ready ? " disabled" : "") + ">" + label + "</button>" +
+        (!gate.ready && n ? ' <span class="det">' + H("Apply opens once both lights above are green or grey.") + "</span>" : "");
     }
     return out + "</div>";
   }
@@ -4130,29 +4319,24 @@ PCI18N.ready.then(function () {
   }
   var MERGE_HELP = N("Plex can hold the same film on two records — one added before the other was matched, a second copy in another folder — each with its own poster, edits and watched state. Plex’s own Merge turns them into versions of one record, keeping the record’s metadata; this finds them for you. Records are the same film when they hold the very same file (a link or a copy in another folder: the same size and running time), whatever each is matched to; or when they share a match or, unmatched, when their files are named for the same title and year — and their running times agree (4% or 30 seconds, whichever is more: a different frame rate or cut of the credits; two films that merely share a title and year differ by more), and they’re the same edition (a Director’s Cut and the theatrical cut are two records on purpose), unless their files are the very same file. The record kept is the one with the most edited fields, then the most files, then the oldest. No file is touched, so a mirrored server isn’t affected.");
   function pageMerge() {
-    var t = toolState("merge"), out = top(T("Merge Duplicates"), H("The same film on several Plex records, made versions of one — keeping its edits, poster and watched state. Nothing happens until you tick rows and apply."), "");
-    out += '<div class="stack">' + toolsNav("merge") + '<section class="card">' + heading(esc(T("Find Duplicate Records")), MERGE_HELP) +
-      '<p class="help">' + H("Why: a film added twice — a copy in another folder, a file re-added, one matched after the other — is two records in Plex: twice in every list, two posters, and watched on one but not the other. Merging makes them one record with two versions, as Plex offers for a single pair; this finds them all. Only this server’s records: no file is touched, so a mirrored server isn’t affected — its own duplicates are found by running this there.") + "</p>" +
-      toolLibs("merge", ["movie", "show"]) + toolScanBar("merge", t) + toolRun(t);
-    toolAutoScan("merge");
-    var sc = toolRows("merge", t);
-    if (sc && sc.rows.some(function (r) { return !r.keep || !r.keep.fields; })) sc = null;  // (a scan from an older version: scan again)
-    if (sc) {
-      out += '<div class="det" style="margin:8px 0">' + H("{n} records read", { n: fmtNum(sc.records) }) + " · " + esc(P(sc.total, "{n} film on more than one record", "{n} films on more than one record", { n: fmtNum(sc.total) })) + "</div>";
-      if (!sc.rows.length) out += '<p class="muted">' + H("No duplicates: every film is on one record.") + "</p>";
-      else {
-        out += mergeRows(sc);
-        out += toolApply("merge", t, sc.rows, function (n) { return P(n, "Merge the records of {n} film in Plex? Their metadata becomes the kept record’s.", "Merge the records of {n} films in Plex? Their metadata becomes the kept record’s.", { n: n }); });
-      }
-    }
-    return out + "</section>" + toolResults(t) + "</div>";
+    return toolPage({ name: "merge", title: "Merge Duplicates", types: ["movie", "show"],
+      blurb: H("The same film on several Plex records, made versions of one — keeping its edits, poster and watched state. Nothing happens until you tick rows and apply."),
+      help: MERGE_HELP + "<br><br>" + H("Why: a film added twice — a copy in another folder, a file re-added, one matched after the other — is two records in Plex: twice in every list, two posters, and watched on one but not the other. Merging makes them one record with two versions, as Plex offers for a single pair; this finds them all. Only this server’s records: no file is touched, so a mirrored server isn’t affected — its own duplicates are merged there."),
+      stale: function (sc) { return sc.rows.some(function (r) { return !r.keep || !r.keep.fields; }); },
+      summary: function (sc) { return H("{n} records read", { n: fmtNum(sc.records) }) + " · " + esc(P(sc.total, "{n} film on more than one record", "{n} films on more than one record", { n: fmtNum(sc.total) })); },
+      empty: H("Every film is on one record."),
+      rows: function (sc) { return mergeRows(sc); },
+      confirm: function (n) { return P(n, "Merge the records of {n} film in Plex? Their metadata becomes the kept record’s.", "Merge the records of {n} films in Plex? Their metadata becomes the kept record’s.", { n: n }); } });
   }
   var VERSIONS_HELP = N("One Plex record can hold the same file twice — a copy that slipped in, or a second path to one file (a link). This finds them: versions of one record with the same running time and size. It also finds the copies Plex doesn’t list at all — a second path to a listed file, or an identical copy of one (the same size and bytes at both ends): Plex’s scanner skips a file it already has under another path, so these only show on disk, taking space and getting cached and optimized twice. The copy kept is the one in a folder of its own, then the newest, then the first Plex lists; the others are set aside in the library’s own trash folder (on the same dataset: no copying) and Plex asked to scan. They’re deleted for good only once Plex here no longer lists them — and, with a mirrored server watched, once its Plex no longer does either (the synced folder carries the change there) — then after the hold below. Until then, each can be put back.");
-  function fileLine(f, mname) {
-    var there = f.there === undefined || f.there === null ? "" : f.there ? '<div class="det">' + badge("info", T("Listed on {name} too", { name: mname })) + " " + esc(T("Its synced folder carries the change: the copy goes there as well, and is deleted here only once its Plex no longer lists it.")) + "</div>"
-      : '<div class="det">' + badge("pass", T("Not listed on {name}", { name: mname })) + "</div>";
-    return "<div>" + esc(f.name) + (f.linked ? " " + badge("info", T("A link to the kept file")) : "") + (f.unlisted ? " " + badge("warn", T("Not in Plex")) : "") + '</div><div class="det">' + esc(f.folder === "." ? T("the library folder") : f.folder) + " · " + fmtBytes(f.size) +
-      (f.unlisted ? " · " + esc(T("Plex skips a file it already has under another path: this one is only on disk.")) : "") + "</div>" + there;
+  function fileLine(f, mname, rowId) {
+    var items = [];
+    if (f.linked) items.push({ id: "linked", status: "info", label: T("A link to the kept file"), text: H("A second path to the very same file: setting it aside frees nothing, but leaves the file where Plex has it and nowhere else.") });
+    if (f.unlisted) items.push({ id: "unlisted", status: "warn", label: T("Not in Plex"), text: H("Plex skips a file it already has under another path: this one is only on disk, taking space and getting cached and optimized twice.") });
+    if (f.there !== undefined && f.there !== null) items.push(f.there
+      ? { id: "there", status: "info", label: T("Listed on {name} too", { name: mname }), text: H("Its synced folder carries the change: the copy goes there as well, and is deleted here only once its Plex no longer lists it.") }
+      : { id: "there", status: "pass", label: T("Not listed on {name}", { name: mname }), text: H("Its Plex doesn’t list this copy: the deletion needn’t wait for it.") });
+    return "<div>" + esc(f.name) + '</div><div class="det">' + esc(f.folder === "." ? T("the library folder") : f.folder) + " · " + fmtBytes(f.size) + "</div>" + (items.length ? chips("versions", rowId + "/" + f.name, items) : "");
   }
   function trashList() {
     var tr = ST.trash || { items: [] }, items = tr.items || [];
@@ -4166,7 +4350,7 @@ PCI18N.ready.then(function () {
     };
     var act = function (e, a, label, pri) { return '<button class="btn sm' + (pri ? " pri" : "") + '" type="button" data-act="trash" data-trash="' + a + '" data-path="' + esc(e.path) + '">' + label + "</button> "; };
     return '<section class="card">' + heading(esc(T("Set Aside")), N("Files the tools set aside, in the library’s .plexcache-trash folder, waiting until Plex no longer lists them (and the mirrored server’s Plex, with one watched), then the hold. A file that never gets there is held and said so on Health: delete it now, put it back, or keep it set aside and stop following it.")) +
-      '<p class="help">' + H("Kept {n} days once every Plex has let go of them (the Optimizer page’s hold).", { n: tr.hold_days }) + "</p>" +
+      '<p class="help">' + H("Kept {n} days once every Plex has let go of them (the backup length in <a href=\"/system#prefs\" data-nav>System → Preferences</a>).", { n: tr.hold_days }) + "</p>" +
       '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("File") + '</th><th scope="col">' + H("Now") + '</th><th scope="col"></th></tr></thead><tbody>' +
       items.map(function (e) {
         return "<tr><td>" + esc(e.title) + '<div class="det mono">' + esc(e.path.split("/").pop()) + '</div><div class="det">' + esc(msg(e.why)) + " · " + fmtWhen(e.at) + "</div></td><td>" + state(e) + "</td><td>" +
@@ -4174,89 +4358,129 @@ PCI18N.ready.then(function () {
       }).join("") + "</tbody></table></div></section>";
   }
   function pageVersions() {
-    var t = toolState("versions"), out = top(T("Duplicate Versions"), H("One Plex record holding the same file twice: the extra copies set aside, and deleted once every Plex has let go of them."), "");
-    out += '<div class="stack">' + toolsNav("versions") + '<section class="card">' + heading(esc(T("Find Duplicate Files")), VERSIONS_HELP) +
-      '<p class="help">' + H("Why: a second copy of the same file on one record — a copy that slipped in, a file linked twice — takes space, is cached and optimized twice, and shows as two versions that are one. This sets the extra copy aside, and deletes it once every Plex has let go of it; nothing goes for good until then, and it can be put back. With a mirrored server, the synced folder carries the deletion there, so each copy says whether its Plex lists it.") + "</p>" +
-      toolLibs("versions") + toolScanBar("versions", t) + toolRun(t);
-    toolAutoScan("versions");
-    var sc = toolRows("versions", t);
-    if (sc) {
-      out += '<div class="det" style="margin:8px 0">' + esc(P(sc.items, "{n} item with more than one file looked at", "{n} items with more than one file looked at", { n: fmtNum(sc.items) })) + " · " + esc(P(sc.total, "{n} item holds the same file twice", "{n} items hold the same file twice", { n: fmtNum(sc.total) })) +
-        (sc.frees ? " · " + H("{size} freed", { size: fmtBytes(sc.frees) }) : "") + "</div>";
-      if (!sc.rows.length) out += '<p class="muted">' + H("No duplicate files.") + "</p>";
-      else {
-        out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">' + H("Item") + '</th><th scope="col">' + H("Kept") + '</th><th scope="col">' + H("Set Aside") + "</th></tr></thead><tbody>" +
-          sc.rows.map(function (r) {
-            var mname = (sc.mirror || {}).name || "";
-            return "<tr><td>" + toolCheck("versions", r) + '</td><td><div class="row" style="gap:8px;align-items:center">' + posterImg(r.poster) + "<span>" + esc(r.title) + "</span></div>" +
-              (r.mirror_error ? '<div class="det bad">' + esc(r.mirror_error) + "</div>" : "") + "</td><td>" + fileLine(r.keep, mname) + "</td><td>" + r.extras.map(function (x) { return fileLine(x, mname); }).join("") + "</td></tr>";
-          }).join("") + "</tbody></table></div>";
-        out += toolApply("versions", t, sc.rows, function (n) { return P(n, "Set aside the extra copies of {n} item? Plex is asked to scan; they’re deleted for good after the hold, and can be put back until then.", "Set aside the extra copies of {n} items? Plex is asked to scan; they’re deleted for good after the hold, and can be put back until then.", { n: n }); });
-        if (sc.mirror) out += '<p class="help">' + H("{name} is watched: a file goes for good only once its Plex no longer lists it either.", { name: sc.mirror.name }) + "</p>";
-      }
-    }
-    return out + "</section>" + trashList() + toolResults(t) + "</div>";
+    return toolPage({ name: "versions", title: "Duplicate Versions",
+      blurb: H("One Plex record holding the same file twice: the extra copies set aside, and deleted once every Plex has let go of them."),
+      help: VERSIONS_HELP + "<br><br>" + H("Why: a second copy of the same file on one record — a copy that slipped in, a file linked twice — takes space, is cached and optimized twice, and shows as two versions that are one. This sets the extra copy aside, and deletes it once every Plex has let go of it; nothing goes for good until then, and it can be put back. With a mirrored server, the synced folder carries the deletion there, so each copy says whether its Plex lists it."),
+      summary: function (sc) {
+        return esc(P(sc.items, "{n} item with more than one file looked at", "{n} items with more than one file looked at", { n: fmtNum(sc.items) })) + " · " + esc(P(sc.total, "{n} item holds the same file twice", "{n} items hold the same file twice", { n: fmtNum(sc.total) })) +
+          (sc.frees ? " · " + H("{size} freed", { size: fmtBytes(sc.frees) }) : "");
+      },
+      empty: H("No file is held twice."),
+      columns: [T("Kept"), T("Set Aside")],
+      sub: function (r) { return r.mirror_error ? '<span class="bad">' + esc(r.mirror_error) + "</span>" : ""; },
+      row: function (r, sc) { var mname = (sc.mirror || {}).name || ""; return [fileLine(r.keep, mname, r.id), r.extras.map(function (x) { return fileLine(x, mname, r.id); }).join("")]; },
+      confirm: function (n) { return P(n, "Set aside the extra copies of {n} item? Plex is asked to scan; they’re deleted for good after the hold, and can be put back until then.", "Set aside the extra copies of {n} items? Plex is asked to scan; they’re deleted for good after the hold, and can be put back until then.", { n: n }); },
+      note: function (sc) { return sc.mirror ? '<div class="det">' + H("{name} is watched: a file goes for good only once its Plex no longer lists it either.", { name: sc.mirror.name }) + "</div>" : ""; },
+      after: function () { return trashList(); } });
   }
   var FOLDERS_HELP = N("Plex recommends each film in a folder of its own, named <code>Title (Year)</code> — with <code>{edition-…}</code> for an edition, and <code>{tmdb-…}</code> only when two films share a title and year. This moves loose files (in the library folder itself) into such folders, with their subtitles and artwork; with Clean Up, it also renames a film’s folder whose name doesn’t carry the title and year (a folder you named, with both in it, is left as it is).<br><br>Plex loses nothing: each file is first given its new path (a hard link — the same file, nothing copied), Plex asked to scan the new folder, the record it makes for it merged into the original (edits, poster and watched state kept), and only then the old path removed. With a mirrored server, the synced folder carries the change there and the same merge is done there once its Plex has the new path.");
   var UNLINK_HELP = N("A hard link is one file under two paths; a symlink is a path that points at another. Plex lists only one of two paths to the same bytes, so a linked copy never shows there. Syncthing can’t carry a hard link at all: the other site gets two whole, separate copies, and once either changes the two sites no longer hold the same thing. A symlink is carried as a link, and dangles on the other side when its target isn’t in the synced folder. This tool makes each linked file a file of its own under the same path — the bytes copied beside it and swapped in, the dates kept, so Plex and the folder sync see the same file. Once every site holds plain files, Merge Duplicates and Duplicate Versions can tidy the copies safely.");
-  function pageUnlink() {
-    var t = toolState("unlink"), out = top(T("Unlink Files"), H("Hard links and symlinks among your media made files of their own, so synced folders match everywhere."), "");
-    out += '<div class="stack">' + toolsNav("unlink") + '<section class="card">' + heading(esc(T("Find Linked Files")), UNLINK_HELP) +
-      '<p class="help">' + H("Why: a link looks like a second file to you but not to Plex, and not to the folder sync, which turns it into separate copies at the other site. Making each a file of its own puts every site on the same footing; then the duplicate tools can remove the extra copies the same way everywhere.") + "</p>" +
-      toolLibs("unlink") + toolScanBar("unlink", t) + toolRun(t);
-    toolAutoScan("unlink");
-    var sc = toolRows("unlink", t);
-    if (sc) {
-      out += '<div class="det" style="margin:8px 0">' + esc(P(sc.total, "{n} linked file", "{n} linked files", { n: fmtNum(sc.total) })) + "</div>";
-      if (!sc.rows.length) out += '<p class="muted">' + H("No links: every file is a file of its own.") + "</p>";
-      else {
-        out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">' + H("Item") + '</th><th scope="col">' + H("File") + '</th><th scope="col">' + H("Link") + "</th></tr></thead><tbody>" +
-          sc.rows.map(function (r) {
-            var what = r.kind === "symlink" ? H("Symlink → {target}", { target: r.target }) : esc(P(r.links, "{n} path to one file", "Hard link: {n} paths to one file", { n: r.links }));
-            return "<tr><td>" + toolCheck("unlink", r) + '</td><td><div class="row" style="gap:8px;align-items:center">' + posterImg(r.poster) + "<span>" + esc(r.title) + "</span></div></td>" +
-              '<td class="mono det">' + esc(r.name) + '<div class="det">' + fmtBytes(r.size) + "</div></td><td>" + badge("warn", r.kind === "symlink" ? T("Symlink") : T("Hard link")) + '<div class="det">' + what + "</div></td></tr>";
-          }).join("") + "</tbody></table></div>";
-        out += toolApply("unlink", t, sc.rows, function (n) { return P(n, "Make {n} linked file a file of its own? Its bytes are copied under the same path; nothing else changes.", "Make {n} linked files files of their own? Their bytes are copied under the same paths; nothing else changes.", { n: n }); });
-        if (sc.mirror) out += '<p class="help">' + H("{name} is watched: once its folder has caught up, run the same there, then tidy the copies with Duplicate Versions on each side.", { name: sc.mirror.name }) + "</p>";
-      }
-    }
-    return out + "</section>" + toolResults(t) + "</div>";
-  }
   function pageFolders() {
-    var t = toolState("folders"), u = TOOL.folders, out = top(T("Organize Folders"), H("Each film in a folder of its own, named as Plex recommends — without Plex losing its edits, poster or watched state."), "");
-    out += '<div class="stack">' + toolsNav("folders") + '<section class="card">' + heading(esc(T("Find Files to Move")), FOLDERS_HELP) +
-      '<p class="help">' + H("Why: Plex matches a film by its folder as much as by its file name, and a folder of its own is where subtitles, artwork and a second version belong. Films loose in the library folder are matched less reliably and tangle with each other; this gives each its own folder, named as Plex recommends, without Plex losing anything about it.") + "</p>" +
-      toolLibs("folders", ["movie"]);
+    var u = TOOL.folders;
     var opts = '<label class="det"><input type="checkbox" data-act="tool-opt" data-tool="folders" data-opt="cleanup"' + (u.opts.cleanup ? " checked" : "") + "> " + H("Clean up folder names too") + "</label>" +
-      info(H("Besides loose files, folders that already hold one film are looked at: one whose name doesn’t carry the film’s title and year — <code>movie.2010.1080p</code>, say, or a folder named for another film — is renamed to <code>Title (Year)</code>, everything in it moving along. A folder you named with the title and year in it (<code>Alien (1979) Director’s Cut</code>) is left as it is, as is a folder holding several films. The rename goes the same safe way as a move: linked first, scanned into Plex, merged, then the old path removed."), T("Clean up folder names too"));
-    out += toolScanBar("folders", t, opts) + toolRun(t);
-    toolAutoScan("folders");
-    var sc = toolRows("folders", t);
-    if (sc) {
-      out += '<div class="det" style="margin:8px 0">' + H("{n} records read", { n: fmtNum(sc.records) }) + " · " + H("{n} folders", { n: fmtNum(sc.folders) }) + " · " + esc(P(sc.total, "{n} move", "{n} moves", { n: fmtNum(sc.total) })) + (sc.cleanup ? " · " + H("folder names checked") : "") + "</div>";
-      if (!sc.rows.length) out += '<p class="muted">' + H("Nothing to move: every film is in a folder of its own.") + "</p>";
-      else {
-        out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">' + H("Film") + '</th><th scope="col">' + H("From") + '</th><th scope="col">' + H("To") + "</th></tr></thead><tbody>" +
-          sc.rows.map(function (r) {
-            var media = r.moves.filter(function (m) { return m.media; }).length, side = r.moves.length - media;
-            return "<tr><td>" + toolCheck("folders", r) + "</td><td>" + esc(r.title) + '<div class="det">' + badge("info", r.kind === "loose" ? T("Loose file") : T("Rename folder")) + " " +
-              esc(P(media, "{n} file", "{n} files", { n: media })) + (side ? " + " + esc(P(side, "{n} sidecar", "{n} sidecars", { n: side })) : "") + "</div></td>" +
-              '<td class="mono det">' + esc(r.kind === "loose" ? r.moves[0].from.split("/").pop() : r.from_folder + "/") + '</td><td class="mono det">' + esc(r.folder + "/") + "</td></tr>";
-          }).join("") + "</tbody></table></div>";
-        out += toolApply("folders", t, sc.rows, function (n) { return P(n, "Move {n} film into its own folder? Each is linked first, scanned into Plex, merged if need be, then the old path removed.", "Move {n} films into their own folders? Each is linked first, scanned into Plex, merged if need be, then the old path removed.", { n: n }); });
-      }
-    }
-    var pend = (t.extra || {}).pending || [];
-    if (pend.length) {
-      var mname = (ST.plex2 || {}).name || T("the mirrored server");
-      out += '<h3 style="margin-top:14px">' + H("Waiting for {name}", { name: mname }) + '</h3><p class="help">' + H("Its Plex hasn’t listed the new folder yet; the synced folder brings the files, and the new record there is merged into the old once it has.") + "</p>" +
-        pend.map(function (e) { return '<div class="det">' + esc(e.title) + " → " + esc(e.folder) + "/ · " + fmtWhen(e.at) + (e.stuck ? " " + badge("warn", T("Not picked up after {n} days", { n: 3 })) : "") + (e.note ? ' <span class="muted">' + esc(e.note) + "</span>" : "") + "</div>"; }).join("");
-    }
-    return out + "</section>" + toolResults(t) + "</div>";
+      info(H("Besides loose files, folders that already hold one film are looked at: one whose name doesn’t carry the film’s title and year — <code>movie.2010.1080p</code>, say, or a folder named for another film — is renamed to <code>Title (Year)</code>, everything in it moving along. A folder you named with the title and year in it is left as it is."), T("Clean up folder names too"));
+    return toolPage({ name: "folders", title: "Organize Folders", types: ["movie"], options: opts,
+      blurb: H("Each film in a folder of its own, named as Plex recommends — without Plex losing its edits, poster or watched state."),
+      help: FOLDERS_HELP + "<br><br>" + H("Why: Plex matches a film by its folder as much as by its file name, and a folder of its own is where subtitles, artwork and a second version belong. Films loose in the library folder are matched less reliably and tangle with each other; this gives each its own folder, named as Plex recommends, without Plex losing anything about it."),
+      summary: function (sc) { return H("{n} records read", { n: fmtNum(sc.records) }) + " · " + H("{n} folders", { n: fmtNum(sc.folders) }) + " · " + esc(P(sc.total, "{n} move", "{n} moves", { n: fmtNum(sc.total) })) + (sc.cleanup ? " · " + H("folder names checked") : ""); },
+      empty: H("Every film is in a folder of its own."),
+      columns: [T("From"), T("To")],
+      sub: function (r) {
+        var media = r.moves.filter(function (m) { return m.media; }).length, side = r.moves.length - media;
+        return chips("folders", r.id, [r.kind === "loose"
+          ? { id: "kind", status: "info", label: T("Loose file"), text: H("A film in the library folder itself rather than in a folder of its own: Plex matches it less reliably, and its subtitles and artwork have nowhere to belong. It’s moved into a folder named as Plex recommends; its sidecars (subtitles, artwork) go with it.") }
+          : { id: "kind", status: "info", label: T("Rename folder"), text: H("The film’s folder isn’t named for its title and year; it’s renamed as Plex recommends, everything in it moving along.") }]) +
+          '<div class="det">' + esc(P(media, "{n} file", "{n} files", { n: media })) + (side ? " + " + esc(P(side, "{n} sidecar", "{n} sidecars", { n: side })) : "") + "</div>";
+      },
+      row: function (r) { return ['<span class="mono det">' + esc(r.kind === "loose" ? r.moves[0].from.split("/").pop() : r.from_folder + "/") + "</span>", '<span class="mono det">' + esc(r.folder + "/") + "</span>"]; },
+      confirm: function (n) { return P(n, "Move {n} film into its own folder? Each is linked first, scanned into Plex, merged if need be, then the old path removed.", "Move {n} films into their own folders? Each is linked first, scanned into Plex, merged if need be, then the old path removed.", { n: n }); },
+      after: function (t) {
+        var pend = (t.extra || {}).pending || [];
+        if (!pend.length) return "";
+        var mname = (ST.plex2 || {}).name || T("the mirrored server");
+        return '<section class="card"><h3>' + H("Waiting for {name}", { name: mname }) + "</h3>" + info(H("Its Plex hasn’t listed the new folder yet; the synced folder brings the files, and the new record there is merged into the old once it has."), T("Waiting for {name}", { name: mname })) +
+          pend.map(function (e) { return '<div class="det">' + esc(e.title) + " → " + esc(e.folder) + "/ · " + fmtWhen(e.at) + (e.stuck ? " " + badge("warn", T("Not picked up after {n} days", { n: 3 })) : "") + (e.note ? ' <span class="muted">' + esc(e.note) + "</span>" : "") + "</div>"; }).join("") + "</section>";
+      } });
+  }
+  function pageUnlink() {
+    var u = TOOL.unlink;
+    return toolPage({ name: "unlink", title: "Unlink Files",
+      blurb: H("Hard links and symlinks among your media untangled: each made a file of its own, or its extra paths removed."),
+      help: UNLINK_HELP + "<br><br>" + H("Why: a link looks like a second file to you but not to Plex, which lists one path and ignores the other — and not to the folder sync, which turns it into separate copies at the other site that drift apart. Making each a file of its own puts every site on the same footing; then the duplicate tools can remove the extra copies the same way everywhere."),
+      summary: function (sc) { return esc(P(sc.total, "{n} linked file", "{n} linked files", { n: fmtNum(sc.total) })); },
+      empty: H("Every file is a file of its own."),
+      columns: [T("File"), T("Link")],
+      row: function (r, sc) {
+        var items = [r.kind === "symlink"
+          ? { id: "link", status: "warn", label: T("Symlink"), text: H("A path that points at another file: Plex and the folder sync see the link, not the file it points at."), lines: ['<span class="mono">' + esc(r.target) + "</span>"] }
+          : { id: "link", status: "warn", label: T("Hard link"), text: H("One file under {n} paths. Plex lists one and ignores the others; a folder sync can’t carry the link, and makes whole copies at the other site.", { n: r.links }) }];
+        (r.others || []).forEach(function (o, i) {
+          items.push(o.listed ? { id: "o" + i, status: "info", label: T("In Plex"), text: H("Another path to the same file that Plex lists as an item of its own: two records of one file. Made a file of its own, it’s a copy for Merge Duplicates."), lines: ['<span class="mono">' + esc(o.path.split("/").pop()) + "</span>"] }
+            : { id: "o" + i, status: "warn", label: T("Not in Plex"), text: H("Another path to the same file that Plex doesn’t list: it looks like a file to you, not to Plex. The remove option takes this path away; the copy option makes the listed one a file of its own and leaves this path a link to the rest."), lines: ['<span class="mono">' + esc(o.path.split("/").pop()) + "</span>"] });
+        });
+        if (sc.remove) items.push(r.removable && r.removable.length ? { id: "plan", status: "pass", label: P(r.removable.length, "{n} path removed", "{n} paths removed", { n: r.removable.length }), text: H("What Apply does to this file with the choice below: the paths Plex doesn’t list are removed; the file stays where Plex has it.") }
+          : { id: "plan", status: "pass", label: T("Made a file of its own"), text: H("Every path to this file is listed in Plex, so none is removed: the file is copied under this path instead, for Merge Duplicates.") });
+        return ['<span class="mono det">' + esc(r.name) + '</span><div class="det">' + fmtBytes(r.size) + "</div>", chips("unlink", r.id, items)];
+      },
+      confirm: function (n) {
+        var sc = toolRows("unlink", toolState("unlink")) || {};
+        return sc.remove ? P(n, "Untangle {n} linked file? The paths Plex doesn’t list are removed; a link Plex lists under every path is made a file of its own.", "Untangle {n} linked files? The paths Plex doesn’t list are removed; a link Plex lists under every path is made a file of its own.", { n: n })
+          : P(n, "Make {n} linked file a file of its own? Its bytes are copied under the same path; nothing else changes.", "Make {n} linked files files of their own? Their bytes are copied under the same paths; nothing else changes.", { n: n });
+      },
+      before: function (sc) {
+        // first the warning, then the way to do it (a choice that reads as what will happen), then the lights and Apply
+        var how = { watched: T("the mirrored server watched on the Sync page"), suspected: T("a server of your account whose files are here too — a mirror until you say otherwise on the Sync page"), peer: T("another Plex Cache sharing these folders") }[sc.mirror && sc.mirror.how];
+        var out = sc.mirror
+          ? '<div class="note warnbox">' + H("<strong>These files look mirrored on {name}</strong>{how}. Syncing files — Syncthing and the like — doesn’t carry a hard link: at the other site each path is a whole copy of its own. So here each link is made a file of its own, which copies the original into a duplicate; the sync then carries the same copies across. Afterwards, make sure your file sync and both Plex servers have caught up with the changes, then run <a href=\"/merge\" data-nav>Merge Duplicates</a> on each side. Removing the extra paths instead would delete the other site’s only copy, and Plex there would lose the item’s metadata.", { name: sc.mirror.name, how: how ? " (" + how + ")" : "" }) + "</div>"
+          : '<div class="note">' + H("No mirror is known: <strong>removing the extra paths</strong> is the clean way — the file stays where Plex has it and nowhere else. Making each link a file of its own, then merging, is the safer way if these files are mirrored somewhere the app can’t see: a duplicate survives a sync, a removed path doesn’t.") + "</div>";
+        var remove = !!sc.remove && !sc.mirror;
+        return out + '<div class="row toolway" style="align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px"><label>' + H("What to do") + ' <select class="sel" data-act="tool-opt" data-tool="unlink" data-opt="remove">' +
+          '<option value="copy"' + (remove ? "" : " selected") + ">" + H("Make each link a file of its own (a copy under the same path)") + "</option>" +
+          '<option value="remove"' + (remove ? " selected" : "") + (sc.mirror ? " disabled" : "") + ">" + H("Remove the extra paths Plex doesn’t list (no mirror)") + "</option></select></label>" +
+          info(H("<strong>A file of its own:</strong> the bytes copied under the same path, the dates kept — nothing disappears anywhere, so it’s the only way where the files are mirrored. This tool stops there: tidying the copies afterwards is <a href=\"/merge\" data-nav>Merge Duplicates</a> or <a href=\"/versions\" data-nav>Duplicate Versions</a>, run by you, the same way on each side.<br><br><strong>Remove the extra paths</strong> (no mirror): the paths to a file that Plex doesn’t list are removed, so the file is where Plex has it and nowhere else. A link whose every path Plex lists (two records) is made a file of its own instead, for Merge Duplicates."), T("What to do")) + "</div>";
+      } });
+  }
+  // the two check pages: Library Health's view, one category of checks at a time, over the library chosen (the same tabs)
+  function checksPage(name, only, title, blurb, help) {
+    var libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
+    if (!LIB.key || !libs.some(function (l) { return String(l.key) === String(LIB.key); })) LIB.key = libs.length ? String(libs[0].key) : null;
+    var out = top(T(title), blurb, "") + '<div class="stack">' + toolsNav(name) + '<section class="card">' + heading(esc(T(title)), help);
+    if (!libs.length) return out + '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No libraries yet.")) + "</p></section></div>";
+    out += '<div class="lctl"><div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + libs.map(function (l) {
+      return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(LIB.key)) + '" data-act="lib-tab" data-key="' + esc(l.key) + '">' + libIcon(l.key) + esc(l.title) + "</button>";
+    }).join("") + "</div></div>";
+    return out + libHealthView(only) + "</section></div>";
+  }
+  function pageFilechecks() {
+    return checksPage("filechecks", "file", "File Checks", H("What’s in each file, as inspected — its tracks, their languages and codecs — checked against what a good file has. Nothing is changed."),
+      H("Each check looks at a file’s tracks as the inspector read them: whether it has audio and subtitles, whether their languages are tagged and agree, what codecs the audio is in and whether FLAC would hold it better or play more widely. Every item of the library is listed, flagged ones first, with a chip per check; a chip opens to what was found. Ignore greys an item’s findings out for good. The counts beside the switches leave ignored items out."));
+  }
+  function pagePlexchecks() {
+    return checksPage("plexchecks", "plex", "Plex Checks", H("How Plex has each item — its versions, their names and lengths, the fields you locked — checked for what looks wrong. Nothing is changed."),
+      H("Each check looks at an item as Plex has it: several files on one item named for different titles or years (a version added to the wrong item), versions whose running times differ by more than a little, a field you locked that holds nothing. The locked-field check reads each item’s own page, which the data layer gathers after the records. Every item of the library is listed, flagged ones first, with a chip per check."));
   }
   function pageConvert() {
-    return top(T("Convert to MKV"), H("Other containers converted to MKV — only when nothing in them would be lost — and seen into Plex before the original goes."), "") +
-      '<div class="stack">' + toolsNav("convert") + convertCard() + "</div>";
+    var kindOf = {};
+    CONVERT_TYPES.forEach(function (t) { kindOf[t[0]] = t; });
+    return toolPage({ name: "convert", title: "Convert to MKV", types: ["movie", "tv"], options: convertKinds(),
+      blurb: H("Other containers converted to MKV — only when nothing in them would be lost — and seen into Plex before the original goes."),
+      help: CONVERT_HELP + "<br><br>" + H("Why: MKV is the container the optimizer can lay out for caching — the index and metadata after the video, so the start of a file is all content — and it keeps every stream, chapter and subtitle the old containers hold. A converted file plays as before; it just caches better. Which kinds of file convert is ticked above, for every library."),
+      summary: function (sc) {
+        return esc(P(sc.other, "{n} file in another container", "{n} files in other containers", { n: fmtNum(sc.other) })) + " · " + esc(P(sc.total, "{n} to convert", "{n} to convert", { n: fmtNum(sc.total) })) +
+          (sc.waiting ? " · " + esc(P(sc.waiting, "{n} converted, on its way into Plex", "{n} converted, on their way into Plex", { n: fmtNum(sc.waiting) })) : "") +
+          (sc.skipped ? " · " + esc(P(sc.skipped, "{n} left as it is", "{n} left as they are", { n: fmtNum(sc.skipped) })) : "");
+      },
+      empty: H("Every video file is MKV already, or its MKV is on its way into Plex."),
+      columns: [T("File"), T("Container")],
+      row: function (r) {
+        var t = kindOf[r.kind] || [r.kind, (r.kind || "").toUpperCase(), "", [], ""];
+        var items = [{ id: "kind", status: "info", label: T(t[1]), text: H(t[2]) + (t[3].length ? "<br><strong>" + H("What MKV wouldn’t keep") + "</strong>" : ""), lines: t[3].map(function (x) { return H(x); }).concat(t[4] ? ["<strong>" + H("How converting handles it") + "</strong> " + H(t[4])] : []) }];
+        if (r.skipped) items.push({ id: "skip", status: "warn", label: T("Left as it is"), text: H("Converting would lose something, so the file was left as it is last time: {why}. It isn’t tried again while it stays as it is — untick it, or leave it ticked to try once more.", { why: msg(r.skipped) }) });
+        return ['<span class="mono det">' + esc(r.name) + '</span><div class="det">' + fmtBytes(r.size) + "</div>", chips("convert", r.id, items)];
+      },
+      confirm: function (n) { return P(n, "Convert {n} file to MKV? The MKV is written next to it and seen into Plex; the original goes once Plex has the MKV.", "Convert {n} files to MKV? Each MKV is written next to its original and seen into Plex; the originals go once Plex has the MKVs.", { n: n }); },
+      note: function (sc) { return sc.mirror ? '<div class="det">' + H("{name} is watched: an original goes only once its Plex has the MKV too.", { name: sc.mirror.name }) + "</div>" : ""; },
+      after: function (t) { return convertWaiting(t); } });
   }
   function pageDataset() {
     return top(T("Convert Folder to Child Dataset"), H("A library folder becomes a dataset of its own, at the same path, with the record size that suits it."), "") +
@@ -4301,6 +4525,8 @@ PCI18N.ready.then(function () {
     document.querySelectorAll(".posterbig").forEach(function (el) { el.style.width = Math.round(el.offsetHeight * 2 / 3) + "px"; });
   }
   window.addEventListener("resize", fitPosters);
+  // a redraw that leaves the page where it is: what opens or closes under a click doesn't move what's on the screen
+  function renderStill() { var y = window.scrollY; render(); window.scrollTo(window.scrollX, y); }
   function render() {
     if (!ST) return;
     document.querySelectorAll(".nav").forEach(function (a) {
@@ -4322,6 +4548,8 @@ PCI18N.ready.then(function () {
     var dot = document.getElementById("dot-health");
     var c = ST.health ? ST.health.counts : null;
     dot.className = "dot " + (!c ? "" : c.fail ? "fail" : c.warn ? "warn" : "ok");
+    var tcount = document.getElementById("count-tools"), ttotal = toolsTotal();  // what the tools have found to do, beside Tools
+    if (tcount) { tcount.textContent = ttotal ? fmtNum(ttotal) : ""; tcount.hidden = !ttotal; }
     var ver = document.getElementById("version"), up = ST.updates || {};
     // the stages: updating (asked of TrueNAS, until this page comes back on the new build), checking (just started, GitHub not
     // asked yet), an update to have (a button when TrueNAS can do it, else a link), or nothing to say
@@ -4665,7 +4893,14 @@ PCI18N.ready.then(function () {
       }
     }
     else if (act === "merge-field") { MERGE_FIELD = MERGE_FIELD && MERGE_FIELD.row === el.dataset.id && MERGE_FIELD.id === el.dataset.f ? null : { row: el.dataset.id, id: el.dataset.f }; render(); }
-    else if (act === "tool-opt") { TOOL[el.dataset.tool].opts[el.dataset.opt] = el.checked; }
+    else if (act === "tool-opt") {
+      var tu2 = TOOL[el.dataset.tool];
+      tu2.opts[el.dataset.opt] = el.tagName === "SELECT" ? el.value === "remove" : el.checked;
+      if (el.tagName === "SELECT") {  // (the rows say what the choice does to each: scanned again with it)
+        tu2.sel = {}; tu2.confirm = false; tu2.scanAt = Date.now() / 1000;
+        api("/api/tools/" + el.dataset.tool, { action: "scan", library: tu2.key, options: tu2.opts, refresh: false }).then(function () { load(); }).catch(function (e) { tu2.scanAt = 0; toast(e.message, true); load(); });
+      }
+    }
     else if (act === "tool-sel") { TOOL[el.dataset.tool].sel[el.dataset.id] = el.checked; TOOL[el.dataset.tool].confirm = false; render(); }
     else if (act === "tool-all") {
       var tu = TOOL[el.dataset.tool], trows = ((toolState(el.dataset.tool).scan || {}).rows) || [];
@@ -4677,7 +4912,7 @@ PCI18N.ready.then(function () {
       var su = TOOL[el.dataset.tool];
       su.sel = {}; su.confirm = false; (su.tried = su.tried || {})[su.key] = true; su.scanAt = Date.now() / 1000;
       render();
-      api("/api/tools/" + el.dataset.tool, { action: "scan", library: su.key, options: su.opts }).then(function () { load(); }).catch(function (e) { su.scanAt = 0; toast(e.message, true); load(); });
+      api("/api/tools/" + el.dataset.tool, { action: "scan", library: su.key, options: su.opts, refresh: true }).then(function () { load(); }).catch(function (e) { su.scanAt = 0; toast(e.message, true); load(); });
     }
     else if (act === "tool-apply") { TOOL[el.dataset.tool].confirm = true; render(); }
     else if (act === "tool-backup") {  // a snapshot taken, a backup you say you've made, or the last error dismissed
@@ -4687,13 +4922,27 @@ PCI18N.ready.then(function () {
       api("/api/tools/snapshot", { library: el.dataset.key, action: how === "snapshot" ? "take" : how === "dismiss" ? "dismiss" : "ack", how: how, tool: el.dataset.tool })
         .then(function () { READY = {}; render(); }).catch(function (e) { READY = {}; toast(e.message, true); render(); });
     }
+    else if (act === "job-revert") {  // a tool's run undone from its backup: the files it changed put back
+      el.disabled = true; el.textContent = T("Reverting…");
+      api("/api/job", { action: "revert", job: el.dataset.job }).then(function (r) { toast(T("Reverted: {ok} put back, {failed} not", { ok: r.reverted, failed: r.failed })); PROC = null; load(); })
+        .catch(function (e) { toast(e.message, true); PROC = null; load(); });
+    }
+    else if (act === "job-rollback-ask") { ROLLBACK_CONFIRM = el.dataset.job; render(); }
+    else if (act === "job-rollback-no") { ROLLBACK_CONFIRM = null; render(); }
+    else if (act === "job-rollback") {  // the whole dataset rolled back to the run's snapshot
+      el.disabled = true; el.textContent = T("Rolling back…"); ROLLBACK_CONFIRM = null;
+      api("/api/job", { action: "rollback", job: el.dataset.job }).then(function (r) { toast(T("Rolled back to {names}", { names: (r.rolled_back || []).join(", ") })); PROC = null; load(); })
+        .catch(function (e) { toast(e.message, true); PROC = null; load(); });
+    }
+    else if (act === "tool-chip") { var ck = el.dataset.tool + ":" + el.dataset.id; TOOL_OPEN[ck] = !TOOL_OPEN[ck]; renderStill(); }
+    else if (act === "tool-history") { var th = TOOL[el.dataset.tool], open = th.history !== undefined ? th.history : true; th.history = !open; renderStill(); }
     else if (act === "tool-apply-no") { TOOL[el.dataset.tool].confirm = false; render(); }
     else if (act === "tool-apply-yes") {
       el.disabled = true;
       var au = TOOL[el.dataset.tool], ids = Object.keys(au.sel).filter(function (k) { return au.sel[k]; }), choices = {};
       ids.forEach(function (id) { if (au.keep && au.keep[id]) choices[id] = { keep_key: au.keep[id] }; });
-      au.sel = {}; au.confirm = false;
-      api("/api/tools/" + el.dataset.tool, { action: "apply", ids: ids, choices: choices }).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
+      au.sel = {}; au.confirm = false; au.history = true; au.openLatest = true;
+      api("/api/tools/" + el.dataset.tool, { action: "apply", ids: ids, choices: choices }).then(function () { PROC = null; load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "trash") {
       // a file a tool set aside: deleted now, put back, or kept set aside (trash.py)
@@ -4729,7 +4978,7 @@ PCI18N.ready.then(function () {
       var pj = el.dataset.job;
       procOpen = procOpen === pj ? null : pj;
       if (procOpen) procFilesFetch(pj, 0);
-      render();
+      renderStill();
       if (!procOpen) { var pr = document.getElementById("proc-" + pj); if (pr && pr.getBoundingClientRect().top < 0) pr.scrollIntoView({ block: "start" }); }
     }
     else if (act === "proc-failed") {
@@ -4749,7 +4998,7 @@ PCI18N.ready.then(function () {
     else if (act === "proc-chart") { procChart[el.dataset.key] = !procChart[el.dataset.key]; render(); }
     else if (act === "file-toggle") { SHOWFILE[el.dataset.file] = !SHOWFILE[el.dataset.file]; render(); }
     else if (act === "lib-view") { LIB.view = el.dataset.view; LIB_DRIVE.at = 0; if (LIB.view === "caching") libFetch(true); render(); }
-    else if (act === "lh-open") { var lk = el.dataset.key + ":" + el.dataset.id; LH_OPEN[lk] = !LH_OPEN[lk]; render(); }
+    else if (act === "lh-open") { var lk = el.dataset.key + ":" + el.dataset.id; LH_OPEN[lk] = !LH_OPEN[lk]; renderStill(); }
     else if (act === "lh-ignore" || act === "lh-restore") {
       el.disabled = true;
       api("/api/library/health/ignore", { library: el.dataset.key, item: el.dataset.item, action: act === "lh-ignore" ? "ignore" : "restore", ids: (el.dataset.ids || "").split(",").filter(Boolean) })
@@ -5060,6 +5309,7 @@ PCI18N.ready.then(function () {
       LIB.health = {};
       return;
     }
+    if (el.dataset.act === "tool-opt" && el.tagName === "SELECT") { action("tool-opt", el); return; }  // (the way a tool does it)
     if (el.dataset.lhquality !== undefined) {  // the audio quality level: the floors move, so the checks run again
       queueSave("library_health", "audio_quality", el.value, true);
       LIB.health = {};
@@ -5079,7 +5329,7 @@ PCI18N.ready.then(function () {
     what[el.dataset.syncwhat] = el.checked;
     queueSave("sync", "what", what, true);
   });
-  // The Optimizer page: which kinds of file are converted, and how long originals are kept
+  // The Convert to MKV page: which kinds of file are converted
   document.addEventListener("change", function (e) {
     var el = e.target;
     if (!el.dataset) return;

@@ -23,7 +23,7 @@ from ..i18n import M
 from ..libhealth import file_title_year
 from ..sync import _compare_pair, side
 from . import MAX_ROWS, Tool
-from .unlink import link_kind
+from ..libdata import link_of
 from ..paging import sort_key
 
 TOP_TYPE = {"movie": 1, "show": 2}  # the records that get duplicated: films, and shows
@@ -139,12 +139,20 @@ class MergeDuplicates(Tool):
     name = "merge"
     scan_version = 2  # (rows hold whole records now, as the Sync view shows them)
 
-    def scan(self, library: str, options: dict | None = None) -> dict:
+    title = M("Merge Duplicates")
+    page = "/merge"
+    applies = ("movie", "tv")
+    flag_help = M("The same film or show on several Plex records (the same match, or files named for the same title and year): twice in every list, two posters, watched on one but not the other. Merge Duplicates makes them one record with versions, keeping its edits, poster and watched state.")
+
+    def flag_lines(self, rows):
+        return [M("{n} records of {title}: {why}", n=len(r.get("others") or []) + 1, title=r.get("title") or "", why={"identical": M("the very same file"), "matched": M("the same match"), "named": M("named for the same title and year")}.get(r.get("why"), r.get("why") or "")) for r in rows]
+
+    def scan(self, data, options: dict | None = None) -> dict:
+        library = data.key
         lib = self.app.library_info(library)
         if not lib or lib.get("type") not in TOP_TYPE:
             raise ValueError(M("Only movie and TV libraries have records to merge."))
-        leaf = TOP_TYPE[lib["type"]]
-        recs = self.app.plex(timeout=120).library_items(lib["key"], leaf)
+        recs = data.records
         rows = []
         found = clusters(recs)
         for i, (why, cluster) in enumerate(found):
@@ -159,13 +167,28 @@ class MergeDuplicates(Tool):
             linked = []  # files of these records that are links: merging them is unsafe until each is a file of its own
             for rec in cluster:
                 for path, _ in rec.get("files") or []:
-                    k, n, _t = link_kind(self.app.map_path(path))
+                    k, n, _t = link_of(data.file(self.app.map_path(path)))
                     if k:
                         linked.append({"name": os.path.basename(path), "kind": k, "links": n})
-            rows.append({"id": "rec:" + keep["key"], "library": str(library), "title": keep.get("label") or keep.get("title"),
+            rows.append({"id": "rec:" + keep["key"], "library": str(library), "title": keep.get("label") or keep.get("title"), "rks": [r["key"] for r in cluster],
                          "why": why, "keep": side(keep), "others": [side(o) for o in others], "kinds": kinds, "changes": changes, "linked": linked})
         rows.sort(key=lambda r: sort_key(r["title"]))
         return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(recs)}
+
+    history = [("merged", M("Records merged")), ("kept", M("Record kept")), ("why", M("Why"))]
+
+    def history_row(self, row: dict, outcome: dict) -> dict:
+        chosen = str(row.get("keep_key") or (row.get("keep") or {}).get("key") or "")
+        kept = next((r for r in [row.get("keep")] + list(row.get("others") or []) if r and str(r.get("key")) == chosen), row.get("keep") or {})
+        return {"merged": int(outcome.get("merged") or 0) + 1, "kept": kept.get("label") or kept.get("title") or chosen,
+                "why": {"identical": M("the very same file"), "matched": M("the same match"), "named": M("named for the same title and year")}.get(row.get("why"), row.get("why") or "")}
+
+    def revert_row(self, row: dict, outcome: dict, backup: dict, log) -> None:
+        """The kept record split apart again (Plex's Split Apart): records of their own, matched afresh — the folded ones'
+        own edits are gone with the merge."""
+        chosen = str(row.get("keep_key") or row["keep"]["key"])
+        self.app.plex().split(chosen)
+        log(M("{title} split into records of its own again (the folded records’ edits aren’t back: Plex matches them afresh)", title=row.get("title") or chosen))
 
     def apply_row(self, row: dict, log) -> dict:
         records = [row["keep"]] + list(row.get("others") or [])

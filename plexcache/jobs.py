@@ -92,7 +92,7 @@ class Job:
             return
         s = self.state
         self.jobs.log.add(dict({"job": s["id"], "kind": self.kind, "mode": s.get("mode"), "library": s.get("library"),
-                                "title": s.get("title")}, **entry))
+                                "title": s.get("title"), **({"tool": s["tool"]} if s.get("tool") else {})}, **entry))
 
     def log_pause(self, by: str | None, why) -> None:
         """Log a pause starting or ending (once each)."""
@@ -308,6 +308,7 @@ class Jobs:
         with self.lock:
             job = self.job if self.job and self.job.state.get("running") else None
         if job:
+            job.update(stopping=True)
             job.stop_event.set()
         return job is not None
 

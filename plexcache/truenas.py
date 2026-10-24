@@ -34,6 +34,7 @@ METHODS = {
     "the snapshots of a dataset": ("pool.snapshot.query", "zfs.snapshot.query"),  # (pool.snapshot.* from 25.04, zfs.snapshot.* before)
     "taking a snapshot": ("pool.snapshot.create", "zfs.snapshot.create"),
     "deleting a snapshot the app took": ("pool.snapshot.delete", "zfs.snapshot.delete"),
+    "rolling a dataset back to a snapshot": ("pool.snapshot.rollback", "zfs.snapshot.rollback"),
     "the list of calls itself": ("core.get_methods",),
 }
 

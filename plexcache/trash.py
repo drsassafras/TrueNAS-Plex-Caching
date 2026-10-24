@@ -3,7 +3,7 @@
 A file set aside — a duplicate version, an old path after a move — is purged only once Plex here no
 longer lists it (a scan), and, with a mirrored server, once the mirror's Plex no longer lists it
 either (the synced folder carries the move there as a deletion), then after the hold
-(optimizer.convert_hold_days, the same hold as converted originals). A file that never meets that —
+(general.backup_days: the one length every backup is kept). A file that never meets that —
 the mirror keeps listing it, say — is held, and said so: Health lists it, and the tool's page offers
 Purge Now, Put Back and Keep (held, no longer followed). Kept in trash.json.
 """
@@ -43,7 +43,8 @@ class Trash:
         return e
 
     def hold_days(self) -> int:
-        return int(self.app.settings.section("optimizer").get("convert_hold_days", 7))
+        from . import safety
+        return safety.life(self.app) // 86400
 
     def _root(self, library: str, path: str) -> str | None:
         lib = self.app.library_info(library) or {}
