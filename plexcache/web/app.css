@@ -740,4 +740,6 @@ fieldset.greyed *{cursor:not-allowed}
 .optgate>.what{display:flex;align-items:center;gap:6px;font-weight:600;margin-bottom:-6px}
 .note.warnbox{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn)}
 .note.warnbox a{color:inherit}
+/* what Apply will do, right before it (every tool): what it does, what it changes, the backup */
+.note.applybox>div+div{margin-top:6px}
 .undo{margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}

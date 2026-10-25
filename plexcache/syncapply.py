@@ -8,9 +8,11 @@ collections, labels, the edition — and, where the source's one item is several
 into one. Nothing is deleted: a file only on the other server stays, as do items; what the source's
 several items are as one item there is left for you (a split needs matching again).
 
-Each change is logged (sync-log.json) with what the item had before, and can be undone from the page:
+Before the first change, the records it will change there are backed up (plexbackup.py, per the Backup preference),
+and each change is logged (sync-log.json) with what the item had before, and can be undone from the page:
 the fields set back (and unlocked, if they weren't locked), the match put back, the poster chosen
-before chosen again, collections and labels as they were. A merge can't be undone here.
+before chosen again, collections and labels as they were. A merge is undone from the backup: split apart, and each
+record given its own metadata back.
 """
 
 from __future__ import annotations
@@ -83,37 +85,43 @@ class Applier:
         return True
 
     def _work(self, key: str, rows: list[dict]) -> None:
+        from . import plexbackup
         try:
             src_client, dst_client, dst_section, dst_name, dst_is_mirror = self._ends(key)
-            for i, row in enumerate(rows):
-                with self.lock:
-                    self.progress.update(done=i, row=row.get("title"))
-                entry = {"id": uuid.uuid4().hex[:12], "at": time.time(), "library": key, "row": row["id"], "title": row.get("title"), "dst_server": dst_name,
-                         "dst_mirror": dst_is_mirror, "dst_key": (row.get("dst") or {}).get("key"), "section": dst_section, "type": (row.get("dst") or row.get("src") or {}).get("type", ""),
-                         "done": [], "before": {}, "after": {}, "notes": [], "result": "done", "undone": False}
-                try:
-                    self._apply_row(row, entry, src_client, dst_client, dst_section)
-                except (PlexError, ValueError) as e:
-                    entry.update(result="failed", reason=str(e))
-                if not entry["done"] and entry["result"] == "done":
-                    entry["result"] = "skipped"
-                with self.lock:
-                    self.entries.append(entry)
-                    if entry["result"] == "done" and entry["done"]:  # (applied: off the report until the next compare)
-                        lib = (self.sync.report or {}).get("libraries", {}).get(key) or {}
-                        lib["items"] = [r for r in lib.get("items") or [] if r["id"] != row["id"]]
-                        for k in entry["done"]:
-                            lib.setdefault("counts", {})[k] = max(0, lib["counts"].get(k, 0) - 1)
-                        self.sync.report["totals"] = {k: sum(v["counts"].get(k, 0) for v in self.sync.report["libraries"].values()) for k in self.sync.report["totals"]}
-                self.save()
-                self.sync.save()
-                self.app.activity.event("sync", M("{title}: {what} applied on {server}", title=row.get("title"), what=", ".join(entry["done"]) or entry["result"], server=dst_name))
+            dst_keys = [str(k) for r in rows for k in [(r.get("dst") or {}).get("key")] + [it.get("key") for it in r.get("dst_items") or []] if k]
+            with plexbackup.session(self.app, M("Library Sync on {server}", server=dst_name), "mirror" if dst_is_mirror else "here", dst_section, client=dst_client, keys=dst_keys) as pb:
+                self._rows(key, rows, src_client, dst_client, dst_section, dst_name, dst_is_mirror, pb)
         except Exception as e:  # noqa: BLE001 — said on the page
             self.error = str(e)
         finally:
             with self.lock:
                 self.running, self.progress = False, None
             self.app.run_checks_async()
+
+    def _rows(self, key: str, rows: list[dict], src_client, dst_client, dst_section: str, dst_name: str, dst_is_mirror: bool, pb: dict | None) -> None:
+        for i, row in enumerate(rows):
+            with self.lock:
+                self.progress.update(done=i, row=row.get("title"))
+            entry = {"id": uuid.uuid4().hex[:12], "at": time.time(), "library": key, "row": row["id"], "title": row.get("title"), "dst_server": dst_name,
+                     "dst_mirror": dst_is_mirror, "dst_key": (row.get("dst") or {}).get("key"), "section": dst_section, "type": (row.get("dst") or row.get("src") or {}).get("type", ""),
+                     "done": [], "before": {}, "after": {}, "notes": [], "result": "done", "undone": False, "backup": (pb or {}).get("id")}
+            try:
+                self._apply_row(row, entry, src_client, dst_client, dst_section)
+            except (PlexError, ValueError) as e:
+                entry.update(result="failed", reason=str(e))
+            if not entry["done"] and entry["result"] == "done":
+                entry["result"] = "skipped"
+            with self.lock:
+                self.entries.append(entry)
+                if entry["result"] == "done" and entry["done"]:  # (applied: off the report until the next compare)
+                    lib = (self.sync.report or {}).get("libraries", {}).get(key) or {}
+                    lib["items"] = [r for r in lib.get("items") or [] if r["id"] != row["id"]]
+                    for k in entry["done"]:
+                        lib.setdefault("counts", {})[k] = max(0, lib["counts"].get(k, 0) - 1)
+                    self.sync.report["totals"] = {k: sum(v["counts"].get(k, 0) for v in self.sync.report["libraries"].values()) for k in self.sync.report["totals"]}
+            self.save()
+            self.sync.save()
+            self.app.activity.event("sync", M("{title}: {what} applied on {server}", title=row.get("title"), what=", ".join(entry["done"]) or entry["result"], server=dst_name))
 
     def _apply_row(self, row: dict, e: dict, src_client, dst_client, section: str) -> None:
         src, dst = row.get("src"), row.get("dst")
@@ -137,7 +145,8 @@ class Applier:
             e["dst_key"] = keep["key"]
             e["before"]["merged"] = others
             e["done"].append("grouping")
-            e["notes"].append(M("Merged {n} items into {title}: can’t be undone here (split them in Plex)", n=len(others), title=keep["label"]))
+            e["notes"].append(M("Merged {n} items into {title}: undone from the backup, split apart with their own metadata back", n=len(others), title=keep["label"])
+                              if e.get("backup") else M("Merged {n} items into {title}: can’t be undone here (split them in Plex)", n=len(others), title=keep["label"]))
             dst = keep
         if not (src and dst):
             return
@@ -201,9 +210,17 @@ class Applier:
             raise ValueError(M("Already undone."))
         if not e.get("done"):
             raise ValueError(M("Nothing was applied."))
+        from . import plexbackup
+        left = []
+        if "grouping" in e["done"] and e.get("backup") and plexbackup.find(self.app, e["backup"]):  # (a merge: its records put back from the backup, split apart)
+            got = plexbackup.revert(self.app, e["backup"], keys=[e["dst_key"]])
+            with self.lock:
+                e.update(undone=True, undone_at=time.time(), left=[str(x) for x in got["left"]])
+            self.save()
+            self.app.activity.event("sync", M("{title}: undone on {server}", title=e.get("title"), server=e.get("dst_server")))
+            return dict(e)
         client = self.app.other.client(timeout=120) if e.get("dst_mirror") else self.app.plex(timeout=120)
         section, type_no, key, b = e["section"], TYPE_NO.get(e.get("type", ""), 1), e["dst_key"], e.get("before") or {}
-        left = []
         for kind in e["done"]:
             if kind == "edits" and "edits" in b:
                 values = {}

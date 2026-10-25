@@ -1506,11 +1506,15 @@ PCI18N.ready.then(function () {
     var name = { started: T("Started"), resumed: T("Resumed after a restart, at {where}", { where: where || "0" }), paused: T("Paused: {why}", { why: ev.why || "" }),
       unpaused: T("Carried on"), finished: T("Finished"), cancelled: T("Cancelled"),
       backup: ev.backup && ev.backup.kind === "snapshot" ? T("Snapshot taken first: {names} (kept until {until})", { names: (ev.backup.names || []).join(", "), until: fmtWhen(ev.backup.until) })
-        : ev.backup && ev.backup.kind === "copies" ? T("The copies the tool keeps are the backup (kept until {until})", { until: fmtWhen(ev.backup.until) }) : T("No backup taken, as chosen in Preferences"),
+        : ev.backup && ev.backup.kind === "copies" ? T("The copies the tool keeps are the backup (kept until {until})", { until: fmtWhen(ev.backup.until) })
+        : ev.backup && ev.backup.kind === "records" ? T("Plex records backed up first: {n} (kept until {until})", { n: fmtNum((ev.backup.plex || {}).records || 0), until: fmtWhen(ev.backup.until) }) : T("No backup taken, as chosen in Preferences"),
       backup_failed: T("Stopped before anything changed: the backup couldn’t be made — {why}", { why: msg(ev.why || "") }),
       reverted: T("Reverted: {ok} put back, {failed} not", { ok: (ev.counts || {}).reverted || 0, failed: (ev.counts || {}).failed || 0 }),
       rolled_back: T("Rolled back: the whole dataset as it was at the snapshot"),
       revert_failed: T("Revert failed: nothing put back ({failed} not) — the files say why", { failed: (ev.counts || {}).failed || 0 }) }[ev.event] || ev.event;
+    if (ev.event === "backup" && ev.backup && ev.backup.plex && ev.backup.kind !== "records") {  // (a file tool whose rows change Plex's records too)
+      name += " · " + T("Plex records backed up first: {n} (kept until {until})", { n: fmtNum(ev.backup.plex.records || 0), until: fmtWhen(ev.backup.until) });
+    }
     return "<li>" + esc(at) + " — " + esc(name) + "</li>";
   }
   function pageProcesses() {
@@ -1526,7 +1530,25 @@ PCI18N.ready.then(function () {
     if (!jobs.length) return out + '<p class="muted">' + H("Nothing yet.") + "</p></section></div>";
     jobs.forEach(function (j) { out += runCard(j); });
     // one export, under the history it's of: every job and file, for a spreadsheet
-    return out + '</section><div><a class="btn" href="/api/processes/export?format=csv" download>' + H("Export CSV") + "</a></div></div>";
+    return out + '</section><div><a class="btn" href="/api/processes/export?format=csv" download>' + H("Export CSV") + "</a></div>" + plexBackupsCard() + "</div>";
+  }
+  // The backups of Plex's records (plexbackup.py), newest first: what each was for, its records, how long it's kept — and
+  // Revert while it lasts: merges split apart, each record given its own metadata back
+  function plexBackupsCard() {
+    var bs = (PROC || {}).plex_backups || [];
+    if (!bs.length) return "";
+    return '<section class="card">' + heading(esc(T("Plex Metadata Backups")), H("Made before any change to Plex’s records — a merge, an edit, a match, a poster — per the Backup preference in <a href=\"/system#prefs\" data-nav>System → Preferences</a>, and kept as long as every backup. Revert puts the records back: merges split apart, each record with its own metadata again.")) +
+      bs.map(function (b) {
+        var status = b.reverted ? badge("info", T("Reverted")) : b.revertable ? badge("pass", T("Backup")) : badge("warn", T("Expired"));
+        return '<div class="row runcard">' + status + '<div class="grow"><div class="what">' + esc(msg(b.what)) + "</div>" +
+          '<div class="det">' + esc(P(b.records, "{n} record on {server}", "{n} records on {server}", { n: fmtNum(b.records), server: b.server_name || "" })) + (b.merges ? " · " + esc(P(b.merges, "{n} merge", "{n} merges", { n: fmtNum(b.merges) })) : "") +
+          " · " + esc(fmtWhen(b.at)) + " · " + esc(T("Kept until {until}", { until: fmtWhen(b.until) })) + "</div>" +
+          ((b.titles || []).length ? '<div class="det muted">' + esc(b.titles.join(", ")) + (b.records > b.titles.length ? "…" : "") + "</div>" : "") +
+          (b.reverted ? '<div class="det">' + esc(T("Put back {when}: {ok} records, {failed} not", { when: fmtWhen(b.reverted_at), ok: (b.result || {}).restored || 0, failed: (b.result || {}).failed || 0 })) + "</div>" +
+            (b.left || []).map(function (l) { return '<div class="det bad">' + esc(msg(l)) + "</div>"; }).join("") : "") +
+          (b.revertable ? '<div class="det undo"><button class="btn sm" type="button" data-act="plex-revert" data-id="' + esc(b.id) + '">' + H("Revert Plex Changes") + "</button></div>" : "") +
+          "</div></div>";
+      }).join("") + "</section>";
   }
   // One run of the history (jobs.py / joblog.py), as a card: its status, when, what it did, its backup and the ways back
   // (undoButtons), its events, and its files on request. The Processes page lists every run so; a tool's page lists its own
@@ -1545,7 +1567,12 @@ PCI18N.ready.then(function () {
     }
     var backupLine = !bk ? "" : bk.kind === "snapshot" ? '<div class="det">' + badge("pass", T("Backup created")) + " " + esc(T("Snapshot {names}, kept until {until}.", { names: (bk.names || []).join(", "), until: fmtWhen(bk.until) })) + "</div>"
       : bk.kind === "copies" ? '<div class="det">' + badge("pass", T("Backup")) + " " + esc(T("The copies this tool keeps, until {until}.", { until: fmtWhen(bk.until) })) + "</div>"
+      : bk.kind === "records" ? ""
       : '<div class="det">' + badge("info", T("No backup")) + " " + esc(T("As chosen in Preferences: you back up yourself.")) + "</div>";
+    if (bk && bk.plex) {  // the Plex records the run changes, backed up before the first row (plexbackup.py)
+      backupLine += '<div class="det">' + badge("pass", T("Backup created")) + " " + esc(P(bk.plex.records || 0, "{n} Plex record as it was before, kept until {until}.", "{n} Plex records as they were before, kept until {until}.",
+        { n: fmtNum(bk.plex.records || 0), until: fmtWhen(bk.until) })) + "</div>";
+    }
     var failedWhy = j.status === "failed" ? '<div class="det bad">' + esc(msg((j.events.filter(function (e) { return e.event === "backup_failed"; })[0] || {}).why || "")) + "</div>" : "";
     return '<div class="row runcard" id="proc-' + esc(j.job) + '">' + status + '<div class="grow"><div class="what">' + esc(jobTitle(titleJob)) + "</div>" +
       '<div class="det">' + (j.planned > j.files ? H("{start} → {end} · {files} of {planned} files tried", { start: fmtWhen(j.started), end: j.ended ? fmtWhen(j.ended) : T("now"), files: fmtNum(j.files), planned: fmtNum(j.planned) })
@@ -2373,7 +2400,7 @@ PCI18N.ready.then(function () {
     }).join("");
     var body = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Item") + '</th><th scope="col">' + H("Change") + '</th><th scope="col"></th></tr></thead><tbody>' + rows + "</tbody></table></div>";
     if (libKey) return '<h3 style="margin-top:16px">' + H("Applied") + "</h3>" + body;
-    return '<section class="card">' + heading(esc(T("Applied Changes")), N("Each difference applied to the other server, with what the item had before. Undo puts that back: the fields (unlocked again if they weren’t locked), the match, the poster chosen before, collections and labels. A merge can’t be undone here.")) + body + "</section>";
+    return '<section class="card">' + heading(esc(T("Applied Changes")), N("Each difference applied to the other server, with what the item had before. Undo puts that back: the fields (unlocked again if they weren’t locked), the match, the poster chosen before, collections and labels. A merge is undone from the backup of the records made first: split apart, each record with its own metadata again.")) + body + "</section>";
   }
   var SYNC_SEL = {};  // the differences ticked on the Library page's Sync view, by library: {id: true}
   var SYNC_CONFIRM = false;
@@ -2387,7 +2414,7 @@ PCI18N.ready.then(function () {
     if (mode !== "apply") return '<p class="help">' + H("To apply differences from here, set Sync to “Compare, and apply what I tick” on the <a href=\"/sync\" data-nav>Sync page</a>.") + "</p>";
     if (ap.allowed) return '<p class="help">' + esc(msg(ap.allowed)) + "</p>";
     var all = items.every(function (it) { return sel[it.id]; });
-    var out = '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px"><label class="det"><input type="checkbox" data-act="sync-all" data-key="' + esc(key) + '"' + (all ? " checked" : "") + "> " + H("All") + "</label>";
+    var out = plexBackupNote() + '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px"><label class="det"><input type="checkbox" data-act="sync-all" data-key="' + esc(key) + '"' + (all ? " checked" : "") + "> " + H("All") + "</label>";
     if (SYNC_CONFIRM && n) {
       var over = n > ((S.sync || {}).ask_over || 25);
       out += "<span>" + esc(P(n, "Apply {n} difference to the other server? Its items are changed to match the source; each change is logged and can be undone.", "Apply {n} differences to the other server? Its items are changed to match the source; each change is logged and can be undone.", { n: n })) +
@@ -2395,7 +2422,8 @@ PCI18N.ready.then(function () {
         '<button class="btn pri" type="button" data-act="sync-apply-yes" data-key="' + esc(key) + '">' + H("Yes, Apply") + "</button>" +
         '<button class="btn" type="button" data-act="sync-apply-no">' + H("Cancel") + "</button>";
     } else {
-      out += '<button class="btn pri" type="button" data-act="sync-apply" data-key="' + esc(key) + '"' + (!n ? " disabled" : "") + ">" + H("Apply {n} Selected", { n: fmtNum(n) }) + "</button>";
+      out += '<button class="btn pri" type="button" data-act="sync-apply" data-key="' + esc(key) + '"' + (!n ? " disabled" : "") + ">" +
+        ((ST.plex_backup || {}).label === "none" ? H("Apply {n} Selected Without Backing Up", { n: fmtNum(n) }) : H("Backup and Apply {n} Selected", { n: fmtNum(n) })) + "</button>";
     }
     if (ap.error) out += '<span class="bad">' + esc(msg(ap.error)) + "</span>";
     return out + "</div>";
@@ -3745,12 +3773,13 @@ PCI18N.ready.then(function () {
     var g = S.general;
     out += '<section class="card" id="prefs"><h2>' + H("Preferences") + '</h2><div class="grid">' +
       number("general", "page_size", T("Entries per page"), 25, 1000, H("On the Library views, the Sync differences, a job’s files: a long list a page at a time, with the pages told by what’s on them.")) +
-      select("general", "backup", T("Backup before files change"), [["snapshot", T("A snapshot, taken through TrueNAS")], ["manual", T("A backup I make myself")], ["copies", T("The copies the action keeps")]],
-        { s: H("Before any action rewrites, moves or deletes files — the file tools, Optimize Now, Child Dataset — a recent snapshot of the library’s dataset must be in reach, or this stands in for it."),
+      select("general", "backup", T("Backup before changes"), [["snapshot", T("A snapshot, taken through TrueNAS")], ["manual", T("A backup I make myself")], ["copies", T("The copies the action keeps")]],
+        { s: H("Before any action rewrites, moves or deletes files — the file tools, Optimize Now, Child Dataset — a recent snapshot of the library’s dataset must be in reach, or this stands in for it.") + " " +
+            H("Before Plex’s records change — Merge Duplicates, Library Sync’s Apply, the merge Organize Folders makes — the app backs up each record it changes, under a snapshot or the copies an action keeps; with a backup you make yourself, it doesn’t."),
           more: H("<strong>A snapshot</strong> is the whole dataset as it is this minute, taken through TrueNAS when you press Take a Snapshot on the action’s page, named <code>plexcache-&lt;tool&gt;-&lt;library&gt;-&lt;time&gt;</code> and deleted by the app after the days set below. Needs TrueNAS connected with a key allowed to make snapshots (TrueNAS 24.10 and later).<br><br>" +
           "<strong>A backup I make myself</strong>: you make one, and say so on the action’s page; it counts for half an hour.<br><br>" +
           "<strong>The copies the action keeps</strong>: where an action sets files aside rather than deleting them (Duplicate Versions, Child Dataset), those are the backup. An action that keeps none asks for a snapshot or a backup instead.") }) +
-      number("general", "backup_days", T("Keep backups for (days)"), 1, 365, H("How long a backup made before files change is kept: a snapshot the app takes is deleted after this long, by the app itself (TrueNAS keeps a snapshot for ever otherwise); files set aside or copied as a backup are deleted after it too. Until then a backup holds the space the changed files took, and a change can be reverted from it.")) +
+      number("general", "backup_days", T("Keep backups for (days)"), 1, 365, H("How long a backup made before files change is kept: a snapshot the app takes is deleted after this long, by the app itself (TrueNAS keeps a snapshot for ever otherwise); files set aside or copied as a backup are deleted after it too. Until then a backup holds the space the changed files took, and a change can be reverted from it.") + " " + H("A backup of Plex’s records is kept as long, then deleted by the app.")) +
       "</div></section>";
     // ---- Updates
     out += '<section class="card" id="updates"><h2>' + H("Updates") + '</h2>' +
@@ -4123,9 +4152,7 @@ PCI18N.ready.then(function () {
       else {
         var sorted = Object.assign({}, sc, { rows: split.live.concat(split.off) });
         out += spec.rows ? spec.rows(sorted) : toolTable(name, sorted, spec);
-        if (spec.before) out += spec.before(sc);  // (what to read before applying: a warning)
-        out += toolApply(name, t, split.live, spec.confirm);
-        if (spec.note) out += spec.note(sc);
+        out += toolApply(name, t, split.live, spec.confirm, spec.applies(sc));
       }
     }
     return out + "</section>" + (spec.after ? spec.after(t, sc) : "") + toolProcess(name) + toolHistory(name) + "</div>";
@@ -4227,6 +4254,16 @@ PCI18N.ready.then(function () {
   // the rows to tick, and the Apply button: a confirmation first, since the tool then acts on your library
   // Before files change: two lights — room for what's written, and a recent snapshot (or a backup you made) — both
   // green (or grey) before Apply opens. The tools that change files (peers.py FILE_TOOLS) and what each writes.
+  // the tools that change only Plex's records (no files): their Apply backs the records up first, per the Backup preference
+  var PLEX_TOOLS = { merge: true };
+  // Before an Apply that changes Plex's records (Merge Duplicates, Library Sync’s Apply): what's backed up first — the records,
+  // or none where you back up yourself (plexbackup.py, ST.plex_backup) — as one line, for the box above the Apply button
+  function plexBackupText() { var pb = ST.plex_backup || {}; return pb.text ? links(msg(pb.text)) : ""; }
+  function plexBackupNote() {
+    var pb = ST.plex_backup || {};
+    if (!pb.kind) return "";
+    return '<div class="det plexbackup">' + badge(pb.kind === "records" ? "pass" : "info", pb.kind === "records" ? T("Backup first") : T("No backup")) + " " + plexBackupText() + "</div>";
+  }
   var FILE_TOOLS = { versions: function (rows) { return 0; }, folders: function (rows) { return 0; }, unlink: function (rows) { return rows.reduce(function (a, r) { return a + (r.size || 0); }, 0); }, convert: function (rows) { return rows.reduce(function (a, r) { return a + (r.size || 0); }, 0); } };
   var READY = {};  // "key/needed" -> {at, data}
   // The lights before anything changes files, the same everywhere: room for what's written (and what a snapshot keeps),
@@ -4252,7 +4289,7 @@ PCI18N.ready.then(function () {
     var err = d.error ? '<div class="det bad">' + links(msg(d.error.text)) + ' <button class="link" type="button" data-act="tool-backup" data-how="dismiss" data-key="' + esc(key) + '">' + H("Dismiss") + "</button></div>" : "";
     var html = '<div class="lights ready">' + light(d.space.status, T("Room for it"), msg(d.space.text), false) +
       lightInfo({ status: bp.status || "warn", text: T("Backup"), detail: msg(bp.text || "") + change + (d.snapshot && d.snapshot.status === "ok" ? " " + T("A snapshot from the last half hour is there too: {name}.", { name: d.snapshot.name }) : "") }, T("Backup"), false, about) + err + "</div>";
-    return { ready: !!d.ready, label: bp.label || "backup", html: html };
+    return { ready: !!d.ready, label: bp.label || "backup", backup: bp.text ? links(msg(bp.text)) : "", html: html };
   }
   function readiness(name, key, rows) {
     return readinessPanel(key, FILE_TOOLS[name](rows), name, (toolState(name) || {}).keeps, 0);
@@ -4268,8 +4305,10 @@ PCI18N.ready.then(function () {
   var ROLLBACK_CONFIRM = null;  // the run whose whole-snapshot rollback waits for a yes
   function undoButtons(jobId, bk) {
     bk = bk || {};
-    var out = '<div class="det undo"><button class="btn sm" type="button" data-act="job-revert" data-job="' + esc(jobId) + '">' + H("Revert Changed Files") + "</button> " +
-      '<span class="muted">' + (bk.kind === "snapshot" ? H("Puts back only the files this run changed, from the backup.") : H("Puts back only what this run changed, by the tool’s own way back.")) + "</span></div>";
+    var records = bk.kind === "records";  // (a run that changed only Plex's records: put back from the backup of them)
+    var out = '<div class="det undo"><button class="btn sm" type="button" data-act="job-revert" data-job="' + esc(jobId) + '">' + (records ? H("Revert Plex Changes") : H("Revert Changed Files")) + "</button> " +
+      '<span class="muted">' + (records ? H("Puts back the Plex records this run changed, from the backup: a merge split apart, each record with its own metadata again.")
+        : bk.kind === "snapshot" ? H("Puts back only the files this run changed, from the backup.") : H("Puts back only what this run changed, by the tool’s own way back.")) + "</span></div>";
     if (bk.kind === "snapshot") {
       out += ROLLBACK_CONFIRM === jobId
         ? '<div class="det undo bad">' + H("Roll the whole dataset back to the snapshot? Everything written to it since — by anything, not only this run — is lost.") + " " +
@@ -4279,21 +4318,34 @@ PCI18N.ready.then(function () {
     }
     return out;
   }
-  function toolApply(name, t, rows, what) {
+  // What Apply will do, said in a box right before it — every tool's (the rule: a tool page passes applies()): what it
+  // does, what it changes (and where, with a mirror), and the backup made first — the Backup preference's plan for a tool
+  // that changes files, else the tool's own word. ``a``: {does, changes, backup, more, warn}, HTML.
+  function applyBox(a, gate) {
+    var backup = gate && gate.backup || a.backup;
+    return '<div class="note applybox' + (a.warn ? " warnbox" : "") + '">' +
+      '<div class="applydoes"><strong>' + H("What Apply does") + "</strong> " + a.does + "</div>" +
+      '<div class="applychanges"><strong>' + H("What it changes") + "</strong> " + a.changes + "</div>" +
+      (backup ? '<div class="applybackup"><strong>' + H("Backup") + "</strong> " + backup + "</div>" : "") +
+      (a.more ? '<div class="applymore">' + a.more + "</div>" : "") + "</div>";
+  }
+  function toolApply(name, t, rows, what, box) {
     var u = TOOL[name], n = rows.filter(function (r) { return u.sel[r.id]; }).length;
     if (!rows.length) return "";
     var all = rows.every(function (r) { return u.sel[r.id]; });
     var job = toolJob(name), busy = !!(job && job.running) || (t.running && (t.progress || {}).what === "apply") || (ST.queue || []).some(function (q) { return q.kind === "tool" && (q.args || {}).tool === name; });
     var picked = rows.filter(function (r) { return u.sel[r.id]; });
-    var gate = FILE_TOOLS[name] ? readiness(name, u.key, picked.length ? picked : rows) : { ready: true, html: "", label: "backup" };  // (nothing ticked yet: the room all of them would take)
+    var gate = FILE_TOOLS[name] ? readiness(name, u.key, picked.length ? picked : rows)  // (nothing ticked yet: the room all of them would take)
+      : PLEX_TOOLS[name] ? { ready: true, html: "", label: (ST.plex_backup || {}).label || "backup", backup: plexBackupText() } : { ready: true, html: "", label: "backup" };
     var out = gate.html;
     // the process: its steps while it runs (the backup first), and how it ended until dismissed
     if (job && !job.running && (job.errors || []).length && (job.done || 0) === 0 && !busy) {
       out += '<div class="det bad">' + H("Not done — the backup couldn’t be made: {why}", { why: msg(job.errors[0].reason || "") }) + ' <button class="link" type="button" data-act="job" data-job="dismiss">' + H("Dismiss") + "</button></div>";
     }
+    out += applyBox(box, FILE_TOOLS[name] || PLEX_TOOLS[name] ? gate : null);  // (right before Apply)
     out += '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px"><label class="det"><input type="checkbox" data-act="tool-all" data-tool="' + name + '"' + (all ? " checked" : "") + "> " + H("All") + "</label>";
     if (!gate.ready) u.confirm = false;
-    var label = gate.label === "none" ? H("Apply to {n} Selected Without Backing Up", { n: fmtNum(n) }) : FILE_TOOLS[name] ? H("Backup and Apply to {n} Selected", { n: fmtNum(n) }) : H("Apply to {n} Selected", { n: fmtNum(n) });
+    var label = gate.label === "none" ? H("Apply to {n} Selected Without Backing Up", { n: fmtNum(n) }) : FILE_TOOLS[name] || PLEX_TOOLS[name] ? H("Backup and Apply to {n} Selected", { n: fmtNum(n) }) : H("Apply to {n} Selected", { n: fmtNum(n) });
     if (u.confirm && n) {
       out += '<span>' + esc(what(n)) + "</span>" +
         '<button class="btn pri" type="button" data-act="tool-apply-yes" data-tool="' + name + '">' + H("Yes, Do It") + "</button>" +
@@ -4367,11 +4419,34 @@ PCI18N.ready.then(function () {
     return toolPage({ name: "merge", title: "Merge Duplicates", types: ["movie", "show"],
       blurb: H("The same film on several Plex records, made versions of one — keeping its edits, poster and watched state. Nothing happens until you tick rows and apply."),
       help: MERGE_HELP + "<br><br>" + H("Why: a film added twice — a copy in another folder, a file re-added, one matched after the other — is two records in Plex: twice in every list, two posters, and watched on one but not the other. Merging makes them one record with two versions, as Plex offers for a single pair; this finds them all. Only this server’s records: no file is touched, so a mirrored server isn’t affected — its own duplicates are merged there."),
-      stale: function (sc) { return sc.rows.some(function (r) { return !r.keep || !r.keep.fields; }); },
+      stale: function (sc) { return !("mirror" in sc) || sc.rows.some(function (r) { return !r.keep || !r.keep.fields; }); },  // (no mirror said: from before the box before Apply)
       summary: function (sc) { return H("{n} records read", { n: fmtNum(sc.records) }) + " · " + esc(P(sc.total, "{n} film on more than one record", "{n} films on more than one record", { n: fmtNum(sc.total) })); },
       empty: H("Every film is on one record."),
       rows: function (sc) { return mergeRows(sc); },
-      confirm: function (n) { return P(n, "Merge the records of {n} film in Plex? Their metadata becomes the kept record’s.", "Merge the records of {n} films in Plex? Their metadata becomes the kept record’s.", { n: n }); } });
+      confirm: function (n) { return P(n, "Merge the records of {n} film in Plex? Their metadata becomes the kept record’s.", "Merge the records of {n} films in Plex? Their metadata becomes the kept record’s.", { n: n }); },
+      applies: function (sc) { return mergeApplies(sc); } });
+  }
+  // Merging is this server's Plex only: no file moves, so the folder sync carries nothing and a mirror keeps its own records.
+  // Library Sync is how a mirror's records follow — when it can: only from its source to the other server, and only with
+  // applying on and versions' grouping compared. Said for the mirror there is (scan: tools mirrored()) and the sync as set.
+  function mergeApplies(sc) {
+    var m = sc.mirror, sy = S.sync || {}, there = "";
+    var warn = false;
+    if (m && m.how === "watched") {
+      if (sy.source === "mirror") {
+        warn = true;
+        there = H("<strong>{name} is the sync source</strong>, so Sync can’t carry a merge from here: the film stays a difference until it’s merged there too. Merge it on {name} instead (its own Merge Duplicates, or Plex), and Sync then merges it here.", { name: m.name });
+      } else if (sy.mode === "apply" && (sy.what || {}).grouping !== false) {
+        there = H("{name}’s Plex keeps its own records. To merge them there too, use Sync: once compared again, each merged film shows as one item here and several there, and applying it merges them on {name}.", { name: m.name });
+      } else {
+        there = H("{name}’s Plex keeps its own records. Sync can merge them there too once it’s set to “Compare, and apply what I tick”, with “Versions grouped differently” compared, on the <a href=\"/sync\" data-nav>Sync page</a>.", { name: m.name });
+      }
+    } else if (m) {
+      there = H("{name} looks like a mirror of these files, but Sync doesn’t watch it: its Plex keeps its own records. Run Merge Duplicates there too, or watch it on the <a href=\"/sync\" data-nav>Sync page</a>.", { name: m.name });
+    }
+    return { warn: warn,
+      does: H("Each ticked film’s records become one, with Plex’s own Merge: the kept record’s metadata stays, and the others’ files become its versions."),
+      changes: H("Only this server’s Plex records. No file is touched, so the folder sync carries nothing.") + (there ? " " + there : "") };  // (the backup: the Plex records', from the gate)
   }
   var VERSIONS_HELP = N("One Plex record can hold the same file twice — a copy that slipped in, or a second path to one file (a link). This finds them: versions of one record with the same running time and size. It also finds the copies Plex doesn’t list at all — a second path to a listed file, or an identical copy of one (the same size and bytes at both ends): Plex’s scanner skips a file it already has under another path, so these only show on disk, taking space and getting cached and optimized twice. The copy kept is the one in a folder of its own, then the newest, then the first Plex lists; the others are set aside in the library’s own trash folder (on the same dataset: no copying) and Plex asked to scan. They’re deleted for good only once Plex here no longer lists them — and, with a mirrored server watched, once its Plex no longer does either (the synced folder carries the change there) — then after the hold below. Until then, each can be put back.");
   function fileLine(f, mname, rowId) {
@@ -4420,7 +4495,10 @@ PCI18N.ready.then(function () {
       },
       row: function (r, sc) { var mname = (sc.mirror || {}).name || ""; return [fileLine(r.keep, mname, r.id), r.extras.map(function (x) { return fileLine(x, mname, r.id); }).join("")]; },
       confirm: function (n) { return P(n, "Set aside the extra copies of {n} item? Plex is asked to scan; they’re deleted for good after the hold, and can be put back until then.", "Set aside the extra copies of {n} items? Plex is asked to scan; they’re deleted for good after the hold, and can be put back until then.", { n: n }); },
-      note: function (sc) { return sc.mirror ? '<div class="det">' + H("{name} is watched: a file goes for good only once its Plex no longer lists it either.", { name: sc.mirror.name }) + "</div>" : ""; },
+      applies: function (sc) {
+        return { does: H("The extra copies of each ticked item are set aside in the library’s trash folder, and Plex asked to scan; each is deleted for good after the hold, and can be put back until then."),
+          changes: H("Files in this library’s folders, and this server’s Plex records of them.") + (sc.mirror ? " " + H("{name} is watched: a file goes for good only once its Plex no longer lists it either.", { name: sc.mirror.name }) : "") };
+      },
       after: function () { return trashList(); } });
   }
   var FOLDERS_HELP = N("Plex recommends each film in a folder of its own, named <code>Title (Year)</code> — with <code>{edition-…}</code> for an edition, and <code>{tmdb-…}</code> only when two films share a title and year. This moves loose files (in the library folder itself) into such folders, with their subtitles and artwork; with Clean Up, it also renames a film’s folder whose name doesn’t carry the title and year (a folder you named, with both in it, is left as it is).<br><br>Plex loses nothing: each file is first given its new path (a hard link — the same file, nothing copied), Plex asked to scan the new folder, the record it makes for it merged into the original (edits, poster and watched state kept), and only then the old path removed. With a mirrored server, the synced folder carries the change there and the same merge is done there once its Plex has the new path.");
@@ -4441,6 +4519,10 @@ PCI18N.ready.then(function () {
       },
       row: function (r) { return ['<span class="mono det">' + esc(r.kind === "loose" ? r.moves[0].from.split("/").pop() : r.from_folder + "/") + "</span>", '<span class="mono det">' + esc(r.folder + "/") + "</span>"]; },
       confirm: function (n) { return P(n, "Move {n} film into its own folder? Each is linked first, scanned into Plex, merged if need be, then the old path removed.", "Move {n} films into their own folders? Each is linked first, scanned into Plex, merged if need be, then the old path removed.", { n: n }); },
+      applies: function (sc) {
+        return { does: H("Each ticked film is moved into a folder of its own, named as Plex recommends: linked first, scanned into Plex, merged into its record if need be, then the old path removed."),
+          changes: H("Files and folders in this library, and this server’s Plex records of them (merged: edits, poster and watched state kept).") + (sc.mirror ? " " + H("{name} is watched: the synced folder carries the move there, and the same merge is made in its Plex once it lists the new folder.", { name: sc.mirror.name }) : "") };
+      },
       after: function (t) {
         var pend = (t.extra || {}).pending || [];
         if (!pend.length) return "";
@@ -4474,13 +4556,15 @@ PCI18N.ready.then(function () {
         return unlinkRemoves(sc) ? P(n, "Untangle {n} linked file? The paths Plex doesn’t list are removed; a link Plex lists under every path is made a file of its own.", "Untangle {n} linked files? The paths Plex doesn’t list are removed; a link Plex lists under every path is made a file of its own.", { n: n })
           : P(n, "Make {n} linked file a file of its own? Its bytes are copied under the same path; nothing else changes.", "Make {n} linked files files of their own? Their bytes are copied under the same paths; nothing else changes.", { n: n });
       },
-      before: function (sc) {
-        // the warning (the way to do it is the choice among the options above), then the lights and Apply
+      applies: function (sc) {
+        // the warning (the way to do it is the choice among the options above), with what Apply does
         var how = { watched: T("the mirrored server watched on the Sync page"), suspected: T("a server of your account whose files are here too — a mirror until you say otherwise on the Sync page"), peer: T("another Plex Cache sharing these folders") }[sc.mirror && sc.mirror.how];
         var out = sc.mirror
-          ? '<div class="note warnbox">' + H("<strong>These files look mirrored on {name}</strong>{how}. Syncing files — Syncthing and the like — doesn’t carry a hard link: at the other site each path is a whole copy of its own. So here each link is made a file of its own, which copies the original into a duplicate; the sync then carries the same copies across. Afterwards, make sure your file sync and both Plex servers have caught up with the changes, then run <a href=\"/merge\" data-nav>Merge Duplicates</a> on each side. Removing the extra paths instead would delete the other site’s only copy, and Plex there would lose the item’s metadata.", { name: sc.mirror.name, how: how ? " (" + how + ")" : "" }) + "</div>"
-          : '<div class="note">' + H("No mirror is known: <strong>removing the extra paths</strong> is the clean way — the file stays where Plex has it and nowhere else. Making each link a file of its own, then merging, is the safer way if these files are mirrored somewhere the app can’t see: a duplicate survives a sync, a removed path doesn’t.") + "</div>";
-        return out;
+          ? H("<strong>These files look mirrored on {name}</strong>{how}. Syncing files — Syncthing and the like — doesn’t carry a hard link: at the other site each path is a whole copy of its own. So here each link is made a file of its own, which copies the original into a duplicate; the sync then carries the same copies across. Afterwards, make sure your file sync and both Plex servers have caught up with the changes, then run <a href=\"/merge\" data-nav>Merge Duplicates</a> on each side. Removing the extra paths instead would delete the other site’s only copy, and Plex there would lose the item’s metadata.", { name: sc.mirror.name, how: how ? " (" + how + ")" : "" })
+          : H("No mirror is known: <strong>removing the extra paths</strong> is the clean way — the file stays where Plex has it and nowhere else. Making each link a file of its own, then merging, is the safer way if these files are mirrored somewhere the app can’t see: a duplicate survives a sync, a removed path doesn’t.");
+        return { warn: !!sc.mirror, more: out,
+          does: unlinkRemoves(sc) ? H("For each ticked file, the paths Plex doesn’t list are removed; a link whose every path Plex lists is made a file of its own instead.") : H("Each ticked link is made a file of its own: its bytes copied under the same path, the dates kept."),
+          changes: H("Linked files in this library’s folders. Plex records are left as they are.") };
       },
       choiceOff: function (id, value, sc) { return id === "remove" && value === "remove" && !!sc.mirror; } });
   }
@@ -4524,7 +4608,10 @@ PCI18N.ready.then(function () {
         return ['<span class="mono det">' + esc(r.name) + '</span><div class="det">' + fmtBytes(r.size) + "</div>", chips("convert", r.id, items)];
       },
       confirm: function (n) { return P(n, "Convert {n} file to MKV? The MKV is written next to it and seen into Plex; the original goes once Plex has the MKV.", "Convert {n} files to MKV? Each MKV is written next to its original and seen into Plex; the originals go once Plex has the MKVs.", { n: n }); },
-      note: function (sc) { return sc.mirror ? '<div class="det">' + H("{name} is watched: an original goes only once its Plex has the MKV too.", { name: sc.mirror.name }) + "</div>" : ""; },
+      applies: function (sc) {
+        return { does: H("Each ticked file is converted to MKV, written next to it and seen into Plex; the original goes once Plex has the MKV."),
+          changes: H("Files in this library’s folders, and this server’s Plex records of them.") + (sc.mirror ? " " + H("{name} is watched: an original goes only once its Plex has the MKV too.", { name: sc.mirror.name }) : "") };
+      },
       after: function (t) { return convertWaiting(t); } });
   }
   function pageDataset() {
@@ -4972,6 +5059,11 @@ PCI18N.ready.then(function () {
     else if (act === "job-revert") {  // a tool's run undone from its backup: the files it changed put back
       el.disabled = true; el.textContent = T("Reverting…");
       api("/api/job", { action: "revert", job: el.dataset.job }).then(function (r) { toast(T("Reverted: {ok} put back, {failed} not", { ok: r.reverted, failed: r.failed })); PROC = null; load(); })
+        .catch(function (e) { toast(e.message, true); PROC = null; load(); });
+    }
+    else if (act === "plex-revert") {  // Plex's records put back from a backup of them (plexbackup.py)
+      el.disabled = true; el.textContent = T("Reverting…");
+      api("/api/job", { action: "plex_revert", id: el.dataset.id }).then(function (r) { toast(T("Put back: {ok} records, {failed} not", { ok: r.restored, failed: r.failed })); PROC = null; load(); })
         .catch(function (e) { toast(e.message, true); PROC = null; load(); });
     }
     else if (act === "job-rollback-ask") { ROLLBACK_CONFIRM = el.dataset.job; render(); }

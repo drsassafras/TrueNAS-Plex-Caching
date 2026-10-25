@@ -196,6 +196,10 @@ def stream_summary(st: ET.Element, file: str) -> dict:
 
 
 class PlexClient:
+    # asked before each change to Plex's records, with (client, op, rating keys): the backup of them (plexbackup.guard;
+    # set by App.plex() and OtherServer.client())
+    before_change = None
+
     def __init__(self, url: str, token: str, timeout: float = 30):
         if not url:
             raise PlexError(M("Plex server address is not set"))
@@ -233,6 +237,11 @@ class PlexClient:
         except (TimeoutError, OSError) as e:
             raise PlexError(M("Can’t reach Plex at {url}: {why}", url=self.url, why=str(e))) from None
 
+    def _changing(self, op: str, keys) -> None:
+        """Before a change to records: the hook told (before_change), so it can back them up first."""
+        if self.before_change is not None:
+            self.before_change(self, op, [str(k) for k in keys if k])
+
     def scan(self, section_key: str, folder: str) -> None:
         """Ask Plex to scan one folder of a library now (as its own "Scan Library Files", just
         there): for libraries scanned by hand, or before Plex notices a change by itself."""
@@ -241,18 +250,21 @@ class PlexClient:
     def split(self, rating_key: str) -> None:
         """A record's versions split into records of their own again (Plex's Split Apart): what undoes a merge — the
         folded records' own metadata is gone, though; they're matched afresh."""
+        self._changing("split", [rating_key])
         self._request(f"/library/metadata/{rating_key}/split", method="PUT")
 
     def merge(self, keep: str, others: list[str]) -> None:
         """Several items made one (Plex's own "Merge"): ``others`` become versions of ``keep``, whose
         metadata (edits, poster, collections, watched state) is the one kept."""
         if others:
+            self._changing("merge", [keep] + list(others))
             self._request(f"/library/metadata/{keep}/merge", {"ids": ",".join(str(k) for k in others)}, method="PUT")
 
     # ---------------------------------------------------------- edits (Library Sync, applying)
     def edit(self, section_key: str, type_no: int, rating_key: str, values: dict) -> None:
         """An item's fields set as Plex's own editor does: ``values`` {"title.value": "…", "title.locked": 1,
         "genre[0].tag.tag": "Drama", "genre[].tag.tag-": "Old", "genre.locked": 1}."""
+        self._changing("edit", [rating_key])
         self._request(f"/library/sections/{section_key}/all", dict({"type": type_no, "id": rating_key}, **values), method="PUT")
 
     def set_tags(self, section_key: str, type_no: int, rating_key: str, field: str, tags: list[str], remove: list[str] = (), locked: bool | None = None) -> None:
@@ -267,9 +279,11 @@ class PlexClient:
 
     def match(self, rating_key: str, guid: str, name: str = "") -> None:
         """An item matched to an online entry (its guid, as Plex gives it: plex://movie/…)."""
+        self._changing("match", [rating_key])
         self._request(f"/library/metadata/{rating_key}/match", {"guid": guid, "name": name}, method="PUT")
 
     def unmatch(self, rating_key: str) -> None:
+        self._changing("unmatch", [rating_key])
         self._request(f"/library/metadata/{rating_key}/unmatch", method="PUT")
 
     def images(self, rating_key: str, kind: str = "posters") -> list[dict]:
@@ -280,10 +294,12 @@ class PlexClient:
 
     def set_image(self, rating_key: str, image_id: str, kind: str = "poster") -> None:
         """One of an item's images (images()) chosen as its poster (or background: "art")."""
+        self._changing("image", [rating_key])
         self._request(f"/library/metadata/{rating_key}/{kind}", {"url": image_id}, method="PUT")
 
     def upload_image(self, rating_key: str, data: bytes, kind: str = "posters") -> None:
         """An image added to an item as its poster (or background: "arts"), chosen at once."""
+        self._changing("image", [rating_key])
         self._request(f"/library/metadata/{rating_key}/{kind}", method="POST", data=data, headers={"Content-Type": "image/jpeg"})
 
     def empty_trash(self, section_key: str) -> None:

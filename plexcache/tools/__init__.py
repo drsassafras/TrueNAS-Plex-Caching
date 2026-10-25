@@ -26,6 +26,7 @@ A tool's state (the last scan, the results, what it's still waiting for) is kept
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
@@ -311,6 +312,11 @@ class Tool:
         """The path a row is about, for the job log (a record tool: its title)."""
         return row.get("path") or row.get("local") or (row.get("keep") or {}).get("path") or (row.get("moves") or [{}])[0].get("from") or str(row.get("title") or row["id"])
 
+    def plex_keys(self, rows: list[dict]) -> list[str]:
+        """The Plex records doing these rows will change (a merge, an edit): backed up before the first row (plexbackup.py).
+        A change to a record not named here is backed up all the same, as it's made."""
+        return []
+
     def changed_paths(self, row: dict, outcome: dict) -> list[str]:
         """The local paths a done row rewrote or removed: what a Revert restores from the snapshot."""
         return []
@@ -438,7 +444,7 @@ class ToolJob(Job):
         return self._args
 
     def run(self) -> None:
-        from .. import safety
+        from .. import peers, plexbackup, safety
         app, tool, key = self.app, self.tool, str(self._args.get("library") or "")
         if tool is None:
             self.log(type="job", event="failed", why="no such tool")
@@ -446,7 +452,9 @@ class ToolJob(Job):
         rows = tool.rows_for(self._args.get("ids") or [], self._args.get("choices") or {})
         self.update(total=len(rows), todo_bytes=sum(int(r.get("size") or 0) for r in rows), phase="backup")
         self.log(type="plan", files=[tool.row_file(r) for r in rows])
-        bp = safety.plan(app, key, keeps=bool(tool.keeps), tool=tool.name)
+        # a tool that changes files: the backup the preference says (a snapshot, its copies, yours); one that changes only
+        # Plex's records: the backup of those records — and either way, any record a row changes is backed up first
+        bp = safety.plan(app, key, keeps=bool(tool.keeps), tool=tool.name) if tool.name in peers.FILE_TOOLS else plexbackup.plan(app)
         backup = {"kind": bp["kind"], "until": time.time() + safety.life(app)}
         if bp["kind"] == "snapshot":
             self.update(step=str(M("Taking a snapshot")))
@@ -462,9 +470,23 @@ class ToolJob(Job):
             self.log(type="job", event="backup_failed", why=bp["text"])
             self.update(errors=[{"file": "", "reason": str(bp["text"]), "at": time.time()}])
             return
-        self.log(type="job", event="backup", backup=backup)
-        self.update(phase="applying", backup=backup, step=None)
-        tool.run_rows(rows, self)
+        records = contextlib.ExitStack()
+        try:
+            self.update(step=str(M("Backing up the Plex records")) if tool.plex_keys(rows) else None)
+            pb = records.enter_context(plexbackup.session(app, M("{tool} on {library}", tool=tool.title, library=self.state.get("title") or key), "here", key, self.state.get("id") or "",
+                                                          keys=tool.plex_keys(rows)))
+        except ValueError as e:  # the records can't be read: nothing changes
+            why = e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))
+            self.update(errors=[{"file": "", "reason": str(why), "at": time.time()}], step=None)
+            self.log(type="job", event="backup_failed", why=why)
+            app.activity.event("tools", M("{tool} on {library} not run: the backup couldn’t be made — {why}", tool=tool.title, library=self.state.get("title"), why=why), level="warn")
+            return
+        with records:
+            if pb is not None and pb["items"]:
+                backup["plex"] = {"id": pb["id"], "records": len(pb["items"])}
+            self.log(type="job", event="backup", backup=backup)
+            self.update(phase="applying", backup=backup, step=None)
+            tool.run_rows(rows, self)
 
     def finished(self) -> None:
         if self.tool is not None:

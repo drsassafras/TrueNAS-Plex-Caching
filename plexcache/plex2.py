@@ -19,6 +19,7 @@ import os
 import threading
 import time
 
+from . import plexbackup
 from .i18n import M
 from .plex import Library, PlexClient, PlexError, reachable, servers
 
@@ -49,7 +50,9 @@ class OtherServer:
 
     def client(self, timeout: float = 30) -> PlexClient:
         s = self.settings()
-        return PlexClient(s["url"], s["token"], timeout=timeout)
+        client = PlexClient(s["url"], s["token"], timeout=timeout)
+        client.before_change = lambda c, op, keys: plexbackup.guard(self.app, c, "mirror", op, keys)  # (each change to its records backed up first)
+        return client
 
     def run(self, fn, timeout: float = 30):
         """``fn(client)`` — and, when the server doesn't answer at its address, once more at another of

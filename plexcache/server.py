@@ -14,7 +14,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import filehistory
+from . import filehistory, plexbackup
 from .auth import SESSION_DAYS, Auth
 from .config import SettingsError
 from .i18n import M, jsonable, msg
@@ -314,7 +314,8 @@ def make_handler(app):
                 q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
                 arg = lambda k, d="": (q.get(k) or [d])[0]
                 if path == "/api/processes":
-                    return self._json({"job": app.jobs.snapshot(), "queue": app.jobs.queued(), "jobs": app.jobs.log.jobs()})
+                    return self._json({"job": app.jobs.snapshot(), "queue": app.jobs.queued(), "jobs": app.jobs.log.jobs(),
+                                       "plex_backups": plexbackup.listing(app)})  # (the backups of Plex's records: each with its Revert)
                 if path == "/api/processes/files":
                     try:
                         off, lim = max(0, int(arg("offset", "0"))), min(1000, max(1, int(arg("limit", "200"))))
@@ -616,6 +617,11 @@ def make_handler(app):
                         return self._json({"ok": got is not None})
                     if a == "remove":  # queued work, taken off the queue
                         return self._json({"ok": app.jobs.remove(str(body.get("id") or ""))})
+                    if a == "plex_revert":  # Plex's records put back from a backup of them (plexbackup.py): {"id"}
+                        try:
+                            return self._json(plexbackup.revert(app, str(body.get("id") or "")))
+                        except ValueError as e:
+                            raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
                     if a in ("revert", "rollback"):  # a tool's run undone: its changed files put back from the backup, or the whole snapshot rolled back
                         from .tools import revert_job, rollback_job
                         try:

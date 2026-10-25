@@ -4864,6 +4864,89 @@ class PageStructureTests(unittest.TestCase):
             self.assertIn("Movies", text)                                                           # (the library tabs)
             self.assertTrue("Running the checks" in text or "items checked" in text, text[:300])   # (the Health view: fetched when the page opens)
 
+    def test_every_tool_says_what_apply_does(self):
+        """Right before every tool's Apply, a box says what it does, what it changes (and where: this server, the folder
+        sync, a mirror) and the backup made first — the rule for every tool: a tool page passes applies() to toolPage,
+        and toolApply draws the box just above the button. Merge Duplicates' box tells how a mirror's records follow:
+        through Sync when this server is its source and applying is on, by hand on the mirror when it's the source, or
+        not at all for a mirror Sync doesn't watch."""
+        from plexcache import safety
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        tt = ToolsTests()
+        app, plex, client, cat, _ = tt._app()
+        for name in app.tools:
+            body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S).group(1)
+            self.assertRegex(body, r"\n      applies: function \(sc\)", f"page{name.capitalize()} doesn't say what Apply does (applies:)")
+        self.assertIn("toolApply(name, t, split.live, spec.confirm, spec.applies(sc))", js)
+        # drawn with rows: the box, then the Apply row straight after it — what it does, what it changes, the backup plan
+        rootd = os.path.join(cat["root"], "Movies")
+        copy = os.path.join(rootd, "Film 1 (2011) [copy].mkv")
+        fakes.make_mkv(copy, 1024 * 1024)
+        plex.cat["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000})
+        twin = os.path.join(rootd, "Movie & Friends 2 (2012)", "Movie 2 twin.mkv")
+        shutil.copy2(cat["movies"][2]["path"], twin)
+        plex.cat["movies"][2]["more"] = [twin]
+        os.link(cat["movies"][3]["path"], os.path.join(rootd, "Film 3 (2013) link.mkv"))
+        avi = os.path.join(rootd, "Old Film (2001).avi")
+        with open(avi, "wb") as fh:
+            fh.write(b"x" * 100)
+        plex.cat["movies"].append({"path": avi, "size": 100, "kbps": 1, "key": "301", "title": "Old Film", "year": 2001, "guid": "plex://movie/301", "duration": 5400000})
+        app.scan_library()
+        for name, tool in app.tools.items():
+            tt._run(tool, tool.scan_async("1"))
+        st = app.state()
+        st["_ready"] = safety.readiness(app, "1", 0)
+        for name in app.tools:
+            with self.subTest(page=name):
+                html = self._render(st, name)["html"]
+                at = html.index('data-act="tool-all"')
+                box = html.rfind('class="note applybox', 0, at)
+                self.assertGreater(box, 0, "no box before Apply")
+                between = html[box:at]
+                self.assertRegex(between, r"What Apply does</strong> \S", "the box doesn't say what Apply does")
+                self.assertRegex(between, r"What it changes</strong> \S", "the box doesn't say what Apply changes")
+                self.assertRegex(between, r'</div></div><div class="row"[^>]*><label class="det"><input type="checkbox" $', "something comes between the box and Apply")
+                self.assertNotIn("<section", between)
+                self.assertIn("You back up yourself", between)                                     # (the backup the preference says is made first: of the files, or of Plex’s records)
+        # Merge Duplicates: this server's Plex only, and what that means for a mirror
+        def merge_box(st):
+            html = self._render(st, "merge")["html"]
+            at = html.index('data-act="tool-all"')
+            return html[html.rfind('class="note applybox', 0, at):at]
+        said = merge_box(st)
+        self.assertIn("Only this server’s Plex records", said)
+        self.assertIn("You back up yourself", said)
+        app.settings.update({"general": {"backup": "snapshot"}})                                     # (a backup of the Plex records it changes, first)
+        self.assertIn("A backup of the Plex records is made first", merge_box(dict(st, plex_backup=app.state()["plex_backup"])))
+        app.settings.update({"general": {"backup": "manual"}})
+        self.assertNotIn("Sync", said)                                                                # (no mirror: nothing to say of one)
+        app, plex, client, cat, other = tt._app(mirror=True)
+        copy = os.path.join(cat["root"], "Movies", "Film 1 (2011) [copy].mkv")
+        fakes.make_mkv(copy, 1024 * 1024)
+        for c in (plex.cat, other.cat):
+            c["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000})
+        app.scan_library()
+        tt._run(app.tools["merge"], app.tools["merge"].scan_async("1"))
+        self.assertEqual(app.tools["merge"].scan_result["mirror"], {"name": "Starlit", "how": "watched"})
+        for sync, says, warn in (({"source": "this", "mode": "apply"}, "applying it merges them on Starlit", False),
+                                 ({"source": "this", "mode": "compare"}, "Sync can merge them there too once it’s set to", False),
+                                 ({"source": "this", "mode": "apply", "what": {"grouping": False}}, "Sync can merge them there too once it’s set to", False),
+                                 ({"source": "mirror", "mode": "apply"}, "is the sync source</strong>, so Sync can’t carry a merge from here", True)):
+            with self.subTest(sync=sync):
+                app.settings.update({"sync": dict({"what": {"grouping": True}}, **sync)})
+                said = merge_box(app.state())
+                self.assertIn("Only this server’s Plex records", said)
+                self.assertIn(says, said)
+                self.assertEqual("warnbox" in said[:60], warn)
+        # a mirror Sync doesn't watch (another Plex Cache sharing the folders): merged there by hand
+        app.settings.update({"sync": {"mirrors": "unknown"}})
+        app.peers_summary = {"systems": [{"name": "Cabin", "libraries": ["1"]}]}
+        tt._run(app.tools["merge"], app.tools["merge"].scan_async("1"))
+        said = merge_box(app.state())
+        self.assertIn("Cabin looks like a mirror of these files, but Sync doesn’t watch it", said)
+        self.assertIn("Run Merge Duplicates there too", said)
+
     def test_paged_lists_use_the_pager(self):
         """Every list shown a page at a time uses the one pager(): spans of what each page holds (its
         first and last entry cut to what tells it from its neighbours), the open page plain, Beginning
@@ -11491,6 +11574,62 @@ class ToolsTests(unittest.TestCase):
         self.assertIn('id="prefs"', js)
         for key in ("page_size", "backup", "backup_days"):
             self.assertIn(f'"general", "{key}"', js)
+
+    def test_plex_metadata_backup_and_revert(self):
+        """Before any change to Plex's records — a tool's merge, an edit made anywhere — the records it changes are backed
+        up, per the same Backup preference and days as before files change: Revert on the run splits the merge apart and
+        gives each record its own metadata back (the folded one's collections and labels too); a change outside a process
+        has a backup of its own; under "A backup I make myself" none is made."""
+        from plexcache import plexbackup
+        from plexcache.tools import revert_job
+        app, plex, client, cat, _ = self._app()
+        app.run_checks_async = lambda *a, **k: None
+        app.settings.update({"general": {"backup": "snapshot", "backup_days": 9}})                    # (no TrueNAS: the records are still backed up)
+        self.assertEqual((app.state()["plex_backup"]["kind"], app.state()["plex_backup"]["days"]), ("records", 9))
+        tool = app.tools["merge"]
+        copy = os.path.join(cat["root"], "Movies", "Film 1 (2011) [copy].mkv")
+        fakes.make_mkv(copy, 1024 * 1024)
+        plex.cat["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000,
+                                   "collections": ["Favourites"], "labels": ["kids"]})
+        plex.cat["movies"][1]["locked"] = ["title"]
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1"))
+        (row,) = snap["scan"]["rows"]
+        self._run(tool, tool.apply_async([row["id"]]))
+        self.assertEqual(plex.merged, [("101", "190")])
+        job = app.jobs.log.jobs()[0]
+        self.assertEqual((job["status"], job["backup"]["kind"], job["backup"]["plex"]["records"], job["revertable"]), ("finished", "records", 2, True))
+        b = plexbackup.find(app, job["backup"]["plex"]["id"])
+        self.assertEqual((sorted(b["items"]), b["items"]["190"]["tags"]["collection"], b["items"]["190"]["tags"]["label"], b["ops"][0]["keep"]), (["101", "190"], ["Favourites"], ["kids"], "101"))
+        self.assertAlmostEqual(b["until"] - b["at"], 9 * 86400, delta=5)                              # (the same days as every backup)
+        self.assertEqual([x["records"] for x in plexbackup.listing(app)], [2])
+        # Revert on the run: split apart, the folded record's own collections and labels back on the record its file is on now
+        self.assertEqual(revert_job(app, job["job"]), {"reverted": 1, "failed": 0})
+        self.assertEqual(plex.split, ["101"])
+        back = next(m for m in plex.cat["movies"] if m.get("path") == copy)
+        self.assertEqual((back["collections"], back["labels"]), (["Favourites"], ["kids"]))
+        self.assertEqual(next(m for m in plex.cat["movies"] if m["key"] == "101")["locked"], ["title"])
+        self.assertTrue(plexbackup.find(app, b["id"])["reverted"])
+        self.assertEqual(len(plexbackup.backups(app)), 1)                                             # (the revert's own changes aren't backed up again)
+        with self.assertRaises(ValueError):
+            plexbackup.revert(app, b["id"])                                                           # (once)
+        # a change outside any process: backed up all the same, and put back from it
+        app.plex().edit("1", 1, "100", {"title.value": "Renamed", "title.locked": 1})
+        film0 = next(m for m in plex.cat["movies"] if m["key"] == "100")
+        self.assertEqual((film0["title"], film0["locked"]), ("Renamed", ["title"]))
+        loose = plexbackup.backups(app)[-1]
+        self.assertEqual((loose["loose"], sorted(loose["items"]), loose["items"]["100"]["values"]["title"]), (True, ["100"], "Film 0"))
+        self.assertEqual(plexbackup.revert(app, loose["id"])["restored"], 1)
+        self.assertEqual((film0["title"], film0.get("locked") or []), ("Film 0", []))
+        # kept the days set, then deleted by the app
+        loose["until"] = time.time() - 1
+        self.assertEqual(plexbackup.prune(app), 1)
+        self.assertIsNone(plexbackup.find(app, loose["id"]))
+        # you back up yourself: no backup of the records is made
+        app.settings.update({"general": {"backup": "manual"}})
+        n = len(plexbackup.backups(app))
+        app.plex().edit("1", 1, "100", {"title.value": "Again", "title.locked": 1})
+        self.assertEqual((len(plexbackup.backups(app)), app.state()["plex_backup"]["label"]), (n, "none"))
 
     def test_tool_runs_revert_from_their_backup(self):
         """Revert on a tool's run (Processes): the paths Unlink Files removed are made again as links to the file;

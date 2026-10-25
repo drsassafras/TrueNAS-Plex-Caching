@@ -148,6 +148,9 @@ class OrganizeFolders(Tool):
         return {"what": M("Loose file moved") if row.get("kind") == "loose" else M("Folder renamed"), "folder": row.get("folder") or "",
                 "files": len(row.get("moves") or [])}
 
+    def plex_keys(self, rows: list[dict]) -> list[str]:
+        return [str(r["rk"]) for r in rows if r.get("rk")]  # (the record the new one is merged into)
+
     def revert_row(self, row: dict, outcome: dict, backup: dict, log) -> None:
         """Each file given its old path again (a link: the same file), the new path removed, Plex asked to scan both folders."""
         for mv in row["moves"]:

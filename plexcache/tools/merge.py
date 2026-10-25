@@ -11,7 +11,8 @@ different frame rate or cut of the credits; two films that merely share a title 
 more) — and they're the same edition (a Director's Cut and the theatrical cut are two records on
 purpose), unless their files are the very same file. The record kept is the one with the most edited
 fields, then the most files, then the oldest. Only this server's records: a merge changes nothing on
-a mirrored server (no file is touched), so its own duplicates are its own matter.
+a mirrored server (no file is touched), so its own duplicates are its own matter — or Library Sync's, which
+merges them there when this server is its source (sync.py: one item here, several there).
 """
 
 from __future__ import annotations
@@ -176,7 +177,8 @@ class MergeDuplicates(Tool):
             rows.append({"id": "rec:" + keep["key"], "library": str(library), "title": keep.get("label") or keep.get("title"), "rks": [r["key"] for r in cluster],
                          "why": why, "issues": [why], "keep": side(keep), "others": [side(o) for o in others], "kinds": kinds, "changes": changes, "linked": linked})
         rows.sort(key=lambda r: sort_key(r["title"]))
-        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(recs)}
+        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(recs),
+                "mirror": self.mirrored(library)}  # (what the page says before Apply: how a mirror's records follow, if they can)
 
     history = [("merged", M("Records merged")), ("kept", M("Record kept")), ("why", M("Why"))]
 
@@ -186,10 +188,23 @@ class MergeDuplicates(Tool):
         return {"merged": int(outcome.get("merged") or 0) + 1, "kept": kept.get("label") or kept.get("title") or chosen,
                 "why": {"identical": M("the very same file"), "matched": M("the same match"), "named": M("named for the same title and year")}.get(row.get("why"), row.get("why") or "")}
 
+    def plex_keys(self, rows: list[dict]) -> list[str]:
+        return [str(k) for r in rows for k in r.get("rks") or []]
+
     def revert_row(self, row: dict, outcome: dict, backup: dict, log) -> None:
-        """The kept record split apart again (Plex's Split Apart): records of their own, matched afresh — the folded ones'
-        own edits are gone with the merge."""
+        """The kept record split apart again (Plex's Split Apart): records of their own — and, from the backup of the records
+        the run made first (plexbackup.py), each given its own metadata back. With no such backup, matched afresh: the
+        folded ones' own edits are gone with the merge."""
+        from .. import plexbackup
         chosen = str(row.get("keep_key") or row["keep"]["key"])
+        if (backup.get("plex") or {}).get("id"):
+            got = plexbackup.revert(self.app, backup["plex"]["id"], keys=[chosen])
+            if got["failed"] and not got["restored"]:
+                raise ValueError(M("{title} not put back: {why}", title=row.get("title") or chosen, why="; ".join(got["left"])))
+            log(M("{title} split into records of its own again, each with its own metadata back from the backup", title=row.get("title") or chosen))
+            for why in got["left"]:
+                log(why)
+            return
         self.app.plex().split(chosen)
         log(M("{title} split into records of its own again (the folded records’ edits aren’t back: Plex matches them afresh)", title=row.get("title") or chosen))
 

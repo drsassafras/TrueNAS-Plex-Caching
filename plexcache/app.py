@@ -41,7 +41,7 @@ from .playback import PlaybackMonitor
 from .plex import PlexClient, PlexError
 from .reader import MiB, benchmark_file
 from . import platform as platform_mod
-from . import peers, safety
+from . import peers, plexbackup, safety
 from .scheduler import TIMED, due, next_run
 from .truenas import METHODS as TRUENAS_METHODS, TrueNASClient, TrueNASError, describe_pool, missing_methods, probe as probe_truenas
 from . import libdata
@@ -232,7 +232,9 @@ class App:
 
     def plex(self, timeout: float = 30) -> PlexClient:
         p = self.settings.section("plex")
-        return PlexClient(p["url"], p["token"], timeout=timeout)
+        client = PlexClient(p["url"], p["token"], timeout=timeout)
+        client.before_change = lambda c, op, keys: plexbackup.guard(self, c, "here", op, keys)  # (each change to its records backed up first)
+        return client
 
     def truenas(self) -> TrueNASClient:
         t = self.settings.section("truenas")
@@ -307,6 +309,7 @@ class App:
             if time.time() - last_prune > 3600:  # the snapshots the app took, deleted after their two weeks (safety.py)
                 last_prune = time.time()
                 threading.Thread(target=lambda: safety.prune_snapshots(self), name="snapshots", daemon=True).start()
+                plexbackup.prune(self)  # (and the Plex record backups, after the same days)
             if time.time() - last_publish > peers.PUBLISH_EVERY and self.libraries:  # our marker in the shared folders (peers.py)
                 last_publish = time.time()
                 threading.Thread(target=self.publish_peers, name="peers", daemon=True).start()
@@ -1705,6 +1708,7 @@ class App:
             "plex2": self.other.snapshot(),
             "sync": self.sync.snapshot(),
             "tools": {name: t.snapshot() for name, t in self.tools.items()},  # the Tools pages: each one's last scan, run, results
+            "plex_backup": plexbackup.plan(self),  # what's done before Plex's records change: the backup of them, or none (plexbackup.py)
             "tool_counts": {name: t.counts() for name, t in self.tools.items()},  # what each tool flags, per library and in all (from the data layer)
             "health_counts": dict(self.health_counts),  # Library Health's findings per library and category, ignored apart (the check cards)
             "libdata": self.libdata.snapshot(),  # the data layer: what's gathered, what's being read
