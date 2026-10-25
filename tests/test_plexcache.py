@@ -4750,7 +4750,8 @@ class PageStructureTests(unittest.TestCase):
     def test_tool_pages_follow_the_standard(self):
         """Every tool's page is the standard one (toolPage): drawn with rows, each shows a poster for the item, Scan Again,
         the one-line summary and Apply saying what the process does first; drawn with no rows, it says so in a sentence
-        rather than showing nothing; the long explanation sits behind the heading's ⓘ, never as a paragraph on the page;
+        rather than showing nothing; the long explanation sits behind the card's How it works (closed until pressed), never
+        as a paragraph on the page;
         and a row's explanations sit behind an ⓘ too (fact()). A new tool page that isn't built on toolPage fails here."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
@@ -4773,7 +4774,7 @@ class PageStructureTests(unittest.TestCase):
             types = re.search(r"types: \[([^\]]*)\]", body.group(1))
             offered = {KIND_BY_LIBRARY_TYPE.get(t, t) for t in re.findall(r"\"(\w+)\"", types.group(1))} if types else set(KIND_BY_LIBRARY_TYPE.values())
             self.assertEqual(offered, set(app.tools[name].applies), f"page{name.capitalize()}'s library tabs (types) aren't the tool's kinds (applies)")
-            self.assertNotIn('<p class="help">', body.group(1), f"page{name.capitalize()} explains itself in a paragraph: put it behind the heading's ⓘ")
+            self.assertNotIn('<p class="help">', body.group(1), f"page{name.capitalize()} explains itself in a paragraph: put it behind the card's How it works")
         # a library with something for every tool: a duplicate record, a duplicate file, a loose film, a hard link
         rootd = os.path.join(cat["root"], "Movies")
         copy = os.path.join(rootd, "Film 1 (2011) [copy].mkv")
@@ -4806,6 +4807,21 @@ class PageStructureTests(unittest.TestCase):
                 self.assertRegex(text, r"Backup and Apply to \d+ Selected|Apply to \d+ Selected Without Backing Up|Apply to \d+ Selected", "no Apply")
                 self.assertNotIn("Nothing found", text)
                 self.assertNotIn("Why:", text, "an explanation on the page itself")
+                # the long explanation: How it works on the card's heading, the Caching cards' toggle — not an ⓘ
+                self.assertRegex(html, r'<div class="head"><h2>[^<]*</h2><span style="flex:1"></span><button class="link" type="button" data-guide="tool-' + name + '" aria-expanded="false">How it works</button>')
+                self.assertNotIn('class="guide toolguide"', html, "the long explanation shows before How it works is pressed")
+                # a row whose record is one of a film's several (Merge Duplicates' rows): a red box saying to merge first
+                if name == "merge":
+                    self.assertIn("<h1>Merge Duplicate Plex Records</h1>", html, "the merge page's own title")
+                    self.assertIn("<h2>Merge Duplicate Plex Records</h2>", html)
+                    self.assertNotIn("Framed:", text)                                          # (no header over the rows)
+                    self.assertIn('<div class="mgdrop"><div class="mgdroplbl">Metadata lost</div><div class="mgdim">', html)  # (the folded record: red, greyed inside)
+                    self.assertNotIn('class="note badbox mergefirst"', html)
+                else:
+                    self.assertIn(">Merge Duplicates</a>", html, "the nav keeps the short name")
+                    merged = {str(k) for r in st["tools"]["merge"]["scan"]["rows"] for k in r["rks"]}
+                    pending = [r for r in st["tools"][name]["scan"]["rows"] if str(r.get("rk") or "") in merged]
+                    self.assertEqual(html.count('class="note badbox mergefirst"'), len(pending), "a red box on each row whose record is to be merged, and on no other")
                 # the row's words are facts: nothing long enough to be an explanation outside an ⓘ
                 cells = re.findall(r"<td[^>]*>(.*?)</td>", table, re.S)
                 for c in cells:
@@ -5039,13 +5055,45 @@ class PageStructureTests(unittest.TestCase):
         self.assertGreater(len(pages), 10)
         for name, body in pages:
             if re.search(r"\b(toolPage|checksPage)\(\{", body) or re.search(r"\bchecksPage\(", body):
-                self.assertRegex(body, r"blurb: H\(|checksPage\(\"\w+\", \"\w+\", \"[^\"]+\", H\(", f"{name}: the standard page needs a blurb (its description)")
-                continue
+                continue  # (the description is the tool's card text: test_tool_pages_open_with_their_card_text)
             m = re.search(r"\btop\(([^,]+),\s*(.+)", body)
             self.assertIsNotNone(m, f"{name} doesn't call top(title, description)")
             desc = m.group(2).strip()
             self.assertFalse(desc.startswith('""') or desc.startswith("''"), f"{name} opens without a description")
             self.assertTrue(desc.startswith(("H(", "T(", "esc(", "(", "LIB.", "libs", "S.", "ST.", "op.", "sy.")) or '"' in desc, f"{name}: {desc[:60]}")
+
+    def test_tool_pages_open_with_their_card_text(self):
+        """Every page under the Tools nav opens with what the tool does, in a sentence or two — the very text of its card on
+        the Tools page (toolBlurb, from the TOOLS list), so the two can't drift apart and a new tool can't open without one.
+        The standard tool page (toolPage) and the check pages (checksPage) take it themselves; a page of its own passes
+        toolBlurb("<page>") to top()."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        tools = re.findall(r'\n    \["(\w+)", N\("((?:[^"\\]|\\.)*)"\), N\("((?:[^"\\]|\\.)*)"\)', js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES = ")])
+        nav = set(re.findall(r"(\w+): 1", re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)))
+        self.assertEqual({t[0] for t in tools}, nav, "every page under the Tools nav has a card (name and text) on the Tools page")
+        for name, title, text in tools:
+            sentences = [x for x in re.split(r"(?<=[.!?])\s+(?=[A-Z])", text.strip()) if x]
+            self.assertTrue(1 <= len(sentences) <= 2, f"{name}: the card's text is {len(sentences)} sentences, not one or two: {text!r}")
+        # the templates take the card's text, and no tool page brings a description of its own
+        self.assertIn('out = top(T(spec.title), toolBlurb(name), "")', js[js.index("  function toolPage("):js.index("  function toolKind(")])
+        self.assertIn('top(T(title), toolBlurb(name), "")', js[js.index("  function checksPage("):js.index("  function pageFilechecks(")])
+        self.assertNotIn("blurb:", js, "a tool page with a description of its own: the page takes its card's text (toolBlurb)")
+        for name, _title, _text in tools:
+            body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S).group(1)
+            if not re.search(r"\b(toolPage\(\{|checksPage\()", body):
+                self.assertRegex(body, r"\btop\([^,]+, toolBlurb\(\"" + name + r"\"\)", f"page{name.capitalize()} doesn't open with toolBlurb(\"{name}\")")
+        # and as drawn: each page's description is its card's text, word for word
+        app, _plex, _client, _cat, _ = ToolsTests()._app()
+        st = app.state()
+        cards = dict(re.findall(r'<section class="card toolcard"><h2><a href="/(\w+)" data-nav>.*?</h2><p>(.*?)</p></section>', self._render(st, "tools")["html"]))
+        self.assertEqual(set(cards), nav)
+        for name in sorted(nav):
+            with self.subTest(page=name):
+                html = self._render(st, name)["html"]
+                sub = re.search(r'<div class="top"><div><h1>.*?</h1><div class="sub">(.*?)(?:<br>|</div>)', html, re.S)
+                self.assertIsNotNone(sub, f"{name}: no description under the title")
+                self.assertEqual(sub.group(1), cards[name])
 
     def _js_fn(self, name):
         """A pure function marked "// @testable: <name>" in app.js, as its source."""
@@ -5103,9 +5151,12 @@ class PageStructureTests(unittest.TestCase):
             ["1", {"running": True, "scan": None}, {}, None],
             ["1", {"running": False, "scan": None}, {"1": True}, None],          # tried once (it failed, say): not again by itself
             ["", {"running": False, "scan": None}, {}, None],
+            # this library's scan from an older version (the page can't draw it): scanned again, once
+            ["1", {"running": False, "scan": {"library": "1"}}, {}, "scan", True],
+            ["1", {"running": False, "scan": {"library": "1"}}, {"1": True}, None, True],
         ]
         got = self._node(fn + "\nconsole.log(JSON.stringify({lib: " + json.dumps([c[:2] for c in cases]) + ".map(function (c) { return libAutoPlan(c[0], c[1]); }), tools: " +
-                         json.dumps([t[:3] for t in tools]) + ".map(function (t) { return toolAutoPlan(t[0], t[1], t[2]); })}));")
+                         json.dumps([t[:3] + t[4:] for t in tools]) + ".map(function (t) { return toolAutoPlan(t[0], t[1], t[2], t[3]); })}));")
         for c, out in zip(cases, got["lib"]):
             self.assertEqual(out, c[2], c)
         for t, out in zip(tools, got["tools"]):
@@ -10845,26 +10896,28 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual([p for p in self.problems if "of a variable" not in p and "without literal" not in p], [])
         self.assertGreater(len(self.keys), 500)
 
-    # Catalogs list every text the app uses (null until translated: shown in English) and
-    # nothing it no longer uses. After changing any wording, run `python3 dev/i18n.py sync`.
-    # (PLEXCACHE_I18N_LOOSE=1 relaxes this while wording is still being worked on.)
-    STRICT = not os.environ.get("PLEXCACHE_I18N_LOOSE")
+    # The catalogs are only brought in step with the code for a release (README.md → Translations):
+    # in between, a new text isn't in them yet (the app shows the English) and an old one lingers.
+    # So that's only checked for a release: PLEXCACHE_I18N_RELEASE=1, which CI sets for main and
+    # version tags, or `tnsync release` / `tnsync beta` (TNSYNC_MODE). What a catalog does hold —
+    # placeholders, tags, plural forms — is checked every time.
+    RELEASE = (os.environ.get("PLEXCACHE_I18N_RELEASE", "").lower() in ("1", "true", "yes")
+               or os.environ.get("TNSYNC_MODE") in ("release", "beta"))
 
     def test_catalogs_consistent(self):
         for code in self.tool.TRANSLATED + list(self.tool.VARIANTS):
             with self.subTest(code):
-                problems = self.tool.check_catalog(code, self.keys, self.tool.load(code))
-                if not self.STRICT:
-                    problems = [p for p in problems if not p.startswith("no longer used")]
-                self.assertEqual(problems, [])
+                problems = self.tool.check_catalog(code, self.keys, self.tool.load(code), release=self.RELEASE)
+                self.assertEqual(problems, [], "for a release, run: python3 dev/i18n.py sync")
 
-    @unittest.skipUnless(STRICT, "PLEXCACHE_I18N_LOOSE is set")
-    def test_catalogs_list_every_text(self):
-        # After `dev/i18n.py sync` every text is in each catalog, null until translated
-        for code in self.tool.TRANSLATED:
-            with self.subTest(code):
-                missing = [k for k in self.keys if k not in self.tool.load(code)]
-                self.assertEqual(missing[:5], [], "run: python3 dev/i18n.py sync")
+    def test_catalogs_may_lag_until_a_release(self):
+        keys = {"Idle": None, "{n} files": "{n} file"}
+        stale = {"Idle": "Inactif", "Gone": "Parti"}            # "{n} files" not in it yet, "Gone" no longer used
+        self.assertEqual(self.tool.check_catalog("fr", keys, stale), [])
+        self.assertEqual(len(self.tool.check_catalog("fr", keys, stale, release=True)), 2)
+        self.assertEqual(self.tool.check_catalog("fr", keys, {"Idle": "Inactif", "{n} files": None}, release=True), [])
+        # a translation that doesn't match its English fails either way
+        self.assertEqual(len(self.tool.check_catalog("fr", {"{n} left": None}, {"{n} left": "restants"})), 1)
 
     def test_untranslated_falls_back_to_english(self):
         from unittest import mock
@@ -11146,7 +11199,10 @@ class ToolsTests(unittest.TestCase):
         from plexcache.tools.merge import MergeDuplicates
         app._save_json("tools-merge.json", {"scan": {"library": "1", "rows": [{"id": "x", "keep": {"key": "1"}}]}, "results": []})
         self.assertIsNone(MergeDuplicates(app).scan_result)
-        self.assertEqual(MergeDuplicates(app).scan_version, 2)
+        self.assertEqual(MergeDuplicates(app).scan_version, 3)
+        # …and one from before the scan said the mirror (the box before Apply): its page couldn't draw it, so it's dropped too
+        app._save_json("tools-merge.json", {"scan": {"library": "1", "rows": [], "v": 2}, "results": []})
+        self.assertIsNone(MergeDuplicates(app).scan_result)
 
     def test_duplicate_versions_and_the_trash(self):
         """One record holding the same file twice (the same running time and size): the copy in a folder
@@ -11229,6 +11285,88 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual(tr.items[-1]["state"], "restored")
         with self.assertRaises(ValueError):
             tr.act("/nowhere", "keep")
+
+    def test_duplicate_versions_wont_destroy_a_record(self):
+        """A copy whose deletion would destroy a Plex record — the only file of a record, here or on the mirrored server,
+        where the synced folder carries the deletion — isn't done: its row says Plex record destroyed in red, its tick is
+        greyed, and the page says to merge the records first. Once merged (both files versions of one record), it can be.
+        The page shows each row as two cards, the file kept and the file deleted, their paths behind File 1 and File 2;
+        a copy on no Plex record has a grey poster."""
+        from plexcache.tools import versions as vmod
+        # the rule itself: the files of a server ({path: record}); a record whose files are all deleted goes
+        idx = {"/a": "1", "/b": "1", "/c": "2"}
+        ending = lambda paths: vmod._ending(idx, vmod._held(idx), [{"path": p} for p in paths], lambda p: [p])  # noqa: E731
+        self.assertEqual((ending(["/c"]), ending(["/b"]), ending(["/a", "/b"]), ending(["/x"])), ({"/c"}, set(), {"/a", "/b"}, set()))
+        app, plex, client, cat, other = self._app(mirror=True)
+        tool = app.tools["versions"]
+        m = cat["movies"][0]
+        loose = os.path.join(cat["root"], "Movies", "Film 0 (2010).mkv")
+        shutil.copy(m["path"], loose)
+        m["more"] = [loose]  # (here: one record, the copy a second version of it)
+        other.cat["movies"].append({"path": loose, "size": 1, "kbps": 1, "key": "800", "title": "Film 0", "year": 2010})  # (there: a record of its own)
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1"))
+        (row,) = snap["scan"]["rows"]
+        (x,) = row["extras"]
+        self.assertEqual((x["there"], x["ends_record_there"], x["ends_record"], row["blocked"]), (True, True, False, True))
+        self.assertFalse(tool.apply_async([row["id"]]))                                            # (not done)
+        self.assertFalse(tool.apply_async([row["id"]], {row["id"]: {"blocked": False}}))           # (nor when asked to)
+        self.assertTrue(os.path.exists(loose))
+        # the page: the two cards, which is which said; the copy in red, its tick greyed, merge first
+        st = app.state()
+        got = PageStructureTests._render(self, st, "versions")
+        html, text = got["html"], got["text"]
+        self.assertIn('<div class="mgkeep"><div class="mgkeeplbl">This file kept</div>', html)
+        self.assertIn('<div class="mgdrop"><div class="mgdroplbl">This file deleted</div>', html)
+        self.assertLess(html.index("This file kept"), html.index("This file deleted"))             # (kept on the left)
+        self.assertNotIn("merge-swap", html)                                                       # (no choosing which is kept)
+        self.assertIn("Plex record destroyed", text)
+        self.assertRegex(html, r'class="badge b-fail sschip[^"]*"[^>]*>Plex record destroyed<')     # (red)
+        self.assertRegex(html, r'<input type="checkbox" data-act="tool-sel" data-tool="versions" data-id="' + re.escape(row["id"]) + '" disabled')
+        self.assertIn('class="note badbox vsblocked"', html)
+        self.assertIn("Merge Duplicates</a> on Starlit", html)
+        self.assertIn("Listed on Starlit too", text)
+        deleted = html[html.index("This file deleted"):]
+        self.assertIn("Listed on Starlit too", deleted)                                            # (on the deleted file's card)
+        self.assertIn(">File 1<", html)
+        self.assertIn(">File 2<", html)
+        self.assertNotIn(loose, text)                                                              # (the paths behind the File chips)
+        self.assertIn("Apply to 0 Selected", text)
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        self.assertIn("can’t be ticked until Merge Duplicates", re.search(r"var VERSIONS_HELP = N\((.*?)\);\n", js).group(1))  # (said in How it works)
+        # merged there: both files versions of one record — the copy can go
+        other.cat["movies"].pop()
+        other.cat["movies"][0]["more"] = [loose]
+        app.other.indexes.clear()
+        snap = self._run(tool, tool.scan_async("1"))
+        (row,) = snap["scan"]["rows"]
+        self.assertEqual((row["extras"][0]["there"], row["extras"][0]["ends_record_there"], row["blocked"]), (True, False, False))
+        html = PageStructureTests._render(self, app.state(), "versions")["html"]
+        self.assertNotIn("Plex record destroyed", html)
+        self.assertNotIn("vsblocked", html)
+        self.assertNotRegex(html, r'data-tool="versions" data-id="' + re.escape(row["id"]) + '" disabled')
+        # split again there before Apply: checked again then, and refused
+        other.cat["movies"][0].pop("more")
+        other.cat["movies"].append({"path": loose, "size": 1, "kbps": 1, "key": "800", "title": "Film 0", "year": 2010})
+        app.other.indexes.clear()
+        snap = self._run(tool, tool.apply_async([row["id"]]))
+        (res,) = snap["results"]
+        self.assertEqual(res["result"], "failed")
+        self.assertIn("destroy a Plex record", en(res["reason"]))
+        self.assertTrue(os.path.exists(loose))
+        # a copy on disk Plex doesn't list here: no record, so a grey poster on its card
+        m.pop("more")
+        other.cat["movies"].pop()
+        app.other.indexes.clear()
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1"))
+        (row,) = snap["scan"]["rows"]
+        self.assertTrue(row["unlisted"])
+        html = PageStructureTests._render(self, app.state(), "versions")["html"]
+        deleted = html[html.index("This file deleted"):]
+        self.assertIn('<div class="ssposter none"', deleted[:deleted.index("</div></div></div>")])
+        self.assertIn("No Plex record", deleted)
+        self.assertIn('<img class="ssposter"', html[:html.index("This file deleted")])            # (the kept file: its record's poster)
 
     def test_organize_folders(self):
         """A loose film (in the library folder itself) moved into "Title (Year)" — with its subtitles;

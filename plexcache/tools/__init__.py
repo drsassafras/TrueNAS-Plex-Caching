@@ -243,7 +243,7 @@ class Tool:
         """The rows of the last scan named, each with your choices for it merged in."""
         with self.lock:
             want = set(ids)
-            return [dict(r, **((choices or {}).get(r["id"]) or {})) for r in (self.scan_result or {}).get("rows") or [] if r["id"] in want]
+            return [dict(r, **{k: v for k, v in ((choices or {}).get(r["id"]) or {}).items() if k != "blocked"}) for r in (self.scan_result or {}).get("rows") or [] if r["id"] in want]
 
     def retained_bytes(self, rows: list[dict]) -> int:
         """What a snapshot keeps of the files these rows rewrite or delete, until it expires (0: nothing goes)."""
@@ -260,7 +260,7 @@ class Tool:
         with self.lock:
             if self.running or not self.scan_result:
                 return False
-        rows = self.live(key, self.rows_for(ids, choices))  # (a row about a switched-off issue isn't done)
+        rows = [r for r in self.live(key, self.rows_for(ids, choices)) if not r.get("blocked")]  # (a row about a switched-off issue isn't done, nor one the page won't tick)
         if not rows:
             return False
         if self.name in peers.FILE_TOOLS:  # (files change: room for it, and a backup that can be made, first)

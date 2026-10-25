@@ -27,13 +27,28 @@ def _brief(x: dict, keep: dict | None = None) -> dict:
             "folder": os.path.relpath(os.path.dirname(x["local"]), x["root"]) if x["root"] else os.path.dirname(x["path"])}
 
 
+def _held(idx: dict) -> dict[str, set]:
+    """A server's records and the files each holds, from its files ({path: rating key})."""
+    held: dict[str, set] = {}
+    for p, rk in idx.items():
+        held.setdefault(rk, set()).add(p)
+    return held
+
+
+def _ending(idx: dict, held: dict, extras: list[dict], where) -> set[str]:
+    """The paths (keys of ``idx``) of ``extras`` — found at ``where(path)`` — whose record holds no other file: deleting
+    them would leave the record empty, and Plex would remove it, its metadata and watched state with it."""
+    gone = {c for x in extras for c in where(x["path"]) if c in idx}
+    return {p for p in gone if held[idx[p]] <= gone}
+
+
 class DuplicateVersions(Tool):
     name = "versions"
     title = M("Duplicate Versions")
     page = "/versions"
     options = [{"id": "versions", "name": M("The same file twice on one record"), "help": M("One Plex record holds the same file as two of its versions — the same size and running time, the same bytes at both ends."), "kinds": ("movie", "tv", "audio"), "default": True},
                {"id": "unlisted", "name": M("A copy on disk Plex doesn’t list"), "help": M("A media file in the library folder that Plex doesn’t list, holding the same bytes as a file it does."), "kinds": ("movie", "tv", "audio"), "default": True}]
-    scan_version = 2  # (each extra copy says whether the mirror lists it)
+    scan_version = 3  # (each extra copy says whether the mirror lists it, and whether deleting it would destroy a record)
     keeps = M("the extra copies themselves: set aside in the library’s .plexcache-trash, kept for the hold (and put back from the page)")
     flag_help = M("One Plex item holding the same file twice — a copy that slipped in, a second path to one file — or a copy on disk that Plex doesn’t list: it takes space and is cached and optimized twice. Duplicate Versions sets the extra copies aside, and deletes them once every Plex has let go of them.")
 
@@ -84,18 +99,35 @@ class DuplicateVersions(Tool):
                              "frees": sum(x["size"] for x in extras if not (keep["ino"] and x["ino"] == keep["ino"]))})
         rows += self._unlisted(data)
         rows.sort(key=lambda r: sort_key(r["title"]))
+        here = {f["path"]: f["rk"] for f in files if f.get("rk")}
+        held = _held(here)
+        for r in rows:  # (a record here whose only files are the extras: deleting them would destroy it)
+            ending = _ending(here, held, r["extras"], lambda p: [p])
+            for x in r["extras"]:
+                x["ends_record"] = x["path"] in ending
         there = self.mirror(library)
         if there is not None:  # each extra copy on the mirrored server: listed there too (then its synced folder carries the deletion there)
             try:
                 idx = self.app.other.index(there)
+                held_there = _held(idx)
                 for r in rows:
-                    for x in r["extras"]:
-                        x["there"] = any(c in idx for c in self.app.other.paths_there(library, x["path"], there))
+                    self._there(library, there, idx, held_there, r)
             except PlexError as e:
                 for r in rows:
                     r["mirror_error"] = str(e)
+        for r in rows:
+            r["blocked"] = any(x.get("ends_record") or x.get("ends_record_there") for x in r["extras"])
         return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "items": sum(1 for g in by_item.values() if len(g) > 1), "frees": sum(r["frees"] for r in rows),
                 "mirror": {"name": self.mirror_name()} if there is not None else None, "hold_days": self.app.trash.hold_days()}
+
+    def _there(self, library: str, there, idx: dict, held: dict, row: dict) -> None:
+        """Each extra copy of ``row`` on the mirrored server (``idx``: its files, {path: rating key}): listed there too, and
+        whether it's the only file of its record there — the synced folder carries the deletion, so that record would go."""
+        where = lambda p: self.app.other.paths_there(library, p, there)  # noqa: E731
+        ending = _ending(idx, held, row["extras"], where)
+        for x in row["extras"]:
+            x["there"] = any(c in idx for c in where(x["path"]))
+            x["ends_record_there"] = any(c in ending for c in where(x["path"]))
 
     def _unlisted(self, data) -> list[dict]:
         """Media files in the library's folders that Plex doesn't list (data.unlisted), and are a listed file over
@@ -148,6 +180,12 @@ class DuplicateVersions(Tool):
 
     def apply_row(self, row: dict, log) -> dict:
         library, folders = row["library"], []
+        there = self.mirror(library)
+        if there is not None:  # (the mirror as it is now: a record there left with no file is refused, as the page does)
+            idx = self.app.other.index(there)
+            self._there(library, there, idx, _held(idx), row)
+        if any(x.get("ends_record") or x.get("ends_record_there") for x in row["extras"]):
+            raise ValueError(M("Deleting it would destroy a Plex record: merge the records with Merge Duplicates first."))
         for x in row["extras"]:
             root = self.root_of(library, x["path"])
             if not root:

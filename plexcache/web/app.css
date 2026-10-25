@@ -706,9 +706,17 @@ h2 .mode-ic{vertical-align:-3px}
 /* Merge Duplicates: the record kept framed and labelled, the ones folded in greyed; the arrow a button that swaps them */
 .mgkeep{position:relative;border:2px solid var(--accent);border-radius:10px;padding:4px}
 .mgkeeplbl{position:absolute;top:-9px;left:10px;background:var(--panel);padding:0 6px;font-size:11px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:.4px}
-.mgdrop{opacity:.6}
+.mgdrop{position:relative;border:2px solid var(--bad);border-radius:10px;padding:4px}
+.mgdroplbl{position:absolute;top:-9px;left:10px;z-index:1;background:var(--panel);padding:0 6px;font-size:11px;font-weight:600;color:var(--bad);text-transform:uppercase;letter-spacing:.4px}
+.mgdim{opacity:.6}
 button.mgarrow{background:none;border:1px solid var(--line);border-radius:8px;padding:6px 8px;cursor:pointer;font:inherit;color:var(--muted)}
 button.mgarrow:hover{border-color:var(--accent);color:var(--accent)}
+/* Duplicate Versions: the file kept and the file deleted as Merge Duplicates' cards (which is kept isn't a choice: no button
+   between them); a row's notes — merge first, a record it would destroy — across both */
+.vsitem>.note{grid-column:1/-1;margin:0}
+.vsitem.off>:not(.sstop){opacity:.6}
+.vssame{font-size:20px;font-weight:600;text-align:center}
+@media (max-width:760px){.vsitem{grid-template-columns:minmax(0,1fr)}.vssame{transform:rotate(90deg);justify-self:center}}
 .brand small .update.quiet{color:#A3ABA6;cursor:default}
 .tbl.mid td{vertical-align:middle}  /* rows with a field in them: the text on the field's line */
 /* a view loading: an indeterminate bar */
@@ -740,6 +748,10 @@ fieldset.greyed *{cursor:not-allowed}
 .optgate>.what{display:flex;align-items:center;gap:6px;font-weight:600;margin-bottom:-6px}
 .note.warnbox{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn)}
 .note.warnbox a{color:inherit}
+.note.badbox{background:var(--bad-bg);color:var(--bad);border:1px solid var(--bad)}
+.note.badbox a{color:inherit}
+.note.mergefirst{margin-top:6px;padding:6px 10px;font-size:13px}
+.toolguide{margin:4px 0 14px;grid-template-columns:1fr}
 /* what Apply will do, right before it (every tool): what it does, what it changes, the backup */
 .note.applybox>div+div{margin-top:6px}
 .undo{margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}

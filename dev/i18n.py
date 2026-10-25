@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Translation catalogs: find every translatable text and check each language has it.
 
-    python3 dev/i18n.py check              # catalogs consistent? (untranslated texts are fine)
+    python3 dev/i18n.py check              # translations match their English (catalogs may lag the code)
+    python3 dev/i18n.py check --release    # ...and catalogs in step with the code: nothing missing or unused
     python3 dev/i18n.py check --complete   # ...and every text translated
     python3 dev/i18n.py status             # how much of each language is translated
     python3 dev/i18n.py sync               # add new texts as null, drop texts no longer used
@@ -23,6 +24,10 @@ en-US.json and en-GB.json only hold the texts whose spelling differs.
 Translating happens in place: after ``sync``, every text a language still needs is in its
 catalog with the value null. Replace the null with the translation (or a plural object); the
 app shows English for anything still null, so a half-done language is safe to ship.
+
+Catalogs are only brought in step with the code for a release (README.md → Translations).
+Between releases they lag: a new text isn't in them yet (the app shows the English) and one
+the code no longer uses lingers. Plain ``check`` allows that; ``check --release`` doesn't.
 """
 
 from __future__ import annotations
@@ -290,16 +295,20 @@ def untranslated(keys: dict, cat: dict) -> list[str]:
     return [k for k in keys if not done(cat.get(k))]
 
 
-def check_catalog(code: str, keys: dict, cat: dict, complete: bool = False) -> list[str]:
-    """Problems with one catalog: placeholders, tags or plural forms that differ, keys no
-    longer used, and (with ``complete``) texts not translated yet."""
+def check_catalog(code: str, keys: dict, cat: dict, complete: bool = False, release: bool = False) -> list[str]:
+    """Problems with one catalog: placeholders, tags or plural forms that differ; with
+    ``release``, texts not in it yet and keys no longer used (what ``sync`` fixes); and with
+    ``complete`` (which implies ``release``), texts not translated yet."""
     out = []
     variant = code in VARIANTS
+    release = release or complete
     todo = set(untranslated(keys, cat))
     for key, one in keys.items():
         if key in todo:
             if complete and not variant:
                 out.append(f"missing: {key[:90]!r}")
+            elif release and not variant and key not in cat:
+                out.append(f"not in the catalog (run sync): {key[:70]!r}")
             continue
         val = cat[key]
         want_places, want_tags = _shape(key)
@@ -329,7 +338,7 @@ def check_catalog(code: str, keys: dict, cat: dict, complete: bool = False) -> l
         if tags != want_tags:
             out.append(f"tags {tags} vs {want_tags}: {key[:70]!r}")
     for key in cat:
-        if key not in keys:
+        if release and key not in keys:
             out.append(f"no longer used: {key[:90]!r}")
     return out
 
@@ -399,10 +408,11 @@ def main(argv: list[str]) -> int:
         return 0
     bad = 0
     complete = "--complete" in argv
+    release = "--release" in argv
     print(f"{len(keys)} texts")
     for code in TRANSLATED + list(VARIANTS):
         cat = load(code)
-        issues = check_catalog(code, keys, cat, complete)
+        issues = check_catalog(code, keys, cat, complete, release)
         bad += bool(issues)
         left = "" if code in VARIANTS else f"  ({len(untranslated(keys, cat))} untranslated)"
         print(f"{code:6} {'ok' if not issues else str(len(issues)) + ' problems'}{left}")

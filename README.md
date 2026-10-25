@@ -352,16 +352,17 @@ docker build -t plex-cache .
 
 Each language has a catalog in `plexcache/web/i18n/<code>.json`, keyed by the English text. Texts are marked in the code with `T()`, `H()`, `P()` and `N()` in JavaScript, `data-i18n` attributes in HTML and `M()` in Python. You translate in place: a text with no translation yet is in the catalog as `null`, and the app shows the English until it's filled in.
 
-**When to translate:** only when a release is being made, and only when the maintainer asks for the release. Day to day, a change that adds or changes texts runs `python3 dev/i18n.py sync` so the catalogs stay in step (new texts as `null`), and leaves the translating for the release.
+**When to translate:** only when a release is being made, and only when the maintainer asks for the release. Day to day, a change that adds or changes texts leaves the catalogs alone: a new text isn't in them yet (the app shows the English) and an old one lingers until the release. Making the release, run `python3 dev/i18n.py sync` to bring every catalog in step (new texts as `null`, unused ones dropped), then translate.
 
 ```sh
 python3 dev/i18n.py status      # how much of each language is translated
-python3 dev/i18n.py sync        # after changing texts: add new ones as null, drop unused ones
+python3 dev/i18n.py sync        # for a release: add new texts as null, drop unused ones
 python3 dev/i18n.py check       # placeholders, HTML tags and plural forms match the English
+python3 dev/i18n.py check --release   # ...and every catalog in step with the code
 python3 dev/i18n.py leftovers   # English in app.js that isn't marked for translation
 ```
 
-Keep every `{placeholder}` and HTML tag from the English. A plural is an object with the forms its language uses, e.g. `{"one": "{n} file", "other": "{n} files"}`; Russian, Ukrainian and Polish also use `few` and `many`, and Japanese, Korean and Chinese only `other`. `en-US.json` and `en-GB.json` only list the texts whose spelling differs from the Canadian original. The tests fail if a catalog is out of sync or a translation doesn't match its English.
+Keep every `{placeholder}` and HTML tag from the English. A plural is an object with the forms its language uses, e.g. `{"one": "{n} file", "other": "{n} files"}`; Russian, Ukrainian and Polish also use `few` and `many`, and Japanese, Korean and Chinese only `other`. `en-US.json` and `en-GB.json` only list the texts whose spelling differs from the Canadian original. The tests always fail if a translation doesn't match its English. They fail on a catalog out of step with the code only for a release: with `PLEXCACHE_I18N_RELEASE=1`, which CI sets for `main`, version tags and pull requests into `main`, or under `tnsync release` / `tnsync beta`.
 
 #### Writing the texts
 

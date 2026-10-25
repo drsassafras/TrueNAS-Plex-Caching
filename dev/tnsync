@@ -19,6 +19,7 @@
 # If the project's .tnsync has TN_TEST, that command runs in the code being
 # copied: by default after the copy and restart (so the app is ready sooner),
 # or first with --tests-first. Failures end in a red banner either way.
+# TNSYNC_MODE (local, master, release, beta) tells the tests which was asked for.
 #
 # Settings come from two files (KEY=value lines):
 #   ~/.config/tnsync/config   shared:      TN_HOST, TN_USER, TN_PORT
@@ -277,7 +278,7 @@ run_tests() {
     # Run in the code being copied (for master/release/beta that's the exported
     # copy, not your folder). Python's bytecode cache is kept out of the project.
     # Straight to the terminal (not through a pipe), so a test runner can draw a progress bar.
-    if ( cd "$SRC" && PYTHONDONTWRITEBYTECODE=1 bash -c "$TN_TEST" ); then
+    if ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$TN_TEST" ); then
         ok "Tests passed"
         return 0
     fi

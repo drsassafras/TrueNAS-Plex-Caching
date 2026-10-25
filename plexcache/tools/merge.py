@@ -138,7 +138,7 @@ def clusters(recs: list[dict]) -> list[tuple[str, list[dict]]]:
 
 class MergeDuplicates(Tool):
     name = "merge"
-    scan_version = 2  # (rows hold whole records now, as the Sync view shows them)
+    scan_version = 3  # (rows hold whole records now, as the Sync view shows them; the scan says the mirror, for the box before Apply)
 
     title = M("Merge Duplicates")
     page = "/merge"
