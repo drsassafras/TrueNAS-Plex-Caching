@@ -225,6 +225,7 @@ h2 .info{vertical-align:2px}
 .infopop[hidden]{display:none}
 .infopop .mono{font-family:var(--mono);font-size:12px}
 .chk > .info,.convtype > .info{align-self:center;margin-left:0;margin-right:-8px}  /* the ⓘ first in every row, in one column; the box right after it */
+.chk > .info::before,.convtype > .info::before{inset:-13px -3px}  /* (its touch target kept off the box beside it) */
 .convtype > .info{margin-right:4px}  /* the row's gap is 4px, not 18px: a clear 8px between the ⓘ and its box */
 .info.gap{visibility:hidden;cursor:default}  /* a row without an ⓘ keeps its place, so the boxes line up too */
 .sizing .tbl tr.sum th,.sizing .tbl tr.sum td{font-weight:600;border-top:1px solid var(--line)}
@@ -554,21 +555,14 @@ h2 .mode-ic{vertical-align:-3px}
 .lcount{margin:2px 0 6px;font-size:14px}
 .lcount .badge{margin-left:6px}
 /* Optimize Files: the buttons stacked, so the table fits without scrolling sideways */
-.optlibs .optacts{display:flex;flex-direction:column;align-items:stretch;gap:6px;min-width:140px}
-.optlibs .optacts .btn{white-space:nowrap}
-.optlibs select{max-width:190px}
 .convtypes{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px 22px;margin:8px 0 6px}
 .convtypes>*{min-width:0}
 .convtype{display:flex;align-items:center;gap:4px;font-size:14px}
 .convtype label{display:inline-flex;align-items:center;gap:6px}
 #convert select[data-convhold]{width:auto}
-.optlibs .optsel{display:flex;flex-direction:column;gap:2px;margin:2px 0 6px}
-.optlibs .optsel .muted{font-size:12px}
-.optlibs .optline{display:block}
-.optlibs .optline label{display:flex;gap:6px;align-items:flex-start;white-space:normal;margin:2px 0}
-.optlibs .optacts{min-width:120px}
-.optlibs td:nth-child(2){max-width:210px}
-.optlibs td:nth-child(4){max-width:160px}
+/* the Optimizer: its library's dataset under the choices, Sync Cover Art beside Scan Again */
+.optds{margin:-2px 0 10px}
+.optacts{display:inline-flex;align-items:center;gap:6px}
 /* Convert Folder to Child Dataset, the switch: each step's button first, what it does after */
 .migsteps{margin:10px 0 0;padding-left:22px}
 .migsteps>li{margin:0 0 12px}
@@ -664,6 +658,15 @@ h2 .mode-ic{vertical-align:-3px}
 /* Library → Health: the checks by category, each with its switch and count */
 .lhgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px 28px;margin:8px 0 12px}
 .lhgrid>*{min-width:0}
+/* every tool's options, the File Checks' way: a row each, two columns where there's room, the count on the right */
+.optgrid{columns:340px;column-gap:28px;margin:6px 0 8px;padding-bottom:8px;border-bottom:1px solid var(--line2)}  /* (columns, not a grid: a tall option — one with options of its own — doesn't stretch its row and leave holes beside it) */
+.optgrid>*{min-width:0;break-inside:avoid}
+.tooltop{align-items:center}  /* every tool's top: the library tabs, and on their right what the last scan found */
+.toolstats{margin-left:auto;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:6px}
+.toolstats .badge{min-width:0;cursor:default}
+.optrow>label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lhchk.optrow select.sel.sm{font-size:12px;padding:2px 6px;min-height:0;max-width:240px;margin-left:4px}
+.optrow>.info+label:not(:has(input)){margin-left:4px}  /* (a choice without a box: its name kept off the ⓘ) */
 .lhchk{align-items:center;gap:6px}
 .lhchk>label{flex:1 1 0;min-width:0}  /* (a long name wraps inside the label: the count stays on the line) */
 .lhchk .badge{margin-left:auto;flex:none}
@@ -676,6 +679,10 @@ h2 .mode-ic{vertical-align:-3px}
 /* what a tool has found to do: on its card, and summed beside Tools in the menu */
 .toolcard .count{display:inline-block;min-width:22px;padding:1px 7px;border-radius:11px;background:var(--line2);color:var(--ink);font-size:13px;font-weight:600;text-align:center;vertical-align:middle;margin-left:6px}
 .toolcard .count.warn{background:var(--warn-bg);color:var(--warn)}
+.count.busy{display:inline-flex;align-items:center;justify-content:center;vertical-align:middle}
+.spin{display:inline-block;width:10px;height:10px;border:2px solid var(--muted);border-right-color:transparent;border-radius:50%;animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none;border-right-color:var(--muted);opacity:.55}}
 .icon .count{position:absolute;right:-9px;top:-8px;min-width:16px;padding:0 4px;border-radius:9px;background:#E0A04A;color:#1b1b1b;font-size:10px;line-height:16px;font-weight:700;text-align:center;box-shadow:0 0 0 2px var(--side)}
 .lhstats{font-size:14px;margin:8px 0 0}
 .toolcard p{color:var(--soft);font-size:14px;margin:6px 0 12px}
@@ -688,8 +695,9 @@ h2 .mode-ic{vertical-align:-3px}
 .toolsub a.subnav:hover{background:#2A302D;color:#fff;opacity:1}
 .toolsub a.subnav.on{background:#2F3833;color:#fff;font-weight:600;opacity:1}
 .shell.collapsed .toolsub{display:none}
+.toolsub[hidden]{display:none}  /* (its display would show it: off a tool page, gone) */
 /* Library Health's checks: the ⓘ before the checkbox, where the eye lands first */
-.lhchk > .info{margin-left:0;margin-right:-8px}
+.lhchk > .info{margin-left:0;margin-right:2px}  /* (a little room between the ⓘ and its box) */
 /* Library → Health: each flagged item as a record card, its issues as chips on the right */
 .lhitem{grid-template-columns:minmax(0,1fr) 34px minmax(0,1.2fr)}
 .lhhdr{grid-template-columns:minmax(0,1fr) 34px minmax(0,1.2fr)}
@@ -708,15 +716,19 @@ h2 .mode-ic{vertical-align:-3px}
 .mgkeeplbl{position:absolute;top:-9px;left:10px;background:var(--panel);padding:0 6px;font-size:11px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:.4px}
 .mgdrop{position:relative;border:2px solid var(--bad);border-radius:10px;padding:4px}
 .mgdroplbl{position:absolute;top:-9px;left:10px;z-index:1;background:var(--panel);padding:0 6px;font-size:11px;font-weight:600;color:var(--bad);text-transform:uppercase;letter-spacing:.4px}
-.mgdim{opacity:.6}
+/* the side that goes, greyed — but not its yellow and red tags: they count */
+.mgdim .ssposter,.mgdim .ssinfo>.what,.mgdim .ssinfo>.det,.mgdim .ssval,.mgdim .sschip:not(.b-warn):not(.b-fail){opacity:.6}
 button.mgarrow{background:none;border:1px solid var(--line);border-radius:8px;padding:6px 8px;cursor:pointer;font:inherit;color:var(--muted)}
 button.mgarrow:hover{border-color:var(--accent);color:var(--accent)}
-/* Duplicate Versions: the file kept and the file deleted as Merge Duplicates' cards (which is kept isn't a choice: no button
-   between them); a row's notes — merge first, a record it would destroy — across both */
-.vsitem>.note{grid-column:1/-1;margin:0}
-.vsitem.off>:not(.sstop){opacity:.6}
-.vssame{font-size:20px;font-weight:600;text-align:center}
-@media (max-width:760px){.vsitem{grid-template-columns:minmax(0,1fr)}.vssame{transform:rotate(90deg);justify-self:center}}
+/* The comparison card (cmpRow): every tool's row, and the optimizer's libraries — Merge Duplicates' look for all. What goes
+   framed red, what stays framed green, the arrow between in its box: a button where the side kept can be chosen, the same
+   box fixed where it can't; the row's boxes (red: what stops it; grey: worth knowing) and its files across the card */
+.cmprow>.note{grid-column:1/-1;margin:0}
+.cmprow>.ssfilelist{grid-column:1/-1}
+.ssarrow.mgarrow.fixed{border:1px solid var(--line);border-radius:8px;padding:6px 8px;cursor:default}
+.note.greybox{background:var(--line2);color:var(--soft);border:1px solid var(--line)}
+.note.greybox a{color:inherit}
+@media (max-width:760px){.cmprow{grid-template-columns:minmax(0,1fr)}.cmprow>.mgarrow{justify-self:center}}
 .brand small .update.quiet{color:#A3ABA6;cursor:default}
 .tbl.mid td{vertical-align:middle}  /* rows with a field in them: the text on the field's line */
 /* a view loading: an indeterminate bar */
@@ -750,7 +762,6 @@ fieldset.greyed *{cursor:not-allowed}
 .note.warnbox a{color:inherit}
 .note.badbox{background:var(--bad-bg);color:var(--bad);border:1px solid var(--bad)}
 .note.badbox a{color:inherit}
-.note.mergefirst{margin-top:6px;padding:6px 10px;font-size:13px}
 .toolguide{margin:4px 0 14px;grid-template-columns:1fr}
 /* what Apply will do, right before it (every tool): what it does, what it changes, the backup */
 .note.applybox>div+div{margin-top:6px}

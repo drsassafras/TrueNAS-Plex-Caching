@@ -200,6 +200,10 @@ class App:
         from .tools import ToolJob
         self.jobs.register("tool", lambda args, saved: ToolJob(self, args, saved))  # a tool's Apply: the backup, then the rows (Processes)
         self.health_counts: dict[str, dict] = {}  # library -> {"file": n, "plex": n, "ignored": n, "items": n, "stamp"}: Library Health's counts for the cards
+        self._health: dict[str, tuple] = {}  # library -> (what it was worked out from: _health_sig, Library Health's answer)
+        self._health_lock = threading.Lock()
+        self._health_tried: dict[str, tuple] = {}  # library -> the _health_sig last worked out in the background
+        self._health_busy = False
         self.libdata.listeners.append(self._count_health)
         # what's where in each media file (the Library Health page), and the job that reads it
         self.file_maps = FileMaps(self.config_dir)
@@ -644,27 +648,102 @@ class App:
         """A library from the last scan ({key, title, kind, ...}), or None."""
         return next((lib for lib in self.libraries if lib["key"] == str(key)), None)
 
-    def _count_health(self, key: str, what) -> None:
-        """Library Health's findings counted for a library whose data changed: per category, ignored items apart
-        (what the File Checks and Plex Checks cards and the menu's count show)."""
+    def _health_sig(self, key: str) -> tuple:
+        """What a library's Library Health answer is worked out from: its data's state, the checks' settings, the items
+        ignored, the Library Sync compare it reads locked fields from — the answer kept until one of them changes."""
         from . import libhealth
-        d = self.libdata.data(key)
-        if not d.ready or not (self.library_info(key) or {}).get("kind"):
-            return
-        try:
-            got = libhealth.library_health(self, key)
-        except Exception:  # noqa: BLE001 — said when the page asks
-            return
+        rep = (getattr(self, "sync", None) and self.sync.report) or {}
+        row = (rep.get("libraries") or {}).get(str(key))
+        return (self.libdata.data(key).stamp, json.dumps(self.settings.get().get("library_health") or {}, sort_keys=True, default=str),
+                json.dumps(libhealth.ignored(self).get(str(key)) or {}, sort_keys=True, default=str), id(row), len((row or {}).get("items") or []))
+
+    def library_health(self, key: str) -> dict:
+        """A library's items through Library Health's checks (libhealth.library_health), worked out once for what it's
+        worked out from (_health_sig) and kept: worked out in the background as the data changes (_count_health), so
+        opening a check page — or a library on it — shows it at once."""
+        from . import libhealth
+        key = str(key)
+        sig = self._health_sig(key)
+        with self._health_lock:
+            got = self._health.get(key)
+        if got and got[0] == sig:
+            return got[1]
+        out = libhealth.library_health(self, key)
+        sig = self._health_sig(key) if sig[0] != self.libdata.data(key).stamp else sig  # (gathered just now for it: the new state's)
+        with self._health_lock:
+            self._health[key] = (sig, out)
+        self._store_health_counts(key, sig, out)
+        return out
+
+    def _store_health_counts(self, key: str, sig: tuple, got: dict) -> None:
+        """The counts the check pages' tabs, the Tools page's cards and the menu show: per category, the items a check
+        switched on finds something on (each once), ignored items apart."""
+        on = {c["id"]: c.get("on") for cs in got["checks"].values() for c in cs}
+        of = {c["id"]: c.get("of") for cs in got["checks"].values() for c in cs}
+        live_check = {i: bool(v) and (not of.get(i) or bool(on.get(of[i]))) for i, v in on.items()}
         cat_of = {c["id"]: cat for cat, cs in got["checks"].items() for c in cs}
         counts: dict[str, int] = {"file": 0, "plex": 0, "tools": 0}
         ignored = 0
         for it in got["items"]:
-            live = {r["id"] for r in it["results"] if not r.get("ignored")}
+            live = {r["id"] for r in it["results"] if not r.get("ignored") and live_check.get(r["id"], True)}
             for cat in set(cat_of.get(i, "") for i in live):
                 if cat in counts:
                     counts[cat] += 1  # (an item once per category, however many of its checks found something)
             ignored += any(r.get("ignored") for r in it["results"])
-        self.health_counts[str(key)] = dict(counts, ignored=ignored, items=got["stats"]["items"], flagged=got["stats"]["flagged"], stamp=d.stamp)
+        self.health_counts[key] = dict(counts, ignored=ignored, items=got["stats"]["items"], flagged=got["stats"]["flagged"], stamp=sig[0], sig=sig)
+
+    def _count_health(self, key: str, what) -> None:
+        """Library Health worked out for a library whose data changed (the data layer's listener), so its counts and
+        its check pages are ready before they're opened."""
+        if not self.libdata.data(key).ready or not (self.library_info(key) or {}).get("kind"):
+            return
+        try:
+            self.library_health(key)
+        except Exception:  # noqa: BLE001 — said when the page asks
+            return
+
+    def _health_counts_now(self) -> dict:
+        """health_counts for the state: each library's, marked stale when what it was worked out from has changed since
+        (a check switched, an item ignored) — the tab turns while it's worked out again, in the background, once per change."""
+        out, todo = {}, []
+        for lib in self.libraries:
+            key = str(lib["key"])
+            if not lib.get("kind") or lib.get("excluded") or not self.libdata.data(key).ready:
+                if key in self.health_counts:
+                    out[key] = {k: v for k, v in self.health_counts[key].items() if k != "sig"}
+                continue
+            sig, got = self._health_sig(key), self.health_counts.get(key)
+            if got:
+                out[key] = dict({k: v for k, v in got.items() if k != "sig"}, stale=got.get("sig") != sig)
+            if not got or got.get("sig") != sig:
+                todo.append((key, sig))
+        if todo:
+            self._health_soon(todo)
+        return out
+
+    def _health_soon(self, todo: list) -> None:
+        """Library Health worked out in a thread for the libraries _health_counts_now found stale: each change tried once,
+        one thread at a time."""
+        with self._health_lock:
+            todo = [(k, sig) for k, sig in todo if self._health_tried.get(k) != sig]
+            if not todo or self._health_busy:
+                return
+            self._health_busy = True
+            for k, sig in todo:
+                self._health_tried[k] = sig
+
+        def run():
+            try:
+                for k, _sig in todo:
+                    try:
+                        self.library_health(k)
+                    except Exception:  # noqa: BLE001
+                        pass
+            finally:
+                with self._health_lock:
+                    self._health_busy = False
+
+        threading.Thread(target=run, name="library-health", daemon=True).start()
 
     def check_prefetch_libraries(self, libs) -> None:
         """Prefetch choices must be for a library Plex has, of a kind Prefetch covers, and offered
@@ -1632,7 +1711,7 @@ class App:
     # ---------------------------------------------------------------- state
     def _optimizer_state(self) -> dict:
         snap = self.optimizing.snapshot()
-        if not snap["configured"]:
+        if not snap["setup"].get("ready"):  # (answering or not: until every step passes — never once it has)
             self.optimizing.diagnose_soon()  # what's left to set up, checked again now and then
         return snap
 
@@ -1710,7 +1789,7 @@ class App:
             "tools": {name: t.snapshot() for name, t in self.tools.items()},  # the Tools pages: each one's last scan, run, results
             "plex_backup": plexbackup.plan(self),  # what's done before Plex's records change: the backup of them, or none (plexbackup.py)
             "tool_counts": {name: t.counts() for name, t in self.tools.items()},  # what each tool flags, per library and in all (from the data layer)
-            "health_counts": dict(self.health_counts),  # Library Health's findings per library and category, ignored apart (the check cards)
+            "health_counts": self._health_counts_now(),  # Library Health's findings per library and category, ignored apart (the check cards)
             "libdata": self.libdata.snapshot(),  # the data layer: what's gathered, what's being read
             "trash": self.trash.snapshot(),  # files the tools set aside, waiting to be purged
             "job": self.jobs.snapshot(),

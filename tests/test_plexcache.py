@@ -3008,6 +3008,19 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.req("GET", "/static/nope.js")[0], 404)
         self.assertEqual(self.req("POST", "/api/nope", {})[0], 404)
 
+    def test_optimizer_files_and_scan_again(self):
+        """The Optimizer page's routes: a page of a library's files to optimize (its cards), and Scan Again."""
+        files = [{"path": f"/m/F{k}.mkv", "title": f"F{k}", "poster": "", "name": f"F{k}.mkv", "size": 1, "problems": ["new"], "mkv": True, "compression": None} for k in range(3)]
+        with mock.patch.object(self.app, "library_info", lambda k: {"title": "Movies"} if str(k) == "1" else None), \
+                mock.patch.object(self.app.optimizing, "todo", {"1": files}), mock.patch.object(self.app.optimizing, "survey_soon") as survey:
+            status, body, _ = self.req("GET", "/api/optimizer/files?key=1&offset=0&limit=2")
+            self.assertEqual(status, 200)
+            got = json.loads(body)
+            self.assertEqual((got["total"], len(got["files"]), len(got["paths"])), (3, 2, 3))
+            self.assertEqual(self.req("GET", "/api/optimizer/files?key=9")[0], 404)
+            self.assertEqual(json.loads(self.req("POST", "/api/optimizer/survey", {})[1]), {"started": True})
+            survey.assert_called_once()
+
     def test_export_has_no_secrets(self):
         self.app.settings.update({"plex": {"token": "secret-token"}})
         status, body, headers = self.req("GET", "/api/export")
@@ -4446,19 +4459,19 @@ class DataLayerTests(unittest.TestCase):
         # the page: what a row says comes through chips (chips(): a badge that opens to its explanation), never a bare
         # badge, nor an ⓘ in a row — the one style, the Sync and Health views' — so every tool reads alike
         js = open(os.path.join(root, "web", "app.js"), encoding="utf-8").read()
-        for fn in ("fileLine",) + tuple("page" + n.capitalize() for n in ("merge", "versions", "folders", "unlink", "convert")):
+        for fn in ("mergeCard", "versionsCard") + tuple("page" + n.capitalize() for n in ("folders", "unlink", "convert")):
             body = re.search(r"\n  function " + fn + r"\(.*?\{(.*?)(?=\n  function |\n  var )", js, re.S)
             self.assertIsNotNone(body, fn)
             rows = body.group(1)
-            if fn != "fileLine":  # the issue a row is about is a chip marked with it (issue: the option id): orange on, grey off
-                self.assertRegex(rows if fn != "pageMerge" else js[js.index("  function mergeRows("):js.index("  function recLine(")], r"\bissue: ", f"{fn}: no chip names the row's issue")
-            for key in ("row:", "sub:"):
+            # the issue a row is about is a chip marked with it (issue: the option id): yellow on, grey off
+            self.assertRegex(rows, r"\bissue: ", f"{fn}: no chip names the row's issue")
+            for key in ("card:",):
                 if key in rows:
                     part = rows[rows.index(key):]
                     part = part[:part.index("\n      ", 1) if "\n      " in part[1:] else len(part)]
                     self.assertNotRegex(part, r"\bbadge\(|\binfo\(|\bfact\(", f"{fn}'s {key} draws a bare badge or ⓘ: use chips()")
-            if fn == "fileLine":
-                self.assertNotRegex(rows, r"\bbadge\(|\binfo\(", "fileLine draws a bare badge or ⓘ: use chips()")
+            if not fn.startswith("page"):
+                self.assertNotRegex(rows, r"\bbadge\(|\binfo\(", f"{fn} draws a bare badge or ⓘ: use chips()")
         self.assertNotIn("function fact(", js)
         # and the data layer itself is where those reads live
         self.assertIn("os.walk(", open(os.path.join(root, "libdata.py"), encoding="utf-8").read())
@@ -4749,7 +4762,8 @@ class PageStructureTests(unittest.TestCase):
 
     def test_tool_pages_follow_the_standard(self):
         """Every tool's page is the standard one (toolPage): drawn with rows, each shows a poster for the item, Scan Again,
-        the one-line summary and Apply saying what the process does first; drawn with no rows, it says so in a sentence
+        what the last scan found as the standard chips on the tabs' right (toolTop: read, issues found, passing the current
+        tests, passing all) and Apply saying what the process does first; drawn with no rows, it says so in a sentence
         rather than showing nothing; the long explanation sits behind the card's How it works (closed until pressed), never
         as a paragraph on the page;
         and a row's explanations sit behind an ⓘ too (fact()). A new tool page that isn't built on toolPage fails here."""
@@ -4801,8 +4815,13 @@ class PageStructureTests(unittest.TestCase):
                 self.assertIn('data-act="tool-switch"', html, "no options block (the tool's switches for this library)")
                 self.assertLess(html.index('data-act="tool-switch"'), html.index('data-act="tool-scan"'), "the options come under the library tabs, before Scan Again")
                 self.assertRegex(html, r'data-act="tool-lib"[^>]*>.*?<span class="count warn"', "no count on the library tab")
-                self.assertIn("flagged", text)
-                table = html[html.index('class="det toolsum"'):]  # (the rows, however the tool draws them, follow the summary line)
+                # the top, one layout: the tabs, and on their right what was read (green), the issues found (yellow), what
+                # passes the tests as set (green) and all of them (grey)
+                self.assertRegex(html, r'<div class="lctl tooltop"><div class="seg small strong" role="tablist".*?</div><div class="toolstats">'
+                                       r'<span class="badge b-pass">\d+ (records|files) read</span><span class="badge b-warn"[^>]*>\d+ issues? found</span>'
+                                       r'<span class="badge b-pass"[^>]*>\d+ pass(es)? current tests</span><span class="badge b-grey"[^>]*>\d+ pass(es)? all tests</span>')
+                self.assertNotIn("toolsum", html)
+                table = html[html.index('class="toolstats"'):]  # (the rows, however the tool draws them, follow the top)
                 self.assertTrue('class="poster"' in table or "ssposter" in table, "no poster on the rows")
                 self.assertRegex(text, r"Backup and Apply to \d+ Selected|Apply to \d+ Selected Without Backing Up|Apply to \d+ Selected", "no Apply")
                 self.assertNotIn("Nothing found", text)
@@ -4816,28 +4835,32 @@ class PageStructureTests(unittest.TestCase):
                     self.assertIn("<h2>Merge Duplicate Plex Records</h2>", html)
                     self.assertNotIn("Framed:", text)                                          # (no header over the rows)
                     self.assertIn('<div class="mgdrop"><div class="mgdroplbl">Metadata lost</div><div class="mgdim">', html)  # (the folded record: red, greyed inside)
-                    self.assertNotIn('class="note badbox mergefirst"', html)
+                    self.assertNotIn(">More than 1 Plex record<", html)
                 else:
                     self.assertIn(">Merge Duplicates</a>", html, "the nav keeps the short name")
                     merged = {str(k) for r in st["tools"]["merge"]["scan"]["rows"] for k in r["rks"]}
-                    pending = [r for r in st["tools"][name]["scan"]["rows"] if str(r.get("rk") or "") in merged]
-                    self.assertEqual(html.count('class="note badbox mergefirst"'), len(pending), "a red box on each row whose record is to be merged, and on no other")
-                # the row's words are facts: nothing long enough to be an explanation outside an ⓘ
-                cells = re.findall(r"<td[^>]*>(.*?)</td>", table, re.S)
+                    pending = [r for r in app.tools[name].live("1", st["tools"][name]["scan"]["rows"]) if str(r.get("rk") or "") in merged]
+                    self.assertEqual(len(re.findall(r'class="badge b-fail sschip"[^>]*>More than 1 Plex record<', html)), len(pending), "a red tag on each row to do whose record is to be merged, and on no other")
+                # the row's words are facts: nothing long enough to be an explanation outside a chip (its text opens on a click)
+                cells = re.findall(r'<div class="(?:det|what)">(.*?)</div>', table.split('class="note applybox')[0], re.S)
+                self.assertTrue(cells)
                 for c in cells:
-                    plain = re.sub(r"<button class=\"info\".*?</button>", "", c)
-                    plain = re.sub(r"<[^>]+>", " ", plain)
+                    plain = re.sub(r"<[^>]+>", " ", c)
                     for sentence in re.split(r"(?<=[.!?])\s+", plain):
                         self.assertLess(len(sentence.strip()), 110, f"{name}: a row explains itself in the open: {sentence.strip()[:80]!r}")
-        # every switch off for the library: the rows stay, grey, after the live ones, with no Apply; the count drops to none
+        # every switch off for the library: no row has anything yellow (or red), so none is drawn — the summary counts them
+        # (the Library page shows every item) — and there's no Apply; the count drops to none
         for name, tool in app.tools.items():
             with self.subTest(page=name, when="switched off"):
                 app.settings.update({"tools": {name: {"1": {o["id"]: False for o in tool.options if not o.get("choices")}}}})
                 self.assertEqual(tool.counts()["libraries"]["1"], 0)
                 got = self._render(app.state(), name)
-                self.assertIn("0 flagged", got["text"])
-                self.assertIn("shown grey", got["text"])
-                self.assertIn("b-off", got["html"])
+                self.assertIn("No issues found", got["text"])
+                read = int(re.search(r"(\d+) (records|files) read", got["text"]).group(1))
+                self.assertIn(f"{read} pass current tests", got["text"])                               # (nothing switched on: every one passes)
+                self.assertNotIn(f"{read} pass all tests", got["text"])                                # (what was found is still there)
+                self.assertIn("Nothing to do", got["text"])
+                self.assertNotIn("cmprow", got["html"])
                 self.assertNotRegex(got["text"], r"Apply to \d+ Selected")
                 app.settings.update({"tools": {name: {}}})
         # the same pages with nothing found: a sentence, not a blank (the films' folders named for them, so nothing is to rename)
@@ -4855,7 +4878,7 @@ class PageStructureTests(unittest.TestCase):
                 self.assertIn("Nothing found", text)
                 self.assertIn("Scan Again", text)
         # a run, and its card at the bottom of the tool's page: the one card the Processes page lists too, with the ways back
-        self.assertIn("toolHistory(name)", js[js.index("  function toolPage("):js.index("  function toolTable(")])
+        self.assertIn("toolHistory(name)", js[js.index("  function toolPage("):js.index("  function toolKind(")])
         self.assertEqual(js.count('data-act="job-revert"'), 1)                                         # (only undoButtons draws it: on the run's card)
         self.assertIn("mine.slice(0, 20).map(runCard)", js)
         self.assertIn("jobs.forEach(function (j) { out += runCard(j); });", js)
@@ -4880,6 +4903,448 @@ class PageStructureTests(unittest.TestCase):
             self.assertIn("Movies", text)                                                           # (the library tabs)
             self.assertTrue("Running the checks" in text or "items checked" in text, text[:300])   # (the Health view: fetched when the page opens)
 
+    # the tools' library, with something for every tool: a duplicate record, a duplicate file, a loose film, a hard link, an AVI
+    def _tools_library(self):
+        tt = ToolsTests()
+        app, plex, client, cat, _ = tt._app()
+        rootd = os.path.join(cat["root"], "Movies")
+        copy = os.path.join(rootd, "Film 1 (2011) [copy].mkv")
+        fakes.make_mkv(copy, 1024 * 1024)
+        plex.cat["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000})
+        twin = os.path.join(rootd, "Movie & Friends 2 (2012)", "Movie 2 twin.mkv")
+        shutil.copy2(cat["movies"][2]["path"], twin)
+        plex.cat["movies"][2]["more"] = [twin]
+        os.link(cat["movies"][3]["path"], os.path.join(rootd, "Film 3 (2013) link.mkv"))
+        avi = os.path.join(rootd, "Old Film (2001).avi")
+        with open(avi, "wb") as fh:
+            fh.write(b"x" * 100)
+        plex.cat["movies"].append({"path": avi, "size": 100, "kbps": 1, "key": "301", "title": "Old Film", "year": 2001, "guid": "plex://movie/301", "duration": 5400000})
+        app.scan_library()
+        for name, tool in app.tools.items():
+            tt._run(tool, tool.scan_async("1"))
+        return app, tt
+
+    @staticmethod
+    def _cards(html):
+        """The comparison cards on a page, each as its HTML: [(tick, top, sides)] — the tick's tag (or ""), the row's own
+        line (its name and checks), and the rest (the sides, the arrow, the boxes, the files)."""
+        out = []
+        starts = [m.start() for m in re.finditer(r'<div class="ssitem cmprow', html)]
+        for k, a in enumerate(starts):
+            seg = html[a:starts[k + 1] if k + 1 < len(starts) else html.find('<div class="note applybox', a) if html.find('<div class="note applybox', a) > 0 else len(html)]
+            top_end = seg.index('</span></div>', seg.index('class="sswarn"')) if 'class="sswarn"' in seg else 0
+            tick = re.search(r'<input type="checkbox" data-act="tool-sel"[^>]*>', seg[:top_end])
+            out.append((tick.group(0) if tick else "", seg[:top_end], seg[top_end:]))
+        return out
+
+    def test_tool_rows_use_the_comparison_card(self):
+        """Every tool draws its rows with the one comparison card (cmpRow), passing only what's its own: the labels of its
+        two sides, whether the arrow between them can be turned (the side kept chosen) or is fixed, its checks, its files.
+        A change to the card is a change to every tool. Merge Duplicates: Metadata kept / lost, the arrow a button;
+        Duplicate Versions: This file kept / deleted, the arrow a button; Organize Folders: Original folder / Folder moved
+        here, fixed; Convert to MKV: Original file deleted / New MKV created, fixed; Unlink Files: File kept / what's done to
+        the link (This hardlink deleted, Hardlink replaced with file, Symlink replaced with file), fixed; the Optimizer, a
+        card per file: File as it is now / File after optimizing, fixed (nothing it does is turned back but by the backup).
+        Each card lists its files under it, numbered as its File n chips — grey, each opening to what happens to the file."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        app, tt = self._tools_library()
+        # the source: the tools pass a card; only cmpRow draws one (its frames, its arrow); toolPage and the optimizer call it
+        for name in app.tools:
+            body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S).group(1)
+            self.assertRegex(body, r"\n      card: function \(r(, sc)?\)", f"page{name.capitalize()} doesn't pass its rows as cards (card:)")
+            self.assertNotRegex(body, r"\n      (rows|columns|row|sub): ", f"page{name.capitalize()} draws rows of its own")
+        cmp = js[js.index("  function cmpRow("):js.index("  function cmpQuiet(")]
+        for mark in ('class="mgkeep"', 'class="mgdrop"', 'class="ssarrow mgarrow', 'class="ssnotes ssfilelist"'):
+            self.assertEqual(js.count(mark), cmp.count(mark), f"{mark} drawn outside cmpRow")
+            self.assertGreater(cmp.count(mark), 0)
+        self.assertIn("onPage.map(cmpRow)", js[js.index("  function toolPage("):js.index("  function toolKind(")])
+        self.assertIn("cards.map(cmpRow)", js[js.index("  function pageOptimizer("):js.index("  // ------------------------------------------------------------ a folder into its own dataset")])
+        for gone in ("function toolTable(", "function versionsRows(", "function mergeRows(", "vssame", "merge-swap", "function optCard(", "optlibs"):
+            self.assertNotIn(gone, js)
+        # as drawn: each tool's labels, its arrow, its files
+        st = app.state()
+        labels = {"merge": ("Metadata kept", "Metadata lost", True), "versions": ("This file kept", "This file deleted", True),
+                  "folders": ("Folder moved here", "Original folder", False), "convert": ("New MKV created", "Original file deleted", False),
+                  "unlink": ("File kept", "This hardlink deleted|Hardlink replaced with file|Symlink replaced with file", False)}
+        self.assertEqual(set(labels), set(app.tools))
+        for name, (keep, drop, turns) in labels.items():
+            with self.subTest(page=name):
+                html = self._render(st, name)["html"]
+                cards = self._cards(html)
+                self.assertTrue(cards, "no cards")
+                for _tick, _top, rest in cards:
+                    self.assertRegex(rest, r'<div class="mgkeep"><div class="mgkeeplbl">(' + keep + r')</div>')
+                    self.assertRegex(rest, r'<div class="mgdrop"><div class="mgdroplbl">(' + drop + r')</div><div class="mgdim">')
+                    if turns:
+                        self.assertRegex(rest, r'<button type="button" class="ssarrow mgarrow" data-act="tool-swap" data-tool="' + name + '"')
+                    else:
+                        self.assertRegex(rest, r'<span class="ssarrow mgarrow fixed" aria-hidden="true"><span>(→|←)</span></span>')
+                        self.assertNotIn("tool-swap", rest)
+                    self.assertRegex(rest, r'<div class="ssnotes ssfilelist"><div class="ssfiles many"><div><span class="ssfn">1</span> ')
+                    # the File n chips: grey, never green or yellow (a colour on a card is a check's)
+                    self.assertRegex(rest, r'class="badge b-grey sschip"[^>]*>File 1<')
+                    self.assertNotRegex(rest, r'class="badge b-(pass|warn) sschip"[^>]*>File \d')
+        # each file chip opens to what happens to the file: the tools' words for it
+        for words in ("This is the existing file of the record kept: it will be kept.", "This file isn’t attached to this item yet: it will be transferred over",
+                      "This is the existing file: it will be kept, where it is.", "This copy will be set aside in the library’s trash folder",
+                      "This is the original file: it will be deleted once Plex has the new MKV", "This MKV will be written next to the original",
+                      "This file is here now: it will be moved to the new folder", "This hard link will be replaced with a file of its own",
+                      "This path to the file will be deleted", "This symlink will be replaced with a file of its own"):
+            self.assertIn(words, js)
+        # the merge card's file chips: grey, opening to the explanation (syncSide's ``explain``) — the Sync view's own stay coloured
+        side = js[js.index("  function fileChips("):js.index("  function syncSide(")]
+        self.assertIn('(explain ? "grey" : both ? "pass" : "warn")', side)
+        self.assertEqual(js.count("mergeFileKept)") + js.count("mergeFileLost)"), 2)
+        # the unlink labels follow the option: removing the paths Plex doesn't list, the hard link is deleted
+        st2 = copy.deepcopy(st)
+        st2["tools"]["unlink"]["enabled"] = {"1": {"hardlink": True, "symlink": True, "remove": "remove"}}
+        (card,) = self._cards(self._render(st2, "unlink")["html"])
+        self.assertIn('<div class="mgdrop"><div class="mgdroplbl">This hardlink deleted</div>', card[2])
+        self.assertIn('<div class="mgkeep"><div class="mgkeeplbl">File kept</div>', card[2])
+        # the optimizer: a section per library with its choices, and a card per file to do — the file now (its warnings
+        # yellow, what's right green), and after (each setting Ideal, or Pass); ticked, then Optimize Selected
+        st["optimizer"] = dict(st["optimizer"], configured=True, version="9")
+        st["optimizer"]["libraries"] = {"1": {"files": 6, "mkv": 6, "mkv_done": 2, "todo": 2, "sync_todo": 1, "why": {"new": 1, "compression": 1}, "conflicts": [],
+                                              "zfs": {"status": "pass", "issues": [], "rs": 1048576, "best": 1048576, "compression": "zstd-9", "rs_status": "ideal", "compression_status": "pass"}}}
+        st["settings"] = dict(st["settings"], optimizer={"libraries": {"1": {"mkv": True}}})
+        files = [{"path": "/m/Film 1 (2011)/Film 1.mkv", "title": "Film 1 (2011)", "poster": "", "name": "Film 1.mkv", "size": 4000, "problems": ["new", "compression"], "mkv": True, "compression": "Unknown"},
+                 {"path": "/m/Film 2 (2012)/Film 2.mkv", "title": "Film 2 (2012)", "poster": "", "name": "Film 2.mkv", "size": 3000, "problems": ["tags"], "mkv": True, "compression": "Optimal"}]
+        st["_optfiles"] = {"library": "1", "files": files, "total": 2, "offset": 0, "paths": [f["path"] for f in files], "pages": [{"offset": 0, "from": "F", "to": "F"}]}
+        from plexcache import safety
+        st["_ready"] = safety.readiness(app, "1", 0)
+        html = self._render(st, "optimizer")["html"]
+        self.assertNotIn("What Optimize Does", html)
+        # the standard tool page: the library tabs, the library's choices on top (as every tool's options), Scan Again
+        self.assertRegex(html, r'<button role="tab" type="button" aria-selected="true" data-act="tool-lib" data-tool="optimizer" data-key="1">.*?<span class="count warn"[^>]*>2</span>')
+        self.assertRegex(html, r'<div class="optgrid"><div class="chk lhchk optrow">.*?data-optlib="1" data-optkey="sync" checked')
+        self.assertIn('data-optlib="1" data-optkey="mkv" checked', html)
+        self.assertIn('data-act="optimizer-survey"', html)
+        self.assertIn('data-guide="tool-optimizer"', html)                                              # (What it does: behind How it works)
+        self.assertNotIn("What It Does", html)
+        cards = self._cards(html)
+        self.assertEqual(len(cards), 2)
+        one = cards[0]
+        self.assertRegex(one[0], r'data-tool="optimizer" data-id="/m/Film 1 \(2011\)/Film 1.mkv"')        # (ticked, as every tool's rows)
+        self.assertNotIn("disabled", one[0])
+        self.assertIn('<div class="mgdrop"><div class="mgdroplbl">File as it is now</div><div class="sscard">', one[2])  # (not greyed: its warnings to read)
+        self.assertIn('<div class="mgkeep"><div class="mgkeeplbl">File after optimizing</div>', one[2])
+        self.assertIn('<span class="ssarrow mgarrow fixed" aria-hidden="true"><span>→</span></span>', one[2])
+        self.assertRegex(one[2], r'class="badge b-warn sschip"[^>]*>Not optimized yet<')
+        self.assertRegex(one[2], r'class="badge b-warn sschip"[^>]*>Not in the dataset’s compression<')
+        self.assertRegex(one[2], r'class="badge b-pass sschip"[^>]*>Record size 1M<')                     # (right already)
+        self.assertRegex(one[2], r'class="badge b-pass sschip"[^>]*>Record size 1M · Ideal<')
+        self.assertRegex(one[2], r'class="badge b-pass sschip"[^>]*>Compression ZSTD-9 · Pass<')
+        self.assertRegex(one[2], r'class="badge b-pass sschip"[^>]*>Metadata at the end · Ideal<')
+        self.assertRegex(cards[1][2], r'class="badge b-warn sschip"[^>]*>Tags to strip<')
+        self.assertRegex(cards[1][2], r'class="badge b-pass sschip"[^>]*>Metadata at the end<')
+        self.assertIn('data-act="opt-all" data-key="1"> All 2 (every page)', html)
+        self.assertRegex(html, r'data-act="optimize-sel" data-key="1" disabled>Optimize 0 Selected<')    # (nothing ticked yet)
+        # nothing to do: no card; the service not set up: red, and nothing can be ticked
+        lib = st["optimizer"]["libraries"]["1"]
+        self.assertNotIn("cmprow", self._render(dict(st, optimizer=dict(st["optimizer"], libraries={"1": dict(lib, todo=0, why={})})), "optimizer")["html"])
+        html = self._render(dict(st, optimizer=dict(st["optimizer"], configured=False)), "optimizer")["html"]
+        self.assertIn('class="note badbox"', html)
+        self.assertTrue(all("disabled" in c[0] for c in self._cards(html)))
+        self.assertNotIn('data-act="optimize-sel"', html)
+
+    def test_card_boxes_open_one_at_a_time_and_in_pairs(self):
+        """On a card, one box opens at a time: opening another closes it. A box with a pair (its file, the mirror, a
+        setting) opens with the first of its pair on each other side, to read the two side by side. The files under a
+        card are listed by their whole path less the folders they all share (one file: its whole path). The mirror is
+        said on every side of Duplicate Versions — Record destroyed there in place of Listed there too."""
+        opn = self._js_fn("chipsOpen")
+        items = [{"id": "path", "pair": "file"}, {"id": "there", "pair": "mirror"}, {"id": "linked"}, {"id": "two", "pair": "file"}]
+        cases = [[None, "c/s1"], [{"id": "c/s1/path", "pair": "file", "group": "c/s1"}, "c/s1"], [{"id": "c/s1/path", "pair": "file", "group": "c/s1"}, "c/s2"],
+                 [{"id": "c/s1/there", "pair": "mirror", "group": "c/s1"}, "c/s2"], [{"id": "c/s1/linked", "pair": "", "group": "c/s1"}, "c/s2"]]
+        got = self._node(opn + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(function (c) { return chipsOpen(c[0], c[1], " + json.dumps(items) + "); })));")
+        self.assertEqual(got, [[False, False, False, False],
+                               [True, False, False, False],      # the one opened, alone on its own side
+                               [True, False, False, False],      # its pair on the other side: the first of the pair only
+                               [False, True, False, False],
+                               [False, False, False, False]])    # no pair: nothing opens with it
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        handler = js[js.index('act === "tool-chip"'):js.index('act === "tool-history"')]
+        self.assertIn('TOOL_OPEN[ck] = cur && cur.id === el.dataset.id ? null : { id: el.dataset.id', handler)  # (one per card: replaced, never added to)
+        shown = self._js_fn("pathsShown")
+        got = self._node(shown + "\nconsole.log(JSON.stringify([pathsShown(['/data/Movies/A (2004)/A (2004).mkv', '/data/Movies/A (2004).mkv']), pathsShown(['/data/Movies/A.mkv']),"
+                         " pathsShown(['/d/M/A/x.mkv', '/d/M/A/y.mkv']), pathsShown(['/d/x.mkv', '/e/x.mkv'])]));")
+        self.assertEqual(got, [["A (2004)/A (2004).mkv", "A (2004).mkv"], ["/data/Movies/A.mkv"], ["x.mkv", "y.mkv"], ["d/x.mkv", "e/x.mkv"]])
+        # Duplicate Versions with a mirror: Listed there too on the file kept; Record destroyed there in its place on the copy
+        app, tt = self._tools_library()
+        st = copy.deepcopy(app.state())
+        sc = st["tools"]["versions"]["scan"]
+        sc["mirror"] = {"name": "drsassafras"}
+        row = next(r for r in sc["rows"] if r.get("extras") and not r.get("unlisted"))
+        row["keep"]["there"] = True
+        row["extras"][0]["there"] = True
+        row["ending"][row["keep"]["path"]]["there"] = [row["extras"][0]["path"]]
+        card = next(c for c in self._cards(self._render(st, "versions")["html"]) if row["title"] in c[1])
+        keep, drop = card[2].split('<div class="mgdrop">')[0], card[2].split('<div class="mgdrop">')[1]
+        self.assertIn(">Listed on drsassafras too<", keep)
+        self.assertIn(">Record destroyed on drsassafras<", drop)
+        self.assertNotIn(">Listed on drsassafras too<", drop)
+        self.assertIn('data-pair="mirror"', drop)
+
+    def test_rows_to_do_come_first_and_tags_sit_in_the_card(self):
+        """A tool's rows that can be done come first, then the ones a red tag stops. The tags are in the card: the row's
+        issue (Loose file) on the side it's about, More than 1 Plex record on the side that stays — never a box below.
+        Off a tool's page the menu's list of tools is hidden (its display can't show it)."""
+        app, tt = self._tools_library()
+        st = app.state()
+        html = self._render(st, "folders")["html"]
+        cards = self._cards(html)
+        self.assertGreater(len(cards), 1)
+        ticks = [" disabled" not in c[0] for c in cards]
+        self.assertEqual(ticks, sorted(ticks, reverse=True), "a row that can be done after one that's stopped")
+        self.assertTrue(ticks[0])
+        self.assertFalse(ticks[-1])
+        for _tick, top, rest in cards:
+            self.assertNotIn("Loose file", top)
+            self.assertRegex(rest.split('<div class="mgkeep">')[0], r'class="badge b-warn sschip"[^>]*>Loose file<')
+        stopped = cards[-1][2]
+        self.assertRegex(stopped.split('<div class="mgkeep">')[1], r'class="badge b-fail sschip"[^>]*>More than 1 Plex record<')
+        self.assertNotIn("badbox", stopped)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "plexcache", "web", "app.css"), encoding="utf-8") as fh:
+            self.assertIn(".toolsub[hidden]{display:none}", fh.read())
+        with open(os.path.join(root, "plexcache", "server.py"), encoding="utf-8") as fh:
+            self.assertIn('path == "/api/optimizer/survey"', fh.read())                                   # (the Optimizer's Scan Again)
+
+    def test_long_lists_are_paged_and_all_means_every_page(self):
+        """A tool's cards come a page at a time (Entries per Tools page: 40 unless set), the pages told by what's on them; All ticks every row that can
+        be ticked, on every page, and This page the ones on the page open. The Optimizer's libraries the same, the server
+        handing a page of a library's files at a time (files_todo), and a ticked set of files optimized on their own."""
+        app, tt = self._tools_library()
+        st = copy.deepcopy(app.state())
+        sc = st["tools"]["convert"]["scan"]
+        (row,) = sc["rows"]
+        sc["rows"] = [dict(row, id=f"r{k:02d}", title=f"Film {k:02d}", rk="") for k in range(50)]
+        html = self._render(st, "convert")["html"]
+        self.assertEqual(len(self._cards(html)), 40)
+        self.assertIn('class="pager det"', html)
+        self.assertIn('data-act="tool-page" data-tool="convert" data-offset="40"', html)
+        self.assertIn("> All 50 (every page)</label>", html)
+        # the preference, apart from the Library page's: 25 a page
+        st25 = copy.deepcopy(st)
+        st25["settings"]["general"]["tool_page_size"] = 25
+        html25 = self._render(st25, "convert")["html"]
+        self.assertEqual(len(self._cards(html25)), 25)
+        self.assertIn('data-act="tool-page" data-tool="convert" data-offset="25"', html25)
+        system = self._render(st, "system")["text"]
+        self.assertIn("Entries per Tools page", system)
+        self.assertIn("Entries per Library page", system)
+        self.assertIn('data-act="tool-pagesel" data-tool="convert"', html)
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        handler = js[js.index('act === "tool-all"'):js.index('act === "tool-scan"')]
+        self.assertIn("tu.can", handler)                                                                 # (every row that can be ticked: every page's)
+        # the optimizer's files, a page at a time, from the last survey
+        op = app.optimizing
+        op.todo = {"1": [{"path": f"/m/F{k:02d}.mkv", "title": f"F{k:02d}", "poster": "", "name": f"F{k:02d}.mkv", "size": 1, "problems": ["new"], "mkv": True, "compression": None} for k in range(30)]}
+        got = op.files_todo("1", 25, 25)
+        self.assertEqual((got["total"], got["offset"], len(got["files"]), len(got["paths"])), (30, 25, 5, 30))
+        self.assertEqual([p["offset"] for p in got["pages"]], [0, 25])
+        self.assertEqual(op.files_todo("2")["total"], 0)
+
+    def test_what_is_still_counted_turns_and_options_say_their_count(self):
+        """A count not known yet isn't drawn as nothing to do: a library still being read, or read and its count not worked
+        out, shows a turning wheel on its tab and on the Tools page's card — and the count is worked out in the background
+        (counts() asks for it, once per state of the data), so it comes without opening the tool. The Optimizer the same
+        while its first scan runs, with a bar that fills (done of total) and, once there's a scan before, its findings said
+        to be the last scan's. Every option is one line: its ⓘ, its choice, and on the right what the scan found for it."""
+        app, tt = self._tools_library()
+        st = copy.deepcopy(app.state())
+        libs = [l for l in st["library"]["libraries"] if l.get("kind")]
+        self.assertGreaterEqual(len(libs), 2)
+        k1, k2 = str(libs[0]["key"]), str(libs[1]["key"])
+        st["tool_counts"]["convert"] = {"total": 1, "ignored": 0, "libraries": {k1: 1}, "pending": [k2]}
+        html = self._render(st, "convert")["html"]
+        self.assertRegex(html, r'data-tool="convert" data-key="' + k1 + r'">.*?<span class="count warn"[^>]*>1</span></button>')
+        self.assertRegex(html, r'data-tool="convert" data-key="' + k2 + r'">(?:(?!</button>).)*<span class="count busy"[^>]*><span class="spin"')
+        tools = self._render(st, "tools")["html"]
+        self.assertRegex(tools, r'href="/convert" data-nav>[^<]*</a> <span class="count busy"')
+        # the option's line: what the scan found for it, on the right
+        self.assertRegex(html, r'<div class="optgrid"><div class="chk lhchk optrow">')
+        self.assertRegex(html, r'class="chk lhchk optrow">(?:(?!class="chk lhchk optrow").)*<span class="badge b-(warn|pass|off)">\d+</span></div>')
+        # the background count: a library read but not worked out, worked out without the page
+        tool = app.tools["convert"]
+        with tool.lock:
+            tool._analysis.clear()
+        self.assertIn(k1, tool.counts()["pending"])
+        for _ in range(200):
+            if k1 not in tool.counts()["pending"]:
+                break
+            time.sleep(0.05)
+        self.assertNotIn(k1, tool.counts()["pending"])
+        self.assertIn(k1, tool.counts()["libraries"])
+        # the optimizer: its first scan running — the tabs and the card turn; the bar fills
+        st["optimizer"] = dict(st.get("optimizer") or {}, configured=True, surveying=True, libraries={}, survey_progress={"done": 250, "total": 1000})
+        html = self._render(st, "optimizer")["html"]
+        self.assertIn('<span class="count busy"', html)
+        self.assertIn("250 of 1,000 · 25%", html)
+        self.assertIn('aria-valuenow="25"', html)
+        self.assertRegex(self._render(st, "tools")["html"], r'href="/optimizer" data-nav>[^<]*</a> <span class="count busy"')
+        # a scan again: the last scan's findings shown, and said to be
+        st["optimizer"]["libraries"] = {k1: {"files": 6, "mkv": 6, "mkv_done": 2, "todo": 2, "sync_todo": 1, "mkv_todo": 2, "why": {"new": 2}, "conflicts": [],
+                                             "zfs": {"status": "pass", "issues": [], "rs": 1048576, "best": 1048576, "compression": "zstd-9"}}}
+        st["optimizer"]["surveyed_at"] = time.time() - 60
+        html = self._render(st, "optimizer")["html"]
+        self.assertIn("From the last scan:", html)
+        self.assertIn("Scanning…", html)
+
+    def test_check_colours_mean_the_same_everywhere(self):
+        """One rule for the colours of a tool's checks (rowSeverity), held here for every tool: yellow is what there is to
+        do — a row with one can be ticked; red stops it — a row with one can't be ticked, whatever else it has, and the
+        server won't do it either; grey (and green) never change anything. Only the row's issue is ever yellow (given as
+        ``issue``, so its switch decides); inside a card's sides, a colour is a check's, and counts (the rest is greyed).
+        A tool page draws only the rows with a yellow or a red check; the Library page shows every item. A row on a record
+        Merge Duplicates would merge is red (merge first), on the page and on the server."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        fn = self._js_fn("rowSeverity")
+        cases = [[], ["warn"], ["fail"], ["warn", "fail"], ["info", "grey", "off", "pass"], ["warn", "info"], ["fail", "info"]]
+        got = self._node(fn + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(rowSeverity)));")
+        self.assertEqual([(g["live"], g["blocked"], g["shown"]) for g in got],
+                         [(False, False, False), (True, False, True), (False, True, True), (True, True, True), (False, False, False), (True, False, True), (False, True, True)])
+        # the tools' cards give yellow only as their issue: never a status of "warn"
+        for fn_name in ("mergeCard", "versionsCard"):
+            body = js[js.index("  function " + fn_name + "("):]
+            body = body[:body.index("\n  }\n") + 4]
+            self.assertNotIn('status: "warn"', body, f"{fn_name} gives a yellow that isn't its issue")
+        for name in ("folders", "unlink", "convert"):
+            body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S).group(1)
+            self.assertNotIn('status: "warn"', body, f"page{name.capitalize()} gives a yellow that isn't its issue")
+        self.assertIn('return String(html).replace(/\\bb-(warn|fail)\\b/g, "b-grey")', js)            # (a side drawn by the tool's own code: greyed)
+        # as drawn: every row shown has a yellow or a red; its tick is open exactly when it has yellow and no red; yellow only
+        # on its own line, never inside the sides; All ticks those rows and no other
+        app, tt = self._tools_library()
+        st = app.state()
+        merged = {str(k) for r in st["tools"]["merge"]["scan"]["rows"] for k in r["rks"]}
+        for name in app.tools:
+            with self.subTest(page=name):
+                html = self._render(st, name)["html"]
+                cards = self._cards(html)
+                self.assertTrue(cards)
+                ticks = 0
+                for tick, top, rest in cards:
+                    yellow, red = "b-warn" in top + rest, "b-fail" in top + rest or "note badbox" in rest
+                    self.assertTrue(yellow or red, f"a row with nothing yellow or red: {top[:200]}")
+                    self.assertEqual(" disabled" not in tick, yellow and not red, tick)
+                    ticks += yellow and not red
+                n = len(st["tools"][name]["scan"]["rows"])
+                self.assertLessEqual(len(cards), n)
+                live = app.tools[name].live("1", st["tools"][name]["scan"]["rows"])
+                pending = [r for r in live if name != "merge" and str(r.get("rk") or "") in merged]
+                self.assertEqual(len(re.findall(r'class="badge b-fail sschip"[^>]*>More than 1 Plex record<', html)), len(pending))  # (a tag inside the card)
+                for r in pending:  # (the server keeps the page's rule: a row on a record to merge isn't done)
+                    self.assertFalse(app.tools[name].apply_async([r["id"]]), r["id"])
+                if ticks:
+                    self.assertIn('data-act="tool-all"', html)
+                else:
+                    self.assertNotIn('data-act="tool-apply"', html)
+
+    def test_check_pages_show_only_what_they_flag(self):
+        """File Checks and Plex Checks show only the items their checks flag — an orange chip, or a grey one (ignored) —
+        never an item with nothing flagged: those are counted, and the Library page lists every item (its view is left as
+        it is). With nothing flagged, the page says so."""
+        from plexcache.libhealth import library_health
+        app, tt = self._tools_library()
+        st = app.state()
+        h = jsonable(library_health(app, "1"))
+        for name, cat in (("filechecks", "file"), ("plexchecks", "plex")):
+            with self.subTest(page=name):
+                ids = {c["id"] for c in h["checks"][cat]}
+                on = sorted(c["id"] for c in h["checks"][cat] if c.get("on") and not c.get("of"))
+                fake = json.loads(json.dumps(h))
+                its = fake["items"]
+                self.assertGreaterEqual(len(its), 2)
+                its[0]["results"] = [{"id": on[0], "category": cat, "text": "found", "ignored": False}]
+                for it in its[1:]:
+                    it["results"] = [r for r in it["results"] if r["id"] not in ids]
+                html = self._render(dict(st, _health=fake), name)["html"]
+                self.assertEqual(html.count('class="ssitem lhitem'), 1, "an item with nothing flagged on a check page")
+                self.assertNotIn("Nothing flagged", html)
+                # counted, as on every tool's page: the top's chips, the checks as the tools' options (optionGrid)
+                n = len(its)
+                self.assertRegex(html, r'<div class="lctl tooltop"><div class="seg small strong".*?<div class="toolstats"><span class="badge b-pass">' + str(n) + r' items read</span>'
+                                       r'<span class="badge b-warn"[^>]*>1 issue found</span><span class="badge b-pass"[^>]*>' + str(n - 1) + r' pass current tests</span>')
+                self.assertIn('<div class="optgrid"><div class="optcell"><div class="chk lhchk optrow">', html)
+                self.assertNotIn('class="lhgrid"', html)
+                for it in its:
+                    it["results"] = [r for r in it["results"] if r["id"] not in ids]
+                text = self._render(dict(st, _health=fake), name)["text"]
+                self.assertIn("No item has anything these checks flag", text)
+        # the Library page's view is every item's, as before
+        lib = self._render(dict(st, _health=h), "library")["html"]
+        self.assertNotIn("No item has anything these checks flag", lib)
+        self.assertIn('<div class="lhgrid">', lib)
+        self.assertNotIn("tooltop", lib)
+        # the tabs, drawn by the one function every tool's page draws them with (libTabs), each with its count — the
+        # page's checks' findings there, ignored items left out — or the turning wheel while it's being counted
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        for fn in ("toolLibs", "optLibTabs", "checksPage"):
+            body = js[js.index("  function " + fn + "("):]
+            body = body[:body.index("\n  }\n")]
+            self.assertIn("libTabs({", body, f"{fn} draws library tabs of its own")
+            self.assertNotIn('role="tab"', body, f"{fn} draws library tabs of its own")
+        for name, cat in (("filechecks", "file"), ("plexchecks", "plex")):
+            st2 = dict(st, _health=h, health_counts={"1": {"file": 3, "plex": 0, "stamp": 7}}, libdata={"libraries": {"1": {"ready": True, "stamp": 7}}, "queue": [], "current": None})
+            html = self._render(st2, name)["html"]
+            self.assertRegex(html, r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count' + (' warn"[^>]*>3<' if cat == "file" else '"[^>]*>0<'))
+            st2["libdata"]["libraries"]["1"]["stamp"] = 8                                              # (read again: counted again)
+            self.assertRegex(self._render(st2, name)["html"], r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count busy"')
+
+    def test_checks_are_worked_out_in_the_background(self):
+        """Library Health is worked out in the background, as the tools' counts are: the state asks for each library's
+        count, and one not worked out — or worked out before a check was switched — is worked out in a thread while its
+        tab turns; the answer is kept, so opening a check page, or a library on it, shows it at once."""
+        app, tt = self._tools_library()
+        with app._health_lock:
+            app._health.clear()
+        app.health_counts.clear()
+        app._health_tried.clear()
+        self.assertNotIn("1", app._health_counts_now())                                              # (asked for: being worked out)
+        for _ in range(200):
+            if "1" in app.health_counts:
+                break
+            time.sleep(0.05)
+        hc = app._health_counts_now()["1"]
+        self.assertFalse(hc["stale"])
+        got = app.library_health("1")
+        self.assertIs(app.library_health("1"), got)                                                   # (kept: not worked out again)
+        # a check switched: the count is stale (the tab turns) until worked out again, by itself
+        app.settings.update({"library_health": {"checks": {"linked_file": False}}})
+        self.assertTrue(app._health_counts_now()["1"]["stale"])
+        for _ in range(200):
+            if not app._health_counts_now()["1"]["stale"]:
+                break
+            time.sleep(0.05)
+        self.assertFalse(app._health_counts_now()["1"]["stale"])
+        self.assertIsNot(app.library_health("1"), got)
+
+    def test_info_boxes_show_no_code(self):
+        """What's behind every ⓘ shows as written for it: marks (<strong>, <code>…) as marks, never as text — a help text
+        from the server goes through richText, which keeps the few marks help is written with. Every page is drawn, with
+        a library holding something for every tool and check, and every ⓘ's text searched for markup escaped into text."""
+        from plexcache.libhealth import library_health
+        app, tt = self._tools_library()
+        st = app.state()
+        st["_health"] = jsonable(library_health(app, "1"))
+        st["settings"] = dict(st["settings"], tools={"folders": {"1": {"loose": True, "rename": True}}})
+        escaped = re.compile(r"&lt;/?[a-zA-Z][a-zA-Z0-9]*(\s[^&]*)?/?&gt;")
+        seen = 0
+        for page in self.PAGES_DRAWN + ("filechecks", "plexchecks"):
+            with self.subTest(page=page):
+                got = self._render(st, page)
+                for k, html in got["info"].items():
+                    seen += 1
+                    m = escaped.search(re.sub(r"<code>.*?</code>", "", html))  # (in code, <tool> is a placeholder written as such)
+                    self.assertIsNone(m, f"{page}: an ⓘ shows code as text: {m and m.group(0)!r} in {html[:120]!r}")
+        self.assertGreater(seen, 50)
+        # the one that showed it: Organize Folders' Clean up folder names too, its <code> a mark
+        got = self._render(st, "folders")
+        self.assertTrue(any("<code>Title (Year)</code>" in h for h in got["info"].values()))
+
     def test_every_tool_says_what_apply_does(self):
         """Right before every tool's Apply, a box says what it does, what it changes (and where: this server, the folder
         sync, a mirror) and the backup made first — the rule for every tool: a tool page passes applies() to toolPage,
@@ -4894,7 +5359,7 @@ class PageStructureTests(unittest.TestCase):
         for name in app.tools:
             body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S).group(1)
             self.assertRegex(body, r"\n      applies: function \(sc\)", f"page{name.capitalize()} doesn't say what Apply does (applies:)")
-        self.assertIn("toolApply(name, t, split.live, spec.confirm, spec.applies(sc))", js)
+        self.assertIn("toolApply(name, t, cards.can, spec.confirm, spec.applies(sc))", js)
         # drawn with rows: the box, then the Apply row straight after it — what it does, what it changes, the backup plan
         rootd = os.path.join(cat["root"], "Movies")
         copy = os.path.join(rootd, "Film 1 (2011) [copy].mkv")
@@ -7265,6 +7730,9 @@ class OptimizerTests(unittest.TestCase):
         op.survey()
         # The record has just begun: no file's compression is known yet — every kind of file
         self.assertEqual((lib()["files"], lib()["mkv"], lib()["sync_todo"], lib()["todo"]), (3, 2, 3, 3))
+        self.assertLessEqual(lib()["mkv_todo"], lib()["todo"])                 # (what the MKV choice adds: the count on its line)
+        self.assertIsNone(op.snapshot()["survey_progress"])                 # (the bar's: only while a scan runs)
+        self.assertGreater(op.snapshot()["surveyed_at"], 0)
         self.assertEqual(lib()["compression"], {"unknown": 3})
         job = run_job(op)["job"]
         self.assertEqual((job["total"], job["rewritten"], job["optimized"], job["failed"]), (3, 3, 0, 0))
@@ -7612,6 +8080,34 @@ class OptimizerTests(unittest.TestCase):
             if not app.jobs.busy():
                 break
             time.sleep(0.05)
+
+    def test_optimize_only_the_files_ticked(self):
+        """The Optimizer page's Optimize Selected: only the files ticked (their Plex paths) are done; the same files asked
+        for twice are one job; the whole library is a job of its own, kept across a restart with its files."""
+        from plexcache import jobs
+        app, op, client, d, state = self._app(names=("a.mkv", "b.mkv", "c.mkv"))
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "sync": False}}}})
+        gate = threading.Event()
+
+        class Long(jobs.Job):
+            kind = "test"
+
+            def run(self):
+                gate.wait(5)
+        app.jobs.register("test", lambda args, saved: Long(app.jobs))
+        self.assertTrue(app.jobs.start(Long(app.jobs)))
+        pick = sorted(f.path for f in app.files)[1:2]
+        self.assertEqual(op.queue("1", files=pick), "queued")
+        self.assertIsNone(op.queue("1", files=list(pick)))                         # the same files once
+        self.assertEqual(app._load_json(jobs.QUEUE_FILE)["items"][0]["args"], {"library": "1", "mode": "optimize", "files": pick})
+        gate.set()
+        for _ in range(200):
+            j = app.jobs.snapshot()
+            if j and j.get("kind") == "optimize" and not j["running"]:
+                break
+            time.sleep(0.05)
+        self.assertEqual((j["kind"], j["files"], j["optimized"]), ("optimize", 1, 1), j)
+        self.assertEqual(sum(1 for f in app.files if op.file_status(app.map_path(f.path), "1", {}).get("problems")), 2)  # (the other two still to do)
 
     def test_resume_where_it_was_and_pause(self):
         from plexcache import jobs
@@ -9892,7 +10388,7 @@ class MQTTTests(unittest.TestCase):
         for bad in ({"port": 0}, {"interval": 1}, {"report_period": "year"}, {"base_topic": "a/#"}, {"discovery_prefix": ""}):
             with self.assertRaises(config.SettingsError, msg=bad):
                 self.app.settings.update({"mqtt": bad})
-        for bad in ({"backup": "none"}, {"page_size": 10}, {"page_size": 5000}, {"backup_days": 0}, {"backup_days": "14"}):
+        for bad in ({"backup": "none"}, {"page_size": 10}, {"page_size": 5000}, {"tool_page_size": 2}, {"tool_page_size": 500}, {"backup_days": 0}, {"backup_days": "14"}):
             with self.assertRaises(config.SettingsError, msg=bad):
                 self.app.settings.update({"general": bad})
         self.app.settings.update({"general": {"backup": "manual", "page_size": 50, "backup_days": 30}})
@@ -11287,11 +11783,14 @@ class ToolsTests(unittest.TestCase):
             tr.act("/nowhere", "keep")
 
     def test_duplicate_versions_wont_destroy_a_record(self):
-        """A copy whose deletion would destroy a Plex record — the only file of a record, here or on the mirrored server,
-        where the synced folder carries the deletion — isn't done: its row says Plex record destroyed in red, its tick is
-        greyed, and the page says to merge the records first. Once merged (both files versions of one record), it can be.
-        The page shows each row as two cards, the file kept and the file deleted, their paths behind File 1 and File 2;
-        a copy on no Plex record has a grey poster."""
+        """What deleting a copy does to a Plex record, said on its card in the colours every tool keeps (rowSeverity). A
+        copy that's the only file of a record on the mirrored server — the synced folder carries the deletion there — is
+        worth knowing, grey: Record destroyed on Starlit, with a grey box; it doesn't stop the row. One that's the only file
+        of a record here is red: Record destroyed, with a red box saying to merge the records first; the row can't be ticked,
+        and the server won't do it. The arrow between the cards chooses which copy is kept (keep_key, sent with Apply): the
+        server works the row out again for that choice — and refuses it when that choice would destroy a record here. The
+        page shows each row as two cards, the file kept and the file deleted, their paths behind File 1 and File 2 and
+        listed under them; a copy on no Plex record has a grey poster."""
         from plexcache.tools import versions as vmod
         # the rule itself: the files of a server ({path: record}); a record whose files are all deleted goes
         idx = {"/a": "1", "/b": "1", "/c": "2"}
@@ -11308,33 +11807,29 @@ class ToolsTests(unittest.TestCase):
         snap = self._run(tool, tool.scan_async("1"))
         (row,) = snap["scan"]["rows"]
         (x,) = row["extras"]
-        self.assertEqual((x["there"], x["ends_record_there"], x["ends_record"], row["blocked"]), (True, True, False, True))
-        self.assertFalse(tool.apply_async([row["id"]]))                                            # (not done)
-        self.assertFalse(tool.apply_async([row["id"]], {row["id"]: {"blocked": False}}))           # (nor when asked to)
-        self.assertTrue(os.path.exists(loose))
-        # the page: the two cards, which is which said; the copy in red, its tick greyed, merge first
-        st = app.state()
-        got = PageStructureTests._render(self, st, "versions")
+        self.assertEqual((x["there"], x["ends_record_there"], x["ends_record"], row["blocked"]), (True, True, False, False))  # (there: grey, not blocking)
+        # the page: the two cards, which is which said; the record there said in grey, the row tickable
+        got = PageStructureTests._render(self, app.state(), "versions")
         html, text = got["html"], got["text"]
         self.assertIn('<div class="mgkeep"><div class="mgkeeplbl">This file kept</div>', html)
         self.assertIn('<div class="mgdrop"><div class="mgdroplbl">This file deleted</div>', html)
-        self.assertLess(html.index("This file kept"), html.index("This file deleted"))             # (kept on the left)
-        self.assertNotIn("merge-swap", html)                                                       # (no choosing which is kept)
-        self.assertIn("Plex record destroyed", text)
-        self.assertRegex(html, r'class="badge b-fail sschip[^"]*"[^>]*>Plex record destroyed<')     # (red)
-        self.assertRegex(html, r'<input type="checkbox" data-act="tool-sel" data-tool="versions" data-id="' + re.escape(row["id"]) + '" disabled')
-        self.assertIn('class="note badbox vsblocked"', html)
+        self.assertLess(html.index("This file kept"), html.index("This file deleted"))             # (the tool's pick on the left)
+        self.assertIn('data-act="tool-swap" data-tool="versions" data-id="' + row["id"] + '"', html)  # (the arrow: choose which is kept)
+        self.assertRegex(html, r'class="badge b-info sschip[^"]*"[^>]*>Record destroyed on Starlit<')  # (grey)
+        self.assertIn('class="note greybox vsthere"', html)
         self.assertIn("Merge Duplicates</a> on Starlit", html)
-        self.assertIn("Listed on Starlit too", text)
+        self.assertNotIn("b-fail", html)
+        self.assertNotIn("badbox", html)
+        self.assertNotRegex(html, r'data-tool="versions" data-id="' + re.escape(row["id"]) + '" disabled')
         deleted = html[html.index("This file deleted"):]
-        self.assertIn("Listed on Starlit too", deleted)                                            # (on the deleted file's card)
+        self.assertIn(">Record destroyed on Starlit<", deleted)                                    # (on the deleted file's card, in place of…
+        self.assertNotIn("Listed on Starlit too", deleted)                                        # …Listed there too: the two are one box)
         self.assertIn(">File 1<", html)
         self.assertIn(">File 2<", html)
-        self.assertNotIn(loose, text)                                                              # (the paths behind the File chips)
-        self.assertIn("Apply to 0 Selected", text)
+        self.assertIn('<span class="ssfn">2</span>', html)                                         # (the files listed under the cards)
         js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
         self.assertIn("can’t be ticked until Merge Duplicates", re.search(r"var VERSIONS_HELP = N\((.*?)\);\n", js).group(1))  # (said in How it works)
-        # merged there: both files versions of one record — the copy can go
+        # merged there: both files versions of one record — nothing said of a record there
         other.cat["movies"].pop()
         other.cat["movies"][0]["more"] = [loose]
         app.other.indexes.clear()
@@ -11342,31 +11837,72 @@ class ToolsTests(unittest.TestCase):
         (row,) = snap["scan"]["rows"]
         self.assertEqual((row["extras"][0]["there"], row["extras"][0]["ends_record_there"], row["blocked"]), (True, False, False))
         html = PageStructureTests._render(self, app.state(), "versions")["html"]
-        self.assertNotIn("Plex record destroyed", html)
-        self.assertNotIn("vsblocked", html)
-        self.assertNotRegex(html, r'data-tool="versions" data-id="' + re.escape(row["id"]) + '" disabled')
-        # split again there before Apply: checked again then, and refused
-        other.cat["movies"][0].pop("more")
-        other.cat["movies"].append({"path": loose, "size": 1, "kbps": 1, "key": "800", "title": "Film 0", "year": 2010})
-        app.other.indexes.clear()
-        snap = self._run(tool, tool.apply_async([row["id"]]))
-        (res,) = snap["results"]
-        self.assertEqual(res["result"], "failed")
-        self.assertIn("destroy a Plex record", en(res["reason"]))
-        self.assertTrue(os.path.exists(loose))
+        self.assertNotIn("Record destroyed", html)
         # a copy on disk Plex doesn't list here: no record, so a grey poster on its card
         m.pop("more")
-        other.cat["movies"].pop()
+        other.cat["movies"][0].pop("more")
         app.other.indexes.clear()
         app.scan_library()
         snap = self._run(tool, tool.scan_async("1"))
         (row,) = snap["scan"]["rows"]
         self.assertTrue(row["unlisted"])
-        html = PageStructureTests._render(self, app.state(), "versions")["html"]
+        self.assertFalse(row["blocked"])
+        st = app.state()
+        html = PageStructureTests._render(self, st, "versions")["html"]
         deleted = html[html.index("This file deleted"):]
         self.assertIn('<div class="ssposter none"', deleted[:deleted.index("</div></div></div>")])
         self.assertIn("No Plex record", deleted)
         self.assertIn('<img class="ssposter"', html[:html.index("This file deleted")])            # (the kept file: its record's poster)
+        # the arrow turned: the copy on disk kept, the listed file deleted — its record's only file here: red, and refused
+        keep = {row["id"]: {"keep_key": loose}}
+        (chosen,) = tool.rows_for([row["id"]], keep)
+        self.assertEqual(chosen["keep"]["path"], loose)
+        self.assertEqual([x["path"] for x in chosen["extras"]], [m["path"]])
+        self.assertEqual((chosen["extras"][0]["ends_record"], chosen["blocked"]), (True, True))
+        self.assertEqual(row["ending"][loose]["here"], [m["path"]])                                # (as the scan found it, for each choice)
+        self.assertFalse(tool.apply_async([row["id"]], keep))                                       # (not done)
+        self.assertFalse(tool.apply_async([row["id"]], {row["id"]: {"keep_key": loose, "blocked": False}}))  # (nor when asked to)
+        self.assertTrue(os.path.exists(m["path"]))
+        # …as the page draws it with that copy kept (the scan's own pick made it, for the page drawn from the state)
+        import copy
+        st = copy.deepcopy(st)
+        r = st["tools"]["versions"]["scan"]["rows"][0]
+        r["keep"], r["extras"] = chosen["keep"], chosen["extras"]
+        html = PageStructureTests._render(self, st, "versions")["html"]
+        self.assertRegex(html, r'class="badge b-fail sschip[^"]*"[^>]*>Record destroyed<')        # (red)
+        self.assertIn('class="note badbox vsblocked"', html)
+        self.assertRegex(html, r'<input type="checkbox" data-act="tool-sel" data-tool="versions" data-id="' + re.escape(row["id"]) + '" disabled')
+        self.assertNotIn('data-act="tool-apply"', html)                                             # (nothing that can be done: no Apply)
+        # the tool's own pick: done, the copy on disk set aside
+        snap = self._run(tool, tool.apply_async([row["id"]]))
+        (res,) = snap["results"]
+        self.assertEqual(res["result"], "done")
+        self.assertFalse(os.path.exists(loose))
+        self.assertTrue(os.path.exists(m["path"]))
+
+    def test_duplicate_versions_keeps_the_copy_chosen(self):
+        """The arrow on a Duplicate Versions card keeps the other copy: Apply sends its path (keep_key), and the copy the
+        tool would have kept is the one set aside — a record that keeps another file loses nothing. A record on the mirrored
+        server left with no file is said, grey, and doesn't stop it."""
+        app, plex, client, cat, other = self._app(mirror=True)
+        tool = app.tools["versions"]
+        m = cat["movies"][0]
+        loose = os.path.join(cat["root"], "Movies", "Film 0 (2010).mkv")
+        shutil.copy(m["path"], loose)
+        m["more"] = [loose]
+        other.cat["movies"].append({"path": loose, "size": 1, "kbps": 1, "key": "800", "title": "Film 0", "year": 2010})
+        app.scan_library()
+        snap = self._run(tool, tool.scan_async("1"))
+        (row,) = snap["scan"]["rows"]
+        kept, gone = row["keep"]["path"], row["extras"][0]["path"]
+        (chosen,) = tool.rows_for([row["id"]], {row["id"]: {"keep_key": gone}})
+        self.assertEqual((chosen["keep"]["path"], [x["path"] for x in chosen["extras"]], chosen["blocked"]), (gone, [kept], False))
+        snap = self._run(tool, tool.apply_async([row["id"]], {row["id"]: {"keep_key": gone}}))
+        (res,) = snap["results"]
+        self.assertEqual(res["result"], "done")
+        self.assertTrue(os.path.exists(app.map_path(gone)))                                          # (the copy chosen stays)
+        self.assertFalse(os.path.exists(app.map_path(kept)))                                         # (the tool's pick set aside)
+        self.assertEqual([e["path"] for e in app.trash.snapshot()["items"]], [app.map_path(kept)])
 
     def test_organize_folders(self):
         """A loose film (in the library folder itself) moved into "Title (Year)" — with its subtitles;
@@ -11698,7 +12234,7 @@ class ToolsTests(unittest.TestCase):
         for name in peers.FILE_TOOLS:
             self.assertRegex(js, r"var FILE_TOOLS = .*\b" + name + r": function", f"{name} isn't among the page's FILE_TOOLS: its Apply wouldn't wait for the lights")
         self.assertIn("if (!gate.ready) u.confirm = false;", js)
-        self.assertRegex(js, r'readinessPanel\(key, "largest", "optimizer"')                       # (Optimize Now)
+        self.assertRegex(js, r'readinessPanel\(key, "largest", "optimizer"')                       # (Optimize Selected)
         self.assertRegex(js, r'readinessPanel\(String\(st\.library\), 0, "dataset"')             # (Start Copying, on the dataset page)
         self.assertIn('H("Backup and Apply to {n} Selected"', js)
         self.assertIn('H("Apply to {n} Selected Without Backing Up"', js)
@@ -11710,7 +12246,7 @@ class ToolsTests(unittest.TestCase):
         self.assertIn('data-how="dismiss"', panel)
         self.assertIn('data-act="job-revert"', js)                                                 # (Revert, on the Processes page)
         self.assertIn('id="prefs"', js)
-        for key in ("page_size", "backup", "backup_days"):
+        for key in ("page_size", "tool_page_size", "backup", "backup_days"):
             self.assertIn(f'"general", "{key}"', js)
 
     def test_plex_metadata_backup_and_revert(self):

@@ -49,6 +49,8 @@ const sandbox = {
     if (process.env.RENDER_DEBUG) console.error("render.js: fetch " + url);
     if (String(url).startsWith("/api/state")) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(state) });
     if (String(url).startsWith("/api/processes") && state._proc) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(state._proc) });
+    if (String(url).startsWith("/api/library/health") && state._health) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(state._health) });
+    if (String(url).startsWith("/api/optimizer/files") && state._optfiles) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(state._optfiles) });
     if (String(url).startsWith("/api/tools/readiness") && state._ready) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(state._ready) });
     return never;
   },
@@ -73,5 +75,5 @@ setTimeout(() => {
   if (process.env.RENDER_DEBUG) console.error("render.js: locale " + (sandbox.PCI18N && sandbox.PCI18N.locale) + ", main drawn: " + !!(byId.main && byId.main.innerHTML));
   const html = byId.main ? byId.main.innerHTML : "";
   const text = html.replace(/<style[\s\S]*?<\/style>/g, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\s+/g, " ").trim();
-  process.stdout.write(JSON.stringify({ html, text, title: document.title }));
+  process.stdout.write(JSON.stringify({ html, text, title: document.title, info: sandbox.PCINFO || {} }));
 }, 300);

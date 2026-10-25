@@ -36,6 +36,7 @@ import time
 import urllib.error
 import urllib.request
 
+from .paging import sort_key
 from . import zfs, zfslog
 from .i18n import M, join as join_names, msg
 from .jobs import Job
@@ -48,6 +49,7 @@ from .projection import family
 IMAGE_MODES = ("unmatched", "remove", "compress", "plex")
 DEFAULTS = {"sync": True, "mkv": False, "images": "unmatched", "tags": "keep"}  # each library's choices unless set
 TAG_MODES = ("keep", "excessive", "strip")
+STRICTEST = {"sync": True, "mkv": True, "tags": "strip"}  # every check on, at its strictest (what "passes all tests" means)
 SYNC_PROBLEMS = ("compression", "blocks")  # fixed by writing the file again
 RECORD = "optimized.json"
 ZFS_RECORD = "zfs-record.json"
@@ -165,11 +167,14 @@ class Optimizing:
         self.record: dict[str, dict] = (saved.get("files") or {}) if saved.get("version") == 2 else {}
         self.zfs = zfslog.ZfsLog(lambda: app._load_json(ZFS_RECORD), lambda d: app._save_json(ZFS_RECORD, d))
         # a saved optimize job (a restart in the middle of one) is started again by the shared jobs
-        app.jobs.register("optimize", lambda args, saved: OptimizeJob(self, args.get("library"), args.get("mode") or "optimize", saved))
+        app.jobs.register("optimize", lambda args, saved: OptimizeJob(self, args.get("library"), args.get("mode") or "optimize", saved, args.get("files")))
         self.retries: list[dict] = []  # failed files to try again, after the file in hand (not queued: retry())
         self._retrying = False  # the worker that does them when no optimizing job runs
         self.summary: dict[str, dict] = {}
+        self.todo: dict[str, list] = {}  # per library, each file there's something to do to (survey): the page's cards, a page at a time
         self.surveying = False
+        self.surveyed_at = 0.0  # when survey() last finished (the Optimizer page's Scanned …)
+        self.survey_progress: dict = {}  # how far the survey running is through the files: {"done", "total"}
         self.setup: dict = {"ready": False, "steps": [], "at": 0}  # diagnose(): what's left to set up
         self._diagnosing = False
 
@@ -450,15 +455,15 @@ class Optimizing:
             self.record[path] = dict(cached or {}, **info)
         return info
 
-    def file_status(self, path: str, library_key: str, rec: dict, poster: str = "", matched: bool | None = None) -> dict:
+    def file_status(self, path: str, library_key: str, rec: dict, poster: str = "", matched: bool | None = None, opts: dict | None = None) -> dict:
         """{"applies", "mkv", "problems", "compression"} for one file under its library's choices.
 
         Optimize MKV files: "new" (not tagged by the optimizer), "version" (by an older
         optimizer: 0.1 → 0.2), "tags" (tags the library's tag choice strips), "layout" (tagged, but no longer laid out right — remuxed since by
         something else). A file tagged by a newer optimizer is left alone. TrueNAS compression &
         record size: "compression" (the ZFS record says Unknown or NotOptimal), "blocks" (not in
-        blocks of the dataset's record size)."""
-        opts = self.options(library_key)
+        blocks of the dataset's record size). ``opts``: other choices than the library's (STRICTEST: what would pass every check)."""
+        opts = opts or self.options(library_key)
         is_mkv = path.lower().endswith(mkv.MKV_EXT)
         if not (opts["sync"] or (opts["mkv"] and is_mkv)) or conflict_original(path):
             return {"applies": False, "mkv": is_mkv}
@@ -510,7 +515,8 @@ class Optimizing:
             status = "info"  # not known yet (no TrueNAS API, or the library's files not read yet)
         else:
             status = "ideal" if statuses == ["ideal", "ideal"] else "pass"
-        return {"status": status, "issues": issues, "rs": r.get("rs"), "best": r.get("best"), "compression": comp}
+        return {"status": status, "issues": issues, "rs": r.get("rs"), "best": r.get("best"), "compression": comp,
+                "rs_status": r["status"], "compression_status": comp_status or "info"}  # (each on its own: the optimizer's card)
 
     def survey_soon(self) -> None:
         """survey() in the background: the first time, every MKV file's tags are read (a few small
@@ -529,10 +535,15 @@ class Optimizing:
             self.zfs.observe_datasets({r["dataset"]: {"rs": r.get("rs"), "compression": r.get("compression")}
                                        for r in records.values() if r.get("dataset")})
             out: dict[str, dict] = {}
+            todo: dict[str, list] = {}
             seen, dirs = set(), {}
             # Every library that isn't unticked in Media Mappings: optimizing doesn't depend on caching
             off = {str(lib["key"]) for lib in getattr(self.app, "libraries", []) or [] if lib.get("excluded")}
-            for f in list(self.app.files):
+            every = list(self.app.files)
+            self.survey_progress = {"done": 0, "total": len(every)}
+            for n, f in enumerate(every):
+                if n % 100 == 0:
+                    self.survey_progress = {"done": n, "total": len(every)}  # (the page's Scanning… bar)
                 key = str(f.library_key)
                 if key in off:
                     continue
@@ -543,7 +554,7 @@ class Optimizing:
                 s = self.file_status(path, key, rec, getattr(f, "poster", ""), getattr(f, "matched", None))
                 lib = out.get(key)
                 if lib is None:
-                    lib = out[key] = {"files": 0, "mkv": 0, "mkv_done": 0, "sync_todo": 0, "todo": 0, "todo_bytes": 0,
+                    lib = out[key] = {"files": 0, "mkv": 0, "mkv_done": 0, "sync_todo": 0, "mkv_todo": 0, "todo": 0, "todo_bytes": 0, "clean_all": 0,
                                       "compression_setting": rec.get("compression"), "dataset": rec.get("dataset"),
                                       "why": {}, "compression": {}, "conflicts": [], "zfs": self.zfs_config(key, rec)}
                 if s.get("missing") or conflict_original(path):
@@ -554,8 +565,16 @@ class Optimizing:
                 if s.get("mkv") and self.options(key)["mkv"] and not any(p not in SYNC_PROBLEMS for p in probs):
                     lib["mkv_done"] += 1
                 lib["sync_todo"] += any(p in SYNC_PROBLEMS for p in probs)
+                lib["mkv_todo"] += any(p not in SYNC_PROBLEMS for p in probs)
                 lib["todo"] += bool(probs)
+                cur = self.options(key)  # (and with every choice at its strictest: the page's "pass all tests")
+                strict = dict(cur, **STRICTEST)
+                lib["clean_all"] += not probs and (strict == cur or not self.file_status(path, key, rec, opts=strict).get("problems"))
                 lib["todo_bytes"] += int(getattr(f, "size", 0) or 0) if probs else 0  # (what a snapshot keeps of the files rewritten)
+                if probs:  # (the file's card: what's done to it, and why)
+                    todo.setdefault(key, []).append({"path": f.path, "title": getattr(f, "title", "") or os.path.basename(f.path), "poster": getattr(f, "poster", "") or "",
+                                                     "name": os.path.basename(f.path), "size": int(getattr(f, "size", 0) or 0), "problems": list(probs),
+                                                     "mkv": bool(s.get("mkv")), "compression": s.get("compression")})
                 for p in probs:
                     lib["why"][p] = lib["why"].get(p, 0) + 1
                 if s.get("compression"):
@@ -583,9 +602,11 @@ class Optimizing:
                 for path in [p for p in self.record if p not in seen]:
                     del self.record[path]  # gone from the libraries (it's a cache: read again if it comes back)
                 self.summary = out
+                self.todo = {k: sorted(v, key=lambda x: (sort_key(x["title"]), x["path"])) for k, v in todo.items()}
             self.zfs.collect()
             self.zfs.save()
             self.save()
+            self.surveyed_at = time.time()
         finally:
             with self.lock:
                 self.surveying = False
@@ -617,6 +638,16 @@ class Optimizing:
         self.app._save_json(RECORD, data)
 
     # ------------------------------------------------------------ the job
+    def files_todo(self, library_key: str, offset: int = 0, limit: int = 50) -> dict:
+        """A page of a library's files there's something to do to, as the last survey found them (the Optimizer page's
+        cards): {"files": […], "total", "offset", "pages" (the spans each page holds)}."""
+        from .paging import page_ranges
+        with self.lock:
+            files = list(self.todo.get(str(library_key)) or [])
+        offset = max(0, min(int(offset), max(0, len(files) - 1)))
+        return {"library": str(library_key), "files": files[offset:offset + limit], "total": len(files), "offset": offset,
+                "paths": [f["path"] for f in files], "pages": page_ranges([f["title"] for f in files], limit)}
+
     def start_library(self, library_key: str, mode: str = "optimize", resumed: dict | None = None) -> bool:
         """Do every file of a library that needs it under its choices, one at a time, in the
         background, as a file job (jobs.py: progress, pause, resume after a restart, one at a time).
@@ -626,13 +657,17 @@ class Optimizing:
             return False
         return self.app.jobs.start(OptimizeJob(self, str(library_key), mode, resumed))
 
-    def queue(self, library_key: str, mode: str = "optimize") -> str | None:
+    def queue(self, library_key: str, mode: str = "optimize", files: list | None = None) -> str | None:
         """Start the job now, or queue it after the ones before it: "started", "queued", or None
-        (not set up, or the same work is queued or running already)."""
+        (not set up, or the same work is queued or running already). ``files``: only these (their Plex paths, the
+        files ticked on the page); None: every file of the library that needs it."""
         if not self.client.ready():
             return None
         title = (self.app.library_info(str(library_key)) or {}).get("title")
-        item = self.app.jobs.enqueue("optimize", {"library": str(library_key), "mode": mode},
+        args = {"library": str(library_key), "mode": mode}
+        if files is not None:
+            args["files"] = sorted({str(f) for f in files})
+        item = self.app.jobs.enqueue("optimize", args,
                                      library=str(library_key), mode=mode, title=title)
         if item is None:
             return None
@@ -670,8 +705,8 @@ class Optimizing:
                     self.client._call("/api/folder", {"action": "cleanup", "path": w})
                 except (OSError, ValueError, urllib.error.URLError):
                     pass
-            # Our own Syncthing conflict copies first: deleted when they're the same as the file
-            for c in list((self.summary.get(key) or {}).get("conflicts") or []):
+            # Our own Syncthing conflict copies first: deleted when they're the same as the file (a run of the whole library)
+            for c in ([] if job.state.get("only") is not None else list((self.summary.get(key) or {}).get("conflicts") or [])):
                 if job.stopped:
                     break
                 r = self._send(c["copy"], lambda c=c: self.client.conflict(c["copy"], c["original"]), os.path.getsize(c["copy"]))
@@ -684,6 +719,10 @@ class Optimizing:
             # listed with why), not tried again — the next job tries them
             failed = {e.get("file") for e in job.state.get("errors") or []}
             mine = [f for f in list(app.files) if str(f.library_key) == key]
+            only = job.state.get("only")
+            if only is not None:  # (the files ticked on the page: those only)
+                only = set(only)
+                mine = [f for f in mine if f.path in only]
             job.update(files=len(mine))
             for f in mine:
                 if job.stopped:
@@ -1166,7 +1205,8 @@ class Optimizing:
         with self.lock:
             return {"configured": ready, "setup": dict(self.setup), "libraries": dict(self.summary), "version": VERSION,
                     "recorded": len(self.record), "zfs_started": self.zfs.started,
-                    "job": job if job and job.get("kind") == "optimize" else None, "surveying": self.surveying}
+                    "job": job if job and job.get("kind") == "optimize" else None, "surveying": self.surveying, "surveyed_at": self.surveyed_at,
+                    "survey_progress": dict(self.survey_progress) if self.surveying else None}
 
 
 RETRY_POLL = 3  # seconds: how often waiting retries look for their turn
@@ -1197,13 +1237,18 @@ class OptimizeJob(Job):
 
     kind = "optimize"
 
-    def __init__(self, op: "Optimizing", library: str, mode: str = "optimize", resumed: dict | None = None):
+    def __init__(self, op: "Optimizing", library: str, mode: str = "optimize", resumed: dict | None = None, files: list | None = None):
         self.op = op
         title = (op.app.library_info(str(library)) or {}).get("title") or (resumed or {}).get("title")
         super().__init__(op.app.jobs, resumed, library=str(library), mode=mode, title=title)
+        if files is not None:  # (only the files ticked: their Plex paths; "files" is the job's count of them)
+            self.state["only"] = list(files)
 
     def args(self) -> dict:
-        return {"library": self.state["library"], "mode": self.state["mode"]}
+        out = {"library": self.state["library"], "mode": self.state["mode"]}
+        if self.state.get("only") is not None:
+            out["files"] = self.state["only"]
+        return out
 
     def dataset(self) -> str | None:
         return (self.app.library_records().get(self.state["library"]) or {}).get("dataset")

@@ -53,6 +53,7 @@ DEFAULTS: dict = {
         "poll_seconds": 5,
         "update_check": True,  # ask GitHub every few hours whether there's a newer version
         "page_size": 200,      # entries on a page of a long list (the Library views, a job's files)
+        "tool_page_size": 40,  # cards on a page of a tool's page (the Tools pages, the Optimizer's, the check pages)
         # Before anything changes files (safety.py): what stands in for a backup when there's no recent snapshot —
         # "snapshot": one taken through TrueNAS before the action (kept backup_days, then deleted by the app);
         # "manual": a backup you make yourself and say so; "copies": the copies the action keeps of its own, where it does.
@@ -200,6 +201,7 @@ LIMITS = {
     ("sync", "compare_hours"): (1, 168),
     ("sync", "ask_over"): (1, 1000),
     ("general", "page_size"): (25, 1000),
+    ("general", "tool_page_size"): (5, 200),  # (the Optimizer's files come from the server 200 at most at a time)
     ("general", "backup_days"): (1, 365),
 }
 AUTO = -1  # a cooldown worked out from what's been measured (cachelog.CacheLog.auto_cooldown)

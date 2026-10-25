@@ -71,7 +71,7 @@ class ConvertToMkv(Tool):
                          "poster": f.get("poster") or "", "path": f["path"], "local": f["local"], "name": os.path.basename(f["path"]), "kind": kind,
                          "issues": [kind], "size": int(f.get("size") or 0), "skipped": skipped})
         rows.sort(key=lambda r: (bool(r["skipped"]), sort_key(r["title"])))
-        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "waiting": waiting,
+        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "files": len(files), "waiting": waiting,
                 "skipped": sum(1 for r in rows if r["skipped"]), "mirror": self.mirrored(library)}
 
     history = [("what", M("What was done")), ("written", M("Written")), ("original", M("Original"))]

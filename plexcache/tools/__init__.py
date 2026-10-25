@@ -63,6 +63,8 @@ class Tool:
         self.error: str | None = None
         self.error_at: float = 0.0  # (when the last scan failed: the page tells it from an earlier one's)
         self._analysis: dict[str, tuple[int, dict]] = {}  # library -> (data stamp, the scan over that data)
+        self._count_tried: dict[str, int] = {}  # library -> the data stamp counts() last worked out in the background
+        self._counting = False
 
     def save(self) -> None:
         with self.lock:
@@ -154,10 +156,18 @@ class Tool:
     def counts(self) -> dict:
         """What the tool flags — its live rows, per the library's options — from the analyses worked out (never worked out
         here: the state is asked every few seconds), ignored items left out: {"total", "ignored", "libraries": {key: n},
-        "pending": [libraries not analysed yet]}."""
-        libs, pending, ignored = {}, [], 0
-        for key, d in list(self.app.libdata.libs.items()):
-            if not d.ready or not self.works_on(key):
+        "pending": [libraries not counted yet: being read from Plex, or being worked out]}. A library read but not worked
+        out is worked out in the background (once per state of its data), so its count follows without opening the page."""
+        libs, pending, ignored, todo = {}, [], 0, []
+        ld = self.app.libdata
+        with ld.lock:
+            busy = {q[0] for q in ld.queue} | ({ld.current} if ld.current else set())
+        for key, d in list(ld.libs.items()):
+            if not self.works_on(key):
+                continue
+            if not d.ready:
+                if key in busy:
+                    pending.append(key)
                 continue
             with self.lock:
                 got = self._analysis.get(key)
@@ -168,7 +178,35 @@ class Tool:
                 ignored += quiet
             else:
                 pending.append(key)
+                todo.append(d)
+        if todo:
+            self._count_soon(todo)
         return {"total": sum(libs.values()), "ignored": ignored, "libraries": libs, "pending": pending}
+
+    def _count_soon(self, datas) -> None:
+        """Works out, in a thread, the libraries counts() found read but not worked out — each state of a library's data
+        tried once (a scan that fails is said when the page scans), one thread at a time."""
+        with self.lock:
+            tried = self._count_tried
+            datas = [d for d in datas if tried.get(d.key) != d.stamp]
+            if not datas or self._counting:
+                return
+            self._counting = True
+            for d in datas:
+                tried[d.key] = d.stamp
+
+        def run():
+            try:
+                for d in datas:
+                    try:
+                        self.analysis(d)
+                    except Exception:  # noqa: BLE001
+                        pass
+            finally:
+                with self.lock:
+                    self._counting = False
+
+        threading.Thread(target=run, name=f"count-{self.name}", daemon=True).start()
 
     def data_changed(self, key: str, what) -> None:
         """A gathering done (libdata's listener): the analysis worked out, so the count and chips are fresh."""
@@ -243,7 +281,25 @@ class Tool:
         """The rows of the last scan named, each with your choices for it merged in."""
         with self.lock:
             want = set(ids)
-            return [dict(r, **{k: v for k, v in ((choices or {}).get(r["id"]) or {}).items() if k != "blocked"}) for r in (self.scan_result or {}).get("rows") or [] if r["id"] in want]
+            return [self.choose(r, (choices or {}).get(r["id"]) or {}) for r in (self.scan_result or {}).get("rows") or [] if r["id"] in want]
+
+    def choose(self, row: dict, choice: dict) -> dict:
+        """A row with your choice for it (the page's arrow: which side is kept) merged in. A tool whose choice changes what
+        the row does (Duplicate Versions: which copy goes) works the row out again; never a choice's own ``blocked``."""
+        return dict(row, **{k: v for k, v in choice.items() if k != "blocked"})
+
+    def merge_first(self, library: str) -> set[str]:
+        """The Plex records of a film on several, as Merge Duplicates last found them in this library (its live rows). A
+        row of another tool on one of them is blocked — the page's red box says to merge them first — since what it did
+        would be done to one record of the film only."""
+        merge = self.app.tools.get("merge")
+        if self.name == "merge" or merge is None:
+            return set()
+        with merge.lock:
+            sc = merge.scan_result
+        if not sc or str(sc.get("library")) != str(library):
+            return set()
+        return {str(k) for r in merge.live(library, sc.get("rows") or []) for k in r.get("rks") or []}
 
     def retained_bytes(self, rows: list[dict]) -> int:
         """What a snapshot keeps of the files these rows rewrite or delete, until it expires (0: nothing goes)."""
@@ -260,7 +316,10 @@ class Tool:
         with self.lock:
             if self.running or not self.scan_result:
                 return False
-        rows = [r for r in self.live(key, self.rows_for(ids, choices)) if not r.get("blocked")]  # (a row about a switched-off issue isn't done, nor one the page won't tick)
+        # the page's rule, kept here too: a row about a switched-off issue isn't done (no yellow chip), nor one with a red one —
+        # blocked by the tool, or on a record still to be merged
+        pending = self.merge_first(key)
+        rows = [r for r in self.live(key, self.rows_for(ids, choices)) if not r.get("blocked") and str(r.get("rk") or "") not in pending]
         if not rows:
             return False
         if self.name in peers.FILE_TOOLS:  # (files change: room for it, and a backup that can be made, first)

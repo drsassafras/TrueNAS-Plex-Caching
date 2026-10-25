@@ -114,6 +114,7 @@ PCI18N.ready.then(function () {
   // ---- Info buttons: longer explanations sit behind a small "i" next to what they explain.
   // Hover or focus shows them; a click (or tap) pins them open until you click elsewhere.
   var INFO = {}, INLINE_MAX = 70;
+  window.PCINFO = INFO;  // (what's behind every ⓘ drawn: read by the tests, tests/render.js)
   function info(html, about) {
     if (!html) return "";
     var h = 0;
@@ -359,6 +360,12 @@ PCI18N.ready.then(function () {
   // A place in the app named in server text is a link to it: "[System → Plex](/system#plex)" (the text escaped first)
   function links(text) {
     return esc(text).replace(/\[([^\]]+)\]\((\/[a-z0-9-]*(?:#[a-z0-9-]+)?)\)/g, '<a href="$2" data-nav>$1</a>');
+  }
+  // Text from the server for an ⓘ (a check's help, an option's): plain text with its [links](/page), and the few marks
+  // help is written with kept — <strong>, <em>, <code>, <br>, bare — so they show as marks, not as code. Anything else
+  // shows as written (escaped). Every ⓘ is tested for markup shown as text (test_info_boxes_show_no_code).
+  function richText(text) {
+    return links(text).replace(/&lt;(\/?)(strong|em|code)&gt;|&lt;br ?\/?&gt;/g, function (m, close, tag) { return tag ? "<" + close + tag + ">" : "<br>"; });
   }
   function itemRow(it, extra) {
     var out = '<div class="row">' + badge(it.status, STATUS_TEXT[it.status] || it.status) + '<div class="grow"><div class="what">' + esc(it.title) +
@@ -966,7 +973,7 @@ PCI18N.ready.then(function () {
   // diagnose()); what passes in one line, then the first that doesn't, with what to do about it.
   function optimizerSetup(op) {
     var su = op.setup || {}, steps = su.steps || [];
-    if (su.ready) return "";
+    if (su.ready || (op.configured && !su.at)) return "";  // (answering, its steps not checked yet: nothing to set up that's known)
     var out = '<section class="card">' + heading(esc(T("Set Up the Optimizer")),
       H("Optional: a second service in this app, and the only part of Plex Cache that can change your media. Until it’s running, the choices below wait."));
     if (!su.at) return out + '<p class="muted">' + H("Checking…") + "</p></section>";
@@ -983,7 +990,7 @@ PCI18N.ready.then(function () {
       '<span class="muted">' + H("checked {when}", { when: ago(su.at) }) + "</span></div>";
     return out + "</section>";
   }
-  var OPT_CONFIRM = null;  // the library whose Optimize Now is waiting for "Optimize Anyway" (ZFS settings off)
+  var OPT_CONFIRM = null;  // the library whose Optimize Selected is waiting for "Optimize Anyway" (ZFS settings off)
   var ZFS_CFG_HELP = H("Whether the library’s dataset is set up for the best result: its record size (see <a href=\"/health#media\" data-nav>Health → Libraries</a>) and its compression. " +
     "<strong>Ideal</strong>: the recommended record size and ZSTD-3. <strong>Pass</strong>: the second-best record size, or ZSTD at levels 4 to 19. " +
     "<strong>Warning</strong>: either is off.<br><br>Files take their dataset’s settings when they’re written, so change these first, in TrueNAS " +
@@ -1114,27 +1121,177 @@ PCI18N.ready.then(function () {
           '<button class="btn" type="button" data-act="queue-remove" data-id="' + esc(item.id) + '">' + H("Remove") + "</button></div>";
       }).join("") + "</section>";
   }
+  // ---- The Optimizer page: a section per library — its choices, its dataset, Sync Cover Art — and under them a
+  // comparison card (cmpRow, as every tool's rows) for each file there's something to do to, a page at a time, ticked
+  // and optimized as chosen. The direction is fixed: the optimizer doesn't put a file back (the backup taken first is the
+  // way back). Left, the file as it is now: what the optimizer changes, in yellow, and what's right already, in green.
+  // Right, the file after: each setting at its best (Ideal), or the one that passes; a dataset setting that's off stays
+  // grey — it's changed in TrueNAS, not here. Red when Optimize can't run (the service not set up): no card can be ticked.
+  var OPT_WHY = { new: N("Not optimized yet"), version: N("Optimized by an older version"), layout: N("Metadata not at the end"), tags: N("Tags to strip"),
+    compression: N("Not in the dataset’s compression"), blocks: N("Not in the dataset’s record size") };
+  var OPT_WHY_HELP = { new: N("The optimizer hasn’t written this MKV file yet: its metadata is laid out as the program that made it left it."),
+    version: N("Written by an older optimizer: done again, the way this version lays it out."), layout: N("Marked as optimized, but its metadata isn’t where the optimizer puts it any more (a tool wrote to it since): laid out again."),
+    tags: N("Tags this library’s choice strips are still in it."), compression: N("Written before the dataset had its compression: ZFS applies it only to files as they’re written, so it’s written again, byte for byte."),
+    blocks: N("Written with another record size than the dataset’s: written again, byte for byte, to take it.") };
+  function cardsPer() { return (S && S.general && S.general.tool_page_size) || 40; }  // the cards on a page, on every tool's page, each Optimizer library's and the check pages' (System → Preferences)
+  var OPT = {};  // per library: the page of its files open (offset), as fetched (data: /api/optimizer/files)
+  function optState(key) { return OPT[key] || (OPT[key] = { offset: 0, asked: null, data: null, at: 0, todo: null, loading: false }); }
+  // a page of a library's files to optimize: fetched again when the page changes, the survey's count does, or a minute on
+  function optFiles(key, todo) {
+    var o = optState(key);
+    if (!o.loading && (o.asked !== o.offset || o.todo !== todo || Date.now() - o.at > 60000)) {
+      o.loading = true; o.asked = o.offset; o.todo = todo; o.at = Date.now();
+      api("/api/optimizer/files?key=" + encodeURIComponent(key) + "&offset=" + o.offset + "&limit=" + cardsPer()).then(function (d) {
+        o.loading = false; o.data = d; o.error = null;
+        var sel = TOOL.optimizer.sel, paths = {};  // (a file done since, or no longer to do: no longer ticked)
+        (d.paths || []).forEach(function (p) { paths[p] = true; });
+        Object.keys(sel).forEach(function (p) { if (sel[p] && (TOOL.optimizer.libOf[p] === key) && !paths[p]) delete sel[p]; });
+        (d.paths || []).forEach(function (p) { TOOL.optimizer.libOf[p] = key; });
+        render();
+      }).catch(function (e) { o.loading = false; o.error = e.message || "?"; render(); });  // (said, with Try Again)
+    }
+    return o.data && o.data.library === String(key) ? o.data : null;
+  }
+  function optFileCard(f, sm, c, op) {
+    var z = sm.zfs || {}, issues = z.issues || [], probs = f.problems || [], has = function (p) { return probs.indexOf(p) >= 0; };
+    var now = [{ id: "file", status: "grey", label: T("File {n}", { n: 1 }), text: H("This is the file as it is now: the optimizer writes it again in its place, at the same path."), lines: ['<span class="mono">' + esc(f.path) + "</span>"] }];
+    var after = [{ id: "file", status: "grey", label: T("File {n}", { n: 1 }), text: H("The same file at the same path, written again: Plex sees the same file, and keeps its metadata and watched state.") }];
+    if (c.mkv && f.mkv) {
+      var lay = ["new", "version", "layout"].filter(has)[0];
+      now.push(lay ? { id: "layout", status: "warn", label: T(OPT_WHY[lay]), text: H(OPT_WHY_HELP[lay]) }
+        : { id: "layout", status: "pass", label: T("Metadata at the end"), text: H("Laid out by this optimizer already: the cover art, fonts, chapters, index and tags at the end of the file.") });
+      if (has("tags")) now.push({ id: "tags", status: "warn", label: T(OPT_WHY.tags), text: H(OPT_WHY_HELP.tags) });
+      var cover = { unmatched: T("Plex poster, unmatched items only"), remove: T("Strip it"), compress: T("Keep it, compressed"), plex: T("Plex poster, every item") }[c.images];
+      var tags = { keep: T("Keep tags"), excessive: T("Strip excessive tags"), strip: T("Strip tags") }[c.tags];
+      after.push({ id: "layout", status: "pass", label: T("Metadata at the end") + " · " + T("Ideal"), text: H("The cover art, fonts, chapters, index and tags moved to the end of the file and sorted, so the start of the file is all content.") });
+      after.push({ id: "cover", status: "pass", label: T("Cover art") + ": " + cover, text: H("As chosen for this library above.") });
+      after.push({ id: "tags", status: "pass", label: T("Tags") + ": " + tags, text: H("As chosen for this library above.") });
+      if (op.version) after.push({ id: "ver", status: "pass", label: T("Optimizer version {version}", { version: op.version }), text: H("Written into the file, so a copy synced elsewhere isn’t done again there.") });
+    }
+    if (c.sync) {
+      var rsIdeal = z.rs_status === "ideal", compIdeal = z.compression_status === "ideal";
+      var rsOff = z.rs_status === "warn" ? issues[0] : null, compOff = z.compression_status === "warn" ? issues[issues.length - 1] : null;
+      var rsLabel = T("Record size {size}", { size: rsOr(z.rs) }), compLabel = T("Compression {value}", { value: String(z.compression || "?").toUpperCase() });
+      if (has("blocks")) now.push({ id: "rs", status: "warn", label: T(OPT_WHY.blocks), text: H(OPT_WHY_HELP.blocks) });
+      else if (z.rs) now.push({ id: "rs", status: "pass", label: rsLabel, text: H("Written with the dataset’s record size already.") });
+      if (has("compression")) now.push({ id: "comp", status: "warn", label: T(OPT_WHY.compression), text: H(OPT_WHY_HELP.compression) });
+      else if (f.compression) now.push({ id: "comp", status: "pass", label: compLabel, text: H("Written with the dataset’s compression already.") });
+      if (z.rs) after.push(rsOff ? { id: "rs", status: "info", label: rsLabel, text: esc(msg(rsOff)) + " " + H("The file is written with the dataset’s record size: change it in TrueNAS first to write the file only once, with {best}.", { best: rsOr(z.best) }) }
+        : { id: "rs", status: "pass", label: rsLabel + " · " + (rsIdeal ? T("Ideal") : T("Pass")), text: rsIdeal ? H("The record size that suits this library best.") : H("Not the best for this library, but good: it passes.") });
+      if (z.compression) after.push(compOff ? { id: "comp", status: "info", label: compLabel, text: esc(msg(compOff)) + " " + H("The file is written with the dataset’s compression: change it to ZSTD-3 in TrueNAS first to write the file only once.") }
+        : { id: "comp", status: "pass", label: compLabel + " · " + (compIdeal ? T("Ideal") : T("Pass")), text: compIdeal ? H("ZSTD-3: the compression that suits media best.") : H("Not the best for media, but good: it passes.") });
+    }
+    now.concat(after).forEach(function (x) { x.pair = x.id; });  // (each setting now opens with the same setting after)
+    var notes = [];
+    if (!op.configured) notes.push({ status: "fail", html: H("The optimizer service isn’t set up yet: files can be optimized once it is (the steps are at the top of this page).") });
+    if (c.sync && z.status === "warn") notes.push({ status: "info", html: H("Optimizing before changing the dataset’s settings means the file is written now and again after the change. Change them in TrueNAS first to write it only once.") });
+    return { tool: "optimizer", id: f.path, title: f.title,
+      checks: [{ id: "size", status: "grey", label: fmtBytes(f.size), text: H("The file’s size: the optimizer writes all of it again, and a snapshot keeps the old copy’s space until it expires.") }],
+      left: [{ kind: "drop", dim: false, label: T("File as it is now"), poster: f.poster, what: esc(f.title), lines: ['<span class="mono">' + esc(f.name) + "</span>"], checks: now }],
+      right: [{ kind: "keep", label: T("File after optimizing"), poster: f.poster, what: esc(f.title), lines: ['<span class="mono">' + esc(f.name) + "</span>"], checks: after }],
+      notes: notes, files: [f.path] };
+  }
+  // a library's choices, drawn as every tool's options are (toolOptions): each with its ⓘ and its ↺ back to the default —
+  // what to do, then for MKV files the cover art and tags; under them its dataset, as set up for the best result
+  function optOptions(l, key, c, sm, op) {
+    var box = function (k, label, help, title, n) {
+      return optionRow({ help: help, title: title, label: '<input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="' + k + '"' + (c[k] ? " checked" : "") + "> " + label, revert: optRevert(key, k), count: sm ? n || 0 : null, on: c[k] });
+    };
+    var pick = function (k, title, help, choices, n) {
+      return optionRow({ help: help, title: title, label: esc(title) + ' <select class="sel sm" data-optlib="' + esc(key) + '" data-optkey="' + k + '" aria-label="' + esc(title) + '">' +
+        choices.map(function (o) { return '<option value="' + o[0] + '"' + (c[k] === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") + "</select>", revert: optRevert(key, k), count: n, on: true });
+    };
+    var why = (sm || {}).why || {};
+    var rows = [box("sync", H("TrueNAS compression &amp; record size"), OPT_SYNC_HELP, T("TrueNAS compression & record size"), (sm || {}).sync_todo),
+      box("mkv", H("Optimize MKV files"), OPT_MKV_HELP, T("Optimize MKV files"), (sm || {}).mkv_todo)];
+    if (c.mkv && l.kind === "audio") {
+      c.images = "compress";  // (optimizing.options: an audio library's cover art stays in the file)
+      rows.push(optionRow({ help: AUDIO_COVER_HELP, title: T("Cover art"), label: H("Cover art") + ': <span class="det">' + H("Kept in the file, compressed") + "</span>" }));
+    } else if (c.mkv) {
+      rows.push(pick("images", T("Cover art"), COVER_HELP, [["unmatched", H("Plex poster, unmatched items only")], ["remove", H("Strip it")], ["compress", H("Keep it, compressed")], ["plex", H("Plex poster, every item")]], null));
+      rows.push(pick("tags", T("Tags"), TAGS_HELP, [["keep", H("Keep tags")], ["excessive", H("Strip excessive tags")], ["strip", H("Strip tags")]], sm ? why.tags || 0 : null));
+    }
+    var out = optionGrid(rows), z = (sm || {}).zfs;
+    if (c.sync && z) out += '<div class="det optds">' + H("Dataset") + info(ZFS_CFG_HELP, T("Dataset")) + " " +
+      badge(z.status === "ideal" || z.status === "pass" ? "pass" : z.status, { ideal: T("Ideal"), pass: T("Pass"), warn: T("Warning"), info: T("Not checked") }[z.status]) +
+      (z.issues || []).map(function (x) { return " " + esc(msg(x)); }).join(" ·") + "</div>";
+    return out;
+  }
+  var OPT_SYNC_HELP = H("<strong>TrueNAS compression &amp; record size</strong>: writes each file again, byte for byte, so it takes its dataset’s current record size and compression — ZFS applies them only to files as they’re written. Any kind of file. A file’s compression can’t be read back, so every file counts until the optimizer has written it once.");
+  var OPT_MKV_HELP = H("<strong>Optimize MKV files</strong>:") + "<ul>" +
+    "<li>" + H("moves the cover art, fonts, chapters, index and tags to the end of the file") + "</li>" +
+    "<li>" + H("sorts them so the parts not needed to play the file can be skipped, and the most compressible sit nearest the end — which maximizes how much TrueNAS can cache, sometimes significantly") + "</li>" +
+    "<li>" + H("compresses image subtitles (PGS, VobSub) with zlib, as MKVToolNix does; video, audio and text subtitles are copied as they are") + "</li>" +
+    "<li>" + H("handles cover art as you choose: keeps it, compressed losslessly, puts Plex’s poster in, or takes it out") + "</li>" +
+    "<li>" + H("handles the file’s own tags as you choose: keeps them, or strips the excessive ones or all of them (Plex doesn’t read them; other players do)") + "</li>" +
+    "<li>" + H("marks each file it optimizes with a tag inside the file (the optimizer’s version), so a file copied or synced to another system isn’t done again there") + "</li></ul>";
+  // Sync Cover Art: cover art is set when a file is first optimized; this brings optimized files in line with the choice and Plex now
+  function optCovers(key, c, sm, op) {
+    if (!c.mkv || c.images === "compress") return "";
+    var qCov = queuedFor("optimize", { library: key, mode: "covers" }), j = ST.job, runs = !!(j && j.running && j.kind === "optimize" && j.library === key && j.mode === "covers");
+    return '<div class="optacts">' + (qCov || runs ? badge("info", qCov ? T("Cover art sync queued") : T("Syncing cover art"))
+      : '<button class="btn" type="button" data-act="optimize-covers" data-key="' + esc(key) + '"' + (!op.configured || !sm || !sm.mkv_done ? " disabled" : "") + ">" +
+        (fileBusy() ? H("Queue Cover Art Sync") : H("Sync Cover Art")) + "</button>") + info(SYNC_COVER_HELP, T("Sync Cover Art")) + "</div>";
+  }
+  // the ticks and Optimize Selected, as every tool's Apply: the readiness lights first (room, and the backup plan), what it
+  // does, then All — every file of the library to optimize, on every page — and This page
+  function optApply(key, sm, c, op, d, cards) {
+    var u = TOOL.optimizer, can = op.configured ? (d.paths || []) : [];
+    if (!can.length) return "";
+    var n = can.filter(function (p) { return u.sel[p]; }).length, all = n === can.length;
+    var page = cards.filter(function (x) { return x.sev.live && !x.sev.blocked; }).map(function (x) { return x.id; }), pageAll = page.length && page.every(function (p) { return u.sel[p]; });
+    var q = queuedFor("optimize", { library: key, mode: "optimize" }), j = ST.job, runs = !!(j && j.running && j.kind === "optimize" && j.library === key && j.mode === "optimize");
+    var gate = q || runs ? { ready: true, html: "" } : readinessPanel(key, "largest", "optimizer", "", 0);
+    var out = gate.html + applyBox({ does: H("Each ticked file is written again in its place: its metadata laid out and its tags and cover art as chosen above (MKV files), in the dataset’s record size and compression. Plex sees the same files."),
+      changes: H("The ticked files in this library’s folders. Plex records are left as they are.") }, gate);
+    out += '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px">' +
+      '<label class="det"><input type="checkbox" data-act="opt-all" data-key="' + esc(key) + '"' + (all ? " checked" : "") + "> " + H("All {n} (every page)", { n: fmtNum(can.length) }) + "</label>" +
+      (can.length > page.length ? '<label class="det"><input type="checkbox" data-act="opt-page" data-key="' + esc(key) + '"' + (pageAll ? " checked" : "") + "> " + H("This page") + "</label>" : "");
+    if (q || runs) return out + badge("info", q ? T("Queued") : T("Running")) + "</div>";
+    if (OPT_CONFIRM === key && n) {
+      out += '<span class="det" style="max-width:420px">' + H("Optimizing before changing the ZFS settings means each file is written now and again after the change. Change the settings first to write each file only once.") + "</span>" +
+        '<button class="btn pri" type="button" data-act="optimize-sel" data-key="' + esc(key) + '" data-confirmed="1">' + H("Optimize Anyway") + "</button>" +
+        '<button class="btn" type="button" data-act="optimize-cancel">' + H("Cancel") + "</button>";
+    } else {
+      out += '<button class="btn pri" type="button" data-act="optimize-sel" data-key="' + esc(key) + '"' + (!n || !gate.ready ? " disabled" : "") + ">" +
+        (fileBusy() ? H("Add {n} Selected to the Queue", { n: fmtNum(n) }) : H("Optimize {n} Selected", { n: fmtNum(n) })) + "</button>" +
+        (!gate.ready && n ? ' <span class="det">' + H("Optimize opens once both lights above are green or grey.") + "</span>" : "");
+    }
+    var lj = ST.job;
+    if (lj && lj.kind === "optimize" && !lj.running && lj.library === key && lj.finished)
+      out += '<span class="det muted">' + H("Last run: {optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed", lj) + "</span>";
+    return out + "</div>";
+  }
+  // the library tabs, as every tool's (toolLibs): each library with its count of files to optimize
+  function optLibTabs(libs, sums) {
+    var u = TOOL.optimizer;
+    if (!u.key || !libs.some(function (l) { return String(l.key) === String(u.key); })) u.key = libs.length ? String(libs[0].key) : null;
+    return libTabs({ libs: libs, key: u.key, attrs: function (l) { return 'data-act="tool-lib" data-tool="optimizer" data-key="' + esc(l.key) + '"'; },
+      count: function (l) {
+        var k = String(l.key), c = optChoices(k), sm = sums[k];
+        return { n: sm && (c.sync || c.mkv) ? sm.todo || 0 : null, pending: !sm && !!(ST.optimizer || {}).surveying };
+      } });
+  }
+  // Scan / Scan Again, as every tool's: every library's files looked at again now (the optimizer also does it by itself)
+  function optScanBar(op, more) {
+    return '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap"><button class="btn" type="button" data-act="optimizer-survey"' + (op.surveying ? " disabled" : "") + ">" +
+      (op.surveying ? H("Scanning…") : op.surveyed_at ? H("Scan Again") : H("Scan")) + "</button>" +
+      (op.surveyed_at && !op.surveying ? '<span class="det">' + H("Scanned {when}", { when: ago(op.surveyed_at) }) + "</span>" : "") + (more || "") + "</div>" +
+      (op.surveying ? loadingBar(T("Looking at every library’s files…"), op.survey_progress) : "");
+  }
+  // The Optimizer page, the standard tool page (toolPage's layout): the library tabs; the library's choices on top; Scan
+  // Again; what the last scan found; its files' cards a page at a time — those that can be done first — and Optimize Selected
   function pageOptimizer() {
     var op = ST.optimizer || {}, sums = op.libraries || {};
     // The optimizer's version (written into every file it optimizes): the running service's, and this app's if they differ
     var svcV = (op.service || {}).version, appV = op.version;
     var ver = svcV ? H("Optimizer version {version}", { version: svcV }) + (appV && String(svcV) !== String(appV) ? " " + H("(this app expects {version})", { version: appV }) : "")
       : appV ? (op.configured ? H("Optimizer version {version} (not running)", { version: appV }) : H("Optimizer version {version} (service to set up below)", { version: appV })) : "";
-    var out = top(T("Optimizer"), toolBlurb("optimizer") +
-      (ver ? '<br><span class="muted">' + ver + "</span>" : ""), "");
-    out += '<div class="stack">' + toolsNav("optimizer") + optimizerSetup(op);
-    out += '<section class="card">' + heading(esc(T("What It Does")), "") + '<ul class="help">' +
-      "<li>" + H("<strong>TrueNAS compression &amp; record size</strong>: writes each file again, byte for byte, so it takes its dataset’s current record size and compression — ZFS applies them only to files as they’re written. Any kind of file. A file’s compression can’t be read back, so every file counts until the optimizer has written it once.") + "</li>" +
-      "<li>" + H("<strong>Optimize MKV files</strong>:") + "<ul>" +
-        "<li>" + H("moves the cover art, fonts, chapters, index and tags to the end of the file") + "</li>" +
-        "<li>" + H("sorts them so the parts not needed to play the file can be skipped, and the most compressible sit nearest the end — which maximizes how much TrueNAS can cache, sometimes significantly") + info(SORT_HELP, T("Sorting the metadata")) + "</li>" +
-        "<li>" + H("compresses image subtitles (PGS, VobSub) with zlib, as MKVToolNix does; video, audio and text subtitles are copied as they are") + "</li>" +
-        "<li>" + H("handles cover art as you choose: keeps it, compressed losslessly, puts Plex’s poster in, or takes it out") + "</li>" +
-        "<li>" + H("handles the file’s own tags as you choose: keeps them, or strips the excessive ones or all of them (Plex doesn’t read them; other players do)") + info(TAGS_HELP, T("Tags")) + "</li>" +
-        "<li>" + H("marks each file it optimizes with a tag inside the file (the optimizer’s version), so a file copied or synced to another system isn’t done again there") + "</li></ul></li>" +
-      "</ul></section>" + jobCard(true) + queueCard();
+    var out = top(T("Optimizer"), toolBlurb("optimizer") + (ver ? '<br><span class="muted">' + ver + "</span>" : ""), "");
+    out += '<div class="stack">' + toolsNav("optimizer") + optimizerSetup(op) + '<section class="card">' +
+      toolHead("optimizer", T("Optimizer"), OPT_SYNC_HELP + "<br><br>" + OPT_MKV_HELP + H("Sorting the metadata") + ": " + SORT_HELP + "<br><br>" +
+        H("Each library has its choices; under them, a card for each file there’s something to do to: the file as it is now, and as optimizing leaves it. Tick the files (All ticks every file of the library, on every page), then Optimize Selected."));
     var libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind && !l.excluded; });
-    out += '<section class="card">' + heading(esc(T("Optimize Files")), H("Choose what to do for each library, then press Optimize Now."));
     if (!libs.length) {
       // Right after a start the libraries haven't been read from Plex yet: say so, rather than "no libraries"
       var lib0 = ST.library || {}, plexSet = S.plex && S.plex.url && S.plex.token_set;
@@ -1142,73 +1299,26 @@ PCI18N.ready.then(function () {
         (lib0.scanning || plexSet) ? H("Reading your libraries from Plex…") : H("No libraries yet. Connect Plex in <a href=\"/system\" data-nav>System</a>.");
       return out + '<p class="muted">' + why + "</p></section></div>";
     }
-    // Library · what to do · its cover art · whether its dataset is set up · the files still to do · the buttons
-    out += '<div class="tbl-wrap"><table class="tbl optlibs"><thead><tr><th scope="col">' + H("Library") + '</th><th scope="col">' + H("Optimize") +
-      '</th><th scope="col">' + H("MKV metadata") + '</th><th scope="col">' + H("Dataset") + info(ZFS_CFG_HELP, T("Dataset")) +
-      '</th><th scope="col">' + H("To optimize") + '</th><th scope="col"></th></tr></thead><tbody>';
-    var gates = "";  // the readiness lights of the libraries that could optimize now, shown under the table
-    libs.forEach(function (l) {
-      var key = String(l.key), c = optChoices(key), sm = sums[key];
-      // what to do: two checkboxes; the cover art choice in its own column (it applies to MKV files)
-      var opts = '<div class="optline"><label><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="sync"' + (c.sync ? " checked" : "") + "> " + H("TrueNAS compression &amp; record size") + optRevert(key, "sync") + "</label>" +
-        '<label><input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="mkv"' + (c.mkv ? " checked" : "") + "> " + H("Optimize MKV files") + optRevert(key, "mkv") + "</label></div>";
-      var cover = '<span class="muted">—</span>';
-      var audioLib = l.kind === "audio";
-      if (audioLib) c.images = "compress";  // (optimizing.options: an audio library's cover art stays in the file)
-      if (c.mkv && audioLib) cover = '<div class="optsel"><div><span class="muted">' + H("Cover art") + "</span>" + info(AUDIO_COVER_HELP, T("Cover art")) + "</div>" +
-        '<span class="det">' + H("Kept in the file, compressed") + "</span></div>";
-      else if (c.mkv) cover = '<div class="optsel"><div><span class="muted">' + H("Cover art") + "</span>" + info(COVER_HELP, T("Cover art")) + "</div>" +
-        '<select data-optlib="' + esc(key) + '" data-optkey="images" aria-label="' + esc(T("Cover art")) + '">' +
-        [["unmatched", H("Plex poster, unmatched items only")], ["remove", H("Strip it")], ["compress", H("Keep it, compressed")],
-         ["plex", H("Plex poster, every item")]].map(function (o) {
-          return '<option value="' + o[0] + '"' + (c.images === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
-        }).join("") + "</select>" + optRevert(key, "images") + "</div>" +
-        '<div class="optsel"><div><span class="muted">' + H("Tags") + "</span>" + info(TAGS_HELP, T("Tags")) + "</div>" +
-        '<select data-optlib="' + esc(key) + '" data-optkey="tags" aria-label="' + esc(T("Tags")) + '">' +
-        [["keep", H("Keep tags")], ["excessive", H("Strip excessive tags")], ["strip", H("Strip tags")]].map(function (o) {
-          return '<option value="' + o[0] + '"' + (c.tags === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
-        }).join("") + "</select>" + optRevert(key, "tags") + "</div>";
-      // one status for everything chosen: the files still to do, or Complete
-      var st;
-      if (!sm) st = '<span class="muted">—</span>';
-      else if (!c.sync && !c.mkv) st = '<span class="muted">' + H("Nothing chosen") + "</span>";
-      else st = sm.todo ? '<span class="nw">' + esc(P(sm.todo, "{n} file", "{n} files", { n: fmtNum(sm.todo) })) + "</span>" : badge("pass", T("Complete"));
-      if (sm && (sm.conflicts || []).length) st += '<div class="det">' + PH((sm.conflicts || []).length, "{n} Syncthing conflict copy", "{n} Syncthing conflict copies") + "</div>";
-      // the dataset set up for the best result before files are written with it
-      var z = (sm || {}).zfs, zcell = '<span class="muted">—</span>';
-      if (z) zcell = badge(z.status === "ideal" || z.status === "pass" ? "pass" : z.status, { ideal: T("Ideal"), pass: T("Pass"), warn: T("Warning"), info: T("Not checked") }[z.status]) +
-        (z.issues || []).map(function (x) { return '<div class="det">' + esc(x) + "</div>"; }).join("");
-      var act;
-      var qOpt = queuedFor("optimize", { library: key, mode: "optimize" }), qCov = queuedFor("optimize", { library: key, mode: "covers" });
-      var runs = function (mode) { var j = ST.job; return !!(j && j.running && j.kind === "optimize" && j.library === key && j.mode === mode); };
-      if (OPT_CONFIRM === key) {
-        // optimizing now with the ZFS settings off: every file would be written twice
-        act = '<div class="det" style="max-width:320px">' + H("Optimizing before changing the ZFS settings means each file is written now and again after the change. Change the settings first to write each file only once.") + "</div>" +
-          '<div class="det"><button class="btn" type="button" data-act="optimize-lib" data-key="' + esc(key) + '" data-confirmed="1">' + H("Optimize Anyway") + "</button> " +
-          '<button class="link" type="button" data-act="optimize-cancel">' + H("Cancel") + "</button></div>";
-        act = '<div class="optacts">' + act + "</div>";
-      } else {
-        // one file job at a time: while one runs, these add to the queue (shown at the top)
-        var later = fileBusy(), off = !op.configured;
-        var canGo = !off && sm && (sm.todo || (sm.conflicts || []).length);
-        var gateO = canGo && !qOpt && !runs("optimize") ? readinessPanel(key, "largest", "optimizer", "", 0) : { ready: true, html: "" };
-        if (gateO.html) gates += '<div class="optgate"><div class="what">' + libIcon(l.key) + esc(l.title) + "</div>" + gateO.html + "</div>";  // (under the table: room to read)
-        if (qOpt || runs("optimize")) act = badge("info", qOpt ? T("Queued") : T("Running"));
-        else act = '<button class="btn pri" type="button" data-act="optimize-lib" data-key="' + esc(key) + '"' +
-          (!canGo || !gateO.ready ? " disabled" : "") + ">" + (later ? H("Add to Queue") : H("Optimize Now")) + "</button>" +
-          (gateO.html && !gateO.ready ? '<div class="det">' + H("See the lights below.") + "</div>" : "");
-        // cover art is set when a file is first optimized; this brings optimized files in line with the choice and Plex now
-        if (c.mkv && c.images !== "compress") act += " " + (qCov || runs("covers") ? badge("info", qCov ? T("Cover art sync queued") : T("Syncing cover art"))
-          : '<button class="btn" type="button" data-act="optimize-covers" data-key="' + esc(key) + '"' +
-          (off || !sm || !sm.mkv_done ? " disabled" : "") + ">" + (later ? H("Queue Cover Art Sync") : H("Sync Cover Art")) + "</button>") + info(SYNC_COVER_HELP, T("Sync Cover Art"));
-        var lj = ST.job;
-        act = '<div class="optacts">' + act + "</div>";
-        if (lj && lj.kind === "optimize" && !lj.running && lj.library === key && lj.finished)
-          act += '<div class="det muted">' + H("Last run: {optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed", lj) + "</div>";
-      }
-      out += '<tr><td class="nw">' + libIcon(l.key) + esc(l.title) + "</td><td>" + opts + "</td><td>" + cover + "</td><td>" + zcell + "</td><td>" + st + "</td><td>" + act + "</td></tr>";
-    });
-    return out + "</tbody></table></div>" + gates + "</section></div>";
+    var tabs = optLibTabs(libs, sums);
+    var key = String(TOOL.optimizer.key), l = libs.filter(function (x) { return String(x.key) === key; })[0], c = optChoices(key), sm = sums[key];
+    var some = sm && (c.sync || c.mkv), nf = sm ? sm.files || 0 : null, conf = sm ? (sm.conflicts || []).length : 0;
+    out += toolTop({ tabs: tabs, options: optOptions(l, key, c, sm, op), scan: optScanBar(op, optCovers(key, c, sm, op)),
+      stats: sm && { last: !!op.surveying, read: nf, readText: P(nf, "{n} file read", "{n} files read", { n: fmtNum(nf) }), issues: some ? sm.todo || 0 : null,
+        passNow: some ? nf - (sm.todo || 0) : null, passAll: sm.clean_all,
+        extra: conf ? [statChip("grey", P(conf, "{n} Syncthing conflict copy", "{n} Syncthing conflict copies", { n: fmtNum(conf) }), T("Copies the folder sync made when two systems wrote a file at once: optimizing the whole library (All) deletes the ones the optimizer made that are the same as the file."))] : [] } });
+    if (!sm) return out + '<p class="muted toolempty">' + (op.surveying ? H("Looking at this library’s files…") : H("This library’s files haven’t been looked at yet: press Scan.")) + "</p></section>" + jobCard(true) + queueCard() + "</div>";
+    if (!c.sync && !c.mkv) return out + '<p class="muted toolempty">' + badge("info", T("Nothing chosen")) + " " + H("Tick what the optimizer should do for this library above.") + "</p></section>" + jobCard(true) + queueCard() + "</div>";
+    if (!sm.todo) return out + '<p class="muted toolempty">' + badge("pass", T("Nothing to optimize")) + " " + H("Every file is optimized as chosen.") + "</p></section>" + jobCard(true) + queueCard() + "</div>";
+    var d = optFiles(key, sm.todo);
+    if (!d && optState(key).error) return out + '<p class="bad">' + H("The files to optimize couldn’t be read: {why}", { why: esc(optState(key).error) }) +
+      ' <button class="btn sm" type="button" data-act="opt-retry" data-key="' + esc(key) + '">' + H("Try Again") + "</button></p></section>" + jobCard(true) + queueCard() + "</div>";
+    if (!d) return out + loadingBar(T("Reading the files to optimize…")) + "</section>" + jobCard(true) + queueCard() + "</div>";
+    // the cards: those that can be done first, then those stopped (the optimizer not set up: all of them)
+    var cards = (d.files || []).map(function (f) { var x = optFileCard(f, sm, c, op); x.sev = rowSeverity(cmpStatuses(x)); return x; }).filter(function (x) { return x.sev.shown; });
+    cards = cards.filter(function (x) { return !x.sev.blocked; }).concat(cards.filter(function (x) { return x.sev.blocked; }));
+    var pg = pager(d, d.offset, cardsPer(), 'data-act="opt-page-go" data-key="' + esc(key) + '"');
+    out += pg + cards.map(cmpRow).join("") + pg + optApply(key, sm, c, op, d, cards);
+    return out + "</section>" + jobCard(true) + queueCard() + "</div>";
   }
 
   // ------------------------------------------------------------ a folder into its own dataset
@@ -1984,7 +2094,7 @@ PCI18N.ready.then(function () {
   function checkMarks(checks, ids, named) {
     return (checks || []).filter(function (c) { return ids.indexOf(c.id) >= 0; }).map(function (c) {
       return '<span class="lcheck">' + (named ? '<span class="muted">' + esc(msg(c.name)) + "</span> " : "") + healthBadge(c.status) +
-        info("<strong>" + esc(msg(c.name)) + "</strong>: " + esc(msg(c.text)), msg(c.name)) + "</span>";
+        info("<strong>" + esc(msg(c.name)) + "</strong>: " + richText(msg(c.text)), msg(c.name)) + "</span>";
     }).join("");
   }
   function blockChecks(d, b, shown, isStart) {
@@ -2340,17 +2450,18 @@ PCI18N.ready.then(function () {
     return '<div class="ssfiles' + (many ? " many" : "") + '">' + files.map(function (f) { return "<div>" + (many ? "• " : "") + esc(f) + "</div>"; }).join("") + "</div>";
   }
   // the row's files numbered: File 1, File 2… over both sides (fidx: name -> n); a chip per file on a card,
-  // green when the other side has the file too, yellow when only this side does
-  function fileChips(x, otherNames, fidx, act, openId) {
+  // green when the other side has the file too, yellow when only this side does — or, with ``explain`` (a tool's
+  // comparison card), grey, each opening to what happens to the file (explain(file, "own" | "gains"))
+  function fileChips(x, otherNames, fidx, act, openId, explain) {
     return (x.files || []).map(function (f) {
       var n = fidx[f], id = "file:" + n, on = openId === id, both = otherNames.indexOf(f) >= 0;
-      return '<button type="button" class="badge b-' + (both ? "pass" : "warn") + " sschip" + (on ? " on" : "") + '" aria-expanded="' + on + '" ' + act + ' data-f="' + id + '" title="' + esc(f) + '">' + esc(T("File {n}", { n: n })) + "</button>";
+      return '<button type="button" class="badge b-' + (explain ? "grey" : both ? "pass" : "warn") + " sschip" + (on ? " on" : "") + '" aria-expanded="' + on + '" ' + act + ' data-f="' + id + '" title="' + esc(f) + '">' + esc(T("File {n}", { n: n })) + "</button>";
     }).join("") + (x.gains || []).map(function (f) {  // files it would gain (greyed: what the record looks like after)
       var n = fidx[f], id = "file:" + n, on = openId === id;
       return '<button type="button" class="badge b-grey sschip' + (on ? " on" : "") + '" aria-expanded="' + on + '" ' + act + ' data-f="' + id + '" title="' + esc(T("{file} — joins this record as a version", { file: f })) + '">' + esc(T("File {n}", { n: n })) + "</button>";
     }).join("");
   }
-  function syncSide(x, other, server, isSource, kinds, act, openId, tags, fidx, otherNames) {
+  function syncSide(x, other, server, isSource, kinds, act, openId, tags, fidx, otherNames, explain) {
     if (!x) return '<div class="sscard"><div class="det">' + H("Not on this server.") + "</div></div>";
     // the Plex checks on this record (libhealth): its versions named for different films, say — data that looks bad
     // (an empty locked field is its own orange chip above: not said twice)
@@ -2373,10 +2484,14 @@ PCI18N.ready.then(function () {
       chips += '<button type="button" class="badge b-' + l.status + ' sschip' + (on ? " on" : "") + '" aria-expanded="' + on + '" ' + act + ' data-f="' + esc(l.id) + '">' + esc(l.label) + "</button>";
       if (on) shown = '<div class="ssval">' + esc(l.text) + "</div>";
     });
-    chips += fileChips(x, otherNames || [], fidx || {}, act, openId);
+    chips += fileChips(x, otherNames || [], fidx || {}, act, openId, explain);
     if (openId && openId.indexOf("file:") === 0) {
-      var fn = (x.files || []).filter(function (f) { return "file:" + (fidx || {})[f] === openId; })[0];
-      if (fn) shown = '<div class="ssval mono">' + esc(fn) + "</div>";
+      var isFile = function (f) { return "file:" + (fidx || {})[f] === openId; };
+      var fn = (x.files || []).filter(isFile)[0], fg = explain && !fn ? (x.gains || []).filter(isFile)[0] : null;
+      if (fn || fg) shown = explain ? '<div class="ssval">' + explain(fn || fg, fn ? "own" : "gains") + '<div class="det mono">' + esc(fn || fg) + "</div></div>" : '<div class="ssval mono">' + esc(fn) + "</div>";
+    }
+    if (explain && openId && openId.indexOf("file:") === 0 && !shown && (x.files || []).length) {  // a file opened on the other side: this side's own, to compare
+      shown = '<div class="ssval">' + explain(x.files[0], "own") + '<div class="det mono">' + esc(x.files[0]) + "</div></div>";
     }
     if (openId && openId !== "match" && !shown) {  // opened on the other side: this side's value, to compare
       var v = sideValueOf(x, openId);
@@ -2507,26 +2622,36 @@ PCI18N.ready.then(function () {
   }
   // The Library page's Health view: the content checks (libhealth.py) — file checks on the files as
   // inspected, Plex checks on how Plex has the items — each with its switch, and the items flagged
-  // a view's data on its way: a bar that moves, not a word
-  function loadingBar(text) {
+  // a view's data on its way: a bar that moves, not a word — how far it is where that's known (pg: {done, total}: a bar
+  // that fills, with the count), else one that sweeps back and forth. Every waiting bar is this one.
+  function loadingBar(text, pg) {
+    if (pg && pg.total) {
+      var pct = Math.min(100, Math.round(100 * (pg.done || 0) / pg.total));
+      return '<div class="loading"><div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '" aria-label="' + esc(text || T("Loading")) + '"><div style="width:' + pct + '%"></div></div>' +
+        '<div class="det">' + esc(text || T("Loading…")) + " " + H("{done} of {total} · {pct}%", { done: fmtNum(pg.done || 0), total: fmtNum(pg.total), pct: pct }) + "</div></div>";
+    }
     return '<div class="loading"><div class="meter thin busy" role="progressbar" aria-busy="true" aria-label="' + esc(text || T("Loading")) + '"><div></div></div><div class="det">' + esc(text || T("Loading…")) + "</div></div>";
   }
   var LH_OPEN = {};  // the issue chips opened on the Health view: "item key/check id" -> true
   var HEALTH_PAGES = { library: 1, filechecks: 1, plexchecks: 1 };  // the pages that draw the Health view
-  function libHealthView(only) {
-    var key = LIB.key, d = LIB.health[key];
+  // only: a check page's category ("file", "plex"), drawn as every tool's page — its library tabs (tabs) and the top
+  // (toolTop: what was found on their right, the checks as options under them); without, the Library page's Health view
+  function libHealthView(only, tabs) {
+    var key = LIB.key, d = LIB.health[key], head = only ? toolTop({ tabs: tabs }) : "";
     if (d === undefined) {
       LIB.health[key] = null;
       api("/api/library/health?key=" + encodeURIComponent(key)).then(function (got) { LIB.health[key] = got; if (HEALTH_PAGES[page]) render(); })
-        .catch(function () { LIB.health[key] = { error: true }; if (HEALTH_PAGES[page]) render(); });
-      return loadingBar(T("Running the checks…"));
+        .catch(function () { LIB.health[key] = { error: true }; if (HEALTH_PAGES[page]) render(); });  // (said, with Try Again)
+      return head + loadingBar(T("Running the checks…"));
     }
-    if (!d || d.error) return loadingBar(T("Running the checks…"));
+    if (d && d.error) return head + '<p class="bad">' + H("The checks couldn’t be loaded.") + ' <button class="btn sm" type="button" data-act="lh-retry">' + H("Try Again") + "</button></p>";
+    if (!d) return head + loadingBar(T("Running the checks…"));
     var cats = { file: [T("File checks"), T("What’s in each file, as inspected: its tracks.")], plex: [T("Plex checks"), T("How Plex has each item.")],
       tools: [T("Tools"), T("What each tool would do about an item: one chip per tool, its page a click away.")] };
     var dflt = ((ST.library_health_defaults || {}).checks) || {};
     var stt = d.stats || {};
-    var out = (d.migration ? '<div class="note">' + H("A folder of this library is on its way to a dataset of its own ({step}): <a href=\"/dataset\" data-nav>Child Dataset</a> carries on.", { step: d.migration.step }) + "</div>" : "") +
+    var mig = d.migration ? '<div class="note">' + H("A folder of this library is on its way to a dataset of its own ({step}): <a href=\"/dataset\" data-nav>Child Dataset</a> carries on.", { step: d.migration.step }) + "</div>" : "";
+    var out = only ? "" : mig +
       (stt.items ? '<div class="lhstats">' + esc(T("{pct}% of items have nothing flagged", { pct: stt.clean_pct })) + ' <span class="muted">(' + esc(T("{clean} of {total}", { clean: fmtNum(stt.clean), total: fmtNum(stt.items) })) + ")</span>" +
         (stt.multi ? " · " + esc(P(stt.multi, "{n} item with more than one issue", "{n} items with more than one issue", { n: fmtNum(stt.multi) })) : "") + "</div>" : "") +
       '<div class="det" style="margin:8px 0">' + esc(T("{n} items checked", { n: fmtNum(d.checked || 0) })) +
@@ -2551,34 +2676,51 @@ PCI18N.ready.then(function () {
     var catOf = {};
     Object.keys(d.checks).forEach(function (cat) { (d.checks[cat] || []).forEach(function (c) { catOf[c.id] = cat; }); });
     var shownItems = (d.items || []).map(function (it) { return Object.assign({}, it, { results: it.results.filter(function (r) { return onIds[r.id] && (!only || catOf[r.id] === only); }) }); });
-    var flaggedItems = shownItems.filter(function (it) { return it.results.length; }).length;
+    var flaggedItems = shownItems.filter(function (it) { return it.results.length; }).length, clean = shownItems.length - flaggedItems;
+    // a check page (only: one category) shows only what its checks found — the items with an orange chip or a grey one
+    // (ignored), as a tool's page shows only its rows with something on them; every item is the Library page's
+    if (only) shownItems = shownItems.filter(function (it) { return it.results.length; });
     var counts = {};
     shownItems.forEach(function (it) { it.results.forEach(function (r) { if (!r.ignored) counts[r.id] = (counts[r.id] || 0) + 1; }); });
-    out += '<div class="lhgrid">' + Object.keys(cats).filter(function (cat) { return !only || cat === only; }).map(function (cat) {
+    var checksHtml = Object.keys(cats).filter(function (cat) { return !only || cat === only; }).map(function (cat) {
       var all = d.checks[cat] || [], byId = {};
       all.forEach(function (c) { byId[c.id] = c; });
       var row = function (c) {
         var n = counts[c.id] || 0, sub = !!c.of;
         var rv = dflt[c.id] !== undefined && c.on !== dflt[c.id] ? ' <button type="button" class="revert" data-lhcheck-revert="' + c.id + '" title="' + H("Back to the default ({value})", { value: dflt[c.id] ? T("on") : T("off") }) + '">↺</button>' : "";
-        var help = esc(msg(c.help)) + (c.link ? '<p><a href="' + esc(c.link) + '" target="_blank" rel="noopener">' + H("The research behind it ↗") + "</a></p>" : "");
-        return '<div class="chk lhchk' + (sub ? " lhsub" : "") + '">' + info(help, msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
+        var help = richText(msg(c.help)) + (c.link ? '<p><a href="' + esc(c.link) + '" target="_blank" rel="noopener">' + H("The research behind it ↗") + "</a></p>" : "");
+        return '<div class="chk lhchk' + (sub ? " lhsub" : "") + (only ? " optrow" : "") + '">' + info(help, msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
           (sub ? (c.on && n ? badge("warn", fmtNum(n)) : "") : c.on ? (n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : "") +
           (c.id === "subtitles_language" ? '<div class="lhlang"><span>' + H("Language") + "</span>" + langSel +
             (d.language !== ((ST.library_health_defaults || {}).subtitle_language || "en") ? ' <button type="button" class="revert" data-lhlang-revert title="' + H("Back to the default ({value})", { value: "English" }) + '">↺</button>' : "") + "</div>" : "") +
           (c.id === "audio_low_bitrate" && c.on ? '<div class="lhlang"><span>' + H("Quality level") + "</span>" + qualSel +
             (d.audio_quality !== ((ST.library_health_defaults || {}).audio_quality || "poor") ? ' <button type="button" class="revert" data-lhquality-revert title="' + H("Back to the default ({value})", { value: LEVELS.poor }) + '">↺</button>' : "") + "</div>" : "") + "</div>";
       };
-      // a check's options (c.of) under it, only while it's on
-      return '<div class="lhcat"><div class="what">' + esc(cats[cat][0]) + '</div><div class="det">' + esc(cats[cat][1]) + "</div>" + all.filter(function (c) { return !c.of; }).map(function (c) {
+      // a check's options (c.of) under it, only while it's on — on a check page, the check and its options one cell of the
+      // options' grid (optionGrid: the tools' options' layout)
+      var rows = all.filter(function (c) { return !c.of; }).map(function (c) {
         return row(c) + (c.on ? all.filter(function (o) { return o.of === c.id; }).map(row).join("") : "");
-      }).join("") + "</div>";
-    }).join("") + "</div>";
-    if (!shownItems.length) return out + '<p class="muted">' + H("No items in this library yet.") + "</p>";
-    out += '<div class="det">' + esc(P(flaggedItems, "{n} item flagged", "{n} items flagged", { n: fmtNum(flaggedItems) })) + " · " + esc(P(shownItems.length - flaggedItems, "{n} with nothing flagged", "{n} with nothing flagged", { n: fmtNum(shownItems.length - flaggedItems) })) + "</div>";
-    var hpages = { pages: pageRanges(shownItems.map(function (it) { return it.label; }), perPage()), total: shownItems.length };
+      });
+      if (only) return optionGrid(rows.map(function (r) { return '<div class="optcell">' + r + "</div>"; }));
+      return '<div class="lhcat"><div class="what">' + esc(cats[cat][0]) + '</div><div class="det">' + esc(cats[cat][1]) + "</div>" + rows.join("") + "</div>";
+    }).join("");
+    if (only) {
+      // what was found, as on every tool's page: the items read, those flagged by this page's checks as they're set, and
+      // with every check of the page on (each item once, whatever its chips)
+      // (an item whose findings are all ignored isn't an issue — as the tab's count — nor does it pass)
+      var total = (d.items || []).length, failAll = (d.items || []).filter(function (it) { return it.results.some(function (r) { return catOf[r.id] === only; }); }).length;
+      var issues = shownItems.filter(function (it) { return it.results.some(function (r) { return !r.ignored; }); }).length;
+      out += mig + toolTop({ tabs: tabs, options: checksHtml, stats: { read: total, readText: P(total, "{n} item read", "{n} items read", { n: fmtNum(total) }), issues: issues,
+        passNow: total - flaggedItems, passAll: total - failAll,
+        extra: d.unread ? [statChip("grey", P(d.unread, "{n} file not inspected yet", "{n} files not inspected yet", { n: fmtNum(d.unread) }), T("Files the inspector hasn’t read yet: their tracks aren’t checked until it has."))] : [] } });
+    } else out += '<div class="lhgrid">' + checksHtml + "</div>";
+    if (!shownItems.length) return out + '<p class="muted">' + (only && (d.items || []).length ? badge("pass", T("Nothing found")) + " " + H("No item has anything these checks flag.") : H("No items in this library yet.")) + "</p>";
+    if (!only) out += '<div class="det">' + esc(P(flaggedItems, "{n} item flagged", "{n} items flagged", { n: fmtNum(flaggedItems) })) + " · " + esc(P(clean, "{n} with nothing flagged", "{n} with nothing flagged", { n: fmtNum(clean) })) + "</div>";
+    var hper = only ? cardsPer() : perPage();  // (a check page is a tool's page: the tools' page size)
+    var hpages = { pages: pageRanges(shownItems.map(function (it) { return it.label; }), hper), total: shownItems.length };
     if (LIB.healthOffset >= shownItems.length) LIB.healthOffset = 0;
     var hoff = LIB.healthOffset;
-    shownItems = shownItems.slice(hoff, hoff + perPage());
+    shownItems = shownItems.slice(hoff, hoff + hper);
     // each item flagged as a record card — its poster, its name as Plex has it (title, year, edition) — with a chip per
     // issue on the right; a chip opened shows what the check found (the file concerned, when the item has several)
     out += '<div class="sshdr lhhdr"><div>' + H("Item") + "</div><div></div><div>" + H("Flagged") + "</div></div>";
@@ -2610,7 +2752,7 @@ PCI18N.ready.then(function () {
       return '<div class="ssitem lhitem' + (live.length ? "" : " lhquiet") + '"><div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(it.label) + '</div><div class="lhacts">' + acts + "</div></div></div></div>" +
         '<div class="ssarrow"></div><div class="lhflags"><div class="sschips">' + chips + "</div>" + shown + "</div></div>";
     }).join("");
-    out += pager(hpages, hoff, perPage(), 'data-act="lh-page"');
+    out += pager(hpages, hoff, hper, 'data-act="lh-page"');
     if ((d.items || []).length < (d.total || 0)) out += '<p class="muted">' + H("The first {n} shown.", { n: fmtNum(d.items.length) }) + "</p>";
     return out;
   }
@@ -3772,9 +3914,10 @@ PCI18N.ready.then(function () {
     // ---- Preferences: lists, and what stands in for a snapshot before files change
     var g = S.general;
     out += '<section class="card" id="prefs"><h2>' + H("Preferences") + '</h2><div class="grid">' +
-      number("general", "page_size", T("Entries per page"), 25, 1000, H("On the Library views, the Sync differences, a job’s files: a long list a page at a time, with the pages told by what’s on them.")) +
+      number("general", "page_size", T("Entries per Library page"), 25, 1000, H("On the Library views, the Sync differences, a job’s files: a long list a page at a time, with the pages told by what’s on them.")) +
+      number("general", "tool_page_size", T("Entries per Tools page"), 5, 200, H("On every tool’s page, the Optimizer’s and the check pages: the cards a page at a time. All still ticks every page’s.")) +
       select("general", "backup", T("Backup before changes"), [["snapshot", T("A snapshot, taken through TrueNAS")], ["manual", T("A backup I make myself")], ["copies", T("The copies the action keeps")]],
-        { s: H("Before any action rewrites, moves or deletes files — the file tools, Optimize Now, Child Dataset — a recent snapshot of the library’s dataset must be in reach, or this stands in for it.") + " " +
+        { s: H("Before any action rewrites, moves or deletes files — the file tools, Optimize Selected, Child Dataset — a recent snapshot of the library’s dataset must be in reach, or this stands in for it.") + " " +
             H("Before Plex’s records change — Merge Duplicates, Library Sync’s Apply, the merge Organize Folders makes — the app backs up each record it changes, under a snapshot or the copies an action keeps; with a backup you make yourself, it doesn’t."),
           more: H("<strong>A snapshot</strong> is the whole dataset as it is this minute, taken through TrueNAS when you press Take a Snapshot on the action’s page, named <code>plexcache-&lt;tool&gt;-&lt;library&gt;-&lt;time&gt;</code> and deleted by the app after the days set below. Needs TrueNAS connected with a key allowed to make snapshots (TrueNAS 24.10 and later).<br><br>" +
           "<strong>A backup I make myself</strong>: you make one, and say so on the action’s page; it counts for half an hour.<br><br>" +
@@ -4080,29 +4223,56 @@ PCI18N.ready.then(function () {
     }
     return null;
   }
+  // what's being counted still: a library being read from Plex, or read and its count not worked out yet — the tab or the
+  // card shows a turning wheel there instead of a number, so a missing count isn't taken for nothing to do
+  function toolPending(name) {
+    var tc = (ST.tool_counts || {})[name];
+    if (tc) return !!(tc.pending || []).length;
+    if (name === "optimizer") { var op = ST.optimizer || {}; return !!op.surveying && !Object.keys(op.libraries || {}).length; }
+    if (name === "filechecks" || name === "plexchecks") return ((ST.library || {}).libraries || []).some(function (l) { return l.kind && !l.excluded && healthPending(String(l.key)); });
+    return false;
+  }
+  // Library Health's count for a library still to come: the library being read, or read and its count not worked out yet
+  // (the server works it out in the background: App._health_counts_now)
+  function healthPending(k) {
+    var ld = ST.libdata || {}, hc = ST.health_counts || {}, d = (ld.libraries || {})[k], busy = (ld.queue || []).concat(ld.current ? [ld.current] : []);
+    return d && d.ready ? !hc[k] || !!hc[k].stale || hc[k].stamp !== d.stamp : busy.indexOf(k) >= 0;  // (stale: a check switched, an item ignored)
+  }
+  function countChip(n, pending) {
+    if (pending) return ' <span class="count busy" role="status" title="' + H("Still counting…") + '" aria-label="' + H("Still counting…") + '"><span class="spin" aria-hidden="true"></span></span>';
+    return n != null ? ' <span class="count' + (n ? " warn" : "") + '" title="' + H("Found to do") + '">' + fmtNum(n) + "</span>" : "";
+  }
   function toolsTotal() { return TOOLS.reduce(function (a, t) { return a + (toolCount(t[0]) || 0); }, 0); }
   function pageTools() {
     var out = top(T("Tools"), H("What Plex Cache can do to your library beyond caching it. Each tool has a page of its own; none changes anything until you ask it to. The number on a card is what the tool has found to do, across your libraries."), "");
     out += '<div class="stack">' + toolsNav("tools") + '<div class="grid">' + TOOLS.map(function (t) {
       var n = toolCount(t[0]);
       return '<section class="card toolcard"><h2><a href="/' + t[0] + '" data-nav>' + esc(T(t[1])) + " →</a>" +
-        (n != null ? ' <span class="count' + (n ? " warn" : "") + '" title="' + H("Found to do") + '">' + fmtNum(n) + "</span>" : "") + "</h2><p>" + esc(T(t[2])) + "</p></section>";
+        countChip(n, toolPending(t[0])) + "</h2><p>" + esc(T(t[2])) + "</p></section>";
     }).join("") + "</div></div>";
     return out;
   }
   // ---- the tools that scan a library and do the rows you tick (tools/): Merge Duplicates, Duplicate Versions, Organize Folders
-  var TOOL = { merge: { key: null, sel: {}, confirm: false, keep: {} }, versions: { key: null, sel: {}, confirm: false }, folders: { key: null, sel: {}, confirm: false }, unlink: { key: null, sel: {}, confirm: false }, convert: { key: null, sel: {}, confirm: false } };
+  var TOOL = { merge: { key: null, sel: {}, confirm: false, keep: {} }, versions: { key: null, sel: {}, confirm: false, keep: {} }, folders: { key: null, sel: {}, confirm: false }, unlink: { key: null, sel: {}, confirm: false }, convert: { key: null, sel: {}, confirm: false },
+    optimizer: { key: null, sel: {}, confirm: false, libOf: {} } };  // (the optimizer's: a file's ticks by its path, over its libraries)
   function toolState(name) { return ((ST.tools || {})[name]) || { results: [], extra: {} }; }
   // the library tabs: the ones the tool can work on
   function toolLibs(name, types) {
     var u = TOOL[name], libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind && (!types || types.indexOf(l.type) >= 0); });
     if (!u.key || !libs.some(function (l) { return String(l.key) === String(u.key); })) u.key = libs.length ? String(libs[0].key) : null;
     if (!libs.length) return '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No library of the kind this tool works on.")) + "</p>";
-    return '<div class="lctl"><div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + libs.map(function (l) {
-      var n = (((ST.tool_counts || {})[name] || {}).libraries || {})[l.key];
-      return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(u.key)) + '" data-act="tool-lib" data-tool="' + name + '" data-key="' + esc(l.key) + '">' + libIcon(l.key) + esc(l.title) +
-        (n != null ? ' <span class="count' + (n ? " warn" : "") + '" title="' + H("Found to do") + '">' + fmtNum(n) + "</span>" : "") + "</button>";
-    }).join("") + "</div></div>";
+    var tc = (ST.tool_counts || {})[name] || {};
+    return libTabs({ libs: libs, key: u.key, attrs: function (l) { return 'data-act="tool-lib" data-tool="' + name + '" data-key="' + esc(l.key) + '"'; },
+      count: function (l) { var n = (tc.libraries || {})[l.key]; return { n: n, pending: n == null && (tc.pending || []).indexOf(String(l.key)) >= 0 }; } });
+  }
+  // ---- The library tabs, drawn one way on every tool's page and both check pages: a tab per library — its icon, its name,
+  // and what the page has found there (countChip: the number, or a turning wheel while it's being counted).
+  // o: {libs, key (the library open), attrs(l) (the tab's data-act and its own), count(l) -> {n (null: not known), pending}}
+  function libTabs(o) {
+    return '<div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + o.libs.map(function (l) {
+      var c = o.count(l) || {};
+      return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(o.key)) + '" ' + o.attrs(l) + ">" + libIcon(l.key) + esc(l.title) + countChip(c.n, c.pending) + "</button>";
+    }).join("") + "</div>";
   }
   // whether the tool is scanning this library: said by the server, or asked for from this page and not yet answered
   // (a scan is kicked off, then the state read: the page says Scanning… across that gap too)
@@ -4131,28 +4301,40 @@ PCI18N.ready.then(function () {
   // blurb; the card's heading with the long explanation behind its ⓘ — never a paragraph on the page; the library tabs; the
   // options and Scan / Scan Again, with the scanning state; one line on what the last scan found; the rows — a poster and the
   // item's name first, the tool's own columns after — or, with none, a sentence saying so; Apply, with the backup plan; and
-  // whatever the tool adds under it. What's in a row is fact (names, sizes, badges); an explanation goes behind an ⓘ (fact()).
-  // spec: {name, title, help, types?, options?, summary(sc), empty, columns: [names], row(r, sc) -> [cells after the item],
-  //        sub?(r) (under the item's name), rows?(sc) (a tool's own rows, posters included), confirm(n), note?(sc), after?(t, sc)}
+  // whatever the tool adds under it. What's in a row is fact (names, sizes, badges); an explanation goes behind a chip.
+  // Every row is a comparison card (cmpRow), the tool passing what it shows (card(r, sc): see cmpRow); which rows show, and
+  // which can be ticked, is the cards' checks' doing (rowSeverity) — the same in every tool.
+  // spec: {name, title, help, types?, options?, read(sc) -> {n, text} (what the scan read: toolStats), units?(r) (how many of
+  //        those a row is: 1), extra?(sc) -> [chips], empty, card(r, sc) -> cmpRow's spec, confirm(n), applies(sc),
+  //        stale?(sc), choiceOff?(id, value, sc), after?(t, sc)}
   function toolPage(spec) {
     var name = spec.name, t = toolState(name), out = top(T(spec.title), toolBlurb(name), "");
     var sc = toolRows(name, t), stale = !!(sc && spec.stale && spec.stale(sc));
     toolAutoScan(name, stale);
     if (stale) sc = null;  // (a scan from an older version: not shown, and scanned again by itself)
-    out += '<div class="stack">' + toolsNav(name) + '<section class="card">' + toolHead(name, T(spec.title), spec.help) + toolLibs(name, spec.types) +
-      toolOptions(name, t, sc, spec) + toolScanBar(name, t) + toolRun(t);
+    // the rows: only those with a yellow chip (something to do) or a red one (what stops it) — a row whose issue is
+    // switched off above has neither, and isn't drawn (the Library page shows every item); worked out here, from the rows
+    // as found, so a switch takes effect at once
+    var cards = sc ? toolCards(name, sc, spec) : null, read = sc && spec.read ? spec.read(sc) : null, units = spec.units || function () { return 1; };
+    var sum = function (rows) { return rows.reduce(function (a, r) { return a + units(r); }, 0); };
+    out += '<div class="stack">' + toolsNav(name) + '<section class="card">' + toolHead(name, T(spec.title), spec.help) +
+      toolTop({ tabs: toolLibs(name, spec.types), options: toolOptions(name, t, sc, spec), scan: toolScanBar(name, t) + toolRun(t),
+        stats: sc && { last: toolScanning(name, t), read: read && read.n, readText: read && read.text, issues: cards.shown.length,
+          passNow: read && read.n - sum(cards.rows), passAll: read && read.n - sum(sc.rows), extra: spec.extra ? spec.extra(sc) : [] } });
     if (sc) {
-      // the rows: the live ones (about an issue switched on above) first, then the rest, grey — sorted here, from the rows as
-      // found, so a switch moves them at once
-      var split = toolSplit(name, sc), quiet = ((ST.tool_counts || {})[name] || {}).ignored || 0;
-      out += '<div class="det toolsum" style="margin:8px 0">' + spec.summary(sc) + " · " + esc(P(split.live.length, "{n} flagged", "{n} flagged", { n: fmtNum(split.live.length) })) +
-        (split.off.length ? " · " + esc(P(split.off.length, "{n} shown grey (its switch is off)", "{n} shown grey (their switches are off)", { n: fmtNum(split.off.length) })) : "") +
-        (quiet ? " · " + esc(P(quiet, "{n} ignored on Library Health", "{n} ignored on Library Health", { n: fmtNum(quiet) })) : "") + "</div>";
       if (!sc.rows.length) out += '<p class="muted toolempty">' + badge("pass", T("Nothing found")) + " " + spec.empty + "</p>";
+      else if (!cards.shown.length) out += '<p class="muted toolempty">' + badge("info", T("Nothing to do")) + " " + H("What was found is about an issue switched off above.") + "</p>";
       else {
-        var sorted = Object.assign({}, sc, { rows: split.live.concat(split.off) });
-        out += spec.rows ? spec.rows(sorted) : toolTable(name, sorted, spec);
-        out += toolApply(name, t, split.live, spec.confirm, spec.applies(sc));
+        // a page of cards at a time (cardsPer), the pages told by what's on them; All ticks every row on every page
+        var u = TOOL[name], off = Math.max(0, Math.min(u.offset || 0, cards.shown.length - 1));
+        var per = cardsPer();
+        off -= off % per;
+        var onPage = cards.shown.slice(off, off + per), canIds = {};
+        cards.can.forEach(function (r) { canIds[r.id] = true; });
+        u.pageCan = onPage.filter(function (c) { return canIds[c.id]; }).map(function (c) { return c.id; });
+        var pg = pager({ total: cards.shown.length, pages: pageRanges(cards.shown.map(function (c) { return c.title; }), per) }, off, per, 'data-act="tool-page" data-tool="' + name + '"');
+        out += pg + onPage.map(cmpRow).join("") + pg;
+        out += toolApply(name, t, cards.can, spec.confirm, spec.applies(sc));
       }
     }
     return out + "</section>" + (spec.after ? spec.after(t, sc) : "") + toolProcess(name) + toolHistory(name) + "</div>";
@@ -4175,10 +4357,23 @@ PCI18N.ready.then(function () {
     var on = toolEnabled(name, key);
     return (row.issues || []).some(function (i) { return on[i] === true; });
   }
-  function toolSplit(name, sc) {
-    var live = [], off = [];
-    sc.rows.forEach(function (r) { (toolLive(name, sc.library, r) ? live : off).push(r); });
-    return { live: live, off: off };
+  // A tool's rows as cards (spec.card), each with its severity, and only the ones to show — those with something to do
+  // (a yellow chip) or a red chip that stops it: the ones that can be done first, then the ones stopped, each in the scan's
+  // order. ``can``: the rows that can be ticked (a yellow chip and no red one: Apply, and All — every page's — TOOL[name].can).
+  function toolCards(name, sc, spec) {
+    var todo = [], stopped = [], can = [], hidden = 0, rows = [];
+    sc.rows.forEach(function (r) {
+      var c = Object.assign({ tool: name, id: r.id, title: r.title }, spec.card(r, sc));
+      var first = mergeFirst(name, sc.library, r), kept = (c.left || []).concat(c.right || []).filter(function (sd) { return sd.kind === "keep"; })[0];
+      if (first && kept) kept.checks = [first].concat(kept.checks || []);  // (a tag inside the card: the side that stays)
+      else if (first) c.checks = [first].concat(c.checks || []);
+      c.sev = rowSeverity(cmpStatuses(c));
+      if (!c.sev.shown) { hidden++; return; }
+      rows.push(r);
+      if (c.sev.live && !c.sev.blocked) { todo.push(c); can.push(r); } else stopped.push(c);
+    });
+    TOOL[name].can = can.map(function (r) { return r.id; });
+    return { shown: todo.concat(stopped), can: can, hidden: hidden, rows: rows };
   }
   function toolOptions(name, t, sc, spec) {
     var u = TOOL[name], key = u.key;
@@ -4186,52 +4381,164 @@ PCI18N.ready.then(function () {
     var kind = toolKind(key), opts = (t.options || []).filter(function (o) { return !kind || o.kinds.indexOf(kind) >= 0; });
     if (!opts.length) return "";
     var on = toolEnabled(name, key), help = TOOL_OPTION_HELP[name] || {};
-    return '<div class="convtypes tooloptions">' + opts.map(function (o) {
+    return optionGrid(opts.map(function (o) {
       var v = on[o.id], rv = v === o.default ? "" : ' <button type="button" class="revert" data-act="tool-switch-revert" data-tool="' + name + '" data-opt="' + esc(o.id) + '" data-key="' + esc(key) + '" title="' + H("Back to the default ({value})", { value: o.choices ? esc(msg((o.choices.filter(function (c) { return c[0] === o.default; })[0] || [0, o.default])[1])) : o.default ? T("on") : T("off") }) + '">↺</button>';
+      var hlp = help[o.id] || richText(msg(o.help || ""));
       if (o.choices) {
-        return '<div class="convtype toolway">' + info(help[o.id] || links(msg(o.help || "")), msg(o.name)) + "<label>" + esc(msg(o.name)) + ' <select class="sel" data-act="tool-switch" data-tool="' + name + '" data-opt="' + esc(o.id) + '" data-key="' + esc(key) + '">' +
-          o.choices.map(function (c) { return '<option value="' + esc(c[0]) + '"' + (v === c[0] ? " selected" : "") + ((spec.choiceOff && sc && spec.choiceOff(o.id, c[0], sc)) ? " disabled" : "") + ">" + esc(msg(c[1])) + "</option>"; }).join("") + "</select></label>" + rv + "</div>";
+        return optionRow({ help: hlp, title: msg(o.name), label: esc(msg(o.name)) + ' <select class="sel sm" data-act="tool-switch" data-tool="' + name + '" data-opt="' + esc(o.id) + '" data-key="' + esc(key) + '">' +
+          o.choices.map(function (c) { return '<option value="' + esc(c[0]) + '"' + (v === c[0] ? " selected" : "") + ((spec.choiceOff && sc && spec.choiceOff(o.id, c[0], sc)) ? " disabled" : "") + ">" + esc(msg(c[1])) + "</option>"; }).join("") + "</select>", revert: rv });
       }
-      return '<div class="convtype">' + info(help[o.id] || links(msg(o.help || "")), msg(o.name)) + '<label><input type="checkbox" data-act="tool-switch" data-tool="' + name + '" data-opt="' + esc(o.id) + '" data-key="' + esc(key) + '"' + (v ? " checked" : "") + "> " + esc(msg(o.name)) + "</label>" + rv + "</div>";
-    }).join("") + "</div>";
+      // what the switch finds in the library, as last scanned: its rows (grey while it's off: what turning it on would show)
+      var n = sc ? sc.rows.filter(function (r) { return (r.issues || []).indexOf(o.id) >= 0; }).length : null;
+      return optionRow({ help: hlp, title: msg(o.name), label: '<input type="checkbox" data-act="tool-switch" data-tool="' + name + '" data-opt="' + esc(o.id) + '" data-key="' + esc(key) + '"' + (v ? " checked" : "") + "> " + esc(msg(o.name)), revert: rv, count: n, on: !!v });
+    }));
   }
-  // the rows as a table: the tick, the item (poster and name), then the tool's columns
-  function toolTable(name, sc, spec) {
-    return '<div class="tbl-wrap"><table class="tbl tool"><thead><tr><th scope="col"></th><th scope="col">' + H("Item") + "</th>" +
-      spec.columns.map(function (c) { return '<th scope="col">' + esc(c) + "</th>"; }).join("") + "</tr></thead><tbody>" +
-      sc.rows.map(function (r) {
-        var live = toolLive(name, sc.library, r);
-        return "<tr" + (live ? "" : ' class="off"') + "><td>" + toolCheck(name, r, !live) + "</td><td>" + toolItem(r, spec.sub ? spec.sub(r) : "") + mergeFirst(name, sc.library, r) + "</td>" + spec.row(r, sc).map(function (c) { return "<td>" + c + "</td>"; }).join("") + "</tr>";
-      }).join("") + "</tbody></table></div>";
+  // ---- Options, drawn one way everywhere — the File Checks' way: a row each, its ⓘ first, its box (or its choice) and its
+  // name on one line, its ↺ back to the default, and on the right what it finds in the library (yellow; green 0; grey while
+  // it's off) — the rows in two columns where there's room. o: {help, title, label (html: the box or choice, the name),
+  // revert (html), count (n, or null: none to say), on}
+  function optionRow(o) {
+    var n = o.count, b = n == null ? "" : !o.on ? (n ? badge("off", fmtNum(n)) : "") : n ? badge("warn", fmtNum(n)) : badge("pass", "0");
+    return '<div class="chk lhchk optrow">' + info(o.help, o.title) + "<label>" + o.label + "</label>" + (o.revert || "") + b + "</div>";
   }
+  function optionGrid(rows) { return '<div class="optgrid">' + rows.join("") + "</div>"; }
+  // ---- The top of every tool's page and check page, one layout: the library tabs, and on their right what the last scan
+  // found (toolStats); under them the options (optionGrid), anything the page adds there (more), and Scan / Scan Again.
+  // o: {tabs, stats (toolStats'), options, more, scan} — each html but stats, any of them left out
+  function toolTop(o) {
+    return '<div class="lctl tooltop">' + (o.tabs || "") + toolStats(o.stats) + "</div>" + (o.options || "") + (o.more || "") + (o.scan || "");
+  }
+  // What the last scan found, the same chips on every page: what was read (green), the issues found — each item once,
+  // however many it has — (yellow; green when none), how many pass the checks as they're set (green), how many would pass
+  // every check at its strictest (grey), then what the page adds (extra: chips, statChip). Each left out when not known.
+  // st: {read (n), readText, issues, passNow, passAll, extra: [html], last (a scan running: these are the last one's)}
+  function toolStats(st) {
+    if (!st) return "";
+    var ok = function (n) { return n != null && !isNaN(n); }, out = [];
+    if (ok(st.read)) out.push(statChip("pass", st.readText));
+    if (ok(st.issues)) out.push(st.issues ? statChip("warn", P(st.issues, "{n} issue found", "{n} issues found", { n: fmtNum(st.issues) }), T("Items with something to do or something in the way, each counted once."))
+      : statChip("pass", T("No issues found")));
+    if (ok(st.read) && ok(st.passNow)) out.push(statChip("pass", P(Math.max(0, st.passNow), "{n} passes current tests", "{n} pass current tests", { n: fmtNum(Math.max(0, st.passNow)) }), T("Items with nothing flagged by the checks as they’re set above.")));
+    if (ok(st.read) && ok(st.passAll)) out.push(statChip("grey", P(Math.max(0, st.passAll), "{n} passes all tests", "{n} pass all tests", { n: fmtNum(Math.max(0, st.passAll)) }), T("Items with nothing flagged with every check on, at its strictest.")));
+    out = out.concat(st.extra || []);
+    if (!out.length) return "";
+    return '<div class="toolstats">' + (st.last ? '<span class="det">' + H("From the last scan:") + "</span>" : "") + out.join("") + "</div>";
+  }
+  function statChip(status, text, tip) { return '<span class="badge b-' + esc(status) + '"' + (tip ? ' title="' + esc(tip) + '"' : "") + ">" + esc(text) + "</span>"; }
   // A row whose Plex record is one of a film's several, as Merge Duplicates last found them in this library (the rows live
-  // there): a red box saying to merge them first — what's done to it here would be done to one record of the film only
+  // there): a red tag in its card, More than 1 Plex record, opening to merge them first — what's done to it here would be
+  // done to one record of the film only. Red: the row can't be ticked (the server refuses it too: Tool.merge_first). Only
+  // on a row with something to do.
   function mergeFirst(name, key, r) {
     var m = toolState("merge").scan, rk = String(r.rk || "");
-    if (name === "merge" || !rk || !m || String(m.library) !== String(key)) return "";
+    if (name === "merge" || !rk || !m || String(m.library) !== String(key) || !toolLive(name, key, r)) return null;  // (nothing to do: nothing to stop)
     var hit = (m.rows || []).some(function (x) { return (x.rks || []).map(String).indexOf(rk) >= 0 && toolLive("merge", key, x); });
-    return hit ? '<div class="note badbox mergefirst">' + H("On more than one Plex record: <a href=\"/merge\" data-nav>merge them</a> first.") + "</div>" : "";
-  }
-  // an item in a row: its poster (Plex's) and its name, with anything the tool adds under it
-  function toolItem(r, sub) {
-    return '<div class="row toolitem" style="gap:8px;align-items:center">' + posterImg(r.poster) + "<div><span>" + esc(r.title) + "</span>" + (sub ? '<div class="det">' + sub + "</div>" : "") + "</div></div>";
+    return hit ? { id: "mergefirst", status: "fail", label: T("More than 1 Plex record"), text: H("This item is on more than one Plex record here: <a href=\"/merge\" data-nav>merge them</a> first with Merge Duplicates. What’s done here would be done to one record of the film only.") } : null;
   }
   // What a tool's row says about its item: chips (the Sync and Health views' kind), each a badge that opens on a click to its
-  // explanation and details underneath — the one way a row carries a warning, a note or a green mark (the standard the tests
-  // hold the tool pages to). items: [{id, status: "warn" | "info" | "pass", label, text (html), lines: [html]}]
+  // explanation and details underneath — the one way a row carries a check (the standard the tests hold the tool pages to).
+  // items: [{id, issue?, status?, label, text (html), lines: [html]}]. The colours mean the same everywhere (rowSeverity):
+  // yellow (warn) is what there is to do — only the row's issue is yellow, so it's given as ``issue`` (an option id), never
+  // as a status; grey (info, grey, off) says something and changes nothing; red (fail) stops the row; green (pass) is good.
+  // One chip open on a card at a time ("tool:card" -> {id, pair, group}): opening another closes it. A chip may name a
+  // ``pair`` (its file, the mirror, a setting): opened, the first chip of the same pair on each of the card's other sides
+  // opens with it, so the two read side by side — File 1 with the file on the other side, Record destroyed on the mirror
+  // with Listed there too.
   var TOOL_OPEN = {};
-  // the chips on a row: an item with ``issue`` (an option id) is the issue the row is about — orange while its switch is on for
-  // the library, grey (off) while it isn't; the rest keep their own status
-  function chips(name, rowId, items) {
-    var out = '<div class="sschips">', shown = "", on = toolEnabled(name, TOOL[name].key);
-    items.forEach(function (c) {
-      var id = rowId + "/" + c.id, open = !!TOOL_OPEN[name + ":" + id];
-      var status = c.issue ? (on[c.issue] === true ? "warn" : "off") : c.status;
-      out += '<button type="button" class="badge b-' + esc(status) + " sschip" + (open ? " on" : "") + '" aria-expanded="' + open + '" data-act="tool-chip" data-tool="' + name + '" data-id="' + esc(id) + '">' + esc(c.label) + "</button>";
+  // a chip's colour: an item with ``issue`` is the issue the row is about — yellow while its switch is on for the library,
+  // grey (off) while it isn't; the rest keep their own status
+  function chipStatus(name, c) {
+    if (!c.issue) return c.status;
+    return TOOL[name] && toolEnabled(name, TOOL[name].key)[c.issue] === true ? "warn" : "off";
+  }
+  // @testable: chipsOpen — pure: which of a group's chips (one side's, or the card's own) are open, the card's open one
+  // being ``at`` ({id, pair, group}, or none): the one itself, or on another side the first chip of its pair
+  function chipsOpen(at, rowId, items) {
+    var paired = false;
+    return items.map(function (c) {
+      var id = rowId + "/" + c.id, open = !!at && (at.id === id || (!paired && !!c.pair && at.pair === c.pair && at.group !== rowId));
+      if (open && at.id !== id) paired = true;  // (one of the pair to a side)
+      return open;
+    });
+  }
+  // @end
+  function chips(name, rowId, items, cardId) {
+    cardId = cardId == null ? rowId : cardId;
+    var out = '<div class="sschips">', shown = "", opens = chipsOpen(TOOL_OPEN[name + ":" + cardId], rowId, items);
+    items.forEach(function (c, k) {
+      var id = rowId + "/" + c.id, open = opens[k];
+      var status = chipStatus(name, c);
+      out += '<button type="button" class="badge b-' + esc(status) + " sschip" + (open ? " on" : "") + '" aria-expanded="' + open + '" data-act="tool-chip" data-tool="' + name + '" data-id="' + esc(id) +
+        '" data-card="' + esc(cardId) + '" data-group="' + esc(rowId) + '"' + (c.pair ? ' data-pair="' + esc(c.pair) + '"' : "") + ">" + esc(c.label) + "</button>";
       if (open) shown += '<div class="ssval">' + (c.text || "") + (c.lines || []).map(function (l) { return '<div class="det">' + l + "</div>"; }).join("") + "</div>";
     });
     return out + "</div>" + shown;
   }
+  // @testable: rowSeverity — pure: what a row's checks (the statuses of its chips and boxes) make of it, the one rule for
+  // every tool. A yellow one (warn) makes it a row to do: it can be ticked; a red one (fail) stops it: it can't, whatever
+  // else it has; grey (info, grey, off) and green (pass) change nothing. A row is shown on a tool's page only with a
+  // yellow or a red one. {live, blocked, shown}
+  function rowSeverity(statuses) {
+    var live = statuses.indexOf("warn") >= 0, blocked = statuses.indexOf("fail") >= 0;
+    return { live: live, blocked: blocked, shown: live || blocked };
+  }
+  // @end
+  // every check a card holds — its own chips, each side's, its boxes — by colour (chipStatus)
+  function cmpStatuses(c) {
+    var out = [], add = function (items) { (items || []).forEach(function (x) { out.push(chipStatus(c.tool, x)); }); };
+    add(c.checks);
+    (c.left || []).concat(c.right || []).forEach(function (sd) { add(sd.checks); });
+    (c.notes || []).forEach(function (n) { out.push(n.status); });
+    return out;
+  }
+  // ---- The comparison card: every tool's row is one (test_tool_rows_use_the_comparison_card), and the optimizer's
+  // libraries. One item, what the tool does to it side by side: what goes framed in red and labelled (its insides greyed),
+  // what stays or comes framed in green and labelled, the arrow between pointing at the green side — a button that turns
+  // it where the tool lets you choose which side stays (swap), else the same box, fixed — and under them the row's boxes
+  // (red: what stops it; grey: worth knowing) and its files, numbered. Above: the tick, the item's name, its checks.
+  // What's inside a side is fact, never a colour of its own: only the checks (chips, boxes) carry one, so a yellow or red
+  // is always one that counts (rowSeverity), and a card's insides are greyed of any other.
+  // c: {tool, id, title, sev (rowSeverity), tick (false: none — the optimizer's), checks: [chip items],
+  //     left: [side], right: [side] (one, or several stacked), swap: null | 'data-act=…' (the arrow's button), swapTitle,
+  //     notes: [{status: "fail" | "info", html, cls?}], files: [paths, numbered as the File n chips]}
+  // side: {kind: "keep" | "drop", label, body (html: a card of the tool's own drawing) — or poster, what (html), lines: [html]
+  //     — and checks: [chip items], dim (false: a red side not greyed inside — the optimizer's file now, its warnings to read)}
+  function cmpRow(c) {
+    var n = 0;
+    var side = function (sd) {
+      n += 1;
+      var inner = sd.body != null ? cmpQuiet(sd.body) : '<div class="sscard"><div class="ssbody">' +
+        (sd.poster ? '<img class="ssposter" src="/api/poster?path=' + encodeURIComponent(sd.poster) + '" alt="" loading="lazy">' : '<div class="ssposter none"' + (sd.noPoster ? ' title="' + esc(sd.noPoster) + '"' : "") + "></div>") +
+        '<div class="ssinfo"><div class="what">' + (sd.what || "") + "</div>" + (sd.lines || []).map(function (l) { return '<div class="det">' + cmpQuiet(l) + "</div>"; }).join("") +
+        (sd.checks && sd.checks.length ? chips(c.tool, c.id + "/s" + n, sd.checks, c.id) : "") + "</div></div></div>";
+      return sd.kind === "keep" ? '<div class="mgkeep"><div class="mgkeeplbl">' + esc(sd.label) + "</div>" + inner + "</div>"
+        : '<div class="mgdrop"><div class="mgdroplbl">' + esc(sd.label) + "</div>" + (sd.dim === false ? inner : '<div class="mgdim">' + inner + "</div>") + "</div>";
+    };
+    var stack = function (list) { var h = list.map(side); return h.length > 1 ? '<div class="ssstack">' + h.join("") + "</div>" : h[0] || ""; };
+    var keepRight = (c.right || []).some(function (sd) { return sd.kind === "keep"; }), arrow = keepRight ? "→" : "←";
+    var left = stack(c.left || []), right = stack(c.right || []);
+    var sev = c.sev || rowSeverity(cmpStatuses(c));
+    var tick = c.tick === false ? "" : toolCheck(c.tool, { id: c.id, title: c.title }, !sev.live || sev.blocked) + " ";
+    var files = pathsShown(c.files || []);
+    return '<div class="ssitem cmprow' + (sev.blocked ? " blocked" : "") + '" data-cmp="' + esc(c.tool) + '"><div class="sstop"><span class="what">' + tick + esc(c.title) + '</span><span class="sswarn">' +
+      (c.checks && c.checks.length ? chips(c.tool, c.id, c.checks, c.id) : "") + "</span></div>" + left +
+      (c.swap ? '<button type="button" class="ssarrow mgarrow" ' + c.swap + ' title="' + esc(c.swapTitle || "") + '"><span>' + arrow + "</span></button>"
+        : '<span class="ssarrow mgarrow fixed" aria-hidden="true"><span>' + arrow + "</span></span>") + right +
+      (c.notes || []).map(function (x) { return '<div class="note ' + (x.status === "fail" ? "badbox" : "greybox") + (x.cls ? " " + x.cls : "") + '">' + x.html + "</div>"; }).join("") +
+      (files.length ? '<div class="ssnotes ssfilelist"><div class="ssfiles many">' + files.map(function (f, k) { return '<div><span class="ssfn">' + (k + 1) + "</span> " + esc(f) + "</div>"; }).join("") + "</div></div>" : "") + "</div>";
+  }
+  // @testable: pathsShown — a card's files as listed under it: one file, its whole path; several, their paths without the
+  // folders they all share (/data/Movies/ on each), so what tells them apart is what's shown
+  function pathsShown(paths) {
+    var parts = paths.map(function (p) { return String(p).split("/"); }), k = 0;
+    if (parts.length < 2) return paths.map(String);
+    while (parts.every(function (ps) { return ps.length - 1 > k && ps[k] === parts[0][k]; })) k++;
+    return parts.map(function (ps) { return ps.slice(k).join("/"); });
+  }
+  // @end
+  // a side's insides drawn by the tool's own code (Merge Duplicates' records, as the Sync view draws them): its colours greyed,
+  // so the only yellow or red on a card is a check's
+  function cmpQuiet(html) { return String(html).replace(/\bb-(warn|fail)\b/g, "b-grey"); }
   // the Scan button (with a tool's own options before it), and what the last scan found
   function toolScanBar(name, t) {
     var sc = t.scan, u = TOOL[name], mine = sc && String(sc.library) === String(u.key), scanning = toolScanning(name, t);
@@ -4348,10 +4655,9 @@ PCI18N.ready.then(function () {
       (backup ? '<div class="applybackup"><strong>' + H("Backup") + "</strong> " + backup + "</div>" : "") +
       (a.more ? '<div class="applymore">' + a.more + "</div>" : "") + "</div>";
   }
-  function toolApply(name, t, live, what, box) {
-    var rows = live.filter(function (r) { return !r.blocked; });  // (a row that can't be done — Duplicate Versions' that would destroy a record — isn't ticked)
+  function toolApply(name, t, rows, what, box) {  // rows: those that can be ticked (toolCards: a yellow chip, no red one)
     var u = TOOL[name], n = rows.filter(function (r) { return u.sel[r.id]; }).length;
-    if (!live.length) return "";
+    if (!rows.length) return "";
     var all = rows.length && rows.every(function (r) { return u.sel[r.id]; });
     var job = toolJob(name), busy = !!(job && job.running) || (t.running && (t.progress || {}).what === "apply") || (ST.queue || []).some(function (q) { return q.kind === "tool" && (q.args || {}).tool === name; });
     var picked = rows.filter(function (r) { return u.sel[r.id]; });
@@ -4363,7 +4669,10 @@ PCI18N.ready.then(function () {
       out += '<div class="det bad">' + H("Not done — the backup couldn’t be made: {why}", { why: msg(job.errors[0].reason || "") }) + ' <button class="link" type="button" data-act="job" data-job="dismiss">' + H("Dismiss") + "</button></div>";
     }
     out += applyBox(box, FILE_TOOLS[name] || PLEX_TOOLS[name] ? gate : null);  // (right before Apply)
-    out += '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px"><label class="det"><input type="checkbox" data-act="tool-all" data-tool="' + name + '"' + (all ? " checked" : "") + "> " + H("All") + "</label>";
+    var page = u.pageCan || [], pageAll = page.length && page.every(function (id) { return u.sel[id]; });
+    out += '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px"><label class="det"><input type="checkbox" data-act="tool-all" data-tool="' + name + '"' + (all ? " checked" : "") + "> " +
+      (rows.length > page.length ? H("All {n} (every page)", { n: fmtNum(rows.length) }) : H("All")) + "</label>" +
+      (rows.length > page.length ? '<label class="det"><input type="checkbox" data-act="tool-pagesel" data-tool="' + name + '"' + (pageAll ? " checked" : "") + "> " + H("This page") + "</label>" : "");
     if (!gate.ready) u.confirm = false;
     var label = gate.label === "none" ? H("Apply to {n} Selected Without Backing Up", { n: fmtNum(n) }) : FILE_TOOLS[name] || PLEX_TOOLS[name] ? H("Backup and Apply to {n} Selected", { n: fmtNum(n) }) : H("Apply to {n} Selected", { n: fmtNum(n) });
     if (u.confirm && n) {
@@ -4397,37 +4706,42 @@ PCI18N.ready.then(function () {
   // the records of one film side by side — the one kept and the ones folded into it — as the Sync view shows
   // two servers' records: the poster, the fields each has, its files. The folded records' edits are lost.
   var MERGE_FIELD = null;  // the one chip opened: {row, id}
-  function mergeRows(sc) {
-    return sc.rows.map(function (r) {
-      // the records keep their places (the tool's pick on the left); the frame and the arrow say which is kept —
-      // the tool's pick, or the one chosen with the arrow (sent with Apply as keep_key)
-      var all = [r.keep].concat(r.others || []), chosen = TOOL.merge.keep[r.id] || r.keep.key;
-      // the files by name — or by their whole path where two records' files share a name (a link or a copy in another folder)
-      var names = all.reduce(function (a, x) { return a.concat(x.files || []); }, []), clash = names.some(function (f, k) { return names.indexOf(f) !== k; });
-      if (clash) all = all.map(function (x) { return Object.assign({}, x, { files: x.paths || x.files }); });
-      var keep = all.filter(function (x) { return String(x.key) === String(chosen); })[0] || all[0], others = all.filter(function (x) { return x !== keep; }), kinds = r.kinds || [];
-      var left = all[0], rights = all.slice(1), keptLeft = keep === left;
-      var files = [keep].concat(others).reduce(function (a, x) { return a.concat(x.files || []); }, []).filter(function (f, k, a) { return a.indexOf(f) === k; }), fidx = {};
-      files.forEach(function (f, k) { fidx[f] = k + 1; });
-      var act = 'data-act="merge-field" data-id="' + esc(r.id) + '"', openId = MERGE_FIELD && MERGE_FIELD.row === r.id ? MERGE_FIELD.id : null;
-      var otherFiles = others.reduce(function (a, x) { return a.concat(x.files || []); }, []);
-      // a card: framed and labelled when it's the one kept (showing the files it gains, greyed); outlined in red, labelled and
-      // greyed inside when it's folded in (its files become the kept one's versions; its own edits, poster and collections go)
-      var card = function (x) {
-        if (x === keep) return '<div class="mgkeep"><div class="mgkeeplbl">' + H("Metadata kept") + "</div>" + syncSide(Object.assign({}, x, { gains: otherFiles.filter(function (f) { return (x.files || []).indexOf(f) < 0; }) }), others[0] || null, "", true, kinds, act, openId, null, fidx, otherFiles) + "</div>";
-        return '<div class="mgdrop"><div class="mgdroplbl">' + H("Metadata lost") + '</div><div class="mgdim">' + syncSide(x, keep, "", false, kinds, act, openId, null, fidx, keep.files || []) + "</div></div>";
-      };
-      var cards = rights.map(card);
-      var linkNote = (r.linked || []).length ? ' <span title="' + H("{files}: a link (a hard link or symlink). Merging records whose files are links is risky where folders are synced — the other site holds copies, not links, and a merge there would go differently. Make each a file of its own first (Unlink Files) and let every synced library catch up.", { files: r.linked.map(function (l) { return l.name; }).join(", ") }) + '">' + badge("warn", T("Linked file")) + "</span>" : "";
-      var why = chips("merge", r.id, [{ id: "why", issue: r.why, label: r.why === "file" ? T("The same file") : r.why === "matched" ? T("Same match") : T("Named alike"),
-        text: r.why === "file" ? H("The two records hold the very same file — a link, or a copy with the same size and running time.") : r.why === "matched" ? H("Plex matched both records to the same film or show; their running times agree, and they’re the same edition.") : H("Unmatched, their files are named for the same title and year, and their running times agree.") }]);
-      var lost = kinds.filter(function (k) { return k !== "match"; }).length;
-      return '<div class="ssitem lhitem"><div class="sstop"><span class="what">' + toolCheck("merge", r) + " " + esc(r.title) + "</span><span class=\"sswarn\">" + why +
-        (lost ? ' <span title="' + H("A folded record has edits, a poster or collections of its own: Plex keeps only the kept record’s. Open the chips to see what goes.") + '">' + badge("warn", T("Edits lost")) + "</span>" : "") + linkNote + "</span></div>" +
-        card(left) +
-        '<button type="button" class="ssarrow mgarrow" data-act="merge-swap" data-id="' + esc(r.id) + '" title="' + H("Keep the other record’s metadata instead") + '"><span>' + (keptLeft ? "←" : "→") + "</span></button>" + (cards.length > 1 ? '<div class="ssstack">' + cards.join("") + "</div>" : cards[0]) +
-        '<div class="ssnotes ssfilelist"><div class="ssfiles many">' + files.map(function (f) { return "<div><span class=\"ssfn\">" + fidx[f] + "</span> " + esc(f) + "</div>"; }).join("") + "</div></div></div>";
-    }).join("");
+  // the records of one film side by side, on the comparison card: the one kept and the ones folded into it, as the Sync
+  // view shows two servers' records — the poster, the fields each has, its files. The folded records' edits are lost.
+  // The records keep their places (the tool's pick on the left); the frame and the arrow say which is kept — the tool's
+  // pick, or the one chosen with the arrow (sent with Apply as keep_key)
+  var SWAP_KEYS = {  // what the arrow goes round, per tool that has one: the keys of a row's sides, the tool's pick first
+    merge: function (r) { return [r.keep.key].concat((r.others || []).map(function (o) { return o.key; })); },
+    versions: function (r) { return [r.keep.path].concat((r.extras || []).map(function (x) { return x.path; })); } };
+  // what merging does to each file, on its chip: the kept record's own files stay, the others' come over as its versions
+  function mergeFileKept(f, how) {
+    return how === "gains" ? H("This file isn’t attached to this item yet: it will be transferred over, as a version of the record kept.") : H("This is the existing file of the record kept: it will be kept.");
+  }
+  function mergeFileLost(f) { return H("This file will be transferred over to the record kept, as a version of it. The file itself isn’t touched; this record’s own metadata goes."); }
+  function mergeCard(r) {
+    var all = [r.keep].concat(r.others || []), chosen = TOOL.merge.keep[r.id] || r.keep.key;
+    // the files by name — or by their whole path where two records' files share a name (a link or a copy in another folder)
+    var names = all.reduce(function (a, x) { return a.concat(x.files || []); }, []), clash = names.some(function (f, k) { return names.indexOf(f) !== k; });
+    if (clash) all = all.map(function (x) { return Object.assign({}, x, { files: x.paths || x.files }); });
+    var keep = all.filter(function (x) { return String(x.key) === String(chosen); })[0] || all[0], others = all.filter(function (x) { return x !== keep; }), kinds = r.kinds || [];
+    var files = [keep].concat(others).reduce(function (a, x) { return a.concat(x.files || []); }, []).filter(function (f, k, a) { return a.indexOf(f) === k; }), fidx = {};
+    files.forEach(function (f, k) { fidx[f] = k + 1; });
+    var act = 'data-act="merge-field" data-id="' + esc(r.id) + '"', openId = MERGE_FIELD && MERGE_FIELD.row === r.id ? MERGE_FIELD.id : null;
+    var otherFiles = others.reduce(function (a, x) { return a.concat(x.files || []); }, []);
+    // the one kept shows the files it gains (greyed); one folded in is greyed inside (its files become the kept one's
+    // versions; its own edits, poster and collections go)
+    var side = function (x) {
+      if (x === keep) return { kind: "keep", label: T("Metadata kept"), body: syncSide(Object.assign({}, x, { gains: otherFiles.filter(function (f) { return (x.files || []).indexOf(f) < 0; }) }), others[0] || null, "", true, kinds, act, openId, null, fidx, otherFiles, mergeFileKept) };
+      return { kind: "drop", label: T("Metadata lost"), body: syncSide(x, keep, "", false, kinds, act, openId, null, fidx, keep.files || [], mergeFileLost) };
+    };
+    var checks = [{ id: "why", issue: r.why, label: r.why === "file" ? T("The same file") : r.why === "matched" ? T("Same match") : T("Named alike"),
+      text: r.why === "file" ? H("The two records hold the very same file — a link, or a copy with the same size and running time.") : r.why === "matched" ? H("Plex matched both records to the same film or show; their running times agree, and they’re the same edition.") : H("Unmatched, their files are named for the same title and year, and their running times agree.") }];
+    if (kinds.filter(function (k) { return k !== "match"; }).length) checks.push({ id: "lost", status: "info", label: T("Edits lost"), text: H("A folded record has edits, a poster or collections of its own: Plex keeps only the kept record’s. Open the chips to see what goes.") });
+    if ((r.linked || []).length) checks.push({ id: "linked", status: "info", label: T("Linked file"), text: H("{files}: a link (a hard link or symlink). Merging records whose files are links is risky where folders are synced — the other site holds copies, not links, and a merge there would go differently. Make each a file of its own first (Unlink Files) and let every synced library catch up.", { files: r.linked.map(function (l) { return l.name; }).join(", ") }) });
+    var pathOf = {};  // (a file's whole path, for the list under the card)
+    all.forEach(function (x) { (x.files || []).forEach(function (f, i) { pathOf[f] = (x.paths || [])[i] || f; }); });
+    return { checks: checks, left: [side(all[0])], right: all.slice(1).map(side), files: files.map(function (f) { return pathOf[f] || f; }),
+      swap: 'data-act="tool-swap" data-tool="merge" data-id="' + esc(r.id) + '"', swapTitle: T("Keep the other record’s metadata instead") };
   }
   function recLine(r) {  // a Plex record, briefly: its name, how many fields were edited, its files
     if (!r) return '<span class="muted">' + H("—") + "</span>";
@@ -4439,9 +4753,10 @@ PCI18N.ready.then(function () {
     return toolPage({ name: "merge", title: "Merge Duplicate Plex Records", types: ["movie", "show"],
       help: MERGE_HELP + "<br><br>" + H("Why: a film added twice — a copy in another folder, a file re-added, one matched after the other — is two records in Plex: twice in every list, two posters, and watched on one but not the other. Merging makes them one record with two versions, as Plex offers for a single pair; this finds them all. Only this server’s records: no file is touched, so a mirrored server isn’t affected — its own duplicates are merged there."),
       stale: function (sc) { return !("mirror" in sc) || sc.rows.some(function (r) { return !r.keep || !r.keep.fields; }); },  // (no mirror said: from before the box before Apply)
-      summary: function (sc) { return H("{n} records read", { n: fmtNum(sc.records) }) + " · " + esc(P(sc.total, "{n} film on more than one record", "{n} films on more than one record", { n: fmtNum(sc.total) })); },
+      read: function (sc) { return sc.records == null ? null : { n: sc.records, text: P(sc.records, "{n} record read", "{n} records read", { n: fmtNum(sc.records) }) }; },
+      units: function (r) { return 1 + (r.others || []).length; },  // (a film's every record: none of them passes)
       empty: H("Every film is on one record."),
-      rows: function (sc) { return mergeRows(sc); },
+      card: function (r) { return mergeCard(r); },
       confirm: function (n) { return P(n, "Merge the records of {n} film in Plex? Their metadata becomes the kept record’s.", "Merge the records of {n} films in Plex? Their metadata becomes the kept record’s.", { n: n }); },
       applies: function (sc) { return mergeApplies(sc); } });
   }
@@ -4467,47 +4782,47 @@ PCI18N.ready.then(function () {
       does: H("Each ticked film’s records become one, with Plex’s own Merge: the kept record’s metadata stays, and the others’ files become its versions."),
       changes: H("Only this server’s Plex records. No file is touched, so the folder sync carries nothing.") + (there ? " " + there : "") };  // (the backup: the Plex records', from the gate)
   }
-  var VERSIONS_HELP = N("One Plex record can hold the same file twice — a copy that slipped in, or a second path to one file (a link). This finds them: versions of one record with the same running time and size. It also finds the copies Plex doesn’t list at all — a second path to a listed file, or an identical copy of one (the same size and bytes at both ends): Plex’s scanner skips a file it already has under another path, so these only show on disk, taking space and getting cached and optimized twice. The copy kept is the one in a folder of its own, then the newest, then the first Plex lists; the others are set aside in the library’s own trash folder (on the same dataset: no copying) and Plex asked to scan. They’re deleted for good only once Plex here no longer lists them — and, with a mirrored server watched, once its Plex no longer does either (the synced folder carries the change there) — then after the hold below. Until then, each can be put back.<br><br><strong>Run <a href=\"/merge\" data-nav>Merge Duplicates</a> first.</strong> A film on two records isn’t one item holding its file twice yet: merging makes its files versions of one record, and only then can this tell an extra copy for sure. Rows whose record is still to be merged are marked in red. A copy that’s the only file of a Plex record — here, or on the mirrored server, where the synced folder carries the deletion — would take the record with it (its metadata and watched state): it’s marked Plex record destroyed, and can’t be ticked until Merge Duplicates has made it a version of the record kept.");
-  // a file's chips on its card: File n (its path, opened), and what's known of it — a link, not in Plex, listed on the mirror,
-  // and in red when deleting it would destroy a Plex record (its record's only file, here or on the mirror)
-  function fileLine(f, mname, rowId, n) {
-    var items = [{ id: "path", status: "grey", label: T("File {n}", { n: n }), text: '<span class="mono">' + esc(f.path || f.name) + "</span>" }];
-    if (f.ends_record || f.ends_record_there) items.push({ id: "ends", status: "fail", label: T("Plex record destroyed"),
-      text: f.ends_record ? H("This is the only file of its Plex record here: deleting it would remove the record, with its metadata and watched state.")
-        : H("On {name}, this is the only file of its Plex record: the synced folder carries the deletion there, and the record would go with its metadata and watched state.", { name: mname }) });
-    if (f.linked) items.push({ id: "linked", status: "info", label: T("A link to the kept file"), text: H("A second path to the very same file: setting it aside frees nothing, but leaves the file where Plex has it and nowhere else.") });
-    if (f.unlisted) items.push({ id: "unlisted", status: "warn", label: T("Not in Plex"), text: H("Plex skips a file it already has under another path: this one is only on disk, taking space and getting cached and optimized twice.") });
-    if (f.there !== undefined && f.there !== null) items.push(f.there
-      ? { id: "there", status: "info", label: T("Listed on {name} too", { name: mname }), text: H("Its synced folder carries the change: the copy goes there as well, and is deleted here only once its Plex no longer lists it.") }
-      : { id: "there", status: "pass", label: T("Not listed on {name}", { name: mname }), text: H("Its Plex doesn’t list this copy: the deletion needn’t wait for it.") });
-    return chips("versions", rowId + "/" + n, items);
-  }
-  // Duplicate Versions' rows: the file kept and the file deleted side by side, as Merge Duplicates shows a film's records —
-  // framed and labelled; which is kept is the tool's rule (a folder of its own, then the newest), not a choice. A file on a
-  // Plex record shows the record's poster; one on none (a copy Plex doesn't list), a grey one. A row whose deletion would
-  // destroy a Plex record can't be ticked: a red box says to merge the records first.
-  function versionsRows(sc, issue) {
+  var VERSIONS_HELP = N("One Plex record can hold the same file twice — a copy that slipped in, or a second path to one file (a link). This finds them: versions of one record with the same running time and size. It also finds the copies Plex doesn’t list at all — a second path to a listed file, or an identical copy of one (the same size and bytes at both ends): Plex’s scanner skips a file it already has under another path, so these only show on disk, taking space and getting cached and optimized twice. The copy kept is the one in a folder of its own, then the newest, then the first Plex lists — or the one you choose with the arrow between them; the others are set aside in the library’s own trash folder (on the same dataset: no copying) and Plex asked to scan. They’re deleted for good only once Plex here no longer lists them — and, with a mirrored server watched, once its Plex no longer does either (the synced folder carries the change there) — then after the hold below. Until then, each can be put back.<br><br><strong>Run <a href=\"/merge\" data-nav>Merge Duplicates</a> first.</strong> A film on two records isn’t one item holding its file twice yet: merging makes its files versions of one record, and only then can this tell an extra copy for sure. Rows whose record is still to be merged are marked in red. A copy that’s the only file of a Plex record here would take the record with it (its metadata and watched state): it’s marked Record destroyed, in red, and can’t be ticked until Merge Duplicates has made it a version of the record kept. One that’s the only file of a record on the mirrored server — where the synced folder carries the deletion — is marked Record destroyed there, in grey: it can still be done, and that record goes; merge the records there first to keep it.");
+  // Duplicate Versions' rows, on the comparison card: the file kept and the files deleted, as Merge Duplicates shows a
+  // film's records. Which is kept is the tool's pick (a folder of its own, then the newest) or the one chosen with the
+  // arrow (sent with Apply as keep_key: its path). A file on a Plex record shows the record's poster; one on none (a copy
+  // Plex doesn't list), a grey one. Each deleted file says what deleting it does to a Plex record: red when it destroys
+  // one here (its record's only file — merge the records first; the row can't be ticked), grey when it destroys one on
+  // the mirrored server (the synced folder carries the deletion there: worth knowing, and it doesn't stop the row).
+  function versionsCard(r, sc) {
     var mname = (sc.mirror || {}).name || "";
-    return sc.rows.map(function (r) {
-      var live = toolLive("versions", sc.library, r), n = 0;
-      var card = function (f, kept) {
-        n += 1;
-        var onRecord = kept || !f.unlisted;
-        var poster = onRecord && r.poster ? '<img class="ssposter" src="/api/poster?path=' + encodeURIComponent(r.poster) + '" alt="" loading="lazy">' : '<div class="ssposter none" title="' + H("Not on a Plex record") + '"></div>';
-        var body = '<div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + (onRecord ? esc(r.title) : '<span class="muted">' + H("No Plex record") + "</span>") + "</div>" +
-          '<div class="det">' + esc(f.folder === "." ? T("the library folder") : f.folder) + " · " + fmtBytes(f.size) + "</div>" + fileLine(f, mname, r.id, n) + "</div></div></div>";
-        return kept ? '<div class="mgkeep"><div class="mgkeeplbl">' + H("This file kept") + "</div>" + body + "</div>"
-          : '<div class="mgdrop"><div class="mgdroplbl">' + H("This file deleted") + "</div>" + body + "</div>";
-      };
-      var kept = card(r.keep, true), gone = r.extras.map(function (x) { return card(x, false); });
-      var ends = r.extras.filter(function (x) { return x.ends_record || x.ends_record_there; });
-      var stop = !ends.length ? "" : '<div class="note badbox vsblocked">' + (ends.some(function (x) { return x.ends_record_there; }) && !ends.some(function (x) { return x.ends_record; })
-        ? H("Deleting it would destroy a Plex record on {name}, where it’s the record’s only file. Merge the records there first (<a href=\"/merge\" data-nav>Merge Duplicates</a> on {name}, or Sync), so it’s a version of the record kept; then it can be deleted.", { name: mname })
-        : H("Deleting it would destroy its Plex record, whose only file it is. Merge the records first with <a href=\"/merge\" data-nav>Merge Duplicates</a>, so it’s a version of the record kept; then it can be deleted.")) + "</div>";
-      return '<div class="ssitem lhitem vsitem' + (live ? "" : " off") + '"><div class="sstop"><span class="what">' + toolCheck("versions", r, !live || r.blocked) + " " + esc(r.title) + '</span><span class="sswarn">' + issue(r) +
-        (r.mirror_error ? '<span class="bad">' + esc(r.mirror_error) + "</span>" : "") + "</span></div>" + mergeFirst("versions", sc.library, r) +
-        kept + '<span class="ssarrow vssame" title="' + H("The same file") + '" aria-hidden="true">=</span>' + (gone.length > 1 ? '<div class="ssstack">' + gone.join("") + "</div>" : gone[0]) + stop + "</div>";
-    }).join("");
+    var all = [r.keep].concat(r.extras || []), chosen = TOOL.versions.keep[r.id] || r.keep.path;
+    var keep = all.filter(function (x) { return x.path === chosen; })[0] || r.keep;
+    // what deleting each file does with this one kept: as the scan found it for each choice (ending), else the row's own
+    var ending = (r.ending || {})[keep.path], endsHere = function (x) { return ending ? (ending.here || []).indexOf(x.path) >= 0 : !!x.ends_record; };
+    var endsThere = function (x) { return ending ? (ending.there || []).indexOf(x.path) >= 0 : !!x.ends_record_there; };
+    var linked = function (x) { return x !== keep && (keep.ino ? keep.ino === x.ino : !!x.linked); };
+    var gone = all.filter(function (x) { return x !== keep; }), here = gone.filter(endsHere), there = gone.filter(endsThere);
+    var side = function (f, k) {
+      var kept = f === keep, onRecord = !f.unlisted;
+      var checks = [{ id: "path", pair: "file", status: "grey", label: T("File {n}", { n: k + 1 }), lines: ['<span class="mono">' + esc(f.path || f.name) + "</span>"],
+        text: kept ? H("This is the existing file: it will be kept, where it is.") : H("This copy will be set aside in the library’s trash folder, and deleted for good after the hold; it can be put back until then.") }];
+      if (!kept && endsHere(f)) checks.push({ id: "ends", status: "fail", label: T("Record destroyed"), text: H("This is the only file of its Plex record here: deleting it would remove the record, with its metadata and watched state. Merge the records first, so it’s a version of the record kept.") });
+      // the mirror, on every side, paired: Record destroyed there in place of Listed there too, where it would be
+      if (!kept && endsThere(f)) checks.push({ id: "there", pair: "mirror", status: "info", label: T("Record destroyed on {name}", { name: mname }), text: H("On {name}, this is the only file of its Plex record: the synced folder carries the deletion there, and the record goes with its metadata and watched state.", { name: mname }) });
+      else if (f.there !== undefined && f.there !== null) checks.push(f.there
+        ? { id: "there", pair: "mirror", status: "info", label: T("Listed on {name} too", { name: mname }), text: kept ? H("Its Plex lists this file too: it stays there, as here.") : H("Its synced folder carries the change: the copy goes there as well, and is deleted here only once its Plex no longer lists it.") }
+        : { id: "there", pair: "mirror", status: "pass", label: T("Not listed on {name}", { name: mname }), text: kept ? H("Its Plex doesn’t list this file.") : H("Its Plex doesn’t list this copy: the deletion needn’t wait for it.") });
+      if (!kept && linked(f)) checks.push({ id: "linked", status: "info", label: T("A link to the kept file"), text: H("A second path to the very same file: setting it aside frees nothing, but leaves the file where Plex has it and nowhere else.") });
+      if (f.unlisted) checks.push({ id: "unlisted", status: "info", label: T("Not in Plex"), text: H("Plex skips a file it already has under another path: this one is only on disk, taking space and getting cached and optimized twice.") });
+      return { kind: kept ? "keep" : "drop", label: kept ? T("This file kept") : T("This file deleted"), poster: onRecord ? r.poster : "", noPoster: T("Not on a Plex record"),
+        what: onRecord ? esc(r.title) : '<span class="muted">' + H("No Plex record") + "</span>", lines: [esc(f.folder === "." ? T("the library folder") : f.folder) + " · " + fmtBytes(f.size)], checks: checks };
+    };
+    var checks = [r.unlisted
+      ? { id: "issue", issue: "unlisted", label: T("Copy on disk"), text: H("A file in the library folder Plex doesn’t list, holding the same bytes as one it does: set aside with the record untouched.") }
+      : { id: "issue", issue: "versions", label: T("Same file twice"), text: H("The record holds this file as two versions — the same size and running time, the same bytes at both ends: the extra copy set aside, and Plex asked to let go of it.") }];
+    if (r.mirror_error) checks.push({ id: "mirror", status: "info", label: T("{name} not read", { name: mname }), text: esc(r.mirror_error) });
+    var notes = [];
+    if (here.length) notes.push({ status: "fail", cls: "vsblocked", html: H("Record destroyed: deleting it would destroy its Plex record here, whose only file it is. Merge the records first with <a href=\"/merge\" data-nav>Merge Duplicates</a>, so it’s a version of the record kept; then it can be deleted.") });
+    if (there.length) notes.push({ status: "info", cls: "vsthere", html: H("Record destroyed on {name}: there it’s the only file of its Plex record, and the synced folder carries the deletion, so that record goes with its metadata and watched state. To keep it, merge the records there first (<a href=\"/merge\" data-nav>Merge Duplicates</a> on {name}, or Sync).", { name: mname }) });
+    return { checks: checks, left: [side(all[0], 0)], right: all.slice(1).map(function (f, k) { return side(f, k + 1); }), notes: notes,
+      files: all.map(function (f) { return f.path || f.name; }),
+      swap: 'data-act="tool-swap" data-tool="versions" data-id="' + esc(r.id) + '"', swapTitle: T("Keep the other file instead") };
   }
   function trashList() {
     var tr = ST.trash || { items: [] }, items = tr.items || [];
@@ -4531,18 +4846,10 @@ PCI18N.ready.then(function () {
   function pageVersions() {
     return toolPage({ name: "versions", title: "Duplicate Versions",
       help: VERSIONS_HELP + "<br><br>" + H("Why: a second copy of the same file on one record — a copy that slipped in, a file linked twice — takes space, is cached and optimized twice, and shows as two versions that are one. This sets the extra copy aside, and deletes it once every Plex has let go of it; nothing goes for good until then, and it can be put back. With a mirrored server, the synced folder carries the deletion there, so each copy says whether its Plex lists it."),
-      summary: function (sc) {
-        return esc(P(sc.items, "{n} item with more than one file looked at", "{n} items with more than one file looked at", { n: fmtNum(sc.items) })) + " · " + esc(P(sc.total, "{n} item holds the same file twice", "{n} items hold the same file twice", { n: fmtNum(sc.total) })) +
-          (sc.frees ? " · " + H("{size} freed", { size: fmtBytes(sc.frees) }) : "");
-      },
+      read: function (sc) { return sc.records == null ? null : { n: sc.records, text: P(sc.records, "{n} record read", "{n} records read", { n: fmtNum(sc.records) }) }; },
+      extra: function (sc) { return sc.frees ? [statChip("pass", T("{size} freed", { size: fmtBytes(sc.frees) }), T("What deleting every extra copy found frees."))] : []; },
       empty: H("No file is held twice."),
-      rows: function (sc) {
-        return versionsRows(sc, function (r) {
-          return chips("versions", r.id, [r.unlisted
-            ? { id: "issue", issue: "unlisted", label: T("Copy on disk"), text: H("A file in the library folder Plex doesn’t list, holding the same bytes as one it does: set aside with the record untouched.") }
-            : { id: "issue", issue: "versions", label: T("Same file twice"), text: H("The record holds this file as two versions — the same size and running time, the same bytes at both ends: the extra copy set aside, and Plex asked to let go of it.") }]);
-        });
-      },
+      card: function (r, sc) { return versionsCard(r, sc); },
       confirm: function (n) { return P(n, "Set aside the extra copies of {n} item? Plex is asked to scan; they’re deleted for good after the hold, and can be put back until then.", "Set aside the extra copies of {n} items? Plex is asked to scan; they’re deleted for good after the hold, and can be put back until then.", { n: n }); },
       applies: function (sc) {
         return { does: H("The extra copies of each ticked item are set aside in the library’s trash folder, and Plex asked to scan; each is deleted for good after the hold, and can be put back until then."),
@@ -4555,17 +4862,26 @@ PCI18N.ready.then(function () {
   function pageFolders() {
     return toolPage({ name: "folders", title: "Organize Folders", types: ["movie"],
       help: FOLDERS_HELP + "<br><br>" + H("Why: Plex matches a film by its folder as much as by its file name, and a folder of its own is where subtitles, artwork and a second version belong. Films loose in the library folder are matched less reliably and tangle with each other; this gives each its own folder, named as Plex recommends, without Plex losing anything about it."),
-      summary: function (sc) { return H("{n} records read", { n: fmtNum(sc.records) }) + " · " + H("{n} folders", { n: fmtNum(sc.folders) }) + " · " + esc(P(sc.total, "{n} move", "{n} moves", { n: fmtNum(sc.total) })); },
+      read: function (sc) { return sc.records == null ? null : { n: sc.records, text: P(sc.records, "{n} record read", "{n} records read", { n: fmtNum(sc.records) }) }; },
       empty: H("Every film is in a folder of its own."),
-      columns: [T("From"), T("To")],
-      sub: function (r) {
+      // the comparison card, its direction fixed: the folder the film is in now, and the one it moves to, its files under
+      card: function (r) {
         var media = r.moves.filter(function (m) { return m.media; }).length, side = r.moves.length - media;
-        return chips("folders", r.id, [r.kind === "loose"
+        var from = r.kind === "loose" ? T("the library folder") : r.from_folder + "/";
+        var tags = [{ id: "media", status: "grey", label: P(media, "{n} file", "{n} files", { n: media }), text: H("The film’s own files: moved with their dates, as hard links first — the same file, nothing copied.") }];
+        if (side) tags.push({ id: "side", status: "grey", label: P(side, "{n} sidecar", "{n} sidecars", { n: side }), text: H("Its subtitles and artwork: they move with it.") });
+        var issue = r.kind === "loose"
           ? { id: "kind", issue: "loose", label: T("Loose file"), text: H("A film in the library folder itself rather than in a folder of its own: Plex matches it less reliably, and its subtitles and artwork have nowhere to belong. It’s moved into a folder named as Plex recommends; its sidecars (subtitles, artwork) go with it.") }
-          : { id: "kind", issue: "rename", label: T("Rename folder"), text: H("The film’s folder isn’t named for its title and year; it’s renamed as Plex recommends, everything in it moving along.") }]) +
-          '<div class="det">' + esc(P(media, "{n} file", "{n} files", { n: media })) + (side ? " + " + esc(P(side, "{n} sidecar", "{n} sidecars", { n: side })) : "") + "</div>";
+          : { id: "kind", issue: "rename", label: T("Rename folder"), text: H("The film’s folder isn’t named for its title and year; it’s renamed as Plex recommends, everything in it moving along.") };
+        return { checks: [],
+          left: [{ kind: "drop", label: T("Original folder"), poster: r.poster, what: esc(r.title), lines: ['<span class="mono">' + esc(from) + "</span>"],
+            checks: [issue].concat(tags).concat(r.moves.map(function (m, k) { return { id: "f" + (k + 1), pair: "f" + (k + 1), status: "grey", label: T("File {n}", { n: k + 1 }), lines: ['<span class="mono">' + esc(m.from) + "</span>"],
+              text: H("This file is here now: it will be moved to the new folder with its dates — linked there first (the same file, nothing copied), then this path removed once Plex has the new one.") }; })) }],
+          right: [{ kind: "keep", label: T("Folder moved here"), poster: r.poster, what: esc(r.title), lines: ['<span class="mono">' + esc(r.folder + "/") + "</span>"],
+            checks: r.moves.map(function (m, k) { return { id: "f" + (k + 1), pair: "f" + (k + 1), status: "grey", label: T("File {n}", { n: k + 1 }), lines: ['<span class="mono">' + esc(m.to || r.folder + "/" + m.from.split("/").pop()) + "</span>"],
+              text: H("This file will be here after the move: the same file, under its new path, and Plex’s record of it kept (edits, poster and watched state).") }; }) }],
+          files: r.moves.map(function (m) { return m.from; }) };
       },
-      row: function (r) { return ['<span class="mono det">' + esc(r.kind === "loose" ? r.moves[0].from.split("/").pop() : r.from_folder + "/") + "</span>", '<span class="mono det">' + esc(r.folder + "/") + "</span>"]; },
       confirm: function (n) { return P(n, "Move {n} film into its own folder? Each is linked first, scanned into Plex, merged if need be, then the old path removed.", "Move {n} films into their own folders? Each is linked first, scanned into Plex, merged if need be, then the old path removed.", { n: n }); },
       applies: function (sc) {
         return { does: H("Each ticked film is moved into a folder of its own, named as Plex recommends: linked first, scanned into Plex, merged into its record if need be, then the old path removed."),
@@ -4583,20 +4899,37 @@ PCI18N.ready.then(function () {
     var u = TOOL.unlink;
     return toolPage({ name: "unlink", title: "Unlink Files",
       help: UNLINK_HELP + "<br><br>" + H("Why: a link looks like a second file to you but not to Plex, which lists one path and ignores the other — and not to the folder sync, which turns it into separate copies at the other site that drift apart. Making each a file of its own puts every site on the same footing; then the duplicate tools can remove the extra copies the same way everywhere."),
-      summary: function (sc) { return esc(P(sc.total, "{n} linked file", "{n} linked files", { n: fmtNum(sc.total) })); },
+      read: function (sc) { return sc.files == null ? null : { n: sc.files, text: P(sc.files, "{n} file read", "{n} files read", { n: fmtNum(sc.files) }) }; },
       empty: H("Every file is a file of its own."),
-      columns: [T("File"), T("Link")],
-      row: function (r, sc) {
-        var items = [r.kind === "symlink"
-          ? { id: "link", issue: "symlink", label: T("Symlink"), text: H("A path that points at another file: Plex and the folder sync see the link, not the file it points at."), lines: ['<span class="mono">' + esc(r.target) + "</span>"] }
-          : { id: "link", issue: "hardlink", label: T("Hard link"), text: H("One file under {n} paths. Plex lists one and ignores the others; a folder sync can’t carry the link, and makes whole copies at the other site.", { n: r.links }) }];
-        (r.others || []).forEach(function (o, i) {
-          items.push(o.listed ? { id: "o" + i, status: "info", label: T("In Plex"), text: H("Another path to the same file that Plex lists as an item of its own: two records of one file. Made a file of its own, it’s a copy for Merge Duplicates."), lines: ['<span class="mono">' + esc(o.path.split("/").pop()) + "</span>"] }
-            : { id: "o" + i, status: "warn", label: T("Not in Plex"), text: H("Another path to the same file that Plex doesn’t list: it looks like a file to you, not to Plex. The remove option takes this path away; the copy option makes the listed one a file of its own and leaves this path a link to the rest."), lines: ['<span class="mono">' + esc(o.path.split("/").pop()) + "</span>"] });
-        });
-        if (unlinkRemoves(sc)) items.push(r.removable && r.removable.length ? { id: "plan", status: "pass", label: P(r.removable.length, "{n} path removed", "{n} paths removed", { n: r.removable.length }), text: H("What Apply does to this file with the choice below: the paths Plex doesn’t list are removed; the file stays where Plex has it.") }
-          : { id: "plan", status: "pass", label: T("Made a file of its own"), text: H("Every path to this file is listed in Plex, so none is removed: the file is copied under this path instead, for Merge Duplicates.") });
-        return ['<span class="mono det">' + esc(r.name) + '</span><div class="det">' + fmtBytes(r.size) + "</div>", chips("unlink", r.id, items)];
+      // the comparison card, its direction fixed, labelled with what Apply does: the file kept (the arrow points at it),
+      // and the link — deleted (the remove option: a path Plex doesn't list), or replaced with a file of its own
+      card: function (r, sc) {
+        var sym = r.kind === "symlink", removes = unlinkRemoves(sc) && !sym && (r.removable || []).length;
+        var others = r.others || [], gone = removes ? others.filter(function (o) { return r.removable.indexOf(o.path) >= 0; }) : [];
+        var files = [r.path].concat(others.map(function (o) { return o.path; })).concat(sym && r.target ? [r.target] : []), fidx = {};
+        files.forEach(function (f, k) { fidx[f] = k + 1; });
+        var chip = function (path, text) { return { id: "f" + fidx[path], pair: "file", status: "grey", label: T("File {n}", { n: fidx[path] }), text: text, lines: ['<span class="mono">' + esc(path) + "</span>"] }; };
+        var listed = function (o) { return o.listed ? { id: "l" + fidx[o.path], pair: "plex", status: "info", label: T("In Plex"), text: H("Another path to the same file that Plex lists as an item of its own: two records of one file. Made a file of its own, it’s a copy for Merge Duplicates.") }
+          : { id: "l" + fidx[o.path], pair: "plex", status: "info", label: T("Not in Plex"), text: H("Another path to the same file that Plex doesn’t list: it looks like a file to you, not to Plex.") }; };
+        var side = function (kind, label, path, checks) {
+          return { kind: kind, label: label, poster: r.poster, what: esc(r.title), lines: ['<span class="mono">' + esc(String(path).split("/").pop()) + "</span> · " + fmtBytes(r.size)], checks: checks };
+        };
+        var keep, drop;
+        if (removes) {  // the path Plex has (and any other it lists) kept; each path it doesn't list deleted
+          keep = [side("keep", T("File kept"), r.path, [chip(r.path, H("This is the existing file, where Plex has it: it will be kept, as it is."))].concat(
+            others.filter(function (o) { return gone.indexOf(o) < 0; }).map(function (o) { return chip(o.path, H("Another path to the file that Plex lists: it will be kept, as it is.")); })))];
+          drop = gone.map(function (o) { return side("drop", T("This hardlink deleted"), o.path, [chip(o.path, H("This path to the file will be deleted: the file stays, under the path Plex has. Nothing is copied.")), listed(o)]); });
+        } else if (sym) {  // the file the symlink points at kept; the symlink replaced with a copy of it
+          keep = [side("keep", T("File kept"), r.target || r.path, r.target ? [chip(r.target, H("This is the existing file the symlink points at: it will be kept, as it is."))] : [])];
+          drop = [side("drop", T("Symlink replaced with file"), r.path, [chip(r.path, H("This symlink will be replaced with a file of its own: the bytes it points at copied under the same path, the dates kept, so Plex and the folder sync see a file."))])];
+        } else {  // the other paths keep the file; this one becomes a file of its own
+          keep = [side("keep", T("File kept"), (others[0] || {}).path || r.path, others.map(function (o) { return chip(o.path, H("This is the existing file: it will be kept, as it is, under this path.")); }).concat(others.map(listed)))];
+          drop = [side("drop", T("Hardlink replaced with file"), r.path, [chip(r.path, H("This hard link will be replaced with a file of its own: the same bytes copied under the same path, the dates kept, so Plex and the folder sync see the same file."))])];
+        }
+        return { checks: [sym
+            ? { id: "link", issue: "symlink", label: T("Symlink"), text: H("A path that points at another file: Plex and the folder sync see the link, not the file it points at."), lines: ['<span class="mono">' + esc(r.target) + "</span>"] }
+            : { id: "link", issue: "hardlink", label: T("Hard link"), text: H("One file under {n} paths. Plex lists one and ignores the others; a folder sync can’t carry the link, and makes whole copies at the other site.", { n: r.links }) }],
+          left: keep, right: drop, files: files };
       },
       confirm: function (n) {
         var sc = toolRows("unlink", toolState("unlink")) || {};
@@ -4622,34 +4955,39 @@ PCI18N.ready.then(function () {
     if (!LIB.key || !libs.some(function (l) { return String(l.key) === String(LIB.key); })) LIB.key = libs.length ? String(libs[0].key) : null;
     var out = top(T(title), toolBlurb(name), "") + '<div class="stack">' + toolsNav(name) + '<section class="card">' + toolHead(name, T(title), help);
     if (!libs.length) return out + '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No libraries yet.")) + "</p></section></div>";
-    out += '<div class="lctl"><div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + libs.map(function (l) {
-      return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(LIB.key)) + '" data-act="lib-tab" data-key="' + esc(l.key) + '">' + libIcon(l.key) + esc(l.title) + "</button>";
-    }).join("") + "</div></div>";
-    return out + libHealthView(only) + "</section></div>";
+    // the tabs, as every tool's: each with what the page's checks found there (Library Health's counts, ignored items left out)
+    var hc = ST.health_counts || {};
+    var tabs = libTabs({ libs: libs, key: LIB.key, attrs: function (l) { return 'data-act="lib-tab" data-key="' + esc(l.key) + '"'; },
+      count: function (l) { var k = String(l.key), got = hc[k]; return { n: got && !healthPending(k) ? got[only] || 0 : null, pending: healthPending(k) }; } });
+    return out + libHealthView(only, tabs) + "</section></div>";
   }
   function pageFilechecks() {
-    return checksPage("filechecks", "file", "File Checks", H("Each check looks at a file’s tracks as the inspector read them: whether it has audio and subtitles, whether their languages are tagged and agree, what codecs the audio is in and whether FLAC would hold it better or play more widely. Every item of the library is listed, flagged ones first, with a chip per check; a chip opens to what was found. Ignore greys an item’s findings out for good. The counts beside the switches leave ignored items out."));
+    return checksPage("filechecks", "file", "File Checks", H("Each check looks at a file’s tracks as the inspector read them: whether it has audio and subtitles, whether their languages are tagged and agree, what codecs the audio is in and whether FLAC would hold it better or play more widely. Only the items a check flags are listed (every item is on the Library page), each with a chip per check; a chip opens to what was found. Ignore greys an item’s findings out for good. The counts beside the switches leave ignored items out."));
   }
   function pagePlexchecks() {
-    return checksPage("plexchecks", "plex", "Plex Checks", H("Each check looks at an item as Plex has it: several files on one item named for different titles or years (a version added to the wrong item), versions whose running times differ by more than a little, a field you locked that holds nothing. The locked-field check reads each item’s own page, which the data layer gathers after the records. Every item of the library is listed, flagged ones first, with a chip per check."));
+    return checksPage("plexchecks", "plex", "Plex Checks", H("Each check looks at an item as Plex has it: several files on one item named for different titles or years (a version added to the wrong item), versions whose running times differ by more than a little, a field you locked that holds nothing. The locked-field check reads each item’s own page, which the data layer gathers after the records. Only the items a check flags are listed (every item is on the Library page), each with a chip per check."));
   }
   function pageConvert() {
     var kindOf = {};
     CONVERT_TYPES.forEach(function (t) { kindOf[t[0]] = t; });
     return toolPage({ name: "convert", title: "Convert to MKV", types: ["movie", "show"],
       help: CONVERT_HELP + "<br><br>" + H("Why: MKV is the container the optimizer can lay out for caching — the index and metadata after the video, so the start of a file is all content — and it keeps every stream, chapter and subtitle the old containers hold. A converted file plays as before; it just caches better. Which kinds of file convert is ticked above, per library; a kind unticked still lists its files, grey."),
-      summary: function (sc) {
-        return esc(P(sc.total, "{n} file in another container", "{n} files in other containers", { n: fmtNum(sc.total) })) +
-          (sc.waiting ? " · " + esc(P(sc.waiting, "{n} converted, on its way into Plex", "{n} converted, on their way into Plex", { n: fmtNum(sc.waiting) })) : "") +
-          (sc.skipped ? " · " + esc(P(sc.skipped, "{n} left as it is", "{n} left as they are", { n: fmtNum(sc.skipped) })) : "");
-      },
+      read: function (sc) { return sc.files == null ? null : { n: sc.files, text: P(sc.files, "{n} file read", "{n} files read", { n: fmtNum(sc.files) }) }; },
+      extra: function (sc) { return sc.waiting ? [statChip("grey", P(sc.waiting, "{n} on its way into Plex", "{n} on their way into Plex", { n: fmtNum(sc.waiting) }), T("Converted: the MKV is next to the original, waiting for Plex to list it."))] : []; },
       empty: H("Every video file is MKV already, or its MKV is on its way into Plex."),
-      columns: [T("File"), T("Container")],
-      row: function (r) {
-        var t = kindOf[r.kind] || [r.kind, (r.kind || "").toUpperCase(), "", [], ""];
-        var items = [{ id: "kind", issue: r.kind, label: T(t[1]), text: H(t[2]) + (t[3].length ? "<br><strong>" + H("What MKV wouldn’t keep") + "</strong>" : ""), lines: t[3].map(function (x) { return H(x); }).concat(t[4] ? ["<strong>" + H("How converting handles it") + "</strong> " + H(t[4])] : []) }];
-        if (r.skipped) items.push({ id: "skip", status: "warn", label: T("Left as it is"), text: H("Converting would lose something, so the file was left as it is last time: {why}. It isn’t tried again while it stays as it is — untick it, or leave it ticked to try once more.", { why: msg(r.skipped) }) });
-        return ['<span class="mono det">' + esc(r.name) + '</span><div class="det">' + fmtBytes(r.size) + "</div>", chips("convert", r.id, items)];
+      // the comparison card, its direction fixed: the original, deleted once Plex has the MKV, and the MKV written beside it
+      card: function (r) {
+        var t = kindOf[r.kind] || [r.kind, (r.kind || "").toUpperCase(), "", [], ""], mkv = r.name.replace(/\.[^./]*$/, "") + ".mkv";
+        var checks = [{ id: "kind", issue: r.kind, label: T(t[1]), text: H(t[2]) + (t[3].length ? "<br><strong>" + H("What MKV wouldn’t keep") + "</strong>" : ""), lines: t[3].map(function (x) { return H(x); }).concat(t[4] ? ["<strong>" + H("How converting handles it") + "</strong> " + H(t[4])] : []) }];
+        if (r.skipped) checks.push({ id: "skip", status: "info", label: T("Left as it is"), text: H("Converting would lose something, so the file was left as it is last time: {why}. It isn’t tried again while it stays as it is — untick it, or leave it ticked to try once more.", { why: msg(r.skipped) }) });
+        return { checks: checks,
+          left: [{ kind: "drop", label: T("Original file deleted"), poster: r.poster, what: esc(r.title), lines: ['<span class="mono">' + esc(r.name) + "</span>"],
+            checks: [{ id: "file", pair: "file", status: "grey", label: T("File {n}", { n: 1 }), text: H("This is the original file: it will be deleted once Plex has the new MKV as a version of the same item."), lines: ['<span class="mono">' + esc(r.path) + "</span>"] },
+              { id: "box", pair: "box", status: "grey", label: T(t[1]), text: H(t[2]) }, { id: "size", status: "grey", label: fmtBytes(r.size), text: H("Its size now: the MKV comes out about the same.") }] }],
+          right: [{ kind: "keep", label: T("New MKV created"), poster: r.poster, what: esc(r.title), lines: ['<span class="mono">' + esc(mkv) + "</span>"],
+            checks: [{ id: "file", pair: "file", status: "grey", label: T("File {n}", { n: 2 }), text: H("This MKV will be written next to the original, and Plex adds it as a version of the same item: the item keeps its metadata and watched state."), lines: ['<span class="mono">' + esc(r.path.replace(/\.[^./]*$/, "") + ".mkv") + "</span>"] },
+              { id: "box", pair: "box", status: "grey", label: "MKV", text: H("Every stream, chapter and subtitle kept, checked against the original, then optimized like any MKV.") }] }],
+          files: [r.path, r.path.replace(/\.[^./]*$/, "") + ".mkv"] };
       },
       confirm: function (n) { return P(n, "Convert {n} file to MKV? The MKV is written next to it and seen into Plex; the original goes once Plex has the MKV.", "Convert {n} files to MKV? Each MKV is written next to its original and seen into Plex; the originals go once Plex has the MKVs.", { n: n }); },
       applies: function (sc) {
@@ -5034,16 +5372,30 @@ PCI18N.ready.then(function () {
 
   function action(act, el) {
     if (act === "recheck") { api("/api/checks", { rescan: true }).then(function () { toast(T("Checking…")); ST.checking = true; render(); }); }
-    else if (act === "optimize-lib") {
+    else if (act === "optimize-sel") {
+      // the files ticked in one library — every one of them (All): the whole library, its conflict copies too
+      var ok = el.dataset.key, ou = TOOL.optimizer, opaths = (optState(ok).data || {}).paths || [];
+      var picked = opaths.filter(function (p) { return ou.sel[p]; });
+      if (!picked.length) return;
       // ZFS settings not right yet: ask first (each file would be written now and again after the change)
-      var zs = ((((ST.optimizer || {}).libraries || {})[el.dataset.key] || {}).zfs || {}).status;
-      if (zs === "warn" && !el.dataset.confirmed) { OPT_CONFIRM = el.dataset.key; render(); return; }
+      var zs = ((((ST.optimizer || {}).libraries || {})[ok] || {}).zfs || {}).status;
+      if (zs === "warn" && optChoices(ok).sync && !el.dataset.confirmed) { OPT_CONFIRM = ok; render(); return; }
       OPT_CONFIRM = null;
-      api("/api/optimize/library", { library: el.dataset.key }).then(function (r) {
+      el.disabled = true;
+      api("/api/optimize/library", picked.length === opaths.length ? { library: ok } : { library: ok, files: picked }).then(function (r) {
+        picked.forEach(function (p) { delete ou.sel[p]; });
         toast(r.started ? T("Optimizing…") : r.queued ? T("Added to the queue") : T("Already queued, or the optimizer isn’t set up"));
-        load();
-      });
+        optState(ok).at = 0; load();
+      }).catch(function (e) { toast(e.message, true); render(); });
     }
+    else if (act === "opt-all" || act === "opt-page") {  // every file of the library to optimize, on every page — or the page open
+      var ak = el.dataset.key, ad = optState(ak).data || {}, asel = TOOL.optimizer.sel;
+      (act === "opt-all" ? ad.paths || [] : (ad.files || []).map(function (f) { return f.path; })).forEach(function (p) { if (el.checked) asel[p] = true; else delete asel[p]; });
+      OPT_CONFIRM = null; render();
+    }
+    else if (act === "optimizer-survey") { el.disabled = true; api("/api/optimizer/survey", {}).then(function () { ST.optimizer.surveying = true; render(); setTimeout(load, 1500); }).catch(function (e) { toast(e.message, true); }); }
+    else if (act === "opt-retry") { var ro = optState(el.dataset.key); ro.error = null; ro.asked = null; render(); }
+    else if (act === "opt-page-go") { optState(el.dataset.key).offset = Number(el.dataset.offset) || 0; render(); }
     else if (act === "optimize-cancel") { OPT_CONFIRM = null; render(); }
     else if (act === "optimizer-check") {
       el.disabled = true;
@@ -5055,16 +5407,17 @@ PCI18N.ready.then(function () {
         .catch(function (e) { toast(e.message); el.disabled = false; });
     }
     else if (act === "updates-check") { el.disabled = true; api("/api/updates/check", {}).then(function () { setTimeout(load, 1500); }).catch(function (e) { toast(e.message); }); }
-    else if (act === "tool-lib") { TOOL[el.dataset.tool].key = el.dataset.key; TOOL[el.dataset.tool].sel = {}; TOOL[el.dataset.tool].confirm = false; render(); }
-    else if (act === "merge-swap") {  // the next record of the row kept instead (round and round)
-      var mrow = (((toolState("merge").scan || {}).rows) || []).filter(function (r) { return r.id === el.dataset.id; })[0];
-      if (mrow) {
-        var keys = [mrow.keep.key].concat((mrow.others || []).map(function (o) { return o.key; })), cur = TOOL.merge.keep[el.dataset.id] || mrow.keep.key;
-        TOOL.merge.keep[el.dataset.id] = keys[(keys.indexOf(cur) + 1) % keys.length];
+    else if (act === "tool-lib") { OPT_CONFIRM = null; TOOL[el.dataset.tool].key = el.dataset.key; TOOL[el.dataset.tool].sel = {}; TOOL[el.dataset.tool].confirm = false; TOOL[el.dataset.tool].offset = 0; render(); }
+    else if (act === "tool-swap") {  // the comparison card's arrow: the next side of the row kept instead (round and round)
+      var wt = el.dataset.tool, wrow = (((toolState(wt).scan || {}).rows) || []).filter(function (r) { return r.id === el.dataset.id; })[0];
+      if (wrow) {
+        var keys = SWAP_KEYS[wt](wrow), cur = TOOL[wt].keep[el.dataset.id] || keys[0];
+        TOOL[wt].keep[el.dataset.id] = keys[(keys.indexOf(cur) + 1) % keys.length];
+        TOOL[wt].confirm = false;
         render();
       }
     }
-    else if (act === "merge-field") { MERGE_FIELD = MERGE_FIELD && MERGE_FIELD.row === el.dataset.id && MERGE_FIELD.id === el.dataset.f ? null : { row: el.dataset.id, id: el.dataset.f }; render(); }
+    else if (act === "merge-field") { MERGE_FIELD = MERGE_FIELD && MERGE_FIELD.row === el.dataset.id && MERGE_FIELD.id === el.dataset.f ? null : { row: el.dataset.id, id: el.dataset.f }; delete TOOL_OPEN["merge:" + el.dataset.id]; render(); }
     else if (act === "tool-switch" || act === "tool-switch-revert") {
       // a tool's option for this library: saved under tools.<tool>.<library>, and the page redrawn at once from the rows it has
       var sname = el.dataset.tool, skey = el.dataset.key, sopt = el.dataset.opt, st2 = toolState(sname);
@@ -5080,9 +5433,16 @@ PCI18N.ready.then(function () {
       renderStill();
     }
     else if (act === "tool-sel") { TOOL[el.dataset.tool].sel[el.dataset.id] = el.checked; TOOL[el.dataset.tool].confirm = false; render(); }
+    else if (act === "lh-retry") { delete LIB.health[LIB.key]; render(); }
+    else if (act === "tool-page") { TOOL[el.dataset.tool].offset = Number(el.dataset.offset) || 0; render(); }
+    else if (act === "tool-pagesel") {  // the rows on the page open that can be ticked
+      var pu = TOOL[el.dataset.tool];
+      (pu.pageCan || []).forEach(function (id) { if (el.checked) pu.sel[id] = true; else delete pu.sel[id]; });
+      pu.confirm = false; render();
+    }
     else if (act === "tool-all") {
-      var tu = TOOL[el.dataset.tool], tsc = toolState(el.dataset.tool).scan || { rows: [] }, trows = toolSplit(el.dataset.tool, tsc).live.filter(function (r) { return !r.blocked; });
-      tu.sel = {}; if (el.checked) trows.forEach(function (r) { tu.sel[r.id] = true; });
+      var tu = TOOL[el.dataset.tool];  // (the rows that can be ticked, as last drawn: toolCards)
+      tu.sel = {}; if (el.checked) (tu.can || []).forEach(function (id) { tu.sel[id] = true; });
       tu.confirm = false; render();
     }
     else if (act === "tool-scan") {
@@ -5117,7 +5477,12 @@ PCI18N.ready.then(function () {
       api("/api/job", { action: "rollback", job: el.dataset.job }).then(function (r) { toast(T("Rolled back to {names}", { names: (r.rolled_back || []).join(", ") })); PROC = null; load(); })
         .catch(function (e) { toast(e.message, true); PROC = null; load(); });
     }
-    else if (act === "tool-chip") { var ck = el.dataset.tool + ":" + el.dataset.id; TOOL_OPEN[ck] = !TOOL_OPEN[ck]; renderStill(); }
+    else if (act === "tool-chip") {  // the one chip open on its card (and its pair on the other sides): another closes it
+      var ck = el.dataset.tool + ":" + el.dataset.card, cur = TOOL_OPEN[ck];
+      TOOL_OPEN[ck] = cur && cur.id === el.dataset.id ? null : { id: el.dataset.id, pair: el.dataset.pair || "", group: el.dataset.group };
+      if (MERGE_FIELD && MERGE_FIELD.row === el.dataset.card) MERGE_FIELD = null;
+      renderStill();
+    }
     else if (act === "tool-history") { var th = TOOL[el.dataset.tool], open = th.history !== undefined ? th.history : true; th.history = !open; renderStill(); }
     else if (act === "tool-apply-no") { TOOL[el.dataset.tool].confirm = false; render(); }
     else if (act === "tool-apply-yes") {

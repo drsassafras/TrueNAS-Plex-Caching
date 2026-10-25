@@ -600,7 +600,7 @@ def check_cache_mode(app) -> dict:
 
 OPTIMIZER_HELP = M("The optimizer is the part of Plex Cache that rewrites your media files so they suit caching: in their "
                    "dataset’s record size and compression and, for MKV files, with the attachments, chapters, index and tags after the "
-                   "video. The Optimizer page has the choices for each library and an <strong>Optimize Now</strong> button.<br><br>"
+                   "video. The Optimizer page has the choices for each library and a card for each file to optimize, with <strong>Optimize Selected</strong>.<br><br>"
                    "It’s optional, and runs as a second service in this app — the only part of Plex Cache that can write to your "
                    "media. It does nothing on its own: it rewrites one file at a time when you press Optimize Now, checks each "
                    "new file before swapping it in, and skips anything playing or just added. It has no web page and no port of "

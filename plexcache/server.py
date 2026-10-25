@@ -251,6 +251,16 @@ def make_handler(app):
                 if tool == "optimizer":  # (what a snapshot keeps of a library's rewrite: the files still to do)
                     retained = retained or int(((app.optimizing.summary or {}).get(key) or {}).get("todo_bytes") or 0)
                 return self._json(jsonable(readiness(app, key, need, keeps=(rq.get("keeps") or [""])[0] == "1", retained=retained, tool=tool)))
+            if path == "/api/optimizer/files":  # the Optimizer page: a page of one library's files to optimize, each a card
+                q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                arg = lambda k, d="": (q.get(k) or [d])[0]  # noqa: E731
+                if not app.library_info(arg("key")):
+                    return self._error("not found", 404)
+                try:
+                    off, lim = int(arg("offset") or 0), max(1, min(200, int(arg("limit") or 25)))
+                except ValueError:
+                    return self._error("bad offset", 400)
+                return self._json(jsonable(app.optimizing.files_todo(arg("key"), off, lim)))
             if path.startswith("/api/library"):
                 # The Library Health page: a library's files with their layouts, or one file in full
                 q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
@@ -272,10 +282,9 @@ def make_handler(app):
                     return self._json({"blocks": got}) if got is not None else self._error("not found", 404)
                 if path == "/api/library/health":  # Library Health: one library's items through the content checks
                     app.libdata.fast_track(arg("key"))  # (the library opened: its data gathered first)
-                    from .libhealth import library_health
                     if not app.library_info(arg("key")):
                         return self._error("not found", 404)
-                    return self._json(jsonable(library_health(app, arg("key"))))
+                    return self._json(jsonable(app.library_health(arg("key"))))  # (worked out in the background already, as a rule)
                 if path == "/api/library/differences":  # Library Sync: one library's differences, as last compared
                     got = app.sync.differences(arg("key"))
                     return self._json(jsonable(got)) if got else self._error("not found", 404)
@@ -458,7 +467,10 @@ def make_handler(app):
                         ready = safety.readiness(app, key, "largest", retained=int(sums.get("todo_bytes") or 0), tool="optimizer")
                         if not ready["ready"]:
                             raise SettingsError(M("Not yet: {why}", why=safety.why_not(ready)))
-                    got = app.optimizing.queue(key, mode)  # now, or after the jobs before it
+                    files = body.get("files")  # (the files ticked on the page, their Plex paths; none: every file that needs it)
+                    if files is not None and (mode != "optimize" or not isinstance(files, list) or not all(isinstance(f, str) for f in files) or not files):
+                        raise SettingsError(M("files must be a list of the files to optimize"))
+                    got = app.optimizing.queue(key, mode, files)  # now, or after the jobs before it
                     return self._json({"started": got == "started", "queued": got == "queued"})
                 if path.startswith("/api/sync/"):
                     # Library Sync (sync.py): compare now, look for mirrors, approve the settings as reviewed
@@ -603,6 +615,9 @@ def make_handler(app):
                         return self._json(app.inspector.snapshot())
                     # "force": every file again; otherwise only files new or changed since they were inspected
                     return self._json(app.inspector.start(key, force=bool(body.get("force"))))
+                if path == "/api/optimizer/survey":  # the Optimizer page's Scan Again: every library's files looked at again now
+                    app.optimizing.survey_soon()
+                    return self._json({"started": True})
                 if path == "/api/optimizer/check":
                     # The optimizer's setup steps, checked again now (the Optimizer page's "Check again")
                     return self._json(jsonable(app.optimizing.diagnose()))

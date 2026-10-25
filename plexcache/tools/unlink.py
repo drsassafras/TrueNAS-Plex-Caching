@@ -36,7 +36,7 @@ class UnlinkFiles(Tool):
     page = "/unlink"
     options = [{"id": "symlink", "name": M("Symlinks"), "help": M("A path that points at another file: Plex and the folder sync see the link, not the file it points at."), "kinds": ("movie", "tv", "audio"), "default": True},
                {"id": "hardlink", "name": M("Hard links"), "help": M("One file under two paths. Plex lists one and ignores the others; a folder sync can’t carry the link, and makes whole copies at the other site."), "kinds": ("movie", "tv", "audio"), "default": True},
-               {"id": "remove", "name": M("What to do"), "help": M("<strong>A file of its own:</strong> the bytes copied under the same path, the dates kept — nothing disappears anywhere, so it’s the only way where the files are mirrored. This tool stops there: tidying the copies afterwards is <a href=\"/merge\" data-nav>Merge Duplicates</a> or <a href=\"/versions\" data-nav>Duplicate Versions</a>, run by you, the same way on each side.<br><br><strong>Remove the extra paths</strong> (no mirror): the paths to a file that Plex doesn’t list are removed, so the file is where Plex has it and nowhere else. A link whose every path Plex lists (two records) is made a file of its own instead."),
+               {"id": "remove", "name": M("What to do"), "help": M("<strong>A file of its own:</strong> the bytes copied under the same path, the dates kept — nothing disappears anywhere, so it’s the only way where the files are mirrored. This tool stops there: tidying the copies afterwards is [Merge Duplicates](/merge) or [Duplicate Versions](/versions), run by you, the same way on each side.<br><br><strong>Remove the extra paths</strong> (no mirror): the paths to a file that Plex doesn’t list are removed, so the file is where Plex has it and nowhere else. A link whose every path Plex lists (two records) is made a file of its own instead."),
                 "kinds": ("movie", "tv", "audio"), "default": "copy", "choices": [("copy", M("Make each link a file of its own (a copy under the same path)")), ("remove", M("Remove the extra paths Plex doesn’t list (no mirror)"))]}]
     flag_help = M("A media file that’s a link: a hard link (one file under two paths — Plex lists one and ignores the other, and a folder sync turns it into two whole copies that drift apart) or a symlink. Unlink Files makes each a file of its own, or on a library that isn’t synced removes the extra paths.")
 
@@ -69,7 +69,7 @@ class UnlinkFiles(Tool):
                          "path": f["path"], "local": local, "name": os.path.basename(f["path"]), "kind": kind, "issues": [kind], "links": n, "target": target, "size": f["size"],
                          "others": others, "removable": [o["path"] for o in others if not o["listed"]]})
         rows.sort(key=lambda r: sort_key(r["title"]))
-        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "links": links, "mirror": mirror}
+        return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "files": len(files), "links": links, "mirror": mirror}
 
     history = [("what", M("What was done")), ("written", M("Written")), ("paths", M("Paths"))]
 
