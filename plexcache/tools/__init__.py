@@ -50,6 +50,11 @@ class Tool:
     # (default True/False: whether rows about that issue are live) or, with "choices": [(value, M)], a way to do it
     options: list[dict] = []
     scan_version = 1  # (raised when a tool's rows change shape: an older scan on disk is dropped)
+    # Library Health checks that stop this tool's rows on the records they flag (the standard way another part's finding
+    # stops a row): each row's records go through them (row["blocks"]: [{key, id, title, text}], marked live by
+    # mark_blocks: ignored there, switched on), and a row with one live (row["held"]) is red on its card and left by
+    # Apply — until the record is put right, or the check is ignored on it there. Merge Duplicates: Dissimilar file naming
+    blocking_checks: tuple[str, ...] = ()
 
     def __init__(self, app):
         self.app = app
@@ -125,6 +130,7 @@ class Tool:
             return got[1]
         out = self.scan(data)
         out["rows"] = out.get("rows") or []
+        self.check_blocks(data, out["rows"])
         with self.lock:
             self._analysis[data.key] = (stamp, out)
         return out
@@ -136,6 +142,43 @@ class Tool:
             for rk in (r.get("rks") or ([r["rk"]] if r.get("rk") else [])):
                 out.setdefault(str(rk), []).append(r)
         return out
+
+    def check_blocks(self, data, rows: list[dict]) -> None:
+        """Each row's records through the tool's blocking checks (every one of them, whatever its switch: mark_blocks
+        says which count), as row["blocks"]."""
+        if not self.blocking_checks:
+            return
+        from .. import libhealth
+        on = libhealth.for_kind(dict.fromkeys(self.blocking_checks, True), (self.app.library_info(data.key) or {}).get("kind"))
+        recs = {str(r.get("key")): r for r in data.records}
+        for row in rows:
+            row["blocks"] = []
+            for rk in [str(x) for x in (row.get("rks") or ([row["rk"]] if row.get("rk") else []))]:
+                rec = recs.get(rk)
+                if not rec:
+                    continue
+                item = {"files": [f[0] if isinstance(f, (list, tuple)) else f for f in rec.get("files") or []], "durations": list(rec.get("durations") or [])}
+                for c in libhealth.plex_checks(item, on):
+                    if c["id"] in self.blocking_checks:
+                        row["blocks"].append({"key": rk, "id": c["id"], "title": rec.get("label") or rec.get("title") or "", "text": c["text"]})
+
+    def mark_blocks(self) -> None:
+        """The last scan's blocks as they stand now — each "on" (its check switched on in Library Health) and "ignored"
+        (ignored on its record there), the row "held" while one is on and not ignored: ignoring it there, or switching
+        the check off, frees the row at once, with no scan again."""
+        if not self.blocking_checks:
+            return
+        from .. import libhealth
+        with self.lock:
+            sc = self.scan_result
+            if not sc:
+                return
+            chosen = libhealth.enabled(self.app.settings.get())
+            quiet = libhealth.ignored(self.app).get(str(sc.get("library") or "")) or {}
+            for r in sc.get("rows") or []:
+                for x in r.get("blocks") or []:
+                    x["on"], x["ignored"] = bool(chosen.get(x["id"])), x["id"] in (quiet.get(str(x["key"])) or [])
+                r["held"] = any(x["on"] and not x["ignored"] for x in r.get("blocks") or [])
 
     def works_on(self, library: str) -> bool:
         lib = self.app.library_info(library) or {}
@@ -286,7 +329,7 @@ class Tool:
     def choose(self, row: dict, choice: dict) -> dict:
         """A row with your choice for it (the page's arrow: which side is kept) merged in. A tool whose choice changes what
         the row does (Duplicate Versions: which copy goes) works the row out again; never a choice's own ``blocked``."""
-        return dict(row, **{k: v for k, v in choice.items() if k != "blocked"})
+        return dict(row, **{k: v for k, v in choice.items() if k not in ("blocked", "held")})
 
     def merge_first(self, library: str) -> set[str]:
         """The Plex records of a film on several, as Merge Duplicates last found them in this library (its live rows). A
@@ -319,7 +362,8 @@ class Tool:
         # the page's rule, kept here too: a row about a switched-off issue isn't done (no yellow chip), nor one with a red one —
         # blocked by the tool, or on a record still to be merged
         pending = self.merge_first(key)
-        rows = [r for r in self.live(key, self.rows_for(ids, choices)) if not r.get("blocked") and str(r.get("rk") or "") not in pending]
+        self.mark_blocks()
+        rows = [r for r in self.live(key, self.rows_for(ids, choices)) if not r.get("blocked") and not r.get("held") and str(r.get("rk") or "") not in pending]
         if not rows:
             return False
         if self.name in peers.FILE_TOOLS:  # (files change: room for it, and a backup that can be made, first)
@@ -414,6 +458,7 @@ class Tool:
         self.scan_async(key, refresh=True)
 
     def snapshot(self) -> dict:
+        self.mark_blocks()
         libs = [str(lib["key"]) for lib in getattr(self.app, "libraries", None) or [] if self.works_on(str(lib["key"]))]
         with self.lock:
             return {"name": self.name, "title": self.title, "page": self.page, "running": self.running, "progress": dict(self.progress) if self.progress else None,

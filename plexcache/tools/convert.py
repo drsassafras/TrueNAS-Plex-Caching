@@ -9,7 +9,8 @@ kind): the scan lists every file in another container the library has, whatever 
 wouldn't keep: the optimizer's record), so you can untick it.
 
 Each file is converted by the optimizer service (optimize/convert.py): inspected first, the MKV
-written next to the original and checked against it, then optimized. The original stays until
+written next to the original (``<name>.mkv``, or ``<name> - MKV.mkv``… where that name is taken)
+and checked against it, then optimized. The original stays until
 Plex has the MKV as a version of the same item — on the mirrored server too, where one is watched
 (converting.py sees it in, and deletes the original then): Plex keeps the item's edits, watch
 history and collections. Revert, while the run's backup lasts: the MKV removed and, where the
@@ -54,7 +55,7 @@ class ConvertToMkv(Tool):
         if not lib:
             raise ValueError(M("No such library."))
         op = self.app.optimizing
-        have = {f["local"] for f in data.files + data.unlisted if not f.get("missing")}
+        have = {f["local"] for f in data.files if not f.get("missing")}  # (Plex's: a file there by the MKV's name that Plex doesn't list isn't its MKV)
         rows, waiting = [], 0
         files = [f for f in data.files if not f.get("missing")]
         for i, f in enumerate(files):
@@ -63,16 +64,25 @@ class ConvertToMkv(Tool):
             kind = convert.type_of(f["path"])
             if not kind:
                 continue
-            if convert.target_of(f["local"]) in have:  # converted already: its MKV is next to it, on its way into Plex
+            if self._converted(f["local"], have):  # converted already: its MKV is next to it, on its way into Plex
                 waiting += 1
                 continue
             skipped = op.convert_skipped(f["local"], data.stat_result(f))
             rows.append({"id": "conv:" + f["path"], "library": str(library), "rk": f.get("rk") or "", "title": f.get("title") or os.path.basename(f["path"]),
                          "poster": f.get("poster") or "", "path": f["path"], "local": f["local"], "name": os.path.basename(f["path"]), "kind": kind,
-                         "issues": [kind], "size": int(f.get("size") or 0), "skipped": skipped})
+                         "issues": [kind], "size": int(f.get("size") or 0), "skipped": skipped,
+                         "new_name": os.path.basename(convert.free_target(f["local"]) or convert.target_of(f["local"]))})
         rows.sort(key=lambda r: (bool(r["skipped"]), sort_key(r["title"])))
         return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "files": len(files), "waiting": waiting,
                 "skipped": sum(1 for r in rows if r["skipped"]), "mirror": self.mirrored(library)}
+
+    def _converted(self, local: str, have: set) -> bool:
+        """Whether a file has its MKV next to it already: one being followed into Plex, or one of the
+        names its MKV would have (convert.targets_of) in the library as Plex lists it (``have``)."""
+        e = self.app.conversions.get(local)
+        if e and e["original"] == local and e["state"] in ("waiting", "seen", "separate"):
+            return True
+        return any(t in have for t in convert.targets_of(local))
 
     history = [("what", M("What was done")), ("written", M("Written")), ("original", M("Original"))]
 
@@ -87,6 +97,8 @@ class ConvertToMkv(Tool):
         return sum(int(r.get("size") or 0) for r in rows)  # (the originals, once they go: the snapshot holds them)
 
     def apply_row(self, row: dict, log) -> dict:
+        if self._converted(row["local"], set()):
+            return {"result": "failed", "reason": M("Converted already: its MKV is on its way into Plex")}
         r = self.app.optimizing.convert_one(row["local"], row["library"], row.get("poster") or "", log)
         res = r.get("result")
         if res == "converted" and r.get("new"):

@@ -1,6 +1,7 @@
 """Converted files on their way into Plex: the original is deleted only once Plex has the MKV.
 
-Converting (optimize/convert.py) leaves the original where it was, with ``<name>.mkv`` next to it.
+Converting (optimize/convert.py) leaves the original where it was, with ``<name>.mkv`` next to it
+(or ``<name> - MKV.mkv``… where that name was taken).
 Then, the way that keeps Plex's metadata (edits, watch history, collections): Plex is asked to scan
 the folder, and picks the MKV up as a second version of the same item. Once it has — checked here
 by asking Plex for the item's files, and on a second Plex server with the same files too (plex2.py)
@@ -55,7 +56,7 @@ class Conversions:
 
     def add(self, library: str, plex_original: str, original: str, new: str, rating_key: str = "", title: str = "") -> None:
         """A file just converted: its path as Plex has it and as this app sees it, and its MKV's."""
-        plex_new = os.path.splitext(plex_original)[0] + ".mkv"
+        plex_new = os.path.join(os.path.dirname(plex_original), os.path.basename(new))  # (its name: <name>.mkv, or the next free one)
         e = {"original": original, "new": new, "plex_original": plex_original, "plex_new": plex_new, "library": str(library),
              "rating_key": rating_key or "", "title": title or os.path.basename(plex_original),
              "converted": time.time(), "state": "waiting", "checked": 0.0, "scanned": 0.0}

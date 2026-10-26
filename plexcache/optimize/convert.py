@@ -9,8 +9,9 @@
    there, and closed captions in the video still in it.
 3. Optimized like any MKV (optimizer.optimize_file: the layout, cover art, tags, our tag).
 4. Given the original's owner, permissions and timestamps, and put next to it as ``<name>.mkv``
-   (never over an existing file). The original stays: the app deletes it once Plex has the MKV
-   (converting.py), through delete_original() here.
+   — or, where a file of that name is there already, ``<name> - MKV.mkv``, ``<name> - MKV 2.mkv``…
+   (targets_of): never over an existing file. The original stays: the app deletes it once Plex has
+   the MKV (converting.py), through delete_original() here.
 """
 
 from __future__ import annotations
@@ -52,6 +53,27 @@ def type_of(path: str) -> str | None:
 
 def target_of(path: str) -> str:
     return os.path.splitext(path)[0] + ".mkv"
+
+
+MAX_TARGETS = 50  # names tried for a file's MKV before giving up
+
+
+def targets_of(path: str) -> list[str]:
+    """The names a file's MKV can have, in the order they're tried: ``<name>.mkv``, then
+    ``<name> - MKV.mkv``, ``<name> - MKV 2.mkv``… (" - " and a word after the name: Plex still sees
+    the same title, and lists it as another version of the item)."""
+    stem = os.path.splitext(path)[0]
+    return [stem + ".mkv", stem + " - MKV.mkv"] + [f"{stem} - MKV {n}.mkv" for n in range(2, MAX_TARGETS)]
+
+
+def is_target_of(path: str, new: str) -> bool:
+    """Whether ``new`` is one of the names ``path``'s MKV can have."""
+    return new in targets_of(path)
+
+
+def free_target(path: str) -> str | None:
+    """The first of a file's MKV names (targets_of) that no file has, or None when every one is."""
+    return next((t for t in targets_of(path) if not os.path.lexists(t)), None)
 
 
 def _probe(path: str, count: bool = False) -> dict:
@@ -134,16 +156,15 @@ def verify(path: str, out: str, captions: bool) -> None:
 
 def convert_file(path: str, images: str = "compress", cover: bytes | None = None, tags_mode: str = "keep",
                  log=lambda text: None, progress=lambda pct: None) -> dict:
-    """Convert ``path`` to ``<name>.mkv`` next to it, optimized; the original stays. Returns
-    {"result": "converted", "new", ...}; raises Skipped (with what MKV wouldn't keep), VerifyError,
+    """Convert ``path`` to ``<name>.mkv`` next to it (or the next free name: targets_of), optimized;
+    the original stays. Returns {"result": "converted", "new", ...}; raises Skipped (with what MKV wouldn't keep), VerifyError,
     ToolError or OSError (nothing is left behind then)."""
     started = time.time()
     kind = type_of(path)
     if not kind:
         raise Skipped("not a kind of file that's converted")
-    target = target_of(path)
-    if os.path.lexists(target):
-        raise Skipped("an MKV of the same name is there already")
+    if free_target(path) is None:
+        raise Skipped("every name for its MKV is taken by a file there already")
     log("inspecting")
     ins = inspect(path)
     if not ins["ok"]:
@@ -167,7 +188,14 @@ def convert_file(path: str, images: str = "compress", cover: bytes | None = None
         if (now.st_size, now.st_mtime_ns, now.st_ino) != (st.st_size, st.st_mtime_ns, st.st_ino):
             raise Skipped("the file changed while it was being converted")
         _copy_meta(st, path, out, False)
-        os.link(out, target)  # (never over a file that appeared meanwhile: link refuses)
+        for target in targets_of(path):  # the first free name (never over a file that appeared meanwhile: link refuses)
+            try:
+                os.link(out, target)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise Skipped("every name for its MKV is taken by a file there already")
         os.unlink(out)
         dfd = os.open(folder, os.O_RDONLY)
         try:
@@ -187,7 +215,7 @@ def convert_file(path: str, images: str = "compress", cover: bytes | None = None
 def delete_original(path: str, new: str) -> dict:
     """Delete a converted file's original — only with its MKV there, a Matroska file of some size,
     and the original a plain file (never a folder or a link)."""
-    if os.path.abspath(path) == os.path.abspath(new) or target_of(path) != new:
+    if os.path.abspath(path) == os.path.abspath(new) or not is_target_of(path, new):
         raise ValueError("not a converted file's original")
     if not os.path.isfile(new) or os.path.getsize(new) == 0 or not mkv.check(new, True).get("applies"):
         raise ValueError("its MKV isn't there")
@@ -201,7 +229,7 @@ def delete_original(path: str, new: str) -> dict:
 def remove_converted(new: str, original: str) -> dict:
     """Remove a converted file's MKV (a revert) — only while its original is there, a plain file, and
     ``new`` is the MKV written for it."""
-    if os.path.abspath(new) == os.path.abspath(original) or target_of(original) != new:
+    if os.path.abspath(new) == os.path.abspath(original) or not is_target_of(original, new):
         raise ValueError("not the file's MKV")
     if not os.path.isfile(original) or os.path.islink(original):
         raise ValueError("the original isn't there")

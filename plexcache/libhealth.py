@@ -75,7 +75,7 @@ CHECKS = {
          "help": M("The same file under two Plex items — the same size and running time, and the same bytes at both ends: a copy or link that slipped in, a file in a subfolder and one in the root, say.")},
     ],
     "plex": [
-        {"id": "versions_named_differently", "name": M("Versions named for different titles"), "applies": VIDEO,
+        {"id": "versions_named_differently", "name": M("Dissimilar file naming"), "applies": VIDEO,
          "help": M("Several files on one Plex item (versions) whose file names carry different titles or years: a version added to the wrong item, most likely.")},
         {"id": "versions_differ_in_length", "name": M("Different length versions"), "applies": ALL,
          "help": M("Several files on one Plex item (versions) whose running times differ by more than a little — {leeway}% or {secs} seconds, whichever is more: two cuts of the same film can differ a little; two films do by far more.", leeway=LEEWAY_PCT, secs=LEEWAY_SECS)},

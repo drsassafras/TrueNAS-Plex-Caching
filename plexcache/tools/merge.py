@@ -64,6 +64,30 @@ def plain_title(rec: dict) -> str:
     return re.sub(r"[\W_]+", " ", str(rec.get("title") or "")).strip().lower()
 
 
+_PART = re.compile(r"\b(?:part|pt|vol|volume|chapter|book)\s*(\d+|[ivx]+|one|two|three|four|five)\b")
+_NUMBER = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10",
+           "one": "1", "two": "2", "three": "3", "four": "4", "five": "5"}
+
+
+def parts(rec: dict) -> set[str]:
+    """Which part of a work in parts a record is — "Part 1", "Pt. II", "Vol 2" — from its files' names (what
+    is merged), or Plex's title when no file names one: a record matched or titled for the wrong part
+    still holds the part its file is."""
+    def of(text):
+        text = re.sub(r"[\W_]+", " ", str(text)).lower()
+        return {_NUMBER.get(n, n.lstrip("0") or "0") for n in _PART.findall(text)}
+    named = set()
+    for f in rec.get("files") or []:
+        named |= of(os.path.basename(f[0] if isinstance(f, (list, tuple)) else f))
+    return named or of(rec.get("title") or "")
+
+
+def other_parts(a: dict, b: dict) -> bool:
+    """Two records of different parts of one work (Henry IV Part 1 and Part 2): never one film."""
+    pa, pb = parts(a), parts(b)
+    return bool(pa and pb and not pa & pb)
+
+
 def duplicates(a: dict, b: dict) -> bool:
     """Whether two records of one group are one film: running times that agree, the same edition, and
     the same title — two records matched to one entry yet titled apart were told apart on purpose: a
@@ -72,6 +96,8 @@ def duplicates(a: dict, b: dict) -> bool:
     identical = any(same_file(x, y) for x in _files(a) for y in _files(b))
     if identical:
         return True
+    if other_parts(a, b):
+        return False
     if plain_title(a) and plain_title(b) and plain_title(a) != plain_title(b):
         return False
     da, db = [d for d in a.get("durations") or [] if d], [d for d in b.get("durations") or [] if d]
@@ -93,6 +119,7 @@ def clusters(recs: list[dict]) -> list[tuple[str, list[dict]]]:
     for the same title and year) — union-find over the pairs that are duplicates()."""
     parent = list(range(len(recs)))
     why: dict[int, str] = {}
+    grouped = {i: [i] for i in range(len(recs))}  # (each group's records, by its root)
 
     def find(i):
         while parent[i] != i:
@@ -103,7 +130,12 @@ def clusters(recs: list[dict]) -> list[tuple[str, list[dict]]]:
     def union(i, j, how):
         ri, rj = find(i), find(j)
         if ri != rj:
+            # a match or a name joins two groups only if no two of their records are different parts: a part's
+            # copies, each on a record, mustn't be pulled in with the other part's by one record titled for the wrong one
+            if how != "file" and any(other_parts(recs[x], recs[y]) for x in grouped[ri] for y in grouped[rj]):
+                return
             parent[ri] = rj
+            grouped[rj] += grouped.pop(ri)
         if how == "file" or rj not in why:
             why[rj] = how
     # the same file on two records: by size (then the running time), whatever they're matched to
@@ -139,6 +171,9 @@ def clusters(recs: list[dict]) -> list[tuple[str, list[dict]]]:
 class MergeDuplicates(Tool):
     name = "merge"
     scan_version = 3  # (rows hold whole records now, as the Sync view shows them; the scan says the mirror, for the box before Apply)
+    # a record whose versions are named for different films (Plex Checks: Dissimilar file naming): a file on the wrong
+    # record, most likely — merged, it would be folded in for good, so the row is held until it's split apart, or ignored there
+    blocking_checks = ("versions_named_differently",)
 
     title = M("Merge Duplicates")
     page = "/merge"

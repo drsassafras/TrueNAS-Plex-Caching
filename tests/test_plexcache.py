@@ -4982,9 +4982,30 @@ class PageStructureTests(unittest.TestCase):
                         self.assertRegex(rest, r'<span class="ssarrow mgarrow fixed" aria-hidden="true"><span>(→|←)</span></span>')
                         self.assertNotIn("tool-swap", rest)
                     self.assertRegex(rest, r'<div class="ssnotes ssfilelist"><div class="ssfiles many"><div><span class="ssfn">1</span> ')
-                    # the File n chips: grey, never green or yellow (a colour on a card is a check's)
-                    self.assertRegex(rest, r'class="badge b-grey sschip"[^>]*>File 1<')
-                    self.assertNotRegex(rest, r'class="badge b-(pass|warn) sschip"[^>]*>File \d')
+                    # the File n chips: grey, never yellow (a colour on a card is a check's) — but on Merge Duplicates the kept
+                    # record's own files are green, the ones it gains grey
+                    if name == "merge":
+                        self.assertRegex(rest, r'class="badge b-pass sschip"[^>]*data-f="file:1"[^>]*>Original File 1<')
+                        self.assertRegex(rest, r'class="badge b-grey sschip"[^>]*>Imported File 2<')
+                        self.assertNotRegex(rest, r'class="badge b-warn sschip"[^>]*>File \d')
+                        # a record a blocking check flags (Tool.blocking_checks — Plex Checks' Dissimilar file naming): a red chip
+                        # among its side's own, the side greyed, the row stopped; ignored there, grey and the row free; the
+                        # check switched off, no chip
+                        row0 = json.loads(json.dumps(st["tools"]["merge"]["scan"]["rows"][0]))
+                        kk = row0["keep"]["key"]
+                        for ignored, on in ((False, True), (True, True), (False, False)):
+                            st2 = json.loads(json.dumps(st))
+                            st2["tools"]["merge"]["scan"]["rows"] = [dict(row0, blocks=[{"key": kk, "id": "versions_named_differently", "title": "x", "text": "y", "ignored": ignored, "on": on}])]
+                            h2 = self._render(st2, "merge")["html"]
+                            dimmed = on and not ignored
+                            self.assertRegex(h2, r'<div class="mgkeep"><div class="mgkeeplbl">Metadata kept</div>' + ('<div class="mgdim">' if dimmed else "<div class=\"sscard"))
+                            chip = r'>Original File 1</button>(<button[^>]*>Imported File \d</button>)*<button type="button" class="badge b-%s sschip[^>]*data-act="tool-chip"[^>]*>Dissimilar file versions</button></div>' % ("grey" if ignored else "fail")
+                            (self.assertRegex if on else self.assertNotRegex)(h2, chip)
+                            self.assertEqual("cmprow blocked" in h2, dimmed)
+                            self.assertNotIn("\u0001", h2)
+                    else:
+                        self.assertRegex(rest, r'class="badge b-grey sschip"[^>]*>File 1<')
+                        self.assertNotRegex(rest, r'class="badge b-(pass|warn) sschip"[^>]*>File \d')
         # each file chip opens to what happens to the file: the tools' words for it
         for words in ("This is the existing file of the record kept: it will be kept.", "This file isn’t attached to this item yet: it will be transferred over",
                       "This is the existing file: it will be kept, where it is.", "This copy will be set aside in the library’s trash folder",
@@ -4992,10 +5013,11 @@ class PageStructureTests(unittest.TestCase):
                       "This file is here now: it will be moved to the new folder", "This hard link will be replaced with a file of its own",
                       "This path to the file will be deleted", "This symlink will be replaced with a file of its own"):
             self.assertIn(words, js)
-        # the merge card's file chips: grey, opening to the explanation (syncSide's ``explain``) — the Sync view's own stay coloured
+        # the merge card's file chips: grey (green: the kept record's own), opening to the explanation (syncSide's ``explain``) —
+        # the Sync view's own stay coloured
         side = js[js.index("  function fileChips("):js.index("  function syncSide(")]
-        self.assertIn('(explain ? "grey" : both ? "pass" : "warn")', side)
-        self.assertEqual(js.count("mergeFileKept)") + js.count("mergeFileLost)"), 2)
+        self.assertIn('(explain ? (x.own ? "pass" : "grey") : both ? "pass" : "warn")', side)
+        self.assertEqual(js.count("mergeFileKept, true)") + js.count("mergeFileLost, true)"), 2)  # (with its slots: the checks from elsewhere among its chips)
         # the unlink labels follow the option: removing the paths Plex doesn't list, the hard link is deleted
         st2 = copy.deepcopy(st)
         st2["tools"]["unlink"]["enabled"] = {"1": {"hardlink": True, "symlink": True, "remove": "remove"}}
@@ -5047,6 +5069,29 @@ class PageStructureTests(unittest.TestCase):
         self.assertIn('class="note badbox"', html)
         self.assertTrue(all("disabled" in c[0] for c in self._cards(html)))
         self.assertNotIn('data-act="optimize-sel"', html)
+
+    def test_records_have_an_anchor_to_link_to(self):
+        """Every record a page lists (Plex Checks, File Checks, the Library's Health view) carries the one anchor,
+        rec-<library>-<rating key>, so any page can link straight to it — Merge Duplicates' Dissimilar file versions chip
+        opens the record on Plex Checks, where its Ignore button is."""
+        fn = self._js_fn("recordId")
+        got = self._node(fn + "\nconsole.log(JSON.stringify([recordId('1', '190'), recordId(2, 'a/b'), recordLink('plexchecks', '1', 190)]));")
+        self.assertEqual(got, ["rec-1-190", "rec-2-a_b", "/plexchecks#rec-1-190"])
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        self.assertIn('var rid = recordId(key, it.key);', js)                                   # (each health item: its anchor)
+        self.assertIn('recordLink(bt.page, key, x.key)', js)                                   # (a blocking check's link to it)
+
+    def test_blocking_checks_from_elsewhere_go_on_their_records_side(self):
+        """The standard way a check from elsewhere stops a row (ROW_BLOCKS, placeBlocks): on the side of its record, else
+        the side that stays, else the card; first among that side's chips; a side that stays, with a red one, greyed."""
+        fn = self._js_fn("placeBlocks")
+        c = {"checks": [{"id": "why"}], "left": [{"kind": "keep", "rk": "1", "checks": [{"id": "own"}]}], "right": [{"kind": "drop", "rk": "2"}]}
+        cases = [[{"rk": "2", "check": {"id": "a", "status": "fail"}}], [{"check": {"id": "b", "status": "fail"}}], [{"rk": "1", "check": {"id": "c", "status": "grey"}}]]
+        got = self._node(fn + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(function (b) { return placeBlocks(JSON.parse(" + json.dumps(json.dumps(c)) + "), b); })));")
+        self.assertEqual([(x["left"][0].get("dim"), [k["id"] for k in x["left"][0]["checks"]], [k["id"] for k in x["right"][0].get("checks", [])]) for x in got],
+                         [(None, ["own"], ["a"]), (True, ["b", "own"], []), (None, ["c", "own"], [])])
+        lone = self._node(fn + "\nconsole.log(JSON.stringify(placeBlocks({checks: [{id: 'why'}]}, [{check: {id: 'm', status: 'fail'}}])));")
+        self.assertEqual([k["id"] for k in lone["checks"]], ["m", "why"])                    # (no sides: the card's own)
 
     def test_card_boxes_open_one_at_a_time_and_in_pairs(self):
         """On a card, one box opens at a time: opening another closes it. A box with a pair (its file, the mirror, a
@@ -5972,10 +6017,10 @@ class FakeOptimizer:
         return self._done(path, self.result, {"path": path, "action": "optimize", "images": images, "force": force, "cover": cover, "tags": tags})
 
     def convert(self, path, images, cover=None, tags="keep"):
-        """Converts as the real one does: <name>.mkv next to the original, optimized and tagged."""
-        from plexcache.optimize import VERSION
+        """Converts as the real one does: <name>.mkv next to the original (or the next free name), optimized and tagged."""
+        from plexcache.optimize import VERSION, convert
         self.sent.append({"path": path, "action": "convert", "images": images, "tags": tags})
-        new = os.path.splitext(path)[0] + ".mkv"
+        new = convert.free_target(path)
         if self.convert_result == "converted":
             build_mkv(new, ours={"PLEXCACHE_OPTIMIZER": VERSION})
             st = os.stat(new)
@@ -6928,10 +6973,40 @@ class OptimizerTests(unittest.TestCase):
         with self.assertRaises(config.SettingsError):
             settings.update({"library_health": {"subtitle_language": "english"}})
 
+    def test_convert_names_a_free_mkv(self):
+        """A converted file's MKV is <name>.mkv, or where a file has that name already, <name> - MKV.mkv,
+        <name> - MKV 2.mkv…: never over a file that's there. Deleting the original and reverting take
+        any of those names as its MKV, and nothing else."""
+        from plexcache.optimize import convert
+        d = tempfile.mkdtemp(dir=TMP)
+        mov = os.path.join(d, "Our School (1981) 2.mov")
+        with open(mov, "wb") as fh:
+            fh.write(b"x" * 100)
+        self.assertEqual(convert.free_target(mov), os.path.join(d, "Our School (1981) 2.mkv"))
+        open(os.path.join(d, "Our School (1981) 2.mkv"), "wb").close()                            # another file, the same name
+        self.assertEqual(convert.free_target(mov), os.path.join(d, "Our School (1981) 2 - MKV.mkv"))
+        open(os.path.join(d, "Our School (1981) 2 - MKV.mkv"), "wb").close()
+        self.assertEqual(convert.free_target(mov), os.path.join(d, "Our School (1981) 2 - MKV 2.mkv"))
+        for t in convert.targets_of(mov):
+            if not os.path.exists(t):
+                open(t, "wb").close()
+        self.assertIsNone(convert.free_target(mov))                                               # every name taken
+        self.assertTrue(convert.is_target_of(mov, os.path.join(d, "Our School (1981) 2 - MKV 2.mkv")))
+        self.assertFalse(convert.is_target_of(mov, os.path.join(d, "Other.mkv")))
+        self.assertFalse(convert.is_target_of(mov, os.path.join(d, "x", "Our School (1981) 2.mkv")))
+        build_mkv(os.path.join(d, "Our School (1981) 2 - MKV.mkv"))
+        with self.assertRaises(ValueError):
+            convert.delete_original(mov, os.path.join(d, "Other.mkv"))                            # not its MKV
+        convert.remove_converted(os.path.join(d, "Our School (1981) 2 - MKV 2.mkv"), mov)         # (a revert: its MKV goes)
+        self.assertFalse(os.path.exists(os.path.join(d, "Our School (1981) 2 - MKV 2.mkv")))
+        convert.delete_original(mov, os.path.join(d, "Our School (1981) 2 - MKV.mkv"))
+        self.assertFalse(os.path.exists(mov))
+
     def test_convert_with_the_real_tools(self):
         """The optimizer's converting, with MKVToolNix and ffmpeg: an AVI becomes an optimized MKV next to
         it (checked against it), the original untouched; an MP4 with an iTunes show and episode is left
-        as it is, saying so; never over an MKV that's there; and an original is deleted only with its MKV."""
+        as it is, saying so; never over an MKV that's there (the next free name instead); and an original
+        is deleted only with its MKV."""
         from plexcache.optimize import convert, mkv, tools
         from plexcache.optimize.optimizer import Skipped
         bundle = "/Applications/MKVToolNix.app/Contents/MacOS"
@@ -6952,9 +7027,9 @@ class OptimizerTests(unittest.TestCase):
         self.assertTrue(mkv.check(r["new"])["optimized"])
         self.assertEqual(int(os.stat(r["new"]).st_mtime), 1_600_000_000)                         # the original's timestamps
         self.assertEqual(_sha256(avi), before)                                                    # the original untouched
-        with self.assertRaises(Skipped) as cm:
-            convert.convert_file(avi)                                                             # its MKV is there
-        self.assertIn("same name", str(cm.exception))
+        r2 = convert.convert_file(avi)                                                            # a.mkv is there: the next free name
+        self.assertEqual(r2["new"], os.path.join(d, "a - MKV.mkv"))
+        os.remove(r2["new"])
         with self.assertRaises(Skipped) as cm:
             convert.convert_file(mp4)
         self.assertIn("episode_id, show", str(cm.exception))
@@ -11636,6 +11711,32 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual(row["skipped"], "its chapters wouldn't be kept")
         self.assertIn("left as it is", en(tool.flag_lines([row])[0]))
 
+    def test_convert_to_mkv_name_taken(self):
+        """Convert to MKV with a file already there by the MKV's name (one Plex doesn't list): the card
+        shows the next free name, the MKV is written by it, and it's that name followed into Plex."""
+        app, plex, client, cat, _ = self._app()
+        root = os.path.join(cat["root"], "Movies")
+        avi = os.path.join(root, "Our School (1981) 2.avi")
+        with open(avi, "wb") as fh:
+            fh.write(b"x" * 100)
+        os.utime(avi, (time.time() - 3600, time.time() - 3600))
+        taken = os.path.join(root, "Our School (1981) 2.mkv")
+        with open(taken, "wb") as fh:
+            fh.write(b"someone else's")
+        plex.cat["movies"].append({"path": avi, "size": 100, "kbps": 1, "key": "311", "title": "Our School", "year": 1981, "guid": "plex://movie/311", "duration": 5400000})
+        app.scan_library()
+        tool = app.tools["convert"]
+        (row,) = self._run(tool, tool.scan_async("1"))["scan"]["rows"]
+        self.assertEqual(row["new_name"], "Our School (1981) 2 - MKV.mkv")
+        self._run(tool, tool.apply_async([row["id"]]))
+        new = os.path.join(root, "Our School (1981) 2 - MKV.mkv")
+        self.assertTrue(os.path.exists(new))
+        with open(taken, "rb") as fh:
+            self.assertEqual(fh.read(), b"someone else's")                                         # (left alone)
+        e = app.conversions.get(avi)
+        self.assertEqual((e["new"], os.path.basename(e["plex_new"])), (new, "Our School (1981) 2 - MKV.mkv"))
+        self.assertEqual(en(tool.apply_row(row, lambda text: None)["reason"]), "Converted already: its MKV is on its way into Plex")
+
     def test_merge_duplicates(self):
         """The same film on two records (the same match; or unmatched, files named for the same title
         and year): the record with the most edited fields is kept, the others merged into it with Plex's
@@ -11668,6 +11769,23 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual(client.sent, [])
         self.assertEqual(sorted(m["key"] for m in plex.cat["movies"]), ["100", "102", "103", "190"])
         self.assertEqual(next(m for m in plex.cat["movies"] if m["key"] == "190")["more"], [path1])  # a version of the kept record now
+        # a record whose versions are named for different films (Plex Checks: Dissimilar file naming) — here
+        # Film 1 and Movie 1 on 190 — stops the row (red on the page; Apply leaves it) until it's ignored there
+        copy2 = os.path.join(cat["root"], "Movies", "Again", "Film 1 (2011) [copy].mkv")
+        fakes.make_mkv(copy2, 1024 * 1024)
+        plex.cat["movies"].append({"path": copy2, "size": 1, "kbps": 1, "key": "191", "title": "Film 1", "year": 2011, "guid": "plex://movie/9", "duration": 5401000})
+        app.libdata.refresh("1")
+        snap = self._run(tool, tool.scan_async("1"))
+        (row,) = snap["scan"]["rows"]
+        self.assertEqual((row["rks"], [(x["key"], x["id"], x["on"], x["ignored"]) for x in row["blocks"]], row["held"]), (["190", "191"], [("190", "versions_named_differently", True, False)], True))
+        self.assertFalse(tool.apply_async([row["id"]]))                                               # (stopped: nothing to do)
+        # ignored on Plex Checks (the files are right): grey, and the merge goes — no scan again
+        from plexcache import libhealth
+        libhealth.set_ignored(app, "1", "190", ["versions_named_differently"])
+        (row,) = tool.snapshot()["scan"]["rows"]
+        self.assertEqual(([x["ignored"] for x in row["blocks"]], row["held"]), ([True], False))
+        snap = self._run(tool, tool.apply_async([row["id"]]))
+        self.assertEqual(snap["results"][0]["result"], "done")
         # another edition isn't a duplicate (unless it's the very same file); nor is a film of another length
         from plexcache.tools import merge as mg
         rec = lambda key, **kw: dict({"key": key, "files": [("/m/%s.mkv" % key, 100 + int(key))], "durations": [5400000], "edition": "", "locked": []}, **kw)
@@ -11685,6 +11803,20 @@ class ToolsTests(unittest.TestCase):
         # …unless a part is there twice as the very same file: those two are duplicates, the other part still apart
         parts.append(rec("3", guid="g", matched=True, title="Shakespeare’s Globe: Henry IV, Part 2", files=[("/m/Henry IV Part 2 (2012) copy.mkv", 102)]))
         self.assertEqual([(w, [r["key"] for r in c]) for w, c in mg.clusters(parts)], [("file", ["2", "3"])])
+        # each part there twice, and Plex's titles crossed (a record titled Part 1 holds Part 2's file): two films,
+        # not one — the two records titled alike mustn't pull both parts' copies into one group
+        crossed = [rec("1", guid="g", matched=True, title="Henry IV Part 2 - Shakespeare's Globe Theatre", files=[("/m/Henry IV Part 1 Shakespeare's Globe Theatre (2012).mkv", 101)]),
+                   rec("2", guid="g", matched=True, title="Henry IV, Part 1 - Shakespeare's Globe Theatre", files=[("/m/Henry IV Part 2 Shakespeare's Globe(2012) 2.mkv", 102)], durations=[5500000]),
+                   rec("3", guid="g", matched=True, title="Shakespeare's Globe: Henry IV, Part 2", files=[("/m/Henry IV Part 2 (2012)/Henry IV Part 2 Shakespeare's Globe(2012) 2.mkv", 102)], durations=[5500000]),
+                   rec("4", guid="g", matched=True, title="Henry IV, Part 1 - Shakespeare's Globe Theatre", files=[("/m/old/Henry IV Part 1 Shakespeare's Globe Theatre (2012).mkv", 101)])]
+        self.assertEqual(sorted((w, [r["key"] for r in c]) for w, c in mg.clusters(crossed)), [("file", ["1", "4"]), ("file", ["2", "3"])])
+        self.assertEqual((mg.parts(crossed[1]), mg.parts(rec("5", title="Kill Bill: Vol. II"))), ({"2"}, {"2"}))  # (the file's part, over Plex's title)
+        # one record holding two films as versions (Coppelia and The Nutcracker, merged in Plex by mistake), each film's copy
+        # on a record of its own: through the very same files, one group still — the row is stopped by the Plex check instead
+        ballet = [rec("1", guid="n", matched=True, title="The Nutcracker", files=[("/m/Coppelia - Ukranine National Ballet (2018).mkv", 101), ("/m/NUTCRACKER - National Opera of Ukraine (2018).mkv", 102)], durations=[5400000, 5400000]),
+                  rec("2", guid="s", matched=True, title="Swan Lake", files=[("/m/c/Coppelia - Ukranine National Ballet (2018).mkv", 101)]),
+                  rec("3", guid="s", matched=True, title="Swan Lake", files=[("/m/n/Nutcracker - National Opera Of Ukraine (2018).mkv", 102)])]
+        self.assertEqual([(w, [r["key"] for r in c]) for w, c in mg.clusters(ballet)], [("file", ["1", "2", "3"])])
         # the very same file (a link, a copy) on two records matched to different entries — or one unmatched: one film
         same = [rec("1", guid="g", matched=True), rec("2", guid="local://2", matched=False, files=[("/other/1.mkv", 101)])]
         self.assertEqual([(w, [r["key"] for r in c]) for w, c in mg.clusters(same)], [("file", ["1", "2"])])

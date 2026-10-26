@@ -2451,17 +2451,20 @@ PCI18N.ready.then(function () {
   }
   // the row's files numbered: File 1, File 2… over both sides (fidx: name -> n); a chip per file on a card,
   // green when the other side has the file too, yellow when only this side does — or, with ``explain`` (a tool's
-  // comparison card), grey, each opening to what happens to the file (explain(file, "own" | "gains"))
+  // comparison card), grey (green: the files of the record kept, ``x.own``), each opening to what happens to the file
+  // (explain(file, "own" | "gains")) and named for it: Original File n (the kept record's own), Imported File n (the rest)
   function fileChips(x, otherNames, fidx, act, openId, explain) {
     return (x.files || []).map(function (f) {
       var n = fidx[f], id = "file:" + n, on = openId === id, both = otherNames.indexOf(f) >= 0;
-      return '<button type="button" class="badge b-' + (explain ? "grey" : both ? "pass" : "warn") + " sschip" + (on ? " on" : "") + '" aria-expanded="' + on + '" ' + act + ' data-f="' + id + '" title="' + esc(f) + '">' + esc(T("File {n}", { n: n })) + "</button>";
+      return '<button type="button" class="badge b-' + (explain ? (x.own ? "pass" : "grey") : both ? "pass" : "warn") + " sschip" + (on ? " on" : "") + '" aria-expanded="' + on + '" ' + act + ' data-f="' + id + '" title="' + esc(f) + '">' + esc(!explain ? T("File {n}", { n: n }) : x.own ? T("Original File {n}", { n: n }) : T("Imported File {n}", { n: n })) + "</button>";
     }).join("") + (x.gains || []).map(function (f) {  // files it would gain (greyed: what the record looks like after)
       var n = fidx[f], id = "file:" + n, on = openId === id;
-      return '<button type="button" class="badge b-grey sschip' + (on ? " on" : "") + '" aria-expanded="' + on + '" ' + act + ' data-f="' + id + '" title="' + esc(T("{file} — joins this record as a version", { file: f })) + '">' + esc(T("File {n}", { n: n })) + "</button>";
+      return '<button type="button" class="badge b-grey sschip' + (on ? " on" : "") + '" aria-expanded="' + on + '" ' + act + ' data-f="' + id + '" title="' + esc(T("{file} — joins this record as a version", { file: f })) + '">' + esc(explain ? T("Imported File {n}", { n: n }) : T("File {n}", { n: n })) + "</button>";
     }).join("");
   }
-  function syncSide(x, other, server, isSource, kinds, act, openId, tags, fidx, otherNames, explain) {
+  // ``slots``: true on a comparison card's side — CHIP_SLOT and SHOWN_SLOT left in its chips' row and under it, where
+  // cmpRow puts the side's checks (another tool's red ones, cmpBlocks) among its own chips
+  function syncSide(x, other, server, isSource, kinds, act, openId, tags, fidx, otherNames, explain, slots) {
     if (!x) return '<div class="sscard"><div class="det">' + H("Not on this server.") + "</div></div>";
     // the Plex checks on this record (libhealth): its versions named for different films, say — data that looks bad
     // (an empty locked field is its own orange chip above: not said twice)
@@ -2490,16 +2493,15 @@ PCI18N.ready.then(function () {
       var fn = (x.files || []).filter(isFile)[0], fg = explain && !fn ? (x.gains || []).filter(isFile)[0] : null;
       if (fn || fg) shown = explain ? '<div class="ssval">' + explain(fn || fg, fn ? "own" : "gains") + '<div class="det mono">' + esc(fn || fg) + "</div></div>" : '<div class="ssval mono">' + esc(fn) + "</div>";
     }
-    if (explain && openId && openId.indexOf("file:") === 0 && !shown && (x.files || []).length) {  // a file opened on the other side: this side's own, to compare
-      shown = '<div class="ssval">' + explain(x.files[0], "own") + '<div class="det mono">' + esc(x.files[0]) + "</div></div>";
-    }
+    // (a file opened on another side that this one hasn't: nothing open here — only the same file pairs)
     if (openId && openId !== "match" && !shown) {  // opened on the other side: this side's value, to compare
       var v = sideValueOf(x, openId);
       if (v) shown = '<div class="ssval">' + esc(v) + "</div>";
     }
     return '<div class="sscard' + (isSource ? " src" : "") + '"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(x.label) + (x.year && String(x.label).indexOf("(" + x.year + ")") < 0 ? ' <span class="muted">(' + esc(x.year) + ")</span>" : "") + "</div>" +
-      '<div class="sschips">' + facts + chips + "</div>" + shown + tagHtml + "</div></div></div>";
+      '<div class="sschips">' + facts + chips + (slots ? CHIP_SLOT : "") + "</div>" + shown + (slots ? SHOWN_SLOT : "") + tagHtml + "</div></div></div>";
   }
+  var CHIP_SLOT = "\u0001chips\u0001", SHOWN_SLOT = "\u0001shown\u0001";
   // what applying did (syncapply.py): each change, with Undo — the whole log on the Sync page, one library's on the Library page
   function syncLogCard(libKey) {
     var ap = ((ST.sync || {}).apply) || {}, log = (ap.log || []).filter(function (e) { return !libKey || String(e.library) === String(libKey); });
@@ -2718,6 +2720,10 @@ PCI18N.ready.then(function () {
     if (!only) out += '<div class="det">' + esc(P(flaggedItems, "{n} item flagged", "{n} items flagged", { n: fmtNum(flaggedItems) })) + " · " + esc(P(clean, "{n} with nothing flagged", "{n} with nothing flagged", { n: fmtNum(clean) })) + "</div>";
     var hper = only ? cardsPer() : perPage();  // (a check page is a tool's page: the tools' page size)
     var hpages = { pages: pageRanges(shownItems.map(function (it) { return it.label; }), hper), total: shownItems.length };
+    if (REVEAL && String(REVEAL.lib) === String(key)) {  // (a link to a record: the page of the list that holds it)
+      var at = shownItems.map(function (it) { return String(it.key); }).indexOf(String(REVEAL.rk));
+      if (at >= 0) LIB.healthOffset = Math.floor(at / hper) * hper;
+    }
     if (LIB.healthOffset >= shownItems.length) LIB.healthOffset = 0;
     var hoff = LIB.healthOffset;
     shownItems = shownItems.slice(hoff, hoff + hper);
@@ -2749,7 +2755,8 @@ PCI18N.ready.then(function () {
       var acts = (live.length ? '<button class="btn sm" type="button" data-act="lh-ignore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" data-ids="' + esc(live.join(",")) + '" title="' + H("Greys out this item’s issues as they are now, for good. A new kind of issue on it still shows as a warning.") + '">' + H("Ignore") + "</button> " : "") +
         (muted ? '<button class="btn sm" type="button" data-act="lh-restore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" title="' + H("Shows this item’s ignored issues as warnings again.") + '">' + H("Bring Back") + "</button>" : "");
       if (!it.results.length) chips = badge("pass", T("Nothing flagged"));
-      return '<div class="ssitem lhitem' + (live.length ? "" : " lhquiet") + '"><div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(it.label) + '</div><div class="lhacts">' + acts + "</div></div></div></div>" +
+      var rid = recordId(key, it.key);
+      return '<div class="ssitem lhitem' + (live.length ? "" : " lhquiet") + (REVEAL && REVEAL.id === rid ? " revealed" : "") + '" id="' + esc(rid) + '"><div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(it.label) + '</div><div class="lhacts">' + acts + "</div></div></div></div>" +
         '<div class="ssarrow"></div><div class="lhflags"><div class="sschips">' + chips + "</div>" + shown + "</div></div>";
     }).join("");
     out += pager(hpages, hoff, hper, 'data-act="lh-page"');
@@ -4364,9 +4371,7 @@ PCI18N.ready.then(function () {
     var todo = [], stopped = [], can = [], hidden = 0, rows = [];
     sc.rows.forEach(function (r) {
       var c = Object.assign({ tool: name, id: r.id, title: r.title }, spec.card(r, sc));
-      var first = mergeFirst(name, sc.library, r), kept = (c.left || []).concat(c.right || []).filter(function (sd) { return sd.kind === "keep"; })[0];
-      if (first && kept) kept.checks = [first].concat(kept.checks || []);  // (a tag inside the card: the side that stays)
-      else if (first) c.checks = [first].concat(c.checks || []);
+      cmpBlocks(name, sc.library, r, c);
       c.sev = rowSeverity(cmpStatuses(c));
       if (!c.sev.shown) { hidden++; return; }
       rows.push(r);
@@ -4425,6 +4430,48 @@ PCI18N.ready.then(function () {
     return '<div class="toolstats">' + (st.last ? '<span class="det">' + H("From the last scan:") + "</span>" : "") + out.join("") + "</div>";
   }
   function statChip(status, text, tip) { return '<span class="badge b-' + esc(status) + '"' + (tip ? ' title="' + esc(tip) + '"' : "") + ">" + esc(text) + "</span>"; }
+  // @testable: placeBlocks — pure: the standard way a check from elsewhere (another tool, Library Health) that stops a row
+  // goes on its card: ``blocks`` [{check, rk?}] each on the side of its record (side.rk), else the side that stays (kind
+  // keep), else the card's own chips — first among them; a side with a red one that stays is greyed (dim), as the sides
+  // that go: it can't go as it is
+  function placeBlocks(c, blocks) {
+    var sides = (c.left || []).concat(c.right || []), kept = sides.filter(function (sd) { return sd.kind === "keep"; })[0];
+    blocks.forEach(function (b) {
+      var sd = (b.rk != null && sides.filter(function (x) { return x.rk != null && String(x.rk) === String(b.rk); })[0]) || kept;
+      if (!sd) { c.checks = [b.check].concat(c.checks || []); return; }
+      sd.checks = [b.check].concat(sd.checks || []);
+      if (b.check.status === "fail" && sd.kind === "keep") sd.dim = true;
+    });
+    return c;
+  }
+  // @end
+  // The checks from elsewhere that stop a tool's rows, one function each (name, library, row) -> [{check, rk?}]: put on every
+  // tool's cards by toolCards (placeBlocks), the server refusing the same rows (Tool.merge_first, Tool.blocking_checks)
+  var ROW_BLOCKS = [
+    function (name, key, r) { var m = mergeFirst(name, key, r); return m ? [{ check: m }] : []; },
+    recordBlocks ];
+  function cmpBlocks(name, key, r, c) {
+    var all = [];
+    ROW_BLOCKS.forEach(function (f) { all = all.concat(f(name, key, r) || []); });
+    return placeBlocks(c, all);
+  }
+  // A row's records flagged by a Library Health check the tool is stopped by (row.blocks, Tool.blocking_checks): a red chip
+  // on the record's side — grey once ignored on the record there, gone while the check is switched off — its text from
+  // BLOCK_TEXT, linking to the record on its checks page (recordLink), its Ignore button there
+  var BLOCK_TEXT = {
+    versions_named_differently: { page: "plexchecks", label: N("Dissimilar file versions"),
+      fail: function (href) {
+        return H("A file looks attached to the wrong record because the naming of the file is dissimilar. To fix this:") +
+          "<br><br><strong>" + H("If these are different titles:") + "</strong> " + H("Split the record apart in Plex (its menu: Split Apart), then scan again.") +
+          "<br><br><strong>" + H("If the files are right:") + "</strong> " + H("One film named in two languages, say: hit the “Ignore” button in <a href=\"{href}\" data-nav>Plex Checks</a> to allow it to be merged here.", { href: href });
+      },
+      ignored: function (href) { return H("This record’s files are named dissimilarly, but that’s ignored on <a href=\"{href}\" data-nav>Plex Checks</a>: the files are taken as right, and the records can be merged.", { href: href }); } } };
+  function recordBlocks(name, key, r) {
+    return (r.blocks || []).filter(function (x) { return x.on !== false && BLOCK_TEXT[x.id]; }).map(function (x) {
+      var bt = BLOCK_TEXT[x.id], href = recordLink(bt.page, key, x.key);
+      return { rk: x.key, check: { id: "block:" + x.id, status: x.ignored ? "grey" : "fail", label: T(bt.label), text: x.ignored ? bt.ignored(href) : bt.fail(href) } };
+    });
+  }
   // A row whose Plex record is one of a film's several, as Merge Duplicates last found them in this library (the rows live
   // there): a red tag in its card, More than 1 Plex record, opening to merge them first — what's done to it here would be
   // done to one record of the film only. Red: the row can't be ticked (the server refuses it too: Tool.merge_first). Only
@@ -4463,8 +4510,13 @@ PCI18N.ready.then(function () {
   }
   // @end
   function chips(name, rowId, items, cardId) {
+    var p = chipParts(name, rowId, items, cardId);
+    return '<div class="sschips">' + p.buttons + "</div>" + p.shown;
+  }
+  // the chips' buttons, and what the open one says (to go under them): {buttons, shown}
+  function chipParts(name, rowId, items, cardId) {
     cardId = cardId == null ? rowId : cardId;
-    var out = '<div class="sschips">', shown = "", opens = chipsOpen(TOOL_OPEN[name + ":" + cardId], rowId, items);
+    var out = "", shown = "", opens = chipsOpen(TOOL_OPEN[name + ":" + cardId], rowId, items);
     items.forEach(function (c, k) {
       var id = rowId + "/" + c.id, open = opens[k];
       var status = chipStatus(name, c);
@@ -4472,7 +4524,7 @@ PCI18N.ready.then(function () {
         '" data-card="' + esc(cardId) + '" data-group="' + esc(rowId) + '"' + (c.pair ? ' data-pair="' + esc(c.pair) + '"' : "") + ">" + esc(c.label) + "</button>";
       if (open) shown += '<div class="ssval">' + (c.text || "") + (c.lines || []).map(function (l) { return '<div class="det">' + l + "</div>"; }).join("") + "</div>";
     });
-    return out + "</div>" + shown;
+    return { buttons: out, shown: shown };
   }
   // @testable: rowSeverity — pure: what a row's checks (the statuses of its chips and boxes) make of it, the one rule for
   // every tool. A yellow one (warn) makes it a row to do: it can be ticked; a red one (fail) stops it: it can't, whatever
@@ -4502,17 +4554,25 @@ PCI18N.ready.then(function () {
   //     left: [side], right: [side] (one, or several stacked), swap: null | 'data-act=…' (the arrow's button), swapTitle,
   //     notes: [{status: "fail" | "info", html, cls?}], files: [paths, numbered as the File n chips]}
   // side: {kind: "keep" | "drop", label, body (html: a card of the tool's own drawing) — or poster, what (html), lines: [html]
-  //     — and checks: [chip items], dim (false: a red side not greyed inside — the optimizer's file now, its warnings to read)}
+  //     — and checks: [chip items] (with a body: under it), dim (false: a red side not greyed inside — the optimizer's file
+  //     now, its warnings to read; true: a green side greyed — one that can't go as it is: a red check from elsewhere on it, placeBlocks)}
   function cmpRow(c) {
     var n = 0;
     var side = function (sd) {
       n += 1;
+      // (a side drawn by the tool, ``body``, carries its checks among its own chips — in its slots, never greyed — or, with
+      // none, under it)
+      var parts = sd.body != null && sd.checks && sd.checks.length ? chipParts(c.tool, c.id + "/s" + n, sd.checks, c.id) : { buttons: "", shown: "" }, own = "";
       var inner = sd.body != null ? cmpQuiet(sd.body) : '<div class="sscard"><div class="ssbody">' +
         (sd.poster ? '<img class="ssposter" src="/api/poster?path=' + encodeURIComponent(sd.poster) + '" alt="" loading="lazy">' : '<div class="ssposter none"' + (sd.noPoster ? ' title="' + esc(sd.noPoster) + '"' : "") + "></div>") +
         '<div class="ssinfo"><div class="what">' + (sd.what || "") + "</div>" + (sd.lines || []).map(function (l) { return '<div class="det">' + cmpQuiet(l) + "</div>"; }).join("") +
         (sd.checks && sd.checks.length ? chips(c.tool, c.id + "/s" + n, sd.checks, c.id) : "") + "</div></div></div>";
-      return sd.kind === "keep" ? '<div class="mgkeep"><div class="mgkeeplbl">' + esc(sd.label) + "</div>" + inner + "</div>"
-        : '<div class="mgdrop"><div class="mgdroplbl">' + esc(sd.label) + "</div>" + (sd.dim === false ? inner : '<div class="mgdim">' + inner + "</div>") + "</div>";
+      if (sd.body != null) {
+        if (inner.indexOf(CHIP_SLOT) >= 0) inner = inner.replace(CHIP_SLOT, parts.buttons).replace(SHOWN_SLOT, parts.shown);
+        else if (parts.buttons) own = '<div class="mgchecks"><div class="sschips">' + parts.buttons + "</div>" + parts.shown + "</div>";
+      }
+      return sd.kind === "keep" ? '<div class="mgkeep"><div class="mgkeeplbl">' + esc(sd.label) + "</div>" + (sd.dim === true ? '<div class="mgdim">' + inner + "</div>" : inner) + own + "</div>"
+        : '<div class="mgdrop"><div class="mgdroplbl">' + esc(sd.label) + "</div>" + (sd.dim === false ? inner : '<div class="mgdim">' + inner + "</div>") + own + "</div>";
     };
     var stack = function (list) { var h = list.map(side); return h.length > 1 ? '<div class="ssstack">' + h.join("") + "</div>" : h[0] || ""; };
     var keepRight = (c.right || []).some(function (sd) { return sd.kind === "keep"; }), arrow = keepRight ? "→" : "←";
@@ -4731,8 +4791,8 @@ PCI18N.ready.then(function () {
     // the one kept shows the files it gains (greyed); one folded in is greyed inside (its files become the kept one's
     // versions; its own edits, poster and collections go)
     var side = function (x) {
-      if (x === keep) return { kind: "keep", label: T("Metadata kept"), body: syncSide(Object.assign({}, x, { gains: otherFiles.filter(function (f) { return (x.files || []).indexOf(f) < 0; }) }), others[0] || null, "", true, kinds, act, openId, null, fidx, otherFiles, mergeFileKept) };
-      return { kind: "drop", label: T("Metadata lost"), body: syncSide(x, keep, "", false, kinds, act, openId, null, fidx, keep.files || [], mergeFileLost) };
+      if (x === keep) return { rk: x.key, kind: "keep", label: T("Metadata kept"), body: syncSide(Object.assign({}, x, { own: true, gains: otherFiles.filter(function (f) { return (x.files || []).indexOf(f) < 0; }) }), others[0] || null, "", true, kinds, act, openId, null, fidx, otherFiles, mergeFileKept, true) };
+      return { rk: x.key, kind: "drop", label: T("Metadata lost"), body: syncSide(x, keep, "", false, kinds, act, openId, null, fidx, keep.files || [], mergeFileLost, true) };
     };
     var checks = [{ id: "why", issue: r.why, label: r.why === "file" ? T("The same file") : r.why === "matched" ? T("Same match") : T("Named alike"),
       text: r.why === "file" ? H("The two records hold the very same file — a link, or a copy with the same size and running time.") : r.why === "matched" ? H("Plex matched both records to the same film or show; their running times agree, and they’re the same edition.") : H("Unmatched, their files are named for the same title and year, and their running times agree.") }];
@@ -4977,7 +5037,8 @@ PCI18N.ready.then(function () {
       empty: H("Every video file is MKV already, or its MKV is on its way into Plex."),
       // the comparison card, its direction fixed: the original, deleted once Plex has the MKV, and the MKV written beside it
       card: function (r) {
-        var t = kindOf[r.kind] || [r.kind, (r.kind || "").toUpperCase(), "", [], ""], mkv = r.name.replace(/\.[^./]*$/, "") + ".mkv";
+        // the MKV's name: <name>.mkv, or the next free one where that's taken (r.new_name, from the scan)
+        var t = kindOf[r.kind] || [r.kind, (r.kind || "").toUpperCase(), "", [], ""], mkv = r.new_name || r.name.replace(/\.[^./]*$/, "") + ".mkv", mkvPath = r.path.replace(/[^/]*$/, "") + mkv;
         var checks = [{ id: "kind", issue: r.kind, label: T(t[1]), text: H(t[2]) + (t[3].length ? "<br><strong>" + H("What MKV wouldn’t keep") + "</strong>" : ""), lines: t[3].map(function (x) { return H(x); }).concat(t[4] ? ["<strong>" + H("How converting handles it") + "</strong> " + H(t[4])] : []) }];
         if (r.skipped) checks.push({ id: "skip", status: "info", label: T("Left as it is"), text: H("Converting would lose something, so the file was left as it is last time: {why}. It isn’t tried again while it stays as it is — untick it, or leave it ticked to try once more.", { why: msg(r.skipped) }) });
         return { checks: checks,
@@ -4985,9 +5046,9 @@ PCI18N.ready.then(function () {
             checks: [{ id: "file", pair: "file", status: "grey", label: T("File {n}", { n: 1 }), text: H("This is the original file: it will be deleted once Plex has the new MKV as a version of the same item."), lines: ['<span class="mono">' + esc(r.path) + "</span>"] },
               { id: "box", pair: "box", status: "grey", label: T(t[1]), text: H(t[2]) }, { id: "size", status: "grey", label: fmtBytes(r.size), text: H("Its size now: the MKV comes out about the same.") }] }],
           right: [{ kind: "keep", label: T("New MKV created"), poster: r.poster, what: esc(r.title), lines: ['<span class="mono">' + esc(mkv) + "</span>"],
-            checks: [{ id: "file", pair: "file", status: "grey", label: T("File {n}", { n: 2 }), text: H("This MKV will be written next to the original, and Plex adds it as a version of the same item: the item keeps its metadata and watched state."), lines: ['<span class="mono">' + esc(r.path.replace(/\.[^./]*$/, "") + ".mkv") + "</span>"] },
+            checks: [{ id: "file", pair: "file", status: "grey", label: T("File {n}", { n: 2 }), text: H("This MKV will be written next to the original, and Plex adds it as a version of the same item: the item keeps its metadata and watched state."), lines: ['<span class="mono">' + esc(mkvPath) + "</span>"] },
               { id: "box", pair: "box", status: "grey", label: "MKV", text: H("Every stream, chapter and subtitle kept, checked against the original, then optimized like any MKV.") }] }],
-          files: [r.path, r.path.replace(/\.[^./]*$/, "") + ".mkv"] };
+          files: [r.path, mkvPath] };
       },
       confirm: function (n) { return P(n, "Convert {n} file to MKV? The MKV is written next to it and seen into Plex; the original goes once Plex has the MKV.", "Convert {n} files to MKV? Each MKV is written next to its original and seen into Plex; the originals go once Plex has the MKVs.", { n: n }); },
       applies: function (sc) {
@@ -5107,9 +5168,23 @@ PCI18N.ready.then(function () {
   window.addEventListener("resize", stickHeights);
 
   // Scroll to a part of a page — once it's there: a page whose data is still loading draws it a little later
+  // @testable: recordId — the anchor of a Plex record on any page that lists records (Plex Checks, File Checks, the Library's
+  // Health view): rec-<library>-<rating key>. recordLink(page, library, key) is the link to it — /plexchecks#rec-1-190: the
+  // page opens on that library, on the page of its list that holds the record, scrolled to it and marked a moment (REVEAL)
+  function recordId(lib, rk) { return "rec-" + String(lib).replace(/[^\w]/g, "_") + "-" + String(rk).replace(/[^\w]/g, "_"); }
+  function recordLink(pageName, lib, rk) { return "/" + pageName + "#" + recordId(lib, rk); }
+  // @end
+  var REVEAL = null;  // the record a link asked for: {lib, rk, id}, until it's been scrolled to
+  function reveal(hash) {
+    var m = /^rec-(\w+?)-(\w+)$/.exec(hash || "");
+    if (!m) return false;
+    REVEAL = { lib: m[1], rk: m[2], id: hash };
+    LIB.key = m[1]; LIB.healthOffset = 0;
+    return true;
+  }
   function scrollToSoon(id, tries) {
     var target = document.getElementById(id);
-    if (target) return target.scrollIntoView({ block: "start" });
+    if (target) { if (REVEAL && REVEAL.id === id) setTimeout(function () { REVEAL = null; }, 2500); return target.scrollIntoView({ block: "start" }); }
     if ((tries || 0) < 30) setTimeout(function () { scrollToSoon(id, (tries || 0) + 1); }, 100);
   }
   // A click under way (the button pressed, not yet released — and a moment after, while its click lands): redrawing
@@ -5349,8 +5424,9 @@ PCI18N.ready.then(function () {
     if (a && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       var parts = a.getAttribute("href").split("#");
+      var toRecord = reveal(parts[1]);
       go(parts[0].replace("/", ""), true);
-      if (parts[1]) scrollToSoon(parts[1]);
+      if (parts[1]) { if (toRecord) history.replaceState({}, "", location.pathname + "#" + parts[1]); scrollToSoon(parts[1], toRecord ? -70 : 0); }  // (a record: up to 10 s, for its list to come in)
       return;
     }
     var t = e.target.closest("[data-toggle],[data-guide],[data-act],[data-copy]");
@@ -5964,6 +6040,7 @@ PCI18N.ready.then(function () {
   load().then(function () {
     go(page, false);
     // A link straight to a card (/ssd#l2arc-settings)
+    if (reveal(location.hash.slice(1))) { render(); scrollToSoon(location.hash.slice(1), -70); }  // (a record: once its list is in)
     var target = location.hash && document.getElementById(location.hash.slice(1));
     if (target) target.scrollIntoView({ block: "start" });
   });
