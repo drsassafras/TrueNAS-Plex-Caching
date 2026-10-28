@@ -28,8 +28,6 @@ season 1 the next episode is S02E01, so "rest of the season" means season 2.
 Music has no "next album" step: albums aren't played in a set order.
 """
 
-from __future__ import annotations
-
 from . import cachemode
 from .i18n import M
 

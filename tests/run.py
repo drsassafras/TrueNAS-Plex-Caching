@@ -11,8 +11,6 @@ Failures are listed in full at the end, as unittest normally does, and the
 exit code is non-zero if anything failed.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 import time

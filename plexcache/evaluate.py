@@ -33,8 +33,6 @@ between its steps for the page's library, and the evaluator finishes the step it
 read what it read) is steered the same way, in its own thread: the page's library first, then the rest.
 """
 
-from __future__ import annotations
-
 import threading
 import time
 

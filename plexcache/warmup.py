@@ -5,8 +5,6 @@ Port of plex_preload_l2arc2.sh with its unit and sizing bugs fixed:
 bitrates are kbps, so bytes = kbps * 125 * seconds everywhere.
 """
 
-from __future__ import annotations
-
 import math
 import random
 import time
@@ -83,7 +81,7 @@ class LibraryStats:
     libraries: list = field(default_factory=list)
 
     @classmethod
-    def from_files(cls, files, names: dict | None = None) -> "LibraryStats":
+    def from_files(cls, files, names: dict | None = None) -> LibraryStats:
         st = cls()
         totals = {k: 0 for k in KINDS}
         per: dict[str, dict] = {}

@@ -7,8 +7,6 @@ Trash: ``<library folder>/.plexcache-trash/<the file's path within the folder>``
 so setting aside is a rename; a synced folder carries the move to the other site as a deletion there.
 """
 
-from __future__ import annotations
-
 import os
 import shutil
 import stat

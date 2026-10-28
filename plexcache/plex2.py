@@ -6,14 +6,15 @@ same item; with a second server, on both. This is how the second one is reached 
 * Chosen from the servers this server's Plex account can use (plex.tv's list) — or, signed in apart,
   another account's; its addresses are tried, direct ones
   first, and the first that answers as that server is kept, with that server's own token.
-* Each library here is paired with one there: by name and kind, unless chosen (or none).
+* Each library here has a state of its own (settings plex2.libraries, the Mirror page's Mirrored Libraries):
+  not decided (the default: nothing is assumed, and what would act on a mirror waits), no mirror, or mirrored
+  — by a library there, named by its key, or the one of the same name and kind when none is named. "*" stands
+  for every library not listed. What every reader goes by (state_of, mirror_for, pairs).
 * A file's path there: its place within its library folder here, under each of that library's
   folders there — the one Plex there has is it. Its files are read (paged, as here) and kept a few
   minutes, with how many of this library's files were found there: the paths only count as lining
   up when nearly all are (MATCHED). Otherwise nothing is deleted on its word.
 """
-
-from __future__ import annotations
 
 import os
 import threading
@@ -48,6 +49,67 @@ class OtherServer:
     def configured(self) -> bool:
         s = self.settings()
         return bool(s.get("url") and s.get("token"))
+
+    # ------------------------------------------------------------ each library's state
+    def entry(self, key: str) -> dict:
+        """The library's setting: {"state": "unset" | "none" | "mirror", "key": its library there ("" : by name)}."""
+        libs = self.settings().get("libraries") or {}
+        e = libs.get(str(key)) if str(key) in libs else libs.get("*")
+        if not isinstance(e, dict):
+            return {"state": "unset", "key": ""}
+        return {"state": e.get("state") if e.get("state") in ("unset", "none", "mirror") else "unset", "key": str(e.get("key") or "")}
+
+    def state_of(self, key: str) -> str:
+        """"unset" (not decided), "none" (no mirror), or "mirror"."""
+        return self.entry(key)["state"]
+
+    def any_mirror(self) -> bool:
+        """Whether some library is mirrored (by the server watched): what the Plex Cache link and the mirror's checks need.
+        (Every library not listed, "*", counts before this Plex's libraries are read.)"""
+        if not self.configured():
+            return False
+        libs = self.settings().get("libraries") or {}
+        return any(isinstance(e, dict) and e.get("state") == "mirror" for e in libs.values())
+
+    def undecided(self) -> list[str]:
+        """The libraries whose state isn't chosen yet."""
+        return [str(lib["key"]) for lib in getattr(self.app, "libraries", []) or [] if lib.get("kind") and self.state_of(str(lib["key"])) == "unset"]
+
+    def set_state(self, key: str, state: str, their_key: str = "") -> None:
+        """A library's state chosen: "unset", "none", or "mirror" by ``their_key`` (""  : the library of the same name)."""
+        if state not in ("unset", "none", "mirror"):
+            raise ValueError(M("unknown state"))
+        libs = dict(self.settings().get("libraries") or {})
+        if state == "unset" and "*" not in libs:
+            libs.pop(str(key), None)
+        else:
+            libs[str(key)] = {"state": state, "key": str(their_key or "") if state == "mirror" else ""}
+        self.app.settings.update({"plex2": {"libraries": libs}})
+
+    def states(self) -> dict:
+        """Every library's state, for the page: {key: {"state", "key", "there": the library there (title) or ""}}."""
+        theirs = {t.key: t for t in (self.libs or [])} if self.configured() else {}
+        out = {}
+        for lib in getattr(self.app, "libraries", []) or []:
+            if not lib.get("kind"):
+                continue
+            key = str(lib["key"])
+            e = self.entry(key)
+            there = self.mirror_for(key, list(theirs.values())) if e["state"] == "mirror" and theirs else None
+            out[key] = {"state": e["state"], "key": e["key"], "there": there.title if there else "", "there_key": there.key if there else ""}
+        return out
+
+    def mirror_for(self, key: str, theirs: list[Library] | None = None):
+        """The library there that mirrors library ``key``, or None: not mirrored (not decided, or none), the server not
+        watched, or the library named not there (nor one of the same name and kind)."""
+        e = self.entry(key)
+        if e["state"] != "mirror" or not self.configured():
+            return None
+        theirs = self.libraries() if theirs is None else theirs
+        if e["key"]:
+            return next((t for t in theirs if t.key == e["key"]), None)
+        lib = next((x for x in getattr(self.app, "libraries", []) or [] if str(x["key"]) == str(key)), None) or {}
+        return next((t for t in theirs if t.title.lower() == str(lib.get("title", "")).lower() and t.kind == lib.get("kind")), None)
 
     def client(self, timeout: float = 30) -> PlexClient:
         s = self.settings()
@@ -158,17 +220,9 @@ class OtherServer:
             return self.libs is not None
 
     def pairs(self, theirs: list[Library] | None = None) -> dict[str, Library | None]:
-        """Each library here -> its library there (or None): as chosen, else the one of the same name and kind."""
+        """Each library here -> the library there that mirrors it (mirror_for), or None."""
         theirs = self.libraries() if theirs is None else theirs
-        chosen = self.settings().get("libraries") or {}
-        out = {}
-        for lib in getattr(self.app, "libraries", []) or []:
-            key = str(lib["key"])
-            if key in chosen:
-                out[key] = next((t for t in theirs if t.key == chosen[key]), None) if chosen[key] else None
-            else:
-                out[key] = next((t for t in theirs if t.title.lower() == str(lib.get("title", "")).lower() and t.kind == lib.get("kind")), None)
-        return out
+        return {str(lib["key"]): self.mirror_for(str(lib["key"]), theirs) for lib in getattr(self.app, "libraries", []) or []}
 
     def paths_there(self, key: str, plex_path: str, there: Library) -> list[str]:
         """Where a file of library ``key`` (its path as this Plex has it) may be on the other server."""
@@ -224,10 +278,11 @@ class OtherServer:
         with self.lock:
             libs = list(self.libs or [])
             rates, err = dict(self.rates), self.error
-        pairs = {k: (v.key if v else "") for k, v in self.pairs().items()} if libs else {}
+        pairs = {k: (v.key if v else "") for k, v in self.pairs(libs).items()} if libs else {}
         return {"configured": self.configured(), "own_signin": bool(s.get("account_token")),
                 "signed_in": bool(s.get("account_token") or self.app.settings.section("plex").get("token")), "name": s.get("name") or "",
-                "url": s.get("url") or "", "error": err, "pairs": pairs, "rates": rates, "matched": MATCHED,
+                "machine_id": s.get("machine_id") or "", "url": s.get("url") or "", "error": err, "pairs": pairs, "rates": rates, "matched": MATCHED,
+                "states": self.states(), "any_mirror": self.any_mirror(), "undecided": self.undecided(),
                 "libraries": [{"key": t.key, "title": t.title, "kind": t.kind} for t in libs]}
 
     # ------------------------------------------------------------ a converted file there
@@ -236,9 +291,7 @@ class OtherServer:
         "other" (an item of its own), "absent" (it doesn't have the original: nothing there to lose),
         "" (not yet), "unpaired" (paths don't line up: never taken as absent) — or None when there's
         no second server for this library. Its folder there is scanned while it hasn't."""
-        if not self.configured():
-            return None
-        there = self.pairs().get(str(e["library"]))
+        there = self.mirror_for(str(e["library"]))
         if there is None:
             return None
         ox = e.setdefault("other", {})

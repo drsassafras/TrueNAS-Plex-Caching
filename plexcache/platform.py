@@ -7,8 +7,6 @@ Otherwise all that's known is whether ZFS is there (/proc/spl), and TrueNAS is "
 the pages say so, and what needs the TrueNAS API is left out rather than asked for.
 """
 
-from __future__ import annotations
-
 import os
 import platform as _platform
 import re

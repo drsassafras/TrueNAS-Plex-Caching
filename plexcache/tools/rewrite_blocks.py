@@ -31,8 +31,6 @@ Things to know first:
   * Replication sends every rewritten file again in full.
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import os

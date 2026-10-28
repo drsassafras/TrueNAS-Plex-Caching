@@ -43,8 +43,6 @@ Each side only tells the other where it is (public(), folders()); neither asks t
 anything.
 """
 
-from __future__ import annotations
-
 import os
 import re
 import threading
@@ -123,9 +121,11 @@ class Migration:
         try:
             return self.client._call("/api/folder", dict(kw, action=action), timeout=600)
         except urllib.error.HTTPError as e:
+            with e:  # (its response: read, then closed)
+                body = e.read()
             try:
                 import json
-                return {"error": json.loads(e.read() or b"{}").get("error") or str(e)}
+                return {"error": json.loads(body or b"{}").get("error") or str(e)}
             except ValueError:
                 return {"error": str(e)}
         except (OSError, ValueError, urllib.error.URLError) as e:
@@ -226,7 +226,7 @@ class Migration:
     def _default_scope(self) -> str:
         """Both servers where a mirror is watched (the files are the same, so the record size that suits them is too),
         else this one."""
-        return "both" if self._mirror_watched() else "this"
+        return "both" if self._mirror_watched((self.state or {}).get("library")) else "this"
 
     def set_scope(self, scope: str) -> dict:
         """Both servers, or this server only: chosen before the copy."""
@@ -553,7 +553,7 @@ class Migration:
         folder, step = st.get("folder") or "", st.get("step")
         if not folder:
             return
-        root, watched = sync_root(folder), self._mirror_watched() or bool(self._mirror_seen(st.get("library")))
+        root, watched = sync_root(folder), self._mirror_watched(st.get("library")) or bool(self._mirror_seen(st.get("library")))
         if not root and not watched and not st.get("sync_paused"):  # (paused: said, even once the folder it was found in is set aside)
             return
         name = os.path.basename(folder)
@@ -603,16 +603,21 @@ class Migration:
         return seen if seen and seen.get("how") != "watched" else None
 
     def _seen_text(self, seen: dict):
-        return M("{name} looks like a mirror of these files, but it isn’t chosen as the mirrored server, so the conversion can’t check it or "
-                 "work with it. Watch it, or Ignore it if it isn’t a mirror (here, or on the [Mirror page](/mirrors)).", name=seen.get("name") or "?") \
+        return M("{name} looks like a mirror of this library ({library} there), but the library isn’t marked as mirrored, so the conversion can’t "
+                 "check it or work with it. Mark it as the mirror, or say the library has no mirror (here, or on the [Mirror page](/mirrors)).",
+                 name=seen.get("name") or "?", library=seen.get("their_title") or "?") \
             if seen.get("how") == "suspected" else \
-            M("Another Plex Cache ({name}) shares these folders, but no mirrored server is chosen, so the conversion can’t check it or work with "
-              "it. Choose its Plex server on the [Mirror page](/mirrors), or say there’s no mirror there.", name=seen.get("name") or "?")
+            M("Another Plex Cache ({name}) shares these folders, but the library isn’t marked as mirrored, so the conversion can’t check it or work "
+              "with it. On the [Mirror page](/mirrors), choose its Plex server and mark the library as mirrored, or say it has no mirror.", name=seen.get("name") or "?")
 
-    def _mirror_watched(self) -> bool:
-        link = getattr(self.app, "peerlink", None)
+    def _mirror_watched(self, library=None) -> bool:
+        """Whether the library (or, with none named, any library) is marked as mirrored, with a mirror watched — the Plex Cache
+        link's mirror."""
+        link, other = getattr(self.app, "peerlink", None), getattr(self.app, "other", None)
         try:
-            return bool(link is not None and link.mirror_id())
+            if not (link is not None and link.mirror_id()):
+                return False
+            return other.state_of(str(library)) == "mirror" if library else True
         except Exception:  # noqa: BLE001 — not set up: no mirror
             return False
 
@@ -637,10 +642,10 @@ class Migration:
         for its own copy, or this one only; no conversion of the library left partway there — a warning until the switch,
         an error from then on, until it's completed or reverted there; the other side holding its file jobs while this one
         switches; once switched, the same files here as there."""
-        if not self._mirror_watched():
+        if not self._mirror_watched(st.get("library")):
             seen = self._mirror_seen(st.get("library"))
             if seen and st.get("step") == "create":
-                check("mirror_chosen", False, M("The mirrored server chosen"), self._seen_text(seen))
+                check("mirror_chosen", False, M("The library’s mirror chosen"), self._seen_text(seen))
             return
         step, key = st.get("step"), str(st.get("library") or "")
         f = self._mirror(fresh=True)
@@ -819,17 +824,23 @@ class Migration:
         only this server; "ok": talking directly, over the link; "warn": only its marker, carried by the folder sync, or
         not heard from at all), what that means for the conversion; with a mirror, its name and page, and each candidate
         folder as it is there."""
-        if not self._mirror_watched():
-            libs = [(self.state or {}).get("library")] if (self.state or {}).get("step") in UNDER_WAY else \
-                list(dict.fromkeys(c["library"] for c in self.candidates()))
-            seen = next((m for m in (self._mirror_seen(k) for k in libs) if m), None)
+        libs = [(self.state or {}).get("library")] if (self.state or {}).get("step") in UNDER_WAY else \
+            list(dict.fromkeys(c["library"] for c in self.candidates()))
+        if not any(self._mirror_watched(k) for k in libs):
+            seen = next(((k, m) for k, m in ((k, self._mirror_seen(k)) for k in libs) if m), None)
             if seen:
-                return {"watched": False, "status": "warn", "title": M("Mirror: {name}, not chosen yet", name=seen.get("name") or "?"),
-                        "detail": self._seen_text(seen), "name": seen.get("name") or "", "how": seen.get("how"), "id": seen.get("id") or ""}
+                key, m = seen
+                return {"watched": False, "status": "warn", "title": M("Mirror: {name}, not chosen yet", name=m.get("name") or "?"),
+                        "detail": self._seen_text(m), "name": m.get("name") or "", "how": m.get("how"), "id": m.get("id") or "",
+                        "library": str(key), "their_key": m.get("their_key") or ""}
+            undecided = [k for k in libs if k and self.app.other.state_of(str(k)) == "unset"]
             return {"watched": False, "status": "off", "title": M("No mirror"),
-                    "detail": M("No mirrored server is watched ([Mirror page](/mirrors)), so the conversion is this server’s alone. "
+                    "detail": M("No library here is marked as mirrored ([Mirror page](/mirrors)), so the conversion is this server’s alone. "
                                 "Anything else that syncs the folder is still looked at: Syncthing has to leave the new dataset and the "
-                                "set-aside folder out.")}
+                                "set-aside folder out.") if not undecided else
+                    M("Whether this library is mirrored isn’t chosen yet ([Mirror page](/mirrors)): until it is, the conversion is this server’s alone. "
+                      "Anything else that syncs the folder is still looked at: Syncthing has to leave the new dataset and the set-aside folder out."),
+                    "library": str(undecided[0]) if undecided else ""}
         f = self._mirror()
         link = self.app.peerlink
         url = ((link.paired or {}).get("url") or "") if link.paired else ""

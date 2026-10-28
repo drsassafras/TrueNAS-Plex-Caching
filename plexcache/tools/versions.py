@@ -9,8 +9,6 @@ trash.py once Plex here — and the mirrored server's Plex, whose synced folder 
 no longer list them, and the hold is over. Until then they can be put back.
 """
 
-from __future__ import annotations
-
 import os
 
 from ..i18n import M

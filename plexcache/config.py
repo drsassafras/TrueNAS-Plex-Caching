@@ -6,8 +6,6 @@ process is started.  Secrets are never sent back to the browser; the UI gets
 a placeholder instead and sending the placeholder back keeps the stored value.
 """
 
-from __future__ import annotations
-
 import copy
 import json
 import math
@@ -25,22 +23,21 @@ SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"), ("mqtt", "password"))
 
 DEFAULTS: dict = {
     "plex": {"url": "", "token": ""},
-    # A second Plex server with the same files (another site, synced): watched so a converted file's
-    # original goes only once both have its MKV. "account_token": from signing in (lists the
-    # account's servers); "token": the chosen server's own; "libraries": this server's library key ->
-    # the other's ("" for none; a library not set is paired with the one of the same name and kind).
+    # The mirrored server (plex2.py): another Plex server with the same files (another site, synced), watched so a
+    # converted file's original goes only once both have its MKV. "account_token": from signing in (lists the account's
+    # servers); "token": the chosen server's own; "libraries": each library's state — this server's library key (or "*",
+    # every library not listed) -> {"state": "unset" (not decided) | "none" | "mirror", "key": its library there, "" for
+    # the one of the same name and kind}. A library with no entry isn't decided: nothing is assumed of it.
     "plex2": {"url": "", "token": "", "account_token": "", "name": "", "machine_id": "", "libraries": {}},
-    # The mirror (sync.py, the Mirror page): whether this server has one ("mirrors": "unknown" until chosen — "none", or
-    # "plex2", the server watched), and what Plex's own sync carries between the two. What Sync Libraries brings in line,
-    # and whose edits win, are that tool's options (the "tools" section).
+    # The mirror (sync.py, the Mirror page): looking for mirrors among the account's servers, and what Plex's own sync
+    # carries between the two. What Sync Libraries brings in line, and whose edits win, are that tool's options (the
+    # "tools" section).
     # Library Health (libhealth.py): which checks run, by id ({id: true/false}; the ids are libhealth.CHECKS)
     "library_health": {"checks": {}, "subtitle_language": "en", "audio_quality": "poor"},  # (checks: each check's switch, where it differs from how it ships)
     "sync": {
-        "mirrors": "unknown",
         "discover": True,        # look for mirrors among the account's servers, weekly
         "watched": "plex",       # watched state and ratings: "plex" (Plex's own sync carries them) | "off" | "both"
         "users": "home",         # whose: "me" | "home" (every user of the Plex Home)
-        "ignored": [],           # servers found that look like a mirror, said not to be one (their Plex machine ids)
     },
     "truenas": {"url": "", "api_key": "", "verify_tls": False},
     # The other Plex Cache, at the mirror's site (peerlink.py: System → Mirror Plex Cache). "enabled": looked for (off: there's
@@ -216,7 +213,6 @@ CHOICES = {
     ("nowplaying", "delay_sec"): (0, 15, 30, 60),
     ("mqtt", "report_period"): ("today", "week", "month"),
     ("mqtt", "language"): tuple(CODES),
-    ("sync", "mirrors"): ("unknown", "none", "plex2"),
     ("sync", "watched"): ("plex", "off", "both"),
     ("sync", "users"): ("me", "home"),
 }
@@ -370,10 +366,21 @@ def _coerce(section: str, key: str, value, current):
         # not refused — else every later save of the switches would fail on it
         return {str(k): v for k, v in value.items() if k in ids or re.fullmatch(r"(tool|page)_[a-z_]+", str(k))}
     if (section, key) == ("plex2", "libraries"):
-        if not isinstance(value, dict) or len(value) > MAX_ITEMS or any(
-                not _LIB_KEY.fullmatch(str(k)) or not (v == "" or (isinstance(v, str) and _LIB_KEY.fullmatch(v))) for k, v in value.items()):
-            raise SettingsError(M("plex2.libraries must pair this server’s library keys with the other server’s (or \"\")"))
-        return {str(k): v for k, v in value.items()}
+        if not isinstance(value, dict) or len(value) > MAX_ITEMS:
+            raise SettingsError(M("plex2.libraries must map this server’s library keys (or “*”) to each one’s state"))
+        out = {}
+        for k, v in value.items():
+            if not (k == "*" or _LIB_KEY.fullmatch(str(k))):
+                raise SettingsError(M("plex2.libraries must map this server’s library keys (or “*”) to each one’s state"))
+            if isinstance(v, str):  # (the shape before: the library there, or "" for none)
+                v = {"state": "mirror", "key": v} if v else {"state": "none", "key": ""}
+            if v is None:
+                continue
+            if (not isinstance(v, dict) or v.get("state") not in ("unset", "none", "mirror")
+                    or not (v.get("key", "") == "" or (isinstance(v.get("key"), str) and _LIB_KEY.fullmatch(v["key"])))):
+                raise SettingsError(M("plex2.libraries: each library’s state is “unset”, “none” or “mirror”, with the key of its library there (or none)"))
+            out[str(k)] = {"state": v["state"], "key": str(v.get("key") or "") if v["state"] == "mirror" else ""}
+        return out
     if (section, key) == ("mqtt", "host"):
         value = _text(section, key, value, 253).strip()
         if value and not _HOST.fullmatch(value):
@@ -387,10 +394,6 @@ def _coerce(section: str, key: str, value, current):
         if value is not None and not (isinstance(value, str) and _ISO_TIME.fullmatch(value)):
             raise SettingsError(M("general.hdd_measured_at must be a date and time"))
         return value
-    if (section, key) == ("sync", "ignored"):
-        if not isinstance(value, list) or len(value) > MAX_ITEMS:
-            raise SettingsError(M("sync.ignored must be a list"))
-        return list(dict.fromkeys(_text(section, key, x, 200, spaces=False) for x in value))
     if key == "excluded_libraries":
         if not isinstance(value, list) or len(value) > MAX_ITEMS:
             raise SettingsError(M("excluded_libraries must be a list"))
@@ -592,6 +595,18 @@ class Settings:
             if g is not None and "snapshot_days" in g:  # (renamed: the one length covers snapshots and file backups alike)
                 g.setdefault("backup_days", g["snapshot_days"])
                 del g["snapshot_days"]
+            p2l = (saved.get("plex2") or {}).get("libraries") if isinstance(saved, dict) and isinstance(saved.get("plex2"), dict) else None
+            if isinstance(p2l, dict):  # (the shape before: the library there, or "" for none — a state now)
+                for k, v in list(p2l.items()):
+                    if isinstance(v, str):
+                        p2l[k] = {"state": "mirror", "key": v} if v else {"state": "none", "key": ""}
+            sy = saved.get("sync") if isinstance(saved, dict) and isinstance(saved.get("sync"), dict) else None
+            if sy is not None and ("mirrors" in sy or "ignored" in sy):  # (the mirror is a choice per library now: the one choice stands for every library)
+                choice, p2 = sy.pop("mirrors", None), saved.setdefault("plex2", {}) if isinstance(saved.get("plex2", {}), dict) else {}
+                sy.pop("ignored", None)
+                libs = p2.setdefault("libraries", {}) if isinstance(p2.get("libraries", {}), dict) else {}
+                if choice in ("none", "plex2") and "*" not in libs:
+                    libs["*"] = {"state": "none", "key": ""} if choice == "none" else {"state": "mirror", "key": ""}
             o = saved.get("optimizer") if isinstance(saved, dict) and isinstance(saved.get("optimizer"), dict) else None
             if o is not None:  # (converting is the Convert to MKV tool's now: no hold, and no per-library switch)
                 o.pop("convert_hold_days", None)

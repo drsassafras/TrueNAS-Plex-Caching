@@ -19,8 +19,6 @@ English is the original. The base text is Canadian English; en-US and en-GB only
 override the spellings that differ (behaviour/behavior, analyse/analyze...).
 """
 
-from __future__ import annotations
-
 import json
 import os
 import re

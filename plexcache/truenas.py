@@ -4,8 +4,6 @@ Only ``query``-style methods are called. The app never changes anything on
 the NAS.
 """
 
-from __future__ import annotations
-
 import itertools
 import json
 import urllib.parse

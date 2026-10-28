@@ -6,8 +6,6 @@ online/offline. With discovery on, Home Assistant's MQTT discovery messages make
 "Plex Cache" device and its entities appear on their own.
 """
 
-from __future__ import annotations
-
 import datetime as dt
 import json
 import logging
@@ -16,7 +14,7 @@ import re
 import threading
 import time
 
-from . import REPO_URL
+from . import CHANNEL, REPO_URL, __version__
 from . import prefetch
 from .config import SettingsError
 from .i18n import M, msg, render
@@ -113,22 +111,46 @@ def _health_text(health: dict):
              one="{n} warning — open Health in Plex Cache for the details.", n=warns)
 
 
-def update_info(app, lang: str = "en") -> dict:
-    """For Home Assistant's update entity: the installed version, the newest one, and whether an
-    install (Update Now, asked from Home Assistant) is under way."""
+def update_installable(app, st: dict | None = None) -> list | None:
+    """What's left to set up before Home Assistant can install an update (Update Now, from its update
+    entity): [] when nothing is. As the web UI's Update Now: on TrueNAS, with its API key accepted —
+    and here, with control allowed. (Not on TrueNAS: None, it can't update itself at all.)"""
+    st = st if st is not None else app.state()
+    if (st.get("platform") or {}).get("truenas") is False:
+        return None
+    missing = []
+    if ((st.get("connections") or {}).get("truenas_key") or {}).get("status") != "ok":
+        missing.append(M("connect the TrueNAS API in Plex Cache (System → TrueNAS), with a key allowed to manage apps"))
+    if not app.settings.section("mqtt").get("allow_control"):
+        missing.append(M("turn on Allow control (System → MQTT)"))
+    return missing
+
+
+def update_info(app, lang: str = "en", st: dict | None = None) -> dict:
+    """For Home Assistant's update entity: the installed version and the newest one (the plain
+    numbers, so a dev build's "-dev" isn't taken for an older version), whether an install is under
+    way, and the notes below them: a dev build says so, and an update it can't install says what
+    would let it."""
     updates = getattr(app, "updates", None)
-    latest = (updates and updates.latest) or app.version
-    info = {"installed_version": app.version, "latest_version": latest, "title": "Plex Cache",
+    latest = (updates and updates.latest) or __version__
+    info = {"installed_version": __version__, "latest_version": latest, "title": "Plex Cache",
             "release_url": REPO_URL}
     # (TrueNAS restarts the app, which starts afresh; one that never came back stops saying so)
     since = getattr(updates, "updating", None)
     info["in_progress"] = bool(since and time.time() - since < INSTALL_TIMEOUT)
-    if latest != app.version:
-        if app.settings.section("mqtt").get("allow_control"):
-            info["release_summary"] = render(M("A newer version is on GitHub. Install has TrueNAS pull the newer image and restart Plex Cache "
-                                               "(it needs the TrueNAS API, with a key allowed to manage apps)."), lang)
-        else:
-            info["release_summary"] = render(M("A newer version is on GitHub. Update the app in TrueNAS so it pulls the latest image."), lang)
+    notes = []
+    if (getattr(updates, "channel", None) or CHANNEL) == "dev":
+        commit = (getattr(updates, "commit", None) or "")[:7]
+        notes.append(M("A development build, from the dev branch{commit}.", commit=f" ({commit})" if commit else ""))
+    if latest != __version__:
+        missing = update_installable(app, st)
+        if missing is None:
+            notes.append(M("A newer version is on GitHub. Plex Cache updates itself only on TrueNAS: update it where it runs."))
+        elif missing:
+            notes.append(M("A newer version is on GitHub. To install it from here, {what}.",
+                           what=M("{a} and {b}", a=missing[0], b=missing[1]) if len(missing) > 1 else missing[0]))
+    if notes:
+        info["release_summary"] = " ".join(render(n, lang) for n in notes)
     return info
 
 
@@ -261,7 +283,8 @@ def build_state(app, period: str = "week", lang: str = "en") -> dict:
                                  M("{n} seconds", one="{n} second", n=s["general"]["poll_seconds"])),
         "datasets": datasets,
         "libraries": {},
-        "update": update_info(app, lang),
+        "update": update_info(app, lang, st),
+        "update_installable": update_installable(app, st) == [],
     }
     out["available"] = control_availability(app, s, wu)
     for lib in st["library"]["libraries"]:
@@ -299,8 +322,7 @@ DESCRIPTIONS = {
     "checking": M("On while the health checks are running."),
     "benchmarking": M("On while the disk benchmark is measuring each dataset’s uncached read speed."),
     "version": M("The version of Plex Cache that’s running."),
-    "update": M("Whether a newer Plex Cache is on GitHub (checked every 6 hours, if switched on in System). With Allow control on, Install "
-                "has TrueNAS pull the newer image and restart the app, as Update Now does; otherwise update the app in TrueNAS."),
+    "update": M("Whether a newer Plex Cache is on GitHub (checked every 6 hours, if switched on in System)."),
     # Activity
     "report_verdict": M("The Metrics page’s verdict for the chosen period (System → MQTT): what could be better, or that all went well."),
     "report_streams": M("Streams played in the report period."),
@@ -524,11 +546,12 @@ def entities(state: dict, allow_control: bool, lang: str = "en") -> list[tuple[s
         sensor("main", f"dataset_{slug}_cache", M("{name} cache settings", name=d["name"]), f"datasets.{slug}.cache_settings",
                icon="mdi:database-cog-outline", cat=D)
     # The installed version, and the newest one on GitHub (when checking is on)
-    # (Its own topic, <base>/update, holds just the JSON Home Assistant's update entity reads.) With
-    # control allowed it can be installed from Home Assistant: Update Now, through the TrueNAS API.
+    # (Its own topic, <base>/update, holds just the JSON Home Assistant's update entity reads.) It can
+    # be installed from Home Assistant only when Plex Cache can do it (Update Now, through the TrueNAS
+    # API, with control allowed); otherwise its notes say what would let it.
     upd = {"_device": "main", "name": M("Update"), "device_class": "firmware",
            "title": "Plex Cache", "release_url": REPO_URL, "entity_category": "diagnostic"}
-    if allow_control:
+    if allow_control and state.get("update_installable"):
         upd["payload_install"] = "install"
     E.append(("update", "update", upd))
 
@@ -762,7 +785,8 @@ class HomeAssistantBridge:
             if time.monotonic() >= next_pub or self.wake.is_set():
                 self.wake.clear()
                 state = build_state(self.app, cfg["report_period"], cfg.get("language", "en"))
-                sig = json.dumps([sorted(state["datasets"]), sorted(state["libraries"]), state["report_period"], self._web_url()])
+                sig = json.dumps([sorted(state["datasets"]), sorted(state["libraries"]), state["report_period"], self._web_url(),
+                                  state["update_installable"]])
                 if cfg["discovery"] and sig != discovery_sig:
                     self._publish_discovery(c, cfg, node, state)
                     discovery_sig = sig

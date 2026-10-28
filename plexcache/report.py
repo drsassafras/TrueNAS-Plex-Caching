@@ -11,8 +11,6 @@ per day (``summarize``), so a year of history stays small. Every report and
 chart bar is a summary too, so both kinds add up the same way.
 """
 
-from __future__ import annotations
-
 import bisect
 import collections
 import datetime as dt

@@ -19,8 +19,6 @@ it ``def name`` or ``async def name`` (``do_create``/``do_update``/``do_delete``
 create/update/delete, as the middleware maps them; CRUD services have ``query`` by inheritance).
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 import re

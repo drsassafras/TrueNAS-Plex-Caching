@@ -1373,13 +1373,13 @@ PCI18N.ready.then(function () {
   }
   // The mirror's light, at the top (migrating.py mirror_view): grey, none (this server alone); green, its Plex Cache
   // talking directly; yellow, heard of only through its marker, or not at all — with how the conversion goes with it
-  // — and, for a server that looks like a mirror but isn't chosen, Watch It or Ignore, as on the Mirror page: one or the
-  // other is needed before the copy (migrating.py mirror_chosen)
+  // — and, while the library's state isn't chosen, Mark as Mirror (a library found that looks like one) or No Mirror, as on
+  // the Mirror page: one or the other is needed before the copy (migrating.py mirror_chosen)
   function migMirror(mv) {
     if (!mv) return "";
-    var acts = !mv.watched && mv.how === "suspected" && mv.id ? '<div class="acts" style="margin:4px 0 0 26px">' +
-      '<button class="btn sm pri" type="button" data-act="plex2-use-found" data-id="' + esc(mv.id) + '">' + H("Watch {name}", { name: mv.name }) + "</button> " +
-      '<button class="btn sm" type="button" data-act="mirror-ignore" data-id="' + esc(mv.id) + '">' + H("Ignore: Not a Mirror") + "</button></div>" : "";
+    var acts = !mv.watched && mv.library ? '<div class="acts" style="margin:4px 0 0 26px">' +
+      (mv.how === "suspected" && mv.id ? '<button class="btn sm pri" type="button" data-act="mirror-set" data-key="' + esc(mv.library) + '" data-state="mirror" data-server="' + esc(mv.id) + '" data-their="' + esc(mv.their_key || "") + '">' + H("Mark {name} as the Mirror", { name: mv.name }) + "</button> " : "") +
+      '<button class="btn sm" type="button" data-act="mirror-set" data-key="' + esc(mv.library) + '" data-state="none">' + H("No Mirror for This Library") + "</button></div>" : "";
     return '<div class="lights">' + light(mv.status, mv.title, mv.detail) + acts + "</div>";
   }
   // a mirror chosen or ignored: a conversion under way looks at its checks again at once, not in 30 seconds
@@ -3717,12 +3717,12 @@ PCI18N.ready.then(function () {
   // its libraries paired with these — so converting waits for both before an original goes
   var PLEX2_LIST = null;
   function plex2Card() {
-    var p2 = ST.plex2 || {}, libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
-    var out = '<section class="card" id="plex2"><h2>' + H("Second Plex Server") + ' <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional") + "</span></h2>" +
+    var p2 = ST.plex2 || {};
+    var out = '<section class="card" id="plex2"><h2>' + H("Mirrored Server") + "</h2>" +
       '<p class="hint">' + H("Another Plex server with the same files — at another site, kept in step by syncing the folders. A file converted to MKV keeps its original until both servers have the MKV as a version of the same item, so neither loses its metadata (edits, watch history, collections).") + "</p>";
     var signin = '<button class="btn" type="button" data-act="plex2-signin">' + (p2.own_signin ? H("Sign In Again") : H("Use Another Plex Account")) + "</button> ";
     if (p2.configured) {
-      out += '<div class="det">' + badge("pass", T("Watching")) + " " + H("{name} at {url}", { name: p2.name || T("the server"), url: p2.url }) + "</div>";
+      out += '<div class="det">' + badge("pass", T("Watched")) + " " + H("{name} at {url}", { name: p2.name || T("the server"), url: p2.url }) + "</div>";
       if (p2.error) out += '<div class="det bad">' + esc(p2.error) + "</div>";
     } else if (p2.signed_in) {
       out += '<div class="det">' + H("Choose it from your Plex account’s servers: this server’s sign-in lists them, so there’s nothing more to sign in to — unless it’s on another account.") + "</div>";
@@ -3735,25 +3735,8 @@ PCI18N.ready.then(function () {
     if (PLEX2_LIST) {
       out += PLEX2_LIST.length ? '<div class="tbl-wrap"><table class="tbl"><tbody>' + PLEX2_LIST.map(function (sv) {
         return "<tr><td>" + esc(sv.name) + '<div class="det">' + (sv.owned ? H("Yours") : H("Shared with you")) + " · " + esc(P(sv.addresses, "{n} address", "{n} addresses", { n: sv.addresses })) +
-          '</div></td><td><button class="btn sm" type="button" data-act="plex2-use" data-id="' + esc(sv.id) + '">' + H("Watch This One") + "</button></td></tr>";
+          '</div></td><td><button class="btn sm" type="button" data-act="plex2-use" data-id="' + esc(sv.id) + '">' + H("Use This Server") + "</button></td></tr>";
       }).join("") + "</tbody></table></div>" : '<p class="muted">' + H("This account has no other Plex server.") + "</p>";
-    }
-    if (p2.configured && libs.length) {
-      var theirs = p2.libraries || [];
-      out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library here") + '</th><th scope="col">' + H("Its library there") +
-        '</th><th scope="col">' + H("Files found there") + "</th></tr></thead><tbody>" + libs.map(function (l) {
-          var key = String(l.key), cur = (p2.pairs || {})[key] || "", rate = (p2.rates || {})[key];
-          var sel = '<select data-p2lib="' + esc(key) + '" aria-label="' + esc(T("Its library there")) + '"><option value="">' + H("None") + "</option>" +
-            theirs.filter(function (t) { return t.kind === l.kind; }).map(function (t) {
-              return '<option value="' + esc(t.key) + '"' + (t.key === cur ? " selected" : "") + ">" + esc(t.title) + "</option>";
-            }).join("") + "</select>";
-          var found = !cur ? '<span class="muted">' + H("Not watched there") + "</span>" : rate == null ? '<span class="muted">—</span>'
-            : rate >= p2.matched ? badge("pass", T("{pct}%", { pct: Math.round(100 * rate) }))
-            : badge("warn", T("{pct}%", { pct: Math.round(100 * rate) })) + '<div class="det">' + H("Too few for the paths to line up: no original is deleted on this server’s word.") + "</div>";
-          var chosen = ((S.plex2 || {}).libraries || {})[key] !== undefined;
-          var rv = chosen ? ' <button type="button" class="revert" data-p2lib-revert="' + esc(key) + '" title="' + H("Back to the default ({value})", { value: T("the library of the same name") }) + '">↺</button>' : "";
-          return "<tr><td>" + libIcon(key) + esc(l.title) + "</td><td>" + sel + rv + "</td><td>" + found + "</td></tr>";
-        }).join("") + "</tbody></table></div>";
     }
     out += details("plex2manual", H("Or enter its address and token by hand"), '<div class="grid">' +
       textInput("plex2", "url", T("Server address"), "s-p2url", H("An address this NAS can reach: the other site’s public address with Remote Access on, or one over a VPN."), "https://") +
@@ -3791,40 +3774,71 @@ PCI18N.ready.then(function () {
       (pe.paired ? ' <button class="link" type="button" data-act="peer-unpair" title="' + H("Forgets the pairing on both sides, and makes a new key here. Neither pairs again by itself: Pair Now on both does.") + '">' + H("Unpair") + "</button>" : "") + "</div>";
     return out + "</section>";
   }
-  // Mirror: the server kept in step with this one (sync.py: the mirror choice, the servers that may be one), Plex's own
+  // Mirrored Libraries: each library here, what discovery found for it, its state — not decided (nothing assumed), no mirror,
+  // or mirrored by a library of the server watched — and the ways to set it. The state is per library (plex2.libraries).
+  var MIRROR_LIBS_HELP = N("Whether another Plex server has the same files is a choice per library, since one server can mirror some of your libraries and not others. <strong>Not decided</strong> (how every library starts): nothing is assumed — Health asks, and converted files’ originals aren’t deleted, since a mirror that isn’t watched could lose its item. <strong>No mirror</strong>: this server’s alone. <strong>Mirrored</strong> by a library of the server watched above: converting waits for both servers, Sync Libraries and Mirror Checks compare the two, the file tools refuse what a folder sync would carry wrongly, and Convert Folder to Child Dataset converts both sides — through the Plex Cache at the other site (<a href=\"/system#peer\" data-nav>System → Mirror Plex Cache</a>), whose link shows on the row.<br><br><strong>Found</strong> is what looking among your account’s servers turned up for the library: the library there whose files are most found here, with how many of a sample of its files are.");
+  function mirrorLibrariesCard() {
+    var p2 = ST.plex2 || {}, sy = ST.sync || {}, pe = ST.peer || {}, libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
+    var out = '<section class="card" id="mirrorlibs">' + heading(esc(T("Mirrored Libraries")), MIRROR_LIBS_HELP) +
+      '<p class="hint">' + H("Which libraries another server mirrors — chosen per library. A library not decided holds back what would act on a mirror.") + "</p>";
+    if (!libs.length) return out + '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No libraries yet.")) + "</p></section>";
+    var states = p2.states || {}, found = sy.libraries || {}, theirs = p2.libraries || [], talking = ((pe.lights || {}).talking || {}).status === "ok";
+    out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library here") + '</th><th scope="col">' + H("Found") + '</th><th scope="col">' + H("State") + '</th><th scope="col"></th></tr></thead><tbody>' +
+      libs.map(function (l) {
+        var key = String(l.key), st = states[key] || { state: "unset", key: "", there: "", there_key: "" }, f = found[key], rate = f ? Math.round(100 * f.rate) : null;
+        var det = f ? esc(f.name) + ": " + esc(f.their_title) + ' <span class="muted">' + esc(T("{found} of {of} files here", { found: fmtNum(f.found), of: fmtNum(f.of) })) + "</span> " +
+          (rate >= 90 ? badge("pass", T("Looks like a mirror")) : rate >= 20 ? badge("warn", T("Partly the same")) : badge("info", T("Not a mirror"))) : '<span class="muted">' + H("Nothing found") + "</span>";
+        var state;
+        if (st.state === "mirror") {
+          var rt = (p2.rates || {})[key];
+          state = badge("pass", T("Mirrored")) + " " + (!p2.configured ? '<span class="bad">' + H("no server watched") + "</span>"
+            : st.there ? esc(p2.name) + ": " + esc(st.there) + (rt != null ? ' <span class="muted">' + esc(T("{pct}% of its files found there", { pct: Math.round(100 * rt) })) + "</span>" : "")
+            : '<span class="bad">' + H("no such library on {name}", { name: p2.name }) + "</span>") +
+            (p2.configured ? " " + (talking ? badge("pass", T("Plex Cache there talking")) : badge("warn", T("Plex Cache there not talking"))) : "");
+          if (p2.configured) state += '<div class="det"><select data-p2lib="' + esc(key) + '" aria-label="' + esc(T("Its library there")) + '"><option value=""' + (st.key ? "" : " selected") + ">" + H("The library of the same name") + "</option>" +
+            theirs.filter(function (t) { return t.kind === l.kind; }).map(function (t) { return '<option value="' + esc(t.key) + '"' + (t.key === st.key ? " selected" : "") + ">" + esc(t.title) + "</option>"; }).join("") + "</select>" +
+            (st.key ? ' <button type="button" class="revert" data-p2lib-revert="' + esc(key) + '" title="' + H("Back to the default ({value})", { value: T("the library of the same name") }) + '">↺</button>' : "") + "</div>";
+        } else state = st.state === "none" ? badge("info", T("No mirror")) : badge("warn", T("Not decided"));
+        var canMark = !!(f && f.url && rate != null) || p2.configured;
+        var markTitle = canMark ? H("Marks {library} as mirrored by {where}.", { library: l.title, where: f && f.url ? f.name + ": " + f.their_title : (p2.name || T("the server watched")) }) : H("Choose the mirrored server above first.");
+        var btns = (st.state !== "mirror" ? '<button class="btn sm' + (st.state === "unset" && rate >= 90 ? " pri" : "") + '" type="button" data-act="mirror-set" data-key="' + esc(key) + '" data-state="mirror" data-server="' + esc(f && f.url ? f.id : "") + '" data-their="' + esc(f && f.url ? f.their_key : "") + '"' + (canMark ? "" : " disabled") +
+            ' title="' + markTitle + '">' + H("Mark as Mirror") + "</button> " : "") +
+          (st.state !== "none" ? '<button class="btn sm" type="button" data-act="mirror-set" data-key="' + esc(key) + '" data-state="none">' + H("No Mirror") + "</button> " : "") +
+          (st.state !== "unset" ? '<button class="link" type="button" data-act="mirror-set" data-key="' + esc(key) + '" data-state="unset">' + H("Undo") + "</button>" : "");
+        return "<tr><td>" + libIcon(key) + esc(l.title) + "</td><td>" + det + "</td><td>" + state + "</td><td>" + btns + "</td></tr>";
+      }).join("") + "</tbody></table></div>";
+    return out + "</section>";
+  }
+  // Mirror: the server kept in step with this one (sync.py: the servers that may be one), each library's state, Plex's own
   // sync of watched state, and what uses the mirror — Sync Libraries (the tool that brings its libraries in line) among them
   function pageMirrors() {
     var sy = ST.sync || {}, p2 = ST.plex2 || {};
-    var out = top(T("Mirror"), H("Another Plex server with the same files — at another site, kept in step by syncing the folders — and what Plex Cache keeps in step with it."), "");
+    var out = top(T("Mirror"), H("Another Plex server with the same files — at another site, kept in step by syncing the folders — and which of your libraries it mirrors."), "");
     out += '<div class="stack" style="max-width:980px">';
-    // ---- the mirror: a choice to make
-    out += '<section class="card"><h2>' + H("Mirrored Server") + "</h2>" +
-      '<p class="hint">' + H("Whether another Plex server has these files. Nothing is assumed: until this is chosen, Health asks, and converted files’ originals aren’t deleted.") + "</p>" +
-      '<div class="grid">' + select("sync", "mirrors", T("Mirrored server"), [["unknown", T("Not chosen yet")], ["none", T("None: this is the only server with these files")],
-        ["plex2", p2.configured ? T("Yes: {name}", { name: p2.name || p2.url }) : T("Yes: the server watched below")]]) + "</div>" +
-      '<div style="margin-top:10px">' + checkbox("sync", "discover", T("Look for mirrors among my Plex account’s servers"),
-        { s: H("Weekly, and when this page opens while the choice isn’t made: a sample of each server’s files is looked up here by path.") }) + "</div>";
+    // ---- the mirrored server: the connection, and the account's servers that may be one
+    out += plex2Card();
+    out += '<section class="card"><h2>' + H("Servers Found") + "</h2>" +
+      '<p class="hint">' + H("Your Plex account’s other servers, and whether their files are here too: a sample of each of their libraries looked up here by path. Which library here each one mirrors is chosen below, per library.") + "</p>" +
+      '<div style="margin-top:4px">' + checkbox("sync", "discover", T("Look for mirrors among my Plex account’s servers"),
+        { s: H("Weekly, while a library’s mirror isn’t chosen; and Look Now.") }) + "</div>";
     if (sy.running) out += '<div class="det muted">' + H("Working…") + "</div>";
     if (sy.error) out += '<div class="det bad">' + esc(sy.error) + "</div>";
-    var cands = (sy.candidates || []).filter(function (c) { return c.id !== (S.plex2 || {}).machine_id; });
-    var ignored = (S.sync || {}).ignored || [];  // said not to be a mirror: Health, the tools and Child Dataset leave it be
+    var cands = sy.candidates || [];
     if (cands.length) {
       out += '<div class="what" style="margin-top:12px">' + H("Found") + ' <span class="muted">' + esc(T("looked {when}", { when: ago(sy.discovered_at) })) + "</span></div>" +
         '<div class="tbl-wrap"><table class="tbl"><tbody>' + cands.map(function (c) {
-          var rate = c.rate == null ? null : Math.round(100 * c.rate);
-          var off = ignored.indexOf(c.id) >= 0;
-          var verdict = off ? badge("info", T("Ignored")) : !c.url ? badge("info", T("Can’t be reached")) : rate == null ? badge("info", T("Not read")) : rate >= 90 ? badge("pass", T("Looks like a mirror")) : rate >= 20 ? badge("warn", T("Partly the same")) : badge("info", T("Not a mirror"));
-          return "<tr><td>" + esc(c.name) + '<div class="det">' + (c.libraries || []).map(function (l) { return esc(l.title) + ": " + esc(T("{found} of {of} files here", { found: fmtNum(l.found), of: fmtNum(l.of) })); }).join(" · ") +
+          var rate = c.rate == null ? null : Math.round(100 * c.rate), mine = c.id === p2.machine_id;
+          var verdict = !c.url ? badge("info", T("Can’t be reached")) : rate == null ? badge("info", T("Not read")) : rate >= 90 ? badge("pass", T("Looks like a mirror")) : rate >= 20 ? badge("warn", T("Partly the same")) : badge("info", T("Not a mirror"));
+          return "<tr><td>" + esc(c.name) + (mine ? " " + badge("pass", T("The mirrored server")) : "") + '<div class="det">' + (c.libraries || []).map(function (l) { return esc(l.title) + ": " + esc(T("{found} of {of} files here", { found: fmtNum(l.found), of: fmtNum(l.of) })); }).join(" · ") +
             (c.error ? ' <span class="bad">' + esc(c.error) + "</span>" : "") + "</div></td><td>" + verdict + (rate != null ? ' <span class="muted">' + rate + "%</span>" : "") + "</td><td>" +
-            (c.url && !off ? '<button class="btn sm" type="button" data-act="plex2-use-found" data-id="' + esc(c.id) + '">' + H("Watch It") + "</button> " : "") +
-            (off ? '<button class="btn sm" type="button" data-act="mirror-unignore" data-id="' + esc(c.id) + '">' + H("Unignore") + "</button>"
-              : '<button class="btn sm" type="button" data-act="mirror-ignore" data-id="' + esc(c.id) + '" title="' + H("Not a mirror: Health, the tools and Convert Folder to Child Dataset stop asking about it.") + '">' + H("Ignore") + "</button>") + "</td></tr>";
+            (c.url && !mine ? '<button class="btn sm" type="button" data-act="plex2-use-found" data-id="' + esc(c.id) + '">' + H("Use as the Mirrored Server") + "</button>" : "") + "</td></tr>";
         }).join("") + "</tbody></table></div>";
     }
     out += '<div class="acts" style="margin-top:10px"><button class="btn" type="button" data-act="sync-discover"' + (sy.running ? " disabled" : "") + ">" + H("Look Now") + "</button></div>";
     if ((sy.peers || []).length) out += '<div class="note">' + H("Another Plex Cache shares these folders (it marked itself in them): {n} system(s). Each optimizes its own side; claims keep them off the same file.", { n: sy.peers.length }) + "</div>";
     out += "</section>";
-    if ((S.sync || {}).mirrors === "plex2") out += plex2Card();
+    // ---- each library: what was found for it, its state, and the ways to set it
+    out += mirrorLibrariesCard();
     // ---- what Plex's own sync carries (Sync Libraries leaves it to Plex)
     out += '<section class="card"><h2>' + H("Watched State") + "</h2>" +
       '<p class="hint">' + H("What each person has watched, and their ratings: Plex carries these between your servers itself. Everything else about a library is brought in line by <a href=\"/sync\" data-nav>Sync Libraries</a>.") + "</p>" +
@@ -3835,8 +3849,8 @@ PCI18N.ready.then(function () {
         { s: H("For what’s synced per user (a later part): every user of the Plex Home, or only you.") }) +
       "</div></section>";
     // ---- what uses it
-    var on = sy.decided === "plex2";
-    out += '<section class="card">' + heading(esc(T("What Uses It")), "") + '<div class="row">' + badge(p2.configured ? "pass" : "info", p2.configured ? T("On") : T("Waiting")) +
+    var on = !!p2.any_mirror;
+    out += '<section class="card">' + heading(esc(T("What Uses It")), "") + '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) +
       '<div class="grow"><div class="what">' + H("Converting to MKV") + '</div><div class="det">' +
       H("A converted file’s original is deleted only once every server watched here has the MKV as a version of the same item. <a href=\"/convert\" data-nav>Tools → Convert to MKV</a>") + "</div></div></div>" +
       '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) + '<div class="grow"><div class="what">' + H("Sync Libraries") + '</div><div class="det">' +
@@ -5544,7 +5558,7 @@ PCI18N.ready.then(function () {
         queueSave("library_health", "checks", lh, true);
       } else {
         var pairs = JSON.parse(JSON.stringify((S.plex2 || {}).libraries || {}));
-        delete pairs[orv.dataset.p2libRevert];
+        pairs[orv.dataset.p2libRevert] = { state: "mirror", key: "" };  // (mirrored still: by the library of the same name)
         queueSave("plex2", "libraries", pairs, true);
         setTimeout(function () { api("/api/plex2/refresh", {}).then(function () { load(); }); }, 1500);
       }
@@ -5855,16 +5869,24 @@ PCI18N.ready.then(function () {
       el.disabled = true;
       api("/api/sync/discover", {}).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
-    else if (act === "mirror-ignore" || act === "mirror-unignore") {  // a server that looks like a mirror, said not to be one (or again)
-      var ign = ((S.sync || {}).ignored || []).filter(function (x) { return x !== el.dataset.id; });
-      if (act === "mirror-ignore") ign.push(el.dataset.id);
-      queueSave("sync", "ignored", ign, true);
-      flush().then(migRecheck).then(load);
-    }
-    else if (act === "plex2-use-found") {  // a server found by discovery: watched (its addresses tried again), and chosen as the mirror
+    else if (act === "mirror-set") {
+      // a library's state: mirrored (by a library of the server watched — that server connected first when the one found isn't
+      // it), no mirror, or undone to not decided; a conversion under way looks at its checks again at once
       el.disabled = true;
-      api("/api/plex2/servers", {}).then(function () { return api("/api/plex2/use", { id: el.dataset.id }); })
-        .then(function () { queueSave("sync", "mirrors", "plex2", true); return flush(); }).then(migRecheck).then(load).catch(function (e) { toast(e.message, true); load(); });
+      var mk = el.dataset.key, ms = el.dataset.state, msv = el.dataset.server || "", mth = el.dataset.their || "";
+      var connect = ms === "mirror" && msv && msv !== (S.plex2 || {}).machine_id
+        ? api("/api/plex2/servers", {}).then(function () { return api("/api/plex2/use", { id: msv }); }) : Promise.resolve();
+      connect.then(function () {
+        var map = JSON.parse(JSON.stringify((S.plex2 || {}).libraries || {}));
+        if (ms === "unset" && !map["*"]) delete map[mk]; else map[mk] = { state: ms, key: ms === "mirror" ? mth : "" };
+        queueSave("plex2", "libraries", map, true);
+        return flush();
+      }).then(function () { return ms === "mirror" ? api("/api/plex2/refresh", {}).catch(function () {}) : null; })
+        .then(migRecheck).then(load).catch(function (e) { toast(e.message, true); load(); });
+    }
+    else if (act === "plex2-use-found") {  // a server found by discovery: watched (its addresses tried again) — the connection; each library's state is its own
+      el.disabled = true;
+      api("/api/plex2/servers", {}).then(function () { return api("/api/plex2/use", { id: el.dataset.id }); }).then(migRecheck).then(load).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "lib-tab") {
       // the library opened is worked out first — its counts, and the inspector reads its files first (focusQuery: load)
@@ -6111,12 +6133,12 @@ PCI18N.ready.then(function () {
     var v = document.querySelector('[data-val="' + el.id + '"]');
     if (v) v.textContent = secText(el.value, el.dataset.unit);
   });
-  // System: the second Plex server's library pairs
+  // Mirror: a mirrored library's library there (the one of the same name, or chosen)
   document.addEventListener("change", function (e) {
     var el = e.target;
     if (!el.dataset || el.dataset.p2lib === undefined) return;
     var pairs = JSON.parse(JSON.stringify((S.plex2 || {}).libraries || {}));
-    pairs[el.dataset.p2lib] = el.value;
+    pairs[el.dataset.p2lib] = { state: "mirror", key: el.value };
     queueSave("plex2", "libraries", pairs, true);
     setTimeout(function () { api("/api/plex2/refresh", {}).then(function () { load(); }); }, 1500);
   });

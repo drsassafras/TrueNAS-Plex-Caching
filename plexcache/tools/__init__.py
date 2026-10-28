@@ -28,8 +28,6 @@ Plex Cache that may write to the media. Plex is asked through its API, here and 
 A tool's state (the last scan, the results, what it's still waiting for) is kept in tools-<name>.json.
 """
 
-from __future__ import annotations
-
 import contextlib
 import json
 import os
@@ -584,8 +582,10 @@ class Tool:
         try:
             return client.file_action(action, path, to=to, root=root)
         except urllib.error.HTTPError as e:
+            with e:  # (its response: read, then closed)
+                body = e.read()
             try:
-                why = json.loads(e.read() or b"{}").get("error") or str(e)
+                why = json.loads(body or b"{}").get("error") or str(e)
             except ValueError:
                 why = str(e)
             raise ValueError(M("The optimizer service refused: {why}", why=why)) from None
@@ -608,25 +608,25 @@ class Tool:
 
 
 def mirror(app, library: str):
-    """The mirrored server's library paired with ``library``, or None (no mirror, or not paired)."""
+    """The mirrored server's library that mirrors ``library``, or None (not mirrored, or the server not watched)."""
     other = getattr(app, "other", None)
-    if other is None or not other.configured() or app.sync.decided() != "plex2":
-        return None
-    return other.pairs().get(str(library))
+    return other.mirror_for(str(library)) if other is not None else None
 
 
 def mirrored(app, library: str) -> dict | None:
     """Whether the library's files are mirrored somewhere, as far as the app can tell: {"name", "how": "watched" |
-    "suspected" | "peer"} — the mirrored server watched on the Mirror page; a server of the account whose files are
-    here too (a mirror until you say otherwise); another Plex Cache sharing the folders. None when you've said
-    there's no mirror, or none is seen. What every tool goes by, and converting a folder to a child dataset too."""
+    "suspected" | "peer"} — the library marked as mirrored on the Mirror page; a library of a server of the account whose
+    files are here too (a mirror until you say otherwise); another Plex Cache sharing the folders. None when you've said
+    the library has no mirror, or none is seen. What every tool goes by, and converting a folder to a child dataset too."""
     if mirror(app, library) is not None:
         return {"name": mirror_name(app), "how": "watched"}
-    sync = getattr(app, "sync", None)
-    if sync is None or sync.settings().get("mirrors") == "none":
+    other, sync = getattr(app, "other", None), getattr(app, "sync", None)
+    if other is None or sync is None or other.state_of(str(library)) != "unset":
         return None
-    for c in sync.likely():
-        return {"name": c.get("name") or c.get("id") or "", "how": "suspected", "id": c.get("id") or ""}
+    c = sync.suspected(str(library))
+    if c:
+        return {"name": c.get("name") or c.get("id") or "", "how": "suspected", "id": c.get("id") or "", "their_key": c.get("their_key") or "",
+                "their_title": c.get("their_title") or ""}
     for sy in ((getattr(app, "peers_summary", None) or {}).get("systems") or []):
         if str(library) in [str(k) for k in sy.get("libraries") or []]:
             return {"name": sy.get("name") or sy.get("instance") or "", "how": "peer"}

@@ -4,8 +4,7 @@ it rather than by Next, Next, Next. Shared by every paged list (the Library page
 files on Processes); the page draws them with pager() in app.js.
 """
 
-from __future__ import annotations
-
+import itertools
 import re
 
 MAX_PREFIX = 3  # (as many letters as tell one page from the next, three at most)
@@ -41,8 +40,7 @@ def page_ranges(labels: list[str], per_page: int) -> list[dict]:
     first and last label cut to the shortest prefix that tells it from the page before and after."""
     if per_page < 1 or not labels:
         return []
-    pages = [{"offset": off, "first": plain(labels[off]), "last": plain(labels[min(off + per_page, len(labels)) - 1])}
-             for off in range(0, len(labels), per_page)]
+    pages = [{"offset": i * per_page, "first": plain(page[0]), "last": plain(page[-1])} for i, page in enumerate(itertools.batched(labels, per_page))]
     out = []
     for i, p in enumerate(pages):
         k_from = _common(pages[i - 1]["last"], p["first"]) + 1 if i else 1

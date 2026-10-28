@@ -14,8 +14,6 @@ its cooldown.
 Replaces the Tautulli-triggered scripts; Plex itself reports what's playing.
 """
 
-from __future__ import annotations
-
 import dataclasses
 import os
 import threading

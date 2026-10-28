@@ -21,8 +21,6 @@ isn't kept: it's read from each file whenever it's needed. Datasets and files no
 months are dropped.
 """
 
-from __future__ import annotations
-
 import re
 import threading
 import time

@@ -1,7 +1,5 @@
 """Health checks and the recommendations that steer the Caching page."""
 
-from __future__ import annotations
-
 import os
 import time
 
@@ -632,19 +630,24 @@ def _sync_items(app) -> list[dict]:
     if sync is None:
         return []
     out = []
-    s = sync.settings()
-    if s.get("mirrors") == "unknown":
-        out.append(dict(item("warn", M("Is there a mirrored Plex server?"),
-                             M("Whether another Plex server has the same files (another site, kept in step by syncing the folders) hasn’t been chosen. "
-                               "Until it is, converted files’ originals aren’t deleted: a mirror that isn’t watched could lose its item."),
-                             M("On the [Mirror page](/mirrors), choose None, or the server to watch."))))
-    elif s.get("mirrors") == "plex2" and not app.other.configured():
-        out.append(dict(item("warn", M("The mirrored Plex server isn’t set up"), M("A mirror was chosen, but no server is watched yet."),
+    other = app.other
+    titles = {str(lib["key"]): lib.get("title") or str(lib["key"]) for lib in getattr(app, "libraries", []) or []}
+    undecided = other.undecided()
+    if undecided:
+        out.append(dict(item("warn", M("Is {libraries} mirrored?", one="Is {libraries} mirrored?", libraries=[titles[k] for k in undecided], n=len(undecided)),
+                             M("Whether another Plex server has the same files (another site, kept in step by syncing the folders) hasn’t been chosen for "
+                               "{n} libraries. Until it is, their converted files’ originals aren’t deleted: a mirror that isn’t watched could lose its item.",
+                               one="Whether another Plex server has the same files (another site, kept in step by syncing the folders) hasn’t been chosen for "
+                               "this library. Until it is, its converted files’ originals aren’t deleted: a mirror that isn’t watched could lose its item.", n=len(undecided)),
+                             M("On the [Mirror page](/mirrors), mark each library as mirrored, or as having no mirror."))))
+    if any(other.state_of(k) == "mirror" for k in titles) and not other.configured():
+        out.append(dict(item("warn", M("The mirrored Plex server isn’t set up"), M("A library is marked as mirrored, but no server is watched yet."),
                              M("On the [Mirror page](/mirrors), choose the server."))))
-    likely = sync.likely()
-    if likely:
-        out.append(dict(item("info", M("A server that looks like a mirror: {names}", names=[c["name"] for c in likely]),
-                             M("Its files are here too, at the same places (a sample of them)."), M("Watch it on the [Mirror page](/mirrors), or Ignore it there if it isn’t a mirror."))))
+    seen = [(titles[k], c) for k in undecided for c in [sync.suspected(k)] if c]
+    if seen:
+        out.append(dict(item("info", M("A library that looks mirrored: {names}", names=[f"{t} ({c['name']}: {c['their_title']})" for t, c in seen]),
+                             M("Its files are here too, at the same places (a sample of them)."),
+                             M("Mark it as mirrored on the [Mirror page](/mirrors), or say it has no mirror."))))
     out.extend(_peer_items(app))
     out.extend(_mirror_items(app))
     return out

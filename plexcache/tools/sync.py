@@ -17,8 +17,6 @@ Whose edits win is an option like the others, per library: changed, the rows are
 other side are backed up first (plexbackup.py), and Revert puts them back from that backup.
 """
 
-from __future__ import annotations
-
 import os
 
 from ..i18n import M

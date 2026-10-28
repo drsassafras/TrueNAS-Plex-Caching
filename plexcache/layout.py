@@ -18,8 +18,6 @@ kept at the front, the room left where the optimizer moved them from — is meta
 60% of a record of video.
 """
 
-from __future__ import annotations
-
 import math
 import os
 import struct

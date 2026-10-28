@@ -10,8 +10,6 @@ the dataset to fall back on? Two lights per library, both green before Apply ope
   a snapshot that couldn't be taken aborts the process, and is kept as an error until the next try.
 """
 
-from __future__ import annotations
-
 import os
 import time
 

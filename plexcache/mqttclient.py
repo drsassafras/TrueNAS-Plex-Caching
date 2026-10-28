@@ -8,8 +8,6 @@ It follows the client rules of the OASIS MQTT 3.1.1 standard (the [MQTT-x.x.x-x]
 tests/test_plexcache.py (MQTTStandardsTests) checks them.
 """
 
-from __future__ import annotations
-
 import socket
 import ssl
 import struct

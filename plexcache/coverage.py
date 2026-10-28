@@ -10,8 +10,6 @@ Each hour is {"t": start of the hour, "libs": {key: [files cached within each sp
 cached within each span (5), files in the library, bytes in the library]}}.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import threading

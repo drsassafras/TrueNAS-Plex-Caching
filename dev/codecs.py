@@ -14,8 +14,6 @@ so they change with it, build by build. Offline, the build keeps the committed f
 It says what changed; the tests check every pattern still works in Python.
 """
 
-from __future__ import annotations
-
 import os
 import re
 import sys

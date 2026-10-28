@@ -6,8 +6,6 @@ that weekday and three days later, and "daily" every day. The time of day and th
 are shared by every library.
 """
 
-from __future__ import annotations
-
 import datetime as dt
 
 TIMED = ("daily", "twice_weekly", "weekly", "twice_monthly")

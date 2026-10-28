@@ -24,8 +24,6 @@ poster ("layout"). A record counts only while the file is still that same file (
 inode unchanged), so telling which files are done reads none of them.
 """
 
-from __future__ import annotations
-
 import base64
 import hashlib
 import json
@@ -710,7 +708,7 @@ class Optimizing:
                     best = loc
         return self.app.map_path(best) if best else None
 
-    def _run(self, job: "OptimizeJob") -> None:
+    def _run(self, job: OptimizeJob) -> None:
         key, mode = job.state["library"], job.state["mode"]
         app = self.app
         name = (app.library_info(key) or {}).get("title") or key
@@ -853,7 +851,7 @@ class Optimizing:
                 self._retrying = False
             raise
 
-    def run_retries(self, job: "OptimizeJob | None") -> None:
+    def run_retries(self, job: OptimizeJob | None) -> None:
         """Try the waiting retries now, one by one."""
         while True:
             with self.lock:
@@ -867,7 +865,7 @@ class Optimizing:
                 with self.lock:
                     self.retries = [r for r in self.retries if r is not it]
 
-    def _retry_one(self, it: dict, job: "OptimizeJob | None") -> None:
+    def _retry_one(self, it: dict, job: OptimizeJob | None) -> None:
         app, path, key, mode = self.app, it["file"], it["library"], it["mode"]
         f = next((x for x in list(app.files) if app.map_path(x.path) == path), None)
         rec = app.library_records().get(key) or {}
@@ -1258,7 +1256,7 @@ class OptimizeJob(Job):
 
     kind = "optimize"
 
-    def __init__(self, op: "Optimizing", library: str, mode: str = "optimize", resumed: dict | None = None, files: list | None = None):
+    def __init__(self, op: Optimizing, library: str, mode: str = "optimize", resumed: dict | None = None, files: list | None = None):
         self.op = op
         title = (op.app.library_info(str(library)) or {}).get("title") or (resumed or {}).get("title")
         super().__init__(op.app.jobs, resumed, library=str(library), mode=mode, title=title)

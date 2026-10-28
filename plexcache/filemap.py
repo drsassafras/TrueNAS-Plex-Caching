@@ -10,11 +10,10 @@ What caching takes from each file comes from the same reading of its layout as c
 (layout.tail_ranges, layout.min_head), so the page shows what really happens.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import struct
+from compression import zstd
 import threading
 import time
 
@@ -448,6 +447,15 @@ MIX_KEYS = ("video", "meta", "unused", "video_disk", "meta_disk", "unused_disk",
 HEAD_KINDS = ("header", "segment", "seekhead", "info", "tracks", "checksum", "id3", "flac")  # what a player reads first
 
 
+ZSTD_LEVEL = 3  # ZFS's "zstd" is zstd-3
+
+
+def packed_size(data: bytes, level: int = ZSTD_LEVEL) -> int:
+    """How many bytes ZFS's ZSTD makes of ``data``: the stdlib's zstd (Python 3.14+, built with libzstd — the image's is;
+    the build checks) at the dataset's default level."""
+    return len(zstd.compress(data, level=level))
+
+
 def lz4_size(data: bytes) -> int:
     """About how many bytes LZ4 (ZFS's lz4, TrueNAS's default compression) makes of ``data``: its
     block format, greedy matching of 4 bytes or more within 64 KB, skipping ahead faster the longer
@@ -499,12 +507,11 @@ def cache_mix(path: str, m: dict, record: int) -> dict | None:
     """What the blocks caching always keeps of a file (block_map: its start and its end, not the
     lead-in) hold: video (the streams), metadata, and unused room (padding, and the zeros past the end
     of the file) — as they are, and as ZFS stores them (``*_disk``, store()). Only the metadata is
-    read: video doesn't compress, and zeros compress away. zlib stands in for ZFS's ZSTD (similar on
-    metadata). ``kinds``: each kind of metadata's bytes, as they are, compressed, and compressed with
+    read: video doesn't compress, and zeros compress away — compressed as ZFS's ZSTD does (packed_size).
+    ``kinds``: each kind of metadata's bytes, as they are, compressed, and compressed with
     LZ4 — what the optimizer's result is estimated from (projection.py). ``lz4``: the blocks as
     stored with LZ4 instead ({"meta_disk", "unused_disk"}: TrueNAS's default, for a file not known
     to be written with the dataset's compression)."""
-    import zlib
     size = m.get("size") or 0
     if not m.get("parts"):
         return None  # (no layout read: nothing to say of what the blocks hold — block_map still draws them as one piece)
@@ -536,10 +543,10 @@ def cache_mix(path: str, m: dict, record: int) -> dict | None:
                     data += got
                     k = kinds.setdefault(p["kind"], [0, 0, 0])
                     k[0] += len(got)
-                    k[1] += len(zlib.compress(got, 6))
+                    k[1] += packed_size(got)
                     k[2] += lz4_size(got)
             unused += record - b["data"]
-            store(out, record, video, record - video - unused, len(zlib.compress(data, 6)) if data else 0, unused)
+            store(out, record, video, record - video - unused, packed_size(data) if data else 0, unused)
             store(lz4, record, video, record - video - unused, lz4_size(data) if data else 0, unused)
     out["kinds"] = kinds
     out["lz4"] = {"meta_disk": lz4["meta_disk"], "unused_disk": lz4["unused_disk"], "round_disk": lz4["round_disk"]}
@@ -642,11 +649,10 @@ def block_map(m: dict | None, size: int, plan: dict, record: int | None) -> dict
 
 
 def estimate_blocks(path: str, numbers: list[int], record: int, size: int) -> list[dict]:
-    """For each block (1-based), how ZFS might store it: its bytes compressed (zlib standing in for
-    ZFS's ZSTD — similar on metadata), kept only if that saves at least 1/8 of the block (ZFS's own
+    """For each block (1-based), how ZFS might store it: its bytes compressed as ZFS's ZSTD does
+    (packed_size), kept only if that saves at least 1/8 of the block (ZFS's own
     rule, so video stays as it is), in whole 4K sectors. A file's last block is padded with zeros to a
     whole block, as ZFS does, and the zeros compress away."""
-    import zlib
     out = []
     with open(path, "rb") as fh:
         for n in numbers[:32]:
@@ -656,7 +662,7 @@ def estimate_blocks(path: str, numbers: list[int], record: int, size: int) -> li
             fh.seek(a)
             data = fh.read(record)
             raw = data + b"\0" * (record - len(data))
-            packed = len(zlib.compress(raw, 6))
+            packed = packed_size(raw)
             stored = record if packed > record - record // 8 else -(-packed // 4096) * 4096
             # rounding: the rest of its last 4K sector, which ZFS stores but holds nothing
             out.append({"n": n, "data": len(data), "stored": stored, "compressed": stored < record,

@@ -15,8 +15,6 @@ so a file's lead-in is all video, everything compressible sits together at the e
 zero padding of the last ZFS record, and image subtitles keep zlib (mkvmerge's default).
 """
 
-from __future__ import annotations
-
 import os
 
 EBML, SEGMENT = 0x1A45DFA3, 0x18538067

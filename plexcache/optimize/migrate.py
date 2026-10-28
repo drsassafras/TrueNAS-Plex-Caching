@@ -12,8 +12,6 @@ Only those two renames and that one deletion are possible: the names are checked
 rename or delete anything else.
 """
 
-from __future__ import annotations
-
 import errno
 import hashlib
 import os
@@ -103,10 +101,8 @@ def _copy_file(src: str, dst: str, st: os.stat_result, ctl: Paused, progress) ->
             progress(len(chunk))
         fo.flush()
         os.fsync(fo.fileno())
-    check = hashlib.sha256()
     with open(part, "rb") as fh:
-        for chunk in iter(lambda: fh.read(CHUNK), b""):
-            check.update(chunk)
+        check = hashlib.file_digest(fh, "sha256")
     if check.hexdigest() != h.hexdigest():
         os.remove(part)
         raise OSError(f"the copy of {os.path.basename(src)} differs from the original")

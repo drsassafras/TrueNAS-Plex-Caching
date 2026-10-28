@@ -12,13 +12,20 @@ permissions:
 
 jobs:
   test:
+    # the Python the image runs (3.15), with every deprecation an error, so what a later Python removes shows up here
+    # first; and the next Python's prerelease (3.16-dev), allowed to fail: an early warning, not a gate
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.15", "3.16-dev"]
+    continue-on-error: ${{ matrix.python-version == '3.16-dev' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
-      - run: python -W ignore -m unittest tests.test_plexcache -v
+          python-version: ${{ matrix.python-version }}
+      - run: python -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest tests.test_plexcache -v
 
   image:
     needs: test
@@ -54,6 +61,8 @@ jobs:
           build-args: |
             PLEXCACHE_CHANNEL=${{ github.ref == 'refs/heads/dev' && 'dev' || 'stable' }}
             PLEXCACHE_COMMIT=${{ github.sha }}
+      - name: The image's Python has what the code needs (ZSTD, for the block estimates)
+        run: docker run --rm --entrypoint python plex-cache:test -c "import compression.zstd as z; print('zstd', z.zstd_version)"
       - name: Optimizer tests inside the image
         run: >
           docker run --rm -v "$PWD:/src:ro" -w /src --entrypoint python plex-cache:test

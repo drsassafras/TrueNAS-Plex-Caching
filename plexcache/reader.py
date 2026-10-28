@@ -1,7 +1,5 @@
 """Reading file data so ZFS caches it, with timing and pacing."""
 
-from __future__ import annotations
-
 import mmap
 import os
 import random

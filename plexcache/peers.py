@@ -18,8 +18,6 @@ From the other systems' markers this module tells:
 Health lists all of it. Without the optimizer service nothing is published, and that's said too.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import time
@@ -53,7 +51,7 @@ def info(app, key: str) -> dict:
     tools = (getattr(app, "tool_runs", None) or {}).get(str(key)) or {}
     link = getattr(app, "peerlink", None)
     return {"name": getattr(app, "plex_name", "") or "", "version": app.version, "at": time.time(),
-            "sync": {"source": _source(app, key), "mirror": p2.get("machine_id") or "", "mirrors": sy.get("mirrors")},
+            "sync": {"source": _source(app, key), "mirror": p2.get("machine_id") or "", "mirrors": app.other.state_of(str(key))},  # (the library's state here: unset, none or mirror)
             "optimizer": {k: opts.get(k) for k in CONTENT},
             "tools": {name: at for name, at in tools.items() if time.time() - at < 7 * 86400},
             **({"peer": link.advert(), "plex": link.own_plex_id()} if link is not None else {}),  # (how the other Plex Cache finds and pairs with this one: peerlink.py)

@@ -17,8 +17,6 @@ history and collections. Revert, while the run's backup lasts: the MKV removed a
 original has gone already, put back from the snapshot.
 """
 
-from __future__ import annotations
-
 import os
 
 from ..i18n import M

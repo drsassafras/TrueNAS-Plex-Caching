@@ -8,8 +8,6 @@ so a push that is still building, or failed, isn't offered. A dev build also com
 the number being the same between releases. Nothing is sent but ordinary downloads.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import os

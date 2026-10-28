@@ -15,8 +15,6 @@ what was saved, and what pausing means for it. The page shows every kind with on
 with one banner.
 """
 
-from __future__ import annotations
-
 import threading
 import time
 import uuid
@@ -40,7 +38,7 @@ class Job:
     kind = "job"
     POLL = 5  # seconds between looks while paused (a resilver is checked six times less often)
 
-    def __init__(self, jobs: "Jobs", resumed: dict | None = None, **info):
+    def __init__(self, jobs: Jobs, resumed: dict | None = None, **info):
         self.jobs, self.app = jobs, jobs.app
         self.stop_event = threading.Event()
         self.state = {"kind": self.kind, "running": True, "started": time.time(), "phase": "checking", "checked": 0,

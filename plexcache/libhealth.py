@@ -24,8 +24,6 @@ data looks bad before anything would be copied.
   Folder: act()).
 """
 
-from __future__ import annotations
-
 import os
 import re
 

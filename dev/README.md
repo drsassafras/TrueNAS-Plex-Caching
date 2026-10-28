@@ -116,4 +116,4 @@ NODE_PATH=$(npm root -g) node dev/screenshots.js
 - **"can't SSH to …"** — SSH isn't running on TrueNAS, or your key isn't on `truenas_admin` (step 1.2).
 - **Copied, but the restart failed** — `/usr/bin/midclt` isn't in the user's no-password sudo commands (step 1.3).
 - **The test app won't start after installing** — the code folder was empty: run `tnsync local -y`.
-- **Tests fail only on the Mac** — the suite has to pass on the Mac's Python 3.9 as well as the 3.13 in the image, and macOS has no `/proc` and lacks some Linux-only calls (such as `os.posix_fadvise`): tests that touch those need to fake them or work without them.
+- **Tests fail only on the Mac** — the suite has to pass on the Mac's Python as well as the 3.15 in the image (the code needs 3.15 or later; CI also tries the next Python's prerelease), and macOS has no `/proc` and lacks some Linux-only calls (such as `os.posix_fadvise`): tests that touch those need to fake them or work without them.

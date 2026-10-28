@@ -24,8 +24,6 @@ Nothing is dropped: it's the history of every file optimized (the Metrics page's
 filehistory.py). export() gives every entry as CSV or JSON.
 """
 
-from __future__ import annotations
-
 import csv
 import io
 import json

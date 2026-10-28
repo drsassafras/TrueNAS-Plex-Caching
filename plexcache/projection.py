@@ -9,12 +9,10 @@ it would write again (to take its dataset's compression and record size: rewrite
 new blocks. A Plex poster the optimizer would put in isn't counted (its size isn't known until it's
 fetched): a file's own cover art stands in for it.
 
-Compression is estimated by family (family()): "zstd" (zlib standing in for ZSTD and gzip), "lz4"
+Compression is estimated by family (family()): "zstd" (ZSTD itself, standing in for gzip too), "lz4"
 (an LZ4 estimate, filemap.lz4_size: TrueNAS's default, taken for a file whose compression isn't
 known) and "off".
 """
-
-from __future__ import annotations
 
 from . import layout
 from .filemap import MIX_KEYS, store

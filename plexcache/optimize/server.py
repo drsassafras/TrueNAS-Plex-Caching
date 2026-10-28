@@ -40,8 +40,6 @@ can be touched (or under PLEXCACHE_MEDIA_ROOTS, when set): the YAML's volumes de
 write. It listens on port 8643 (PLEXCACHE_OPTIMIZER_PORT).
 """
 
-from __future__ import annotations
-
 import base64
 import binascii
 import hmac

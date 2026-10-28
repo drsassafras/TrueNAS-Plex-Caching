@@ -13,8 +13,6 @@ from the same file — whenever something more important needs the disks or the 
 Caching that works without an L2ARC (Now Playing Cache, the next episode...) never waits.
 """
 
-from __future__ import annotations
-
 import re
 import time
 

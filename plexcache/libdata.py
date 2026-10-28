@@ -38,8 +38,6 @@ or a check's scan reads from a LibraryData and nothing else — no Plex call, no
 own — so one gathering serves every check, and a change reaches every one of them.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import threading
@@ -199,7 +197,7 @@ class LibraryData:
                 "mirror": self.mirror, "mirror_at": self.mirror_at, "mirror_for": self.mirror_for, "mirror_changed": self.mirror_changed}
 
     @classmethod
-    def from_json(cls, d: dict) -> "LibraryData | None":
+    def from_json(cls, d: dict) -> LibraryData | None:
         if not isinstance(d, dict) or d.get("v") != VERSION or not d.get("key"):
             return None
         x = cls(d["key"])
@@ -513,8 +511,8 @@ class Gatherer:
         """(the mirrored server's library paired with this one, "<the mirror's machine id>/<that library>"), or (None, "")
         with no mirror watched, or the library not paired — or (None, None) while that isn't known: the mirror's libraries
         never read (it couldn't be reached), never taken for "not paired" (what was read of it kept)."""
-        other, sync = getattr(self.app, "other", None), getattr(self.app, "sync", None)
-        if other is None or sync is None or sync.decided() != "plex2":
+        other = getattr(self.app, "other", None)
+        if other is None or other.state_of(str(key)) != "mirror" or not other.configured():
             return None, ""
         if hasattr(other, "known") and not other.known():
             try:

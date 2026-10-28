@@ -15,8 +15,6 @@ a mirrored server (no file is touched), so its own duplicates are its own matter
 merges them there when this server's edits win (tools/sync.py: one item here, several there).
 """
 
-from __future__ import annotations
-
 import os
 import re
 

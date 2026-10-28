@@ -1,8 +1,6 @@
 """What the Activity page shows: the event log, warm-up runs, playback measurements
 (for the report) and lifetime totals, kept in history.json in the config folder."""
 
-from __future__ import annotations
-
 import collections
 import json
 import logging

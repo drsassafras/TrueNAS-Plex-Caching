@@ -6,8 +6,6 @@ They're found on PATH, or in the folders listed in PLEXCACHE_TOOLS_PATH (e.g. th
 bundle, /Applications/MKVToolNix.app/Contents/MacOS, when testing outside the container).
 """
 
-from __future__ import annotations
-
 import os
 import re
 import shutil

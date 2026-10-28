@@ -17,8 +17,6 @@ they cost no reads of the file.
 Each is something the optimizer puts right: together they say whether a file needs it.
 """
 
-from __future__ import annotations
-
 import os
 
 from .i18n import M

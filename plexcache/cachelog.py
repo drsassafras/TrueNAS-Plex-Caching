@@ -26,8 +26,6 @@ Every count is also kept per library, with finer ages (FINE) and whether each re
 missed, so the Activity page can split re-reads into fresh and stale at any age you pick.
 """
 
-from __future__ import annotations
-
 import bisect
 import json
 import os

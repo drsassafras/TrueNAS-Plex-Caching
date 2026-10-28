@@ -1,7 +1,5 @@
 """Entry point: ``python -m plexcache``."""
 
-from __future__ import annotations
-
 import html
 import logging
 import os

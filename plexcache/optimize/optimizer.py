@@ -22,8 +22,6 @@ dataset, and the new file is written with the dataset's current record size and 
 5. Owner, permissions, timestamps and extended attributes copied, then an atomic rename.
 """
 
-from __future__ import annotations
-
 import errno
 import hashlib
 import json

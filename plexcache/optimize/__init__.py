@@ -1,7 +1,5 @@
 """The MKV optimizer (the app's second container). See optimizer.py."""
 
-from __future__ import annotations
-
 import re
 
 # The optimizer's own version, written into every file it optimizes (the PLEXCACHE_OPTIMIZER tag).

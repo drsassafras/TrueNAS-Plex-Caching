@@ -19,5 +19,5 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.15"
       - run: python3 dev/truenas_api.py --ref master

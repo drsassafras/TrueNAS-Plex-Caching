@@ -3,8 +3,6 @@
 Just enough for TrueNAS's JSON-RPC API: text frames, ping/pong, close.
 """
 
-from __future__ import annotations
-
 import base64
 import hashlib
 import os

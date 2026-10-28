@@ -1,7 +1,5 @@
 """Application core: shared state and background workers."""
 
-from __future__ import annotations
-
 import datetime as dt
 import hashlib
 import ipaddress
@@ -330,7 +328,7 @@ class App:
             if mst in ("create", "switch", "verify"):
                 threading.Thread(target=self._refresh_migration, daemon=True).start()
             # the mirror: looked for weekly among the account's servers, while it isn't chosen
-            if self.sync.settings().get("discover") and time.time() - self.sync.discovered_at > 7 * 86400 and self.sync.settings().get("mirrors") == "unknown":
+            if self.sync.settings().get("discover") and time.time() - self.sync.discovered_at > 7 * 86400 and self.other.undecided():
                 self.sync.discover_async()
             # converted files: Plex asked whether it has the MKVs, originals deleted once it has (and the hold is over)
             if any(e["state"] != "deleted" for e in self.conversions.items):

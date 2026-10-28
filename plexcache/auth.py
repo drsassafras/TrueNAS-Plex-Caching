@@ -14,8 +14,6 @@ doesn't go any faster. An address that keeps getting it wrong (LOCKOUT_FAILS in 
 refused for a while (LOCKOUT_SECONDS) — signing in from elsewhere still works.
 """
 
-from __future__ import annotations
-
 import base64
 import json
 import hashlib
@@ -47,7 +45,7 @@ class Auth:
         self._fails: dict[str, tuple[int, float]] = {}  # address -> (wrong in a row, when last)
 
     @classmethod
-    def from_env(cls, config_dir: str | None = None) -> "Auth":
+    def from_env(cls, config_dir: str | None = None) -> Auth:
         return cls(os.environ.get("PLEXCACHE_USERNAME", ""), os.environ.get("PLEXCACHE_PASSWORD", ""), config_dir)
 
     @staticmethod

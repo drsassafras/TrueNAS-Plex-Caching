@@ -28,8 +28,6 @@ notes in the shared folders (peers.py).
 Everything here is in the state (snapshot) as five lights, worked out by tick() every TICK_EVERY.
 """
 
-from __future__ import annotations
-
 import hashlib
 import hmac
 import ipaddress
@@ -195,8 +193,8 @@ class PeerLink:
 
     def mirror_id(self) -> str:
         """The mirror's Plex (the Mirror page's choice), or "" when none is watched."""
-        sync, other = getattr(self.app, "sync", None), getattr(self.app, "other", None)
-        if sync is None or other is None or sync.decided() != "plex2" or not other.configured():
+        other = getattr(self.app, "other", None)
+        if other is None or not other.any_mirror():
             return ""
         return self.app.settings.section("plex2").get("machine_id") or ""
 
@@ -491,8 +489,10 @@ class PeerLink:
             with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT * 3) as resp:
                 return json.loads(resp.read(1024 * 1024) or b"{}")
         except urllib.error.HTTPError as e:
+            with e:  # (its response: read, then closed)
+                body = e.read()
             try:
-                return json.loads(e.read() or b"{}")
+                return json.loads(body or b"{}")
             except ValueError:
                 raise PeerError(f"HTTP {e.code}") from None
 
@@ -551,8 +551,10 @@ class PeerLink:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 got = json.loads(resp.read(64 * 1024 * 1024) or b"{}")
         except urllib.error.HTTPError as e:
+            with e:
+                body = e.read()
             try:
-                why = json.loads(e.read() or b"{}").get("error")
+                why = json.loads(body or b"{}").get("error")
             except ValueError:
                 why = None
             raise PeerError(why or f"HTTP {e.code}") from None
@@ -824,7 +826,7 @@ class PeerLink:
         """The System card's five lights: {"found", "paired", "talking", "folders", "version"}: {"status", "text", "detail"}."""
         off = lambda text, detail="": {"status": "off", "text": text, "detail": detail}  # noqa: E731
         if not self.mirror_id():
-            why = M("No mirror is watched: choose one on the [Mirror page](/mirrors).")
+            why = M("No mirror is watched: mark a library as mirrored on the [Mirror page](/mirrors).")
             return {"found": off(M("No mirrored server"), why), "paired": off(M("Not paired")), "talking": off(M("Not talking")),
                     "folders": off(M("Folder sync")), "version": off(M("Version and clock"))}
         if not self.settings().get("enabled", True):

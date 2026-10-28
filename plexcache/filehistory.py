@@ -24,8 +24,6 @@ Each entry: {"lib", "id" ([size, mtime_ns, ino]), "ours" (our tags in it), "orig
 here or elsewhere), "gone" (when it left the libraries, or None)}.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import threading

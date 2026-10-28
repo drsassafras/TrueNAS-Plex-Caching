@@ -1,7 +1,5 @@
 """Fake Plex and TrueNAS servers plus a fake media tree for tests and demos."""
 
-from __future__ import annotations
-
 import base64
 import hashlib
 import json

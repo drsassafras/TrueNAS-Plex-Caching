@@ -10,8 +10,6 @@ not at all. For each library folder we work out:
   user can just pick the right one from a list.
 """
 
-from __future__ import annotations
-
 import os
 
 from . import zfs

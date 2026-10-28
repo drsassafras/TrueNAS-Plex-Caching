@@ -8,8 +8,6 @@ the mirror keeps listing it, say — is held, and said so: Health lists it, and 
 Purge Now, Put Back and Keep (held, no longer followed). Kept in trash.json.
 """
 
-from __future__ import annotations
-
 import os
 import threading
 import time
@@ -83,7 +81,7 @@ class Trash:
         other = getattr(self.app, "other", None)
         there = None
         try:
-            lib_there = other.pairs().get(e["library"]) if other is not None and other.configured() and self.app.sync.decided() == "plex2" else None
+            lib_there = other.mirror_for(str(e["library"])) if other is not None else None
             if lib_there is not None:
                 idx = other.index(lib_there, fresh=True)
                 cands = other.paths_there(e["library"], e["plex_path"], lib_there)

@@ -17,8 +17,6 @@ original's deletion failed: tried again), "separate" (another item), "deleted", 
 is gone: the original stays).
 """
 
-from __future__ import annotations
-
 import logging
 import os
 import threading
@@ -120,12 +118,12 @@ class Conversions:
         now, state = time.time(), e["state"]
         if state in ("deleted",):
             return False
-        # whether this server has a mirror is a choice to make (the Mirror page): until it's made, the
-        # original stays — a mirror not watched could lose its item
-        sync = getattr(self.app, "sync", None)
-        if sync is not None and not sync.decided():
-            if e.get("note") != str(M("Waiting: whether there’s a mirrored server isn’t chosen yet (Mirror page).")):
-                e["note"] = str(M("Waiting: whether there’s a mirrored server isn’t chosen yet (Mirror page)."))
+        # whether the library is mirrored is a choice to make (the Mirror page): until it's made, the original stays —
+        # a mirror not watched could lose its item
+        other = getattr(self.app, "other", None)
+        if other is not None and other.state_of(str(e["library"])) == "unset":
+            if e.get("note") != str(M("Waiting: whether this library is mirrored isn’t chosen yet (Mirror page).")):
+                e["note"] = str(M("Waiting: whether this library is mirrored isn’t chosen yet (Mirror page)."))
                 return True
             return False
         if not os.path.exists(e["new"]):
@@ -175,7 +173,8 @@ class Conversions:
             reason = getattr(err, "reason", None) or str(err)
             try:
                 import json
-                reason = json.loads(err.read() or b"{}").get("error") or reason  # (an HTTP error's own reason)
+                with err:  # (an HTTP error's own reason; its response closed)
+                    reason = json.loads(err.read() or b"{}").get("error") or reason
             except Exception:  # noqa: BLE001
                 pass
             e.update(failed=time.time(), error=str(reason))

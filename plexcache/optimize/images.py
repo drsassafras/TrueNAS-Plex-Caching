@@ -13,8 +13,6 @@ that isn't smaller, can't be checked, or is another format (WebP, GIF, animated 
 it was.
 """
 
-from __future__ import annotations
-
 import os
 
 from .tools import ToolError, find, run

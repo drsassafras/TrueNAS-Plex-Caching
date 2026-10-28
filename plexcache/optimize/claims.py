@@ -11,8 +11,6 @@ Claims are released when the file is done, and any left behind (a system stopped
 ignored after STALE and tidied away.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import re

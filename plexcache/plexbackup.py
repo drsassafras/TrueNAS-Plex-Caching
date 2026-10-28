@@ -13,8 +13,6 @@ OtherServer.client()). A process opens a backup of its own (session(), with the 
 one that can't be read stops it before anything changes); a change made outside one gets a backup of its own all the same.
 """
 
-from __future__ import annotations
-
 import contextlib
 import threading
 import time

@@ -3,8 +3,6 @@ and 639-1, as the Library of Congress lists them — the same table MKVToolNix n
 Generated from https://www.loc.gov/standards/iso639-2/ISO-639-2_utf-8.txt by the script below;
 ``language_name`` takes a BCP 47 tag too ("en-US": its language part)."""
 
-from __future__ import annotations
-
 NAMES = {
     "aa": "Afar",
     "aar": "Afar",

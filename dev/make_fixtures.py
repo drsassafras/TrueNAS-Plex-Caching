@@ -19,8 +19,6 @@ look at what changed, and if it's fine, run this with --snapshot. Needs ffmpeg a
 (PLEXCACHE_TOOLS_PATH works here too).
 """
 
-from __future__ import annotations
-
 import json
 import os
 import random

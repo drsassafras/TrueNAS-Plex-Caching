@@ -12,8 +12,6 @@ synced folder carries the change there, and the same merge is done there once it
 path (tick: followed until it has).
 """
 
-from __future__ import annotations
-
 import os
 import re
 import time

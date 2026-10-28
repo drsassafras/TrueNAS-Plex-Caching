@@ -1,7 +1,5 @@
 """HTTP server: the web UI plus a small JSON API (standard library only)."""
 
-from __future__ import annotations
-
 import hashlib
 import ipaddress
 import json

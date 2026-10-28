@@ -14,8 +14,6 @@ Settings register themselves in DYNAMIC: ``DYNAMIC[id] = Dynamic(...)``. The id 
 with its own id, "prefetch.<library key>.start", so fallbacks are tracked per library).
 """
 
-from __future__ import annotations
-
 import threading
 import time
 from dataclasses import dataclass, field

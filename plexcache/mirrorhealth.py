@@ -30,8 +30,6 @@ read — and those checks' counts red. With no Plex Cache known at the mirror's 
 nothing is red: nothing known to be there went unread.
 """
 
-from __future__ import annotations
-
 import logging
 import os
 import re
@@ -118,7 +116,7 @@ class MirrorHealth:
             return cached[1], None
         other = getattr(self.app, "other", None)
         out, waiting = [], None
-        watched = other is not None and other.configured() and self.app.sync.decided() == "plex2"
+        watched = other is not None and other.any_mirror()
         if watched and not here:  # (this Plex's libraries not read yet: what's paired with them isn't known)
             waiting = ("pending", None)
         elif watched:
@@ -355,7 +353,7 @@ class MirrorHealth:
                     self.wanted.add(str(key))
         if str(key) in libs or waiting:  # (not known yet: its count says so — waiting())
             return None
-        return M("No mirror is watched: choose one on the [Mirror page](/mirrors).") if not libs else \
+        return M("No mirror is watched: mark a library as mirrored on the [Mirror page](/mirrors).") if not libs else \
             M("This library isn’t paired with one on the mirror: pair it on the [Mirror page](/mirrors) to compare it.")
 
     def current(self, key: str) -> bool:
@@ -510,7 +508,7 @@ class MirrorHealth:
         if snap["waiting"]:
             return [self.waiting_note(snap["waiting"])]
         if key not in snap["libraries"]:
-            return [{"status": "info", "text": M("No mirror is watched: choose one on the [Mirror page](/mirrors).") if not snap["libraries"]
+            return [{"status": "info", "text": M("No mirror is watched: mark a library as mirrored on the [Mirror page](/mirrors).") if not snap["libraries"]
                      else M("This library isn’t paired with one on the mirror: pair it on the [Mirror page](/mirrors) to compare it.")}]
         out = []
         with self.lock:
@@ -647,7 +645,7 @@ class MirrorHealth:
             n = self.waiting_note(waiting)
             return {"status": "warn" if n["status"] == "warn" else "off", "text": n["text"], "lights": []}
         if not self.libraries():
-            return {"status": "off", "text": M("No mirror is watched: choose one on the [Mirror page](/mirrors)."), "lights": []}
+            return {"status": "off", "text": M("No mirror is watched: mark a library as mirrored on the [Mirror page](/mirrors)."), "lights": []}
         if not link.wanted():
             return {"status": "ok", "text": M("No Plex Cache at the mirror’s site: the disks aren’t compared."), "lights": []}
         bad = [v["text"] for v in link.lights().values() if v["status"] in ("warn", "fail")]

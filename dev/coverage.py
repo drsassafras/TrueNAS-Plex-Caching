@@ -10,8 +10,6 @@ close to what coverage.py reports, but not identical: docstrings and `def` lines
 code here, which nudges the percentage up slightly.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 import unittest

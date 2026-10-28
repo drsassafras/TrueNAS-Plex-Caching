@@ -1,7 +1,5 @@
 """Minimal Plex Media Server client (standard library only)."""
 
-from __future__ import annotations
-
 import json
 import ssl
 import time

@@ -1,8 +1,6 @@
 """Optimize MKV files from the command line (``python -m plexcache.optimize FILE...``), or run
 the optimizer service (``python -m plexcache.optimize serve``)."""
 
-from __future__ import annotations
-
 import argparse
 import sys
 

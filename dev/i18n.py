@@ -30,8 +30,6 @@ Between releases they lag: a new text isn't in them yet (the app shows the Engli
 the code no longer uses lingers. Plain ``check`` allows that; ``check --release`` doesn't.
 """
 
-from __future__ import annotations
-
 import ast
 import json
 import os

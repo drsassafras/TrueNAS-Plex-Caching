@@ -1,7 +1,5 @@
 """Reads ZFS state that is visible from inside the container."""
 
-from __future__ import annotations
-
 import os
 import re
 import stat

@@ -20,8 +20,6 @@ Two ways, the library's option ``remove`` (a choice):
 The copy is made by the optimizer service (optimize/files.py make_real).
 """
 
-from __future__ import annotations
-
 import os
 
 from ..i18n import M

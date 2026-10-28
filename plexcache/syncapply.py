@@ -14,8 +14,6 @@ without that backup ("A backup I make myself") is undone the old way: the fields
 weren't locked), the match put back, the poster chosen before chosen again, collections and labels as they were.
 """
 
-from __future__ import annotations
-
 from .i18n import M
 from .plex import EDIT_FIELDS, PlexError
 
