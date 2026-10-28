@@ -282,6 +282,16 @@ class Sync:
             return ""
         return m if m in ("none", "plex2") else ""
 
+    def likely(self) -> list[dict]:
+        """The servers found that look like a mirror (nearly all of a sample of their files here): not the one watched, nor
+        one said not to be a mirror (Ignore, on the Mirror page) — none at all once "none" is chosen. What Health, every
+        tool and converting a folder to a child dataset go by."""
+        s = self.settings()
+        if s.get("mirrors") == "none":
+            return []
+        mine, ignored = self.app.settings.section("plex2").get("machine_id"), set(s.get("ignored") or [])
+        return [c for c in self.candidates if (c.get("rate") or 0) >= 0.9 and c.get("id") != mine and c.get("id") not in ignored]
+
     def peers(self) -> list[str]:
         """Other Plex Caches seen in the library folders (their markers, within PEER_DAYS)."""
         mine = self.app.optimizing.instance()

@@ -1339,7 +1339,7 @@ PCI18N.ready.then(function () {
     var next = (((ST.migration || {}).state) || {}).step === "copy" ? null : (checks || []).filter(function (c) { return !migClear(c); })[0];
     return (checks || []).map(function (c) {
       return '<div class="row">' + migBadge(c) + '<div class="grow"><div class="what">' + esc(c.title) + "</div>" +
-        (c.detail ? '<div class="det">' + esc(c.detail) + "</div>" : "") + (c.cmd ? cmdBox(c.cmd) : "") +
+        (c.detail ? '<div class="det">' + links(c.detail) + "</div>" : "") + (c.cmd ? cmdBox(c.cmd) : "") +
         (c !== next && (c.action === "scope" || !migClear(c)) ? migAction(c) : "") + "</div></div>";
     }).join("");
   }
@@ -1348,7 +1348,7 @@ PCI18N.ready.then(function () {
     var first = (checks || []).filter(function (c) { return !migClear(c); })[0];
     if (!first) return checks && checks.length ? '<div class="note">' + H("<strong>Ready.</strong> Everything below is done.") + "</div>" : "";
     var at = (ST.migration || {}).checked_at;
-    return '<div class="note"><strong>' + H("Next:") + "</strong> " + esc(first.title) + (first.detail ? '<div class="det">' + esc(first.detail) + "</div>" : "") +
+    return '<div class="note"><strong>' + H("Next:") + "</strong> " + esc(first.title) + (first.detail ? '<div class="det">' + links(first.detail) + "</div>" : "") +
       (first.cmd ? cmdBox(first.cmd) : "") + migAction(first) +
       '<div class="det muted">' + (at ? H("Looked at {when}: not done yet. Plex Cache looks again by itself every 30 seconds, and this moves on once it is.", { when: ago(at) })
         : H("Plex Cache looks by itself every 30 seconds, and this moves on once it’s done.")) + "</div></div>";
@@ -1370,6 +1370,21 @@ PCI18N.ready.then(function () {
       return row(both ? b("scope", H("Convert This Server Only"), false, ' data-scope="this"') : b("scope", H("Convert Both Servers"), false, ' data-scope="both"'));
     }
     return "";
+  }
+  // The mirror's light, at the top (migrating.py mirror_view): grey, none (this server alone); green, its Plex Cache
+  // talking directly; yellow, heard of only through its marker, or not at all — with how the conversion goes with it
+  // — and, for a server that looks like a mirror but isn't chosen, Watch It or Ignore, as on the Mirror page: one or the
+  // other is needed before the copy (migrating.py mirror_chosen)
+  function migMirror(mv) {
+    if (!mv) return "";
+    var acts = !mv.watched && mv.how === "suspected" && mv.id ? '<div class="acts" style="margin:4px 0 0 26px">' +
+      '<button class="btn sm pri" type="button" data-act="plex2-use-found" data-id="' + esc(mv.id) + '">' + H("Watch {name}", { name: mv.name }) + "</button> " +
+      '<button class="btn sm" type="button" data-act="mirror-ignore" data-id="' + esc(mv.id) + '">' + H("Ignore: Not a Mirror") + "</button></div>" : "";
+    return '<div class="lights">' + light(mv.status, mv.title, mv.detail) + acts + "</div>";
+  }
+  // a mirror chosen or ignored: a conversion under way looks at its checks again at once, not in 30 seconds
+  function migRecheck() {
+    return ((ST.migration || {}).state || {}).step ? api("/api/migration", { action: "check" }).catch(function () {}) : null;
   }
   function rsOr(n) { return n ? fmtRs(n) : "?"; }
   function migStep(step) { return { create: T("Create"), copy: T("Copy"), switch: T("Switch"), verify: T("Verify") }[step] || step || ""; }
@@ -1469,9 +1484,10 @@ PCI18N.ready.then(function () {
       H("A record size suits some media better than others, and a dataset has just one. A library folder that needs a different one than the rest of its dataset can become a dataset of its own — a child dataset, at the same path, with the record size that suits it.") +
       "<br><br>" + H("<strong>Ideal already</strong>: its dataset has the record size recommended for it. <strong>Sufficient</strong>: the second best — fine as it is. <strong>Split dataset</strong>: neither; converting the folder lets it read in the size that suits it.") +
       "<br><br>" + H("How: a new dataset is made next to the folder, the files are copied into it (which also gives them its record size and compression), and it takes the folder’s place. Plex keeps every file’s metadata, and is restarted once, at the end. You’ll need room for a second copy until the old one is deleted; snapshots keep the old copy’s space until they expire."));
+    out += migMirror(mg.mirror);
     if (!st || st.step === "done") {
       if (st && st.step === "done") {
-        var mvd = mg.mirror, thereD = mvd && st.scope === "both" ? (mvd.folders || {})[st.folder] : null;
+        var mvd = mg.mirror && mg.mirror.watched ? mg.mirror : null, thereD = mvd && st.scope === "both" ? (mvd.folders || {})[st.folder] : null;
         out += '<div class="note">' + H("{folder} is now the dataset {name}.", { folder: st.host_folder || st.folder, name: st.child }) +
           (mvd && st.scope === "both" ? " " + (thereD && thereD.state === "dataset" ? H("{name} has converted its copy too: both servers are done.", { name: mvd.name })
             : H("Now it’s {name}’s turn: open its Convert Folder to Child Dataset page and start this library there.", { name: mvd.name }) +
@@ -1481,7 +1497,7 @@ PCI18N.ready.then(function () {
       var cands = mg.candidates || [], dc = countOf("dataset");
       if (dc.s !== "done") return out + countBox(dc) + "</section>";  // (what each folder would become: once the datasets are looked at — or why it doesn't apply)
       if (!cands.length) return out + '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No library folders yet.")) + "</p></section>";
-      var mv = mg.mirror;  // with a mirror watched: each folder as it is there (migrating.py mirror_view)
+      var mv = mg.mirror && mg.mirror.watched ? mg.mirror : null;  // with a mirror watched: each folder as it is there (migrating.py mirror_view)
       out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library folder") + '</th><th scope="col">' + H("Would become") +
         '</th><th scope="col">' + H("Size") + "</th>" + (mv ? '<th scope="col">' + esc(mv.name) + "</th>" : "") + '<th scope="col"></th></tr></thead><tbody>';
       cands.forEach(function (c) {
@@ -3791,14 +3807,18 @@ PCI18N.ready.then(function () {
     if (sy.running) out += '<div class="det muted">' + H("Working…") + "</div>";
     if (sy.error) out += '<div class="det bad">' + esc(sy.error) + "</div>";
     var cands = (sy.candidates || []).filter(function (c) { return c.id !== (S.plex2 || {}).machine_id; });
+    var ignored = (S.sync || {}).ignored || [];  // said not to be a mirror: Health, the tools and Child Dataset leave it be
     if (cands.length) {
       out += '<div class="what" style="margin-top:12px">' + H("Found") + ' <span class="muted">' + esc(T("looked {when}", { when: ago(sy.discovered_at) })) + "</span></div>" +
         '<div class="tbl-wrap"><table class="tbl"><tbody>' + cands.map(function (c) {
           var rate = c.rate == null ? null : Math.round(100 * c.rate);
-          var verdict = !c.url ? badge("info", T("Can’t be reached")) : rate == null ? badge("info", T("Not read")) : rate >= 90 ? badge("pass", T("Looks like a mirror")) : rate >= 20 ? badge("warn", T("Partly the same")) : badge("info", T("Not a mirror"));
+          var off = ignored.indexOf(c.id) >= 0;
+          var verdict = off ? badge("info", T("Ignored")) : !c.url ? badge("info", T("Can’t be reached")) : rate == null ? badge("info", T("Not read")) : rate >= 90 ? badge("pass", T("Looks like a mirror")) : rate >= 20 ? badge("warn", T("Partly the same")) : badge("info", T("Not a mirror"));
           return "<tr><td>" + esc(c.name) + '<div class="det">' + (c.libraries || []).map(function (l) { return esc(l.title) + ": " + esc(T("{found} of {of} files here", { found: fmtNum(l.found), of: fmtNum(l.of) })); }).join(" · ") +
             (c.error ? ' <span class="bad">' + esc(c.error) + "</span>" : "") + "</div></td><td>" + verdict + (rate != null ? ' <span class="muted">' + rate + "%</span>" : "") + "</td><td>" +
-            (c.url ? '<button class="btn sm" type="button" data-act="plex2-use-found" data-id="' + esc(c.id) + '">' + H("Watch It") + "</button>" : "") + "</td></tr>";
+            (c.url && !off ? '<button class="btn sm" type="button" data-act="plex2-use-found" data-id="' + esc(c.id) + '">' + H("Watch It") + "</button> " : "") +
+            (off ? '<button class="btn sm" type="button" data-act="mirror-unignore" data-id="' + esc(c.id) + '">' + H("Unignore") + "</button>"
+              : '<button class="btn sm" type="button" data-act="mirror-ignore" data-id="' + esc(c.id) + '" title="' + H("Not a mirror: Health, the tools and Convert Folder to Child Dataset stop asking about it.") + '">' + H("Ignore") + "</button>") + "</td></tr>";
         }).join("") + "</tbody></table></div>";
     }
     out += '<div class="acts" style="margin-top:10px"><button class="btn" type="button" data-act="sync-discover"' + (sy.running ? " disabled" : "") + ">" + H("Look Now") + "</button></div>";
@@ -3823,8 +3843,8 @@ PCI18N.ready.then(function () {
       H("Brings each paired library in line with the other server’s, one way, from the side whose edits win — when you press Apply. <a href=\"/sync\" data-nav>Tools → Sync Libraries</a>") + "</div></div></div>" +
       '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) + '<div class="grow"><div class="what">' + H("Mirror Checks") + '</div><div class="det">' +
       H("What Sync Libraries can’t bring in line, and what the folder sync or a Plex scan missed. <a href=\"/mirrorchecks\" data-nav>Tools → Mirror Checks</a>") + "</div></div></div>" +
-      '<div class="row">' + badge("info", T("Planned")) + '<div class="grow"><div class="what">' + H("Converting a folder to a child dataset, on synced folders") + '</div><div class="det">' +
-      H("Keeping the new dataset and the old folder out of the sync while the folder is converted, so nothing is sent to the other site.") + "</div></div></div></section>";
+      '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) + '<div class="grow"><div class="what">' + H("Convert Folder to Child Dataset") + '</div><div class="det">' +
+      H("Both servers converted one after the other, the folder sync kept off the new dataset and the old folder, and a conversion left partway on either side found. <a href=\"/dataset\" data-nav>Tools → Convert Folder to Child Dataset</a>") + "</div></div></div></section>";
     return out + "</div>";
   }
   function pageSystem() {
@@ -5835,10 +5855,16 @@ PCI18N.ready.then(function () {
       el.disabled = true;
       api("/api/sync/discover", {}).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
+    else if (act === "mirror-ignore" || act === "mirror-unignore") {  // a server that looks like a mirror, said not to be one (or again)
+      var ign = ((S.sync || {}).ignored || []).filter(function (x) { return x !== el.dataset.id; });
+      if (act === "mirror-ignore") ign.push(el.dataset.id);
+      queueSave("sync", "ignored", ign, true);
+      flush().then(migRecheck).then(load);
+    }
     else if (act === "plex2-use-found") {  // a server found by discovery: watched (its addresses tried again), and chosen as the mirror
       el.disabled = true;
       api("/api/plex2/servers", {}).then(function () { return api("/api/plex2/use", { id: el.dataset.id }); })
-        .then(function () { queueSave("sync", "mirrors", "plex2", true); load(); }).catch(function (e) { toast(e.message, true); load(); });
+        .then(function () { queueSave("sync", "mirrors", "plex2", true); return flush(); }).then(migRecheck).then(load).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "lib-tab") {
       // the library opened is worked out first — its counts, and the inspector reads its files first (focusQuery: load)

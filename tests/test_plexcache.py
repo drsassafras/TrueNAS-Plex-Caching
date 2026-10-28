@@ -4642,7 +4642,7 @@ class DataLayerTests(unittest.TestCase):
         st = Settings(d)
         self.assertEqual(st.section("tools")["sync"], {"*": {"source": "mirror", "scan": False, "grouping": False, "art": False, "edits": True},
                                                        "2": dict.fromkeys(("scan", "grouping", "matches", "edits", "art", "collections", "editions"), False)})
-        self.assertEqual(set(st.section("sync")), {"mirrors", "discover", "watched", "users"})
+        self.assertEqual(set(st.section("sync")), {"mirrors", "discover", "watched", "users", "ignored"})
         self.assertEqual((st.section("sync")["mirrors"], st.section("sync")["watched"]), ("plex2", "both"))
         with open(os.path.join(d, "settings.json"), "w") as fh:                                      # (already moved: what's there stays)
             json.dump({"sync": {"source": "this"}, "tools": {"sync": {"*": {"source": "mirror"}}}}, fh)
@@ -9416,8 +9416,9 @@ class MirrorMigrationTests(unittest.TestCase):
             app.peerlink.facts = lambda: self.facts["v"]
             app.settings.update({"plex2": {"name": "Cabin"}})
         record = lambda app, key, rs=None: {"status": "warn", "rs": 1024 * self.K, "best": 512 * self.K, "alt": 128 * self.K}
-        self.enterContext(mock.patch.object(zfs, "mounts", lambda: self.ml))
-        self.enterContext(mock.patch.object(checks, "library_record", record))
+        for patch in (mock.patch.object(zfs, "mounts", lambda: self.ml), mock.patch.object(checks, "library_record", record)):
+            patch.start()  # (not enterContext: that's Python 3.11 on, and the tests run on older ones too)
+            self.addCleanup(patch.stop)
         mig = migrating.Migration(app)
         app.migration = mig
         return app, mig, d, folder, mounted, props
@@ -9831,6 +9832,73 @@ class MirrorMigrationTests(unittest.TestCase):
         html = PageStructureTests()._render(app.state(), "dataset")["html"]
         self.assertIn('class="badge b-warn">Warning', html)
         self.assertIn('data-scope="this"', html)
+
+    def test_the_mirror_light(self):
+        """The light at the top of the page: grey with no mirror; green with the other Plex Cache talking directly; yellow
+        through its marker only, not heard from, or a mirror seen but not chosen — which stops the copy until it's chosen
+        (or said not to be one), as every tool goes by (tools.mirrored)."""
+        app, mig, d, folder, mounted, props = self._setup(mirror=False)
+        self._ready_dataset(folder, mounted, props)
+        app.sync.candidates = []
+        v = mig.mirror_view()
+        self.assertEqual((v["watched"], v["status"], en(v["title"])), (False, "off", "No mirror"))
+        app.sync.candidates = [{"id": "starlit", "name": "Starlit", "rate": 1.0}]                  # (looks like a mirror)
+        v = mig.mirror_view()
+        self.assertEqual((v["watched"], v["status"], en(v["title"])), (False, "warn", "Mirror: Starlit, not chosen yet"))
+        self.assertIn("Mirror page", en(v["detail"]))
+        mig.plan("9", folder)
+        c = self._by_id(mig.refresh())["mirror_chosen"]
+        self.assertFalse(c["ok"])
+        self.assertIn("mirror_chosen", [x["id"] for x in mig.blocking()])
+        with self.assertRaises(ValueError):
+            mig.start_copy()
+        self.assertIn("sync_checked", self._by_id(mig.refresh()))                             # (the folder sync asked of too)
+        app.sync.settings = lambda: {"mirrors": "none"}                                          # said: no mirror
+        self.assertNotIn("mirror_chosen", self._by_id(mig.refresh()))
+        self.assertEqual(mig.mirror_view()["status"], "off")
+        # watched: green talking directly, yellow through the marker or not heard from
+        app2, mig2, d2, folder2, mounted2, props2 = self._setup()
+        self.facts["v"] = self._facts()
+        v = mig2.mirror_view()
+        self.assertEqual((v["watched"], v["status"], en(v["title"])), (True, "ok", "Mirror: Cabin, talking directly"))
+        self.assertIn("This server goes first, then Cabin", en(v["detail"]))
+        self.facts["v"] = dict(self._facts(), via="marker")
+        v = mig2.mirror_view()
+        self.assertEqual((v["status"], en(v["title"])), ("warn", "Mirror: Cabin, through its marker only"))
+        self.assertIn("System → Mirror Plex Cache", en(v["detail"]))
+        self.facts["v"] = None
+        self.assertEqual(en(mig2.mirror_view()["title"]), "Mirror: Cabin, not heard from")
+        # drawn at the top of the page, its links working
+        app2.zfs = {"datasets": [{"dataset": "tank/media", "pool": "tank", "keys": ["9"]}], "pools": {}}
+        self.facts["v"] = dict(self._facts(), via="marker")
+        html = PageStructureTests()._render(app2.state(), "dataset")["html"]
+        self.assertIn('class="light l-warn"', html)
+        self.assertIn("Mirror: Cabin, through its marker only", html)
+        self.assertIn('<a href="/system#peer" data-nav>', html)
+        # a server that looks like a mirror, not chosen: Watch It or Ignore at the top of the page, and on the Mirror page
+        app.settings.update({"sync": {"mirrors": "unknown"}})
+        app.sync.settings = lambda: app.settings.section("sync")
+        app.zfs = app2.zfs
+        v = mig.mirror_view()
+        self.assertEqual((v["status"], v["how"], v["id"]), ("warn", "suspected", "starlit"))
+        html = PageStructureTests()._render(app.state(), "dataset")["html"]
+        self.assertIn('data-act="plex2-use-found" data-id="starlit"', html)
+        self.assertIn('data-act="mirror-ignore" data-id="starlit"', html)
+        state = app.state()
+        state["sync"] = dict(state.get("sync") or {}, candidates=app.sync.candidates)
+        html = PageStructureTests()._render(state, "mirrors")["html"]
+        self.assertIn('data-act="mirror-ignore" data-id="starlit"', html)
+        self.assertIn("Tools → Convert Folder to Child Dataset", html)                          # (what uses the mirror: no longer planned)
+        app.settings.update({"sync": {"ignored": ["starlit"]}})                                   # Ignore
+        self.assertEqual(mig.mirror_view()["status"], "off")
+        self.assertNotIn("mirror_chosen", self._by_id(mig.refresh()))
+        state = app.state()
+        state["sync"] = dict(state.get("sync") or {}, candidates=app.sync.candidates)
+        html = PageStructureTests()._render(state, "mirrors")["html"]
+        self.assertIn('data-act="mirror-unignore" data-id="starlit"', html)
+        self.assertIn(">Ignored<", html)
+        with self.assertRaises(Exception):
+            app.settings.update({"sync": {"ignored": "starlit"}})                                 # (a list, of ids)
 
 
 class OptimizerSetupTests(unittest.TestCase):
@@ -13003,10 +13071,13 @@ class ToolsTests(unittest.TestCase):
         # a server of the account whose files are here too counts as a mirror until you say there's none
         app.settings.update({"sync": {"mirrors": "unknown"}})
         app.sync.candidates = [{"id": "zzz", "name": "Starlit", "url": "", "libraries": [], "rate": 0.95}]
-        self.assertEqual(tool.mirrored("1"), {"name": "Starlit", "how": "suspected"})
+        self.assertEqual(tool.mirrored("1"), {"name": "Starlit", "how": "suspected", "id": "zzz"})
         with self.assertRaises(ValueError) as cm3:
             tool.apply_async([snap["scan"]["rows"][0]["id"]])
         self.assertIn("may be mirrored (Starlit)", en(cm3.exception.args[0]))
+        app.settings.update({"sync": {"ignored": ["zzz"]}})                                        # (Ignore: said not to be one)
+        self.assertIsNone(tool.mirrored("1"))
+        app.settings.update({"sync": {"ignored": []}})
         app.settings.update({"sync": {"mirrors": "none"}})
         self.assertIsNone(tool.mirrored("1"))                                                       # (said: no mirror)
         js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()

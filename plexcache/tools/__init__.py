@@ -568,32 +568,13 @@ class Tool:
     # ------------------------------------------------------------ what the tools share
     def mirror(self, library: str):
         """The mirrored server's library paired with ``library``, or None (no mirror, or not paired)."""
-        other = getattr(self.app, "other", None)
-        if other is None or not other.configured() or self.app.sync.decided() != "plex2":
-            return None
-        return other.pairs().get(str(library))
+        return mirror(self.app, library)
 
     def mirrored(self, library: str) -> dict | None:
-        """Whether the library's files are mirrored somewhere, as far as the app can tell: {"name", "how": "watched" |
-        "suspected" | "peer"} — the mirrored server watched on the Mirror page; a server of the account whose files are
-        here too (a mirror until you say otherwise); another Plex Cache sharing the folders. None when you've said
-        there's no mirror, or none is seen."""
-        if self.mirror(library) is not None:
-            return {"name": self.mirror_name(), "how": "watched"}
-        sync = getattr(self.app, "sync", None)
-        if sync is None or sync.settings().get("mirrors") == "none":
-            return None
-        mine = self.app.settings.section("plex2").get("machine_id")
-        for c in getattr(sync, "candidates", None) or []:
-            if (c.get("rate") or 0) >= 0.9 and c.get("id") != mine:
-                return {"name": c.get("name") or c.get("id") or "", "how": "suspected"}
-        for sy in ((getattr(self.app, "peers_summary", None) or {}).get("systems") or []):
-            if str(library) in [str(k) for k in sy.get("libraries") or []]:
-                return {"name": sy.get("name") or sy.get("instance") or "", "how": "peer"}
-        return None
+        return mirrored(self.app, library)
 
     def mirror_name(self) -> str:
-        return self.app.other.settings().get("name") or M("the mirrored server")
+        return mirror_name(self.app)
 
     def file_action(self, action: str, path: str, to: str = "", root: str = "") -> dict:
         """A file action through the optimizer service, its refusal said in words."""
@@ -624,6 +605,36 @@ class Tool:
         with self.lock:
             if self.progress and self.progress.get("what") == "scan":
                 self.progress.update(step="rows", done=int(done), total=int(total))
+
+
+def mirror(app, library: str):
+    """The mirrored server's library paired with ``library``, or None (no mirror, or not paired)."""
+    other = getattr(app, "other", None)
+    if other is None or not other.configured() or app.sync.decided() != "plex2":
+        return None
+    return other.pairs().get(str(library))
+
+
+def mirrored(app, library: str) -> dict | None:
+    """Whether the library's files are mirrored somewhere, as far as the app can tell: {"name", "how": "watched" |
+    "suspected" | "peer"} — the mirrored server watched on the Mirror page; a server of the account whose files are
+    here too (a mirror until you say otherwise); another Plex Cache sharing the folders. None when you've said
+    there's no mirror, or none is seen. What every tool goes by, and converting a folder to a child dataset too."""
+    if mirror(app, library) is not None:
+        return {"name": mirror_name(app), "how": "watched"}
+    sync = getattr(app, "sync", None)
+    if sync is None or sync.settings().get("mirrors") == "none":
+        return None
+    for c in sync.likely():
+        return {"name": c.get("name") or c.get("id") or "", "how": "suspected", "id": c.get("id") or ""}
+    for sy in ((getattr(app, "peers_summary", None) or {}).get("systems") or []):
+        if str(library) in [str(k) for k in sy.get("libraries") or []]:
+            return {"name": sy.get("name") or sy.get("instance") or "", "how": "peer"}
+    return None
+
+
+def mirror_name(app) -> str:
+    return app.other.settings().get("name") or M("the mirrored server")
 
 
 class ToolJob(Job):

@@ -40,6 +40,7 @@ DEFAULTS: dict = {
         "discover": True,        # look for mirrors among the account's servers, weekly
         "watched": "plex",       # watched state and ratings: "plex" (Plex's own sync carries them) | "off" | "both"
         "users": "home",         # whose: "me" | "home" (every user of the Plex Home)
+        "ignored": [],           # servers found that look like a mirror, said not to be one (their Plex machine ids)
     },
     "truenas": {"url": "", "api_key": "", "verify_tls": False},
     # The other Plex Cache, at the mirror's site (peerlink.py: System → Mirror Plex Cache). "enabled": looked for (off: there's
@@ -386,6 +387,10 @@ def _coerce(section: str, key: str, value, current):
         if value is not None and not (isinstance(value, str) and _ISO_TIME.fullmatch(value)):
             raise SettingsError(M("general.hdd_measured_at must be a date and time"))
         return value
+    if (section, key) == ("sync", "ignored"):
+        if not isinstance(value, list) or len(value) > MAX_ITEMS:
+            raise SettingsError(M("sync.ignored must be a list"))
+        return list(dict.fromkeys(_text(section, key, x, 200, spaces=False) for x in value))
     if key == "excluded_libraries":
         if not isinstance(value, list) or len(value) > MAX_ITEMS:
             raise SettingsError(M("excluded_libraries must be a list"))

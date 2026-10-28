@@ -641,10 +641,10 @@ def _sync_items(app) -> list[dict]:
     elif s.get("mirrors") == "plex2" and not app.other.configured():
         out.append(dict(item("warn", M("The mirrored Plex server isn’t set up"), M("A mirror was chosen, but no server is watched yet."),
                              M("On the [Mirror page](/mirrors), choose the server."))))
-    likely = [c for c in sync.candidates if (c.get("rate") or 0) >= 0.9 and c.get("id") != app.settings.section("plex2").get("machine_id")]
-    if likely and s.get("mirrors") != "none":
+    likely = sync.likely()
+    if likely:
         out.append(dict(item("info", M("A server that looks like a mirror: {names}", names=[c["name"] for c in likely]),
-                             M("Its files are here too, at the same places (a sample of them)."), M("Watch it on the [Mirror page](/mirrors), or say it isn’t a mirror."))))
+                             M("Its files are here too, at the same places (a sample of them)."), M("Watch it on the [Mirror page](/mirrors), or Ignore it there if it isn’t a mirror."))))
     out.extend(_peer_items(app))
     out.extend(_mirror_items(app))
     return out
