@@ -90,11 +90,14 @@ h2{font-size:17px;margin:0 0 4px;font-weight:600}
 .b-pass,.b-use,.b-ok,.b-done{background:var(--ok-bg);color:var(--ok)}
 .b-warn,.b-maybe,.b-stopped{background:var(--warn-bg);color:var(--warn)}
 .b-fail,.b-avoid,.b-failed,.b-errors{background:var(--bad-bg);color:var(--bad)}
+a.badge{text-decoration:none}a.badge:hover{text-decoration:underline}
 .b-info,.b-skip,.b-cancelled,.b-waiting,.b-manual{background:var(--info-bg);color:var(--info)}
 .b-off{background:var(--info-bg);color:var(--info)}  /* an issue whose switch is off for the library */
 .tbl.tool tr.off td{opacity:.6}
 .seg button .count{display:inline-block;min-width:20px;padding:0 6px;border-radius:10px;background:var(--line2);color:var(--ink);font-size:12px;font-weight:600;text-align:center;margin-left:4px}
 .seg button .count.warn{background:var(--warn-bg);color:var(--warn)}
+.seg button .count.fail{background:var(--bad-bg);color:var(--bad)}
+.seg button .count.ok{background:var(--ok-bg);color:var(--ok)}
 .tooloptions{flex-basis:100%;border-bottom:1px solid var(--line2);padding-bottom:8px}
 .tooloptions .toolway{grid-column:1 / -1}
 .b-reading,.b-running,.b-scanning{background:var(--run-bg);color:var(--run)}
@@ -117,6 +120,7 @@ h2{font-size:17px;margin:0 0 4px;font-weight:600}
 .optline label{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 .head{display:flex;flex-wrap:wrap;align-items:center;gap:14px}
 .head h2{font-size:19px;margin:0}
+/* Tools → Mirror Health: the findings, a group per kind */
 .lede{color:var(--soft);font-size:14px;margin:6px 0 0;max-width:780px}
 .sw{position:relative;width:56px;height:32px;border-radius:999px;border:0;cursor:pointer;flex:none;padding:0;background:#B7BEB9}
 .sw[aria-pressed="true"]{background:var(--accent)}
@@ -656,8 +660,15 @@ h2 .mode-ic{vertical-align:-3px}
 .ssfiles>div{padding-left:0}
 .ssnotes .ssfiles{margin-top:0}
 /* Library → Health: the checks by category, each with its switch and count */
-.lhgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px 28px;margin:8px 0 12px}
-.lhgrid>*{min-width:0}
+.lhtools{columns:300px;column-gap:28px;margin:8px 0 12px}  /* the Library page's tools: a line each, in columns where there's room */
+.lhtools>*{break-inside:avoid}
+.lhtool{gap:6px 10px;min-height:36px}
+.libstats{display:flex;margin:10px 0 8px}
+.libstats .toolstats{margin-left:0;justify-content:flex-start}
+.lhtool>a{flex:1 1 0;min-width:0}
+.lhtool>.badge{margin-left:auto}
+.lhtool>.btn{flex:none;min-width:64px}
+.lhtool.lhhidden>a,.lhtool.lhhidden>.badge{opacity:.55}  /* (hidden from the list below: still a click away) */
 /* every tool's options, the File Checks' way: a row each, two columns where there's room, the count on the right */
 .optgrid{columns:340px;column-gap:28px;margin:6px 0 8px;padding-bottom:8px;border-bottom:1px solid var(--line2)}  /* (columns, not a grid: a tall option — one with options of its own — doesn't stretch its row and leave holes beside it) */
 .optgrid>*{min-width:0;break-inside:avoid}
@@ -679,12 +690,24 @@ h2 .mode-ic{vertical-align:-3px}
 /* what a tool has found to do: on its card, and summed beside Tools in the menu */
 .toolcard .count{display:inline-block;min-width:22px;padding:1px 7px;border-radius:11px;background:var(--line2);color:var(--ink);font-size:13px;font-weight:600;text-align:center;vertical-align:middle;margin-left:6px}
 .toolcard .count.warn{background:var(--warn-bg);color:var(--warn)}
+.toolcard .count.fail{background:var(--bad-bg);color:var(--bad)}
+.toolcard .count.ok{background:var(--ok-bg);color:var(--ok)}
 .count.busy{display:inline-flex;align-items:center;justify-content:center;vertical-align:middle}
+/* a count that doesn't apply there (evaluate.py "na"): a grey dash */
+.count.na{background:var(--line2);color:var(--muted);font-weight:400}
+.icon .count.busy{display:inline-flex;background:var(--line2);box-shadow:0 0 0 2px var(--side)}
+.icon .count.busy .spin{width:8px;height:8px;border-width:2px}
+.icon .count.busy.warn{background:#E0A04A;color:#1b1b1b}
+.icon .count.busy.fail{background:#D9534F;color:#fff}
+.count.busy.warn .spin,.count.busy.fail .spin{border-color:currentColor;border-right-color:transparent}
+/* a count still growing (evaluate.py "partial"): what's been found so far, the wheel beside it */
+.count.partial{gap:4px}
+.count.partial .spin{width:8px;height:8px}
 .spin{display:inline-block;width:10px;height:10px;border:2px solid var(--muted);border-right-color:transparent;border-radius:50%;animation:spin .9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spin{animation:none;border-right-color:var(--muted);opacity:.55}}
 .icon .count{position:absolute;right:-9px;top:-8px;min-width:16px;padding:0 4px;border-radius:9px;background:#E0A04A;color:#1b1b1b;font-size:10px;line-height:16px;font-weight:700;text-align:center;box-shadow:0 0 0 2px var(--side)}
-.lhstats{font-size:14px;margin:8px 0 0}
+.icon .count.fail{background:#D9534F;color:#fff}
 .toolcard p{color:var(--soft);font-size:14px;margin:6px 0 12px}
 .seg a[role=tab]{display:inline-flex;align-items:center;font:inherit;font-size:13px;font-weight:600;text-decoration:none;color:var(--soft);border-radius:8px;padding:0 10px;min-height:32px}
 .seg a[role=tab][aria-selected=true]{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}

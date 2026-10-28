@@ -110,7 +110,7 @@ class UnlinkFiles(Tool):
         key = str((self.scan_result or {}).get("library") or "")
         mirror = self.mirrored(key)
         if self.removes(key) and mirror is not None:
-            raise ValueError(M("Not while the files may be mirrored ({name}): a path removed here is removed there too by the folder sync — and there it isn’t a link but the only copy. Make each link a file of its own instead, then tidy the copies with Merge Duplicates on each side; or say there’s no mirror on the Sync page.", name=mirror["name"]))
+            raise ValueError(M("Not while the files may be mirrored ({name}): a path removed here is removed there too by the folder sync — and there it isn’t a link but the only copy. Make each link a file of its own instead, then tidy the copies with Merge Duplicates on each side; or say there’s no mirror on the Mirror page.", name=mirror["name"]))
         return super().apply_async(ids, choices)
 
     def apply_row(self, row: dict, log) -> dict:

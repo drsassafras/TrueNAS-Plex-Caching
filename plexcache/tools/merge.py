@@ -11,8 +11,8 @@ different frame rate or cut of the credits; two films that merely share a title 
 more) — and they're the same edition (a Director's Cut and the theatrical cut are two records on
 purpose), unless their files are the very same file. The record kept is the one with the most edited
 fields, then the most files, then the oldest. Only this server's records: a merge changes nothing on
-a mirrored server (no file is touched), so its own duplicates are its own matter — or Library Sync's, which
-merges them there when this server is its source (sync.py: one item here, several there).
+a mirrored server (no file is touched), so its own duplicates are its own matter — or Sync Libraries', which
+merges them there when this server's edits win (tools/sync.py: one item here, several there).
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ def clusters(recs: list[dict]) -> list[tuple[str, list[dict]]]:
 
 class MergeDuplicates(Tool):
     name = "merge"
-    scan_version = 3  # (rows hold whole records now, as the Sync view shows them; the scan says the mirror, for the box before Apply)
+    scan_version = 3  # (rows hold whole records now, as Sync Libraries shows them; the scan says the mirror, for the box before Apply)
     # a record whose versions are named for different films (Plex Checks: Dissimilar file naming): a file on the wrong
     # record, most likely — merged, it would be folded in for good, so the row is held until it's split apart, or ignored there
     blocking_checks = ("versions_named_differently",)

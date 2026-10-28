@@ -4,6 +4,7 @@
 #
 #   tnsync local     the files in your folder right now, uncommitted changes included
 #   tnsync master    the latest code on GitHub's default branch (main or master)
+#   tnsync dev       the latest code on GitHub's dev branch
 #   tnsync release   the newest release tag, e.g. v1.2.0
 #   tnsync beta      the newest tag including pre-releases, e.g. v1.3.0-beta.1
 #   tnsync init      set up tnsync for the project you're in
@@ -19,7 +20,11 @@
 # If the project's .tnsync has TN_TEST, that command runs in the code being
 # copied: by default after the copy and restart (so the app is ready sooner),
 # or first with --tests-first. Failures end in a red banner either way.
-# TNSYNC_MODE (local, master, release, beta) tells the tests which was asked for.
+# TNSYNC_MODE (local, master, dev, release, beta) tells the tests which was asked for.
+#
+# If the NAS already has exactly these files, nothing is copied or restarted.
+# When the last tests tnsync ran there passed, it just says so (green banner);
+# otherwise it runs the tests again (yellow banner first).
 #
 # Settings come from two files (KEY=value lines):
 #   ~/.config/tnsync/config   shared:      TN_HOST, TN_USER, TN_PORT
@@ -30,15 +35,18 @@
 
 set -eo pipefail
 
-TNSYNC_VERSION="1.3.0"
+TNSYNC_VERSION="1.4.0"
 GLOBAL_CONF="${TNSYNC_CONFIG:-$HOME/.config/tnsync/config}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tnsync"   # last test result per app
 
 # ----------------------------------------------------------------- output
 if [ -t 1 ]; then
     C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'; C_BLU=$'\033[34m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
     C_BAD=$'\033[1;97;41m'   # bold white on red
+    C_GOOD=$'\033[1;97;42m'  # bold white on green
+    C_MEH=$'\033[1;30;43m'   # bold black on yellow
 else
-    C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_DIM=""; C_OFF=""; C_BAD=""
+    C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_DIM=""; C_OFF=""; C_BAD=""; C_GOOD=""; C_MEH=""
 fi
 say()  { printf '%s\n' "$*"; }
 info() { printf '%s==>%s %s\n' "$C_BLU" "$C_OFF" "$*"; }
@@ -47,19 +55,24 @@ warn() { printf '%sWarning:%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
 die()  { printf '%stnsync:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 
 usage() {
-    sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,32p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
-# A loud red block that can't be missed in the terminal.
-red_banner() {
-    local line
-    printf '\n' >&2
+# Loud blocks that can't be missed in the terminal.
+banner() {   # banner <colour> <line>...
+    local colour="$1" line
+    shift
+    printf '\n'
     for line in "" "$@" ""; do
-        printf '%s  %-66s  %s\n' "$C_BAD" "$line" "$C_OFF" >&2
+        printf '%s  %-66s  %s\n' "$colour" "$line" "$C_OFF"
     done
-    printf '\n' >&2
+    printf '\n'
 }
+red_banner()    { banner "$C_BAD" "$@" >&2; }
+green_banner()  { banner "$C_GOOD" "$@"; }
+yellow_banner() { banner "$C_MEH" "$@"; }
+fail() { red_banner "$@"; exit 1; }   # a red block, then stop
 
 # ----------------------------------------------------------------- args
 MODE=""
@@ -78,15 +91,15 @@ while [ $# -gt 0 ]; do
         --version)       say "tnsync $TNSYNC_VERSION"; exit 0 ;;
         -*)              die "unknown option: $1 (see tnsync --help)" ;;
         *)
-            [ -z "$MODE" ] || die "only one of local, master, release, beta or init"
+            [ -z "$MODE" ] || die "only one of local, master, dev, release, beta or init"
             MODE="$1" ;;
     esac
     shift
 done
 case "$MODE" in
-    local|master|main|release|beta|init) ;;
+    local|master|main|dev|release|beta|init) ;;
     "") usage 1 ;;
-    *)  die "unknown command: $MODE (use local, master, release, beta or init)" ;;
+    *)  die "unknown command: $MODE (use local, master, dev, release, beta or init)" ;;
 esac
 
 # ----------------------------------------------------------------- config
@@ -219,10 +232,13 @@ case "$MODE" in
             SRC_LABEL="$SRC_LABEL (on $(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null))"
         fi
         ;;
-    master|main|release|beta)
+    master|main|dev|release|beta)
         git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || die "'tnsync $MODE' needs a git repository; use 'tnsync local'"
         info "Fetching from GitHub…"
-        git -C "$ROOT" fetch --quiet --tags origin || die "git fetch failed"
+        git -C "$ROOT" fetch --quiet --tags origin || fail "CAN'T REACH GITHUB  -  NOTHING WAS COPIED" \
+            "" \
+            "git fetch failed (see the error above)." \
+            "Check that you're online, then run 'tnsync $MODE' again."
         if [ "$MODE" = "master" ] || [ "$MODE" = "main" ]; then
             ref="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
             if [ -z "$ref" ]; then
@@ -236,6 +252,9 @@ case "$MODE" in
             fi
             [ -n "$ref" ] || die "can't work out the default branch on origin"
             export_ref "$ref" "$ref"
+        elif [ "$MODE" = "dev" ]; then
+            git -C "$ROOT" rev-parse --verify --quiet "origin/dev" >/dev/null || die "there's no dev branch on origin"
+            export_ref "origin/dev" "origin/dev"
         elif [ "$MODE" = "release" ]; then
             tag="$(newest_tag '^v?[0-9]+(\.[0-9]+)*$')"
             [ -n "$tag" ] || die "no release tags (like v1.2.0) yet"
@@ -261,9 +280,37 @@ say "  ${C_DIM}App${C_OFF}      $TN_APP"
 [ "$DRY_RUN" = 1 ] && say "  ${C_YEL}Dry run: nothing will be changed${C_OFF}"
 say ""
 
+# ----------------------------------------------------------------- last test result
+# One small file per NAS folder, written only when the tests ran on exactly the
+# code that's on the NAS. Read as KEY=value lines, never run.
+STATE_FILE="$STATE_DIR/$(printf '%s' "$TN_HOST:$TN_DEST" | tr -c 'A-Za-z0-9._-' '_')"
+state_get() { [ -f "$STATE_FILE" ] && sed -n "s/^$1=//p" "$STATE_FILE" | head -n 1; true; }
+state_clear() { rm -f "$STATE_FILE"; }
+record_tests() {   # record_tests pass|fail — only if the tests actually ran
+    if [ "$TESTS_RAN" != 1 ]; then state_clear; return 0; fi
+    mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+    printf 'result=%s\nmode=%s\nwhen=%s\ntest=%s\n' "$1" "$MODE" "$(date '+%Y-%m-%d %H:%M')" "$TN_TEST" \
+        > "$STATE_FILE" 2>/dev/null || true
+}
+# Prints why the last result doesn't count for this run; prints nothing if it passed.
+last_tests_not_passed() {
+    local result when
+    result="$(state_get result)"; when="$(state_get when)"
+    if [ -z "$result" ]; then
+        say "tnsync has no test result for this code yet."
+    elif [ "$result" != "pass" ]; then
+        say "The last test run failed ($when)."
+    elif [ "$(state_get test)" != "$TN_TEST" ]; then
+        say "TN_TEST has changed since the last test run."
+    elif [ "$(state_get mode)" != "$MODE" ]; then
+        say "The last tests ran for 'tnsync $(state_get mode)', not 'tnsync $MODE'."
+    fi
+}
+
 # ----------------------------------------------------------------- tests
-# run_tests before|after — runs TN_TEST in the code being copied. Returns non-zero
-# (after a red banner) if it fails.
+# run_tests before|after|insync — runs TN_TEST in the code being copied. Returns
+# non-zero (after a red banner) if it fails. Sets TESTS_RAN=1 if it ran them.
+TESTS_RAN=0
 run_tests() {
     local when="$1"
     if [ "$SKIP_TESTS" = 1 ]; then
@@ -275,14 +322,20 @@ run_tests() {
         return 0
     fi
     info "Running tests: $TN_TEST"
-    # Run in the code being copied (for master/release/beta that's the exported
+    TESTS_RAN=1
+    # Run in the code being copied (for master/dev/release/beta that's the exported
     # copy, not your folder). Python's bytecode cache is kept out of the project.
     # Straight to the terminal (not through a pipe), so a test runner can draw a progress bar.
     if ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$TN_TEST" ); then
         ok "Tests passed"
         return 0
     fi
-    if [ "$when" = "before" ]; then
+    if [ "$when" = "insync" ]; then
+        red_banner "TESTS FAILED  -  THE FILES WERE ALREADY IN SYNC" \
+                   "" \
+                   "$TN_APP is running this code (nothing was copied)." \
+                   "Fix the failures above, then run 'tnsync $MODE' again."
+    elif [ "$when" = "before" ]; then
         red_banner "TESTS FAILED  -  NOTHING WAS COPIED TO $TN_HOST" \
                    "" \
                    "$TN_APP is still running the code it had before." \
@@ -299,24 +352,26 @@ run_tests() {
     return 1
 }
 
-if [ "$TESTS_FIRST" = 1 ]; then
-    run_tests before || exit 1
-fi
-
 command -v rsync >/dev/null 2>&1 || die "rsync isn't installed (on a Mac: it normally is; try 'brew install rsync')"
 info "Connecting to ${TN_HOST}…"
-ssh_run "true" || die "can't SSH to $REMOTE. Check TrueNAS: System → Services → SSH is running, and your key is added to $TN_USER."
+ssh_run "true" || fail "CAN'T CONNECT TO $TN_HOST  -  NOTHING WAS COPIED" \
+    "" \
+    "SSH to $REMOTE failed (see the error above). Check:" \
+    "  - you're online and on the same network as the NAS" \
+    "  - TrueNAS: System > Services > SSH is running" \
+    "  - your key is added to $TN_USER"
 
 set -f   # keep exclude patterns like *.pyc from expanding here
-RSYNC_ARGS=(-a --delete -e "ssh $SSH_OPTS")
-for pat in $TN_EXCLUDE; do RSYNC_ARGS+=(--exclude "$pat"); done
+RSYNC_BASE=(-a --delete -e "ssh $SSH_OPTS")
+for pat in $TN_EXCLUDE; do RSYNC_BASE+=(--exclude "$pat"); done
+RSYNC_ARGS=("${RSYNC_BASE[@]}")
 [ "$DRY_RUN" = 1 ] && RSYNC_ARGS+=(-n -v) || RSYNC_ARGS+=(-v)
 PATHS_LIST=$TN_PATHS
 set +f
 
-COPIED=0
-for p in $PATHS_LIST; do
-    p="${p%/}"
+resolve_path() {   # resolve_path <TN_PATHS entry> — sets from, to, parent
+    local p="$1"
+    case "$p" in ..*|/*) die "TN_PATHS entries must be inside the project: $p" ;; esac
     if [ "$p" = "." ]; then
         from="$SRC/"; to="$TN_DEST/"; parent="$TN_DEST"
     elif [ -d "$SRC/$p" ]; then
@@ -326,25 +381,104 @@ for p in $PATHS_LIST; do
     else
         die "'$p' (from TN_PATHS) isn't in the source"
     fi
-    case "$p" in ..*|/*) die "TN_PATHS entries must be inside the project: $p" ;; esac
+}
+
+# ----------------------------------------------------------------- already in sync?
+# Compares file contents (not just dates), so the same code from another branch
+# or tag counts as in sync. Prints one line per file that would change; prints
+# "?" if it couldn't tell (for example, the folder isn't on the NAS yet).
+pending_changes() {
+    local p out itemize=0
+    # Every rsync since 2.6.7 (and macOS's openrsync) lists changes with -i; fall back to -v.
+    rsync -i --version >/dev/null 2>&1 && itemize=1
+    for p in $PATHS_LIST; do
+        p="${p%/}"
+        resolve_path "$p"
+        if [ "$itemize" = 1 ]; then
+            out="$(rsync "${RSYNC_BASE[@]}" -n -c -i "$from" "$REMOTE:$to" 2>/dev/null)" || { say "?"; return 0; }
+            # < > c h are copies and creations; lines starting "." only touch dates or permissions.
+            printf '%s\n' "$out" | grep -E '^([<>ch]|\*deleting)' || true
+        else
+            out="$(rsync "${RSYNC_BASE[@]}" -n -c -v "$from" "$REMOTE:$to" 2>/dev/null)" || { say "?"; return 0; }
+            printf '%s\n' "$out" | grep -v -E '^(sending|building|sent |total size|created directory|$)|/$' || true
+        fi
+    done
+}
+
+CHANGES="$(pending_changes)" || exit 1
+if [ -z "$CHANGES" ]; then
+    if [ -z "$TN_TEST" ] || [ "$SKIP_TESTS" = 1 ]; then
+        green_banner "ALREADY IN SYNC  -  NOTHING TO COPY" \
+                     "" \
+                     "$TN_HOST already has exactly these files." \
+                     "Nothing was copied and $TN_APP wasn't restarted."
+        exit 0
+    fi
+    why="$(last_tests_not_passed)"
+    if [ -z "$why" ]; then
+        green_banner "ALREADY IN SYNC  -  TESTS ALREADY PASSED" \
+                     "" \
+                     "$TN_HOST already has exactly these files, and the" \
+                     "last tests tnsync ran on them passed ($(state_get when))." \
+                     "Nothing was copied and $TN_APP wasn't restarted."
+        exit 0
+    fi
+    yellow_banner "ALL FILES ARE IN SYNC  -  RE-RUNNING TESTS" \
+                  "" \
+                  "$why" \
+                  "Nothing will be copied and $TN_APP won't be restarted."
+    if run_tests insync; then record_tests pass; exit 0; fi
+    record_tests fail
+    exit 1
+fi
+
+if [ "$TESTS_FIRST" = 1 ]; then
+    run_tests before || exit 1
+fi
+
+# The NAS is about to get different code, so the last test result no longer applies.
+[ "$DRY_RUN" = 1 ] || state_clear
+
+COPIED=0
+CHANGED=0   # files actually copied or deleted
+for p in $PATHS_LIST; do
+    p="${p%/}"
+    resolve_path "$p"
     [ "$DRY_RUN" = 1 ] || ssh_run "mkdir -p '$parent'" || die "can't create $parent on TrueNAS (does $TN_USER own it?)"
     info "Copying $p"
     # Indent rsync's file list and drop its summary lines.
-    if ! rsync "${RSYNC_ARGS[@]}" "$from" "$REMOTE:$to" 2>&1 \
-        | { grep -v -E '^(sending|building|sent |total size|created directory|$)' || true; } | sed 's/^/    /'; then
-        die "copy failed"
+    if ! out="$(rsync "${RSYNC_ARGS[@]}" "$from" "$REMOTE:$to" 2>&1)"; then
+        printf '%s\n' "$out" | sed 's/^/    /'
+        fail "COPY FAILED  -  $TN_HOST MAY HAVE PART OF THE CODE" \
+             "" \
+             "rsync stopped partway (see the error above)." \
+             "Fix it, then run 'tnsync $MODE' again."
     fi
+    out="$(printf '%s\n' "$out" | grep -v -E '^(sending|building|sent |total size|created directory|$)' || true)"
+    [ -z "$out" ] || printf '%s\n' "$out" | sed 's/^/    /'
+    CHANGED=$((CHANGED + $(printf '%s\n' "$out" | grep -c -v -E '/$|^$' || true)))   # folders don't count
     COPIED=$((COPIED + 1))
 done
 if [ "$DRY_RUN" = 1 ]; then ok "Dry run: the files listed above would be copied"; else ok "Copied $COPIED path(s) to $TN_HOST"; fi
 
 # ----------------------------------------------------------------- restart
 finish() {   # the tests, unless they already ran first
-    if [ "$TESTS_FIRST" = 1 ]; then exit 0; fi
-    run_tests after || exit 1
-    exit 0
+    if [ "$TESTS_FIRST" = 1 ]; then
+        [ "$DRY_RUN" = 1 ] || record_tests pass
+        exit 0
+    fi
+    if run_tests after; then
+        [ "$DRY_RUN" = 1 ] || record_tests pass
+        exit 0
+    fi
+    [ "$DRY_RUN" = 1 ] || record_tests fail
+    exit 1
 }
 [ "$DRY_RUN" = 1 ] && finish
+if [ "$CHANGED" = 0 ]; then
+    say "No files changed on $TN_HOST, so $TN_APP wasn't restarted."
+    finish
+fi
 if [ "$RESTART" = "ask" ]; then
     if [ -t 0 ]; then
         read -r -p "Restart '$TN_APP' on $TN_HOST now? [y/N] " ans
@@ -367,6 +501,9 @@ exit 1"
 if ssh_run "$REMOTE_RESTART"; then
     ok "Restarted $TN_APP — ready to try while the tests run"
 else
-    die "couldn't restart $TN_APP. Check the app name, and that $TN_USER may run midclt (see the tnsync README)."
+    fail "COPIED, BUT $TN_APP COULDN'T BE RESTARTED" \
+         "" \
+         "Check the app name, and that $TN_USER may run midclt" \
+         "(see the tnsync README). The tests weren't run."
 fi
 finish

@@ -2465,6 +2465,49 @@ def _new_app(**settings):
     return app
 
 
+def evaluated(app, *keys, timeout=60):
+    """Every count of the libraries (``keys``, or every one) worked out as the evaluator's thread would in time: the
+    files inspected, every unit brought (its data read first) — for a test of a page's drawing with its numbers in. The
+    evaluation itself, and its order, are tested by CountStandardTests."""
+    ev = app.evaluator
+    keys = [str(k) for k in keys] or ev.libraries()
+    for key in keys:
+        app.inspector.start(key)
+        wait_for(lambda: not app.inspector.left(key) and not app.inspector.running_for(key), timeout)
+        for name, u in ev.units().items():
+            try:
+                if name == "optimizer":
+                    if u.applies(key) is None and not u.current(key):
+                        app.libdata.gather(key, u.needs, wait=True)
+                        app.optimizing.survey()
+                    continue
+                ev.bring(name, key)
+            except ValueError:
+                pass  # (failed: the count says so)
+    return app
+
+
+def counted(st, counts=None):
+    """The state with every count in (a test of a page's drawing, not of the evaluation): ``counts`` {page: {key: n}} the
+    numbers wanted, the rest done as they are or 0; a count that doesn't apply stays so unless it's given. The totals
+    worked out from them as the server does (evaluate.total)."""
+    from plexcache.evaluate import done, total
+    st = jsonable(st)
+    counts = counts or {}
+    pages = [p for p in st["counts"] if p != "tools"]
+    for page in pages:
+        per = st["counts"][page]["libraries"]
+        for key, c in per.items():
+            if key in (counts.get(page) or {}):
+                per[key] = done(counts[page][key])
+            elif c["s"] != "na":
+                per[key] = done(c.get("n") or 0)
+        st["counts"][page]["total"] = total(list(per.values()))
+    tools = [st["counts"][p]["total"] for p in pages if p not in ("library",)]
+    st["counts"]["tools"] = {"libraries": {}, "total": total(tools)}
+    return st
+
+
 class PlaybackMonitorTests(unittest.TestCase):
     """The playback monitor driven poll by poll against the fake Plex."""
 
@@ -4459,7 +4502,7 @@ class DataLayerTests(unittest.TestCase):
         # the page: what a row says comes through chips (chips(): a badge that opens to its explanation), never a bare
         # badge, nor an ⓘ in a row — the one style, the Sync and Health views' — so every tool reads alike
         js = open(os.path.join(root, "web", "app.js"), encoding="utf-8").read()
-        for fn in ("mergeCard", "versionsCard") + tuple("page" + n.capitalize() for n in ("folders", "unlink", "convert")):
+        for fn in ("mergeCard", "versionsCard", "syncCard") + tuple("page" + n.capitalize() for n in ("folders", "unlink", "convert")):
             body = re.search(r"\n  function " + fn + r"\(.*?\{(.*?)(?=\n  function |\n  var )", js, re.S)
             self.assertIsNotNone(body, fn)
             rows = body.group(1)
@@ -4522,7 +4565,7 @@ class DataLayerTests(unittest.TestCase):
         settings keep a library's options apart from another's."""
         from plexcache import libhealth
         tt = ToolsTests()
-        app, plex, client, cat, _ = tt._app()
+        app, plex, client, cat, _ = tt._app(mirror=True)                                               # (Sync Libraries: a mirror to compare with)
         rootd = os.path.join(cat["root"], "Movies")
         copy = os.path.join(rootd, "Film 1 (2011) [copy].mkv")
         fakes.make_mkv(copy, 1024 * 1024)
@@ -4589,6 +4632,21 @@ class DataLayerTests(unittest.TestCase):
         st = Settings(d)
         self.assertEqual(st.section("tools")["convert"], {"*": {"mp4": True, "avi": False}})
         self.assertNotIn("convert_types", st.section("optimizer"))
+        # Library Sync's settings become Sync Libraries' options: whose edits win and what's brought in line for every
+        # library ("grouping" covered the files not listed too), every option off for a library left out; the review and
+        # the timer are gone, and the Mirror page keeps only the mirror and what Plex's own sync carries
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "settings.json"), "w") as fh:
+            json.dump({"sync": {"mirrors": "plex2", "watched": "both", "source": "mirror", "mode": "apply", "approved": "x", "compare_hours": 12, "ask_over": 50,
+                                "what": {"grouping": False, "art": False, "edits": True}, "libraries": {"2": False, "3": True}}}, fh)
+        st = Settings(d)
+        self.assertEqual(st.section("tools")["sync"], {"*": {"source": "mirror", "scan": False, "grouping": False, "art": False, "edits": True},
+                                                       "2": dict.fromkeys(("scan", "grouping", "matches", "edits", "art", "collections", "editions"), False)})
+        self.assertEqual(set(st.section("sync")), {"mirrors", "discover", "watched", "users"})
+        self.assertEqual((st.section("sync")["mirrors"], st.section("sync")["watched"]), ("plex2", "both"))
+        with open(os.path.join(d, "settings.json"), "w") as fh:                                      # (already moved: what's there stays)
+            json.dump({"sync": {"source": "this"}, "tools": {"sync": {"*": {"source": "mirror"}}}}, fh)
+        self.assertEqual(Settings(d).section("tools")["sync"], {"*": {"source": "mirror"}})
 
     def test_one_gathering_serves_every_tool(self):
         """The request budget: one library gathered means one Plex listing of its records and one of its files — then every
@@ -4641,7 +4699,7 @@ class DataLayerTests(unittest.TestCase):
             if app.libdata.data("1").ready and "1" in c0["libraries"] and "2" in c0["libraries"] and not c0["pending"]:
                 break
             time.sleep(0.05)
-        self.assertEqual(app.tools["merge"].counts(), {"total": 0, "ignored": 0, "libraries": {"1": 0, "2": 0}, "pending": []})
+        self.assertEqual(app.tools["merge"].counts(), {"total": 0, "ignored": 0, "libraries": {"1": 0, "2": 0}, "blocked": {"1": 0, "2": 0}, "pending": []})
         self.assertEqual(app.tools["unlink"].counts()["total"], 0)
         # Plex: a second record of Film 1 (its stamp moves); the tick sees it
         copy = os.path.join(cat["root"], "Movies", "Film 1 (2011) [copy].mkv")
@@ -4660,7 +4718,7 @@ class DataLayerTests(unittest.TestCase):
         got = libhealth.library_health(app, "1")
         chips = {r["id"] for it in got["items"] for r in it["results"]}
         self.assertIn("tool_merge", chips)
-        self.assertEqual([c["id"] for c in got["checks"]["tools"]], ["tool_merge", "tool_versions", "tool_folders", "tool_unlink", "tool_convert"])
+        self.assertEqual([c["id"] for c in got["checks"]["tools"]], ["tool_merge", "tool_versions", "tool_folders", "tool_unlink", "tool_convert", "tool_sync"])
         self.assertEqual(got["counts"]["tool_merge"], 2)                                             # (both records of the pair carry the chip)
         self.assertTrue(got["stats"]["items"] and got["stats"]["clean_pct"] is not None)
         # (the other libraries settle: one whose gathering began before the listing changed reads its records once more)
@@ -4721,12 +4779,21 @@ class PageStructureTests(unittest.TestCase):
         self.assertEqual(got.returncode, 0, got.stderr)
         return json.loads(got.stdout)
 
+    # The check pages (CHECK_PAGES in app.js), every one: [(category, page, title)] — the tests of the check pages hold each
+    # of them, a new check tool's included
+    def _check_pages(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        got = re.findall(r'(\w+): \["(\w+)", "([^"]+)"\]', re.search(r"var CHECK_PAGES = \{([^}]*)\}", js).group(1))
+        self.assertGreaterEqual(len(got), 3)
+        return got
+
     # What a page may not say before the check behind it has run: the verdicts. Each one a text the page shows once
     # it knows; while it doesn't, the place says Checking… (or Reading…, Loading…) instead.
     VERDICTS = re.compile(r"not detected|not found|not accepted|not connected|not set up|not tested yet|not running|"
                           r"couldn.t (check|confirm)|needs attention|needs fixing|aren.t being cached|isn.t mounted|"
                           r"No L2ARC found|No media pools|No library folders|No library of the kind|Upgrade your server|RAM only for now", re.I)
-    PAGES_DRAWN = ("health", "caching", "ssd", "library", "optimizer", "mkv", "dataset", "merge", "versions", "folders", "unlink", "tools", "processes", "sync", "activity", "system")
+    PAGES_DRAWN = ("health", "caching", "ssd", "library", "optimizer", "mkv", "dataset", "merge", "versions", "folders", "unlink", "sync", "mirror", "tools", "processes", "mirrors", "activity", "system")
 
     def test_pages_say_checking_before_the_checks_ran(self):
         """Before the first checks have run — Plex not yet asked, ZFS and TrueNAS not yet probed — no page gives
@@ -4766,19 +4833,44 @@ class PageStructureTests(unittest.TestCase):
         tests, passing all) and Apply saying what the process does first; drawn with no rows, it says so in a sentence
         rather than showing nothing; the long explanation sits behind the card's How it works (closed until pressed), never
         as a paragraph on the page;
-        and a row's explanations sit behind an ⓘ too (fact()). A new tool page that isn't built on toolPage fails here."""
+        and a row's explanations sit behind an ⓘ too (fact()). A new tool page that isn't built on toolPage fails here.
+        Every check tool's page is the shared check page (checksPage: Library Health's view, one category of checks): every
+        category of checks has one, and it is that call and nothing else. A check tool drawn its own way fails here.
+
+        No page is let off this test, nor is the test loosened for one, without the maintainer's express permission,
+        asked for and given first (CLAUDE.md). A page that doesn't fit is built on the shared code, extended if need be."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
         tt = ToolsTests()
-        app, plex, client, cat, _ = tt._app()
+        app, plex, client, cat, _ = tt._app(mirror=True)                                               # (Sync Libraries: a mirror to compare with)
         from plexcache import server
         tool_pages = [n for n in app.tools]
-        # every page under the Tools nav is a tool's (built on toolPage, held to the standard below), or one of these — the
-        # optimizer's and the dataset migration's, processes of their own with their own cards, and the two check pages,
-        # Library Health's view (checksPage) — named here with its reason: a new page there can't slip past the standard
-        nav = re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)
-        self.assertEqual(set(re.findall(r"(\w+): 1", nav)) - set(tool_pages), {"optimizer", "dataset", "filechecks", "plexchecks"},
-                         "a page under the Tools nav that's neither a tool (app.tools, on toolPage) nor named here with why")
+        # every page under the Tools nav is a tool's (built on toolPage, held to the standard below), a check page (built
+        # on checksPage, held below), or one of the two named here: the optimizer's and the dataset migration's, processes
+        # of their own with their own cards. These two are the only pages let off, by the maintainer: adding a page to
+        # them needs the maintainer's express permission, asked for and given first (CLAUDE.md) — never added to make a
+        # new page pass
+        nav = set(re.findall(r"(\w+): 1", re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)))
+        check_pages = dict(re.findall(r'(\w+): \["(\w+)", "[^"]+"\]', re.search(r"var CHECK_PAGES = \{([^}]*)\}", js).group(1)))  # category -> its page
+        self.assertEqual(nav - set(tool_pages) - set(check_pages.values()), {"optimizer", "dataset"},
+                         "a page under the Tools nav that's neither a tool (app.tools, on toolPage) nor a check page (checksPage) — "
+                         "build it on the shared code; letting a page off needs the maintainer's express permission (CLAUDE.md)")
+        # the check pages: one for every category of Library Health's checks (a check tool is a category of them, its
+        # findings on their items as every check's), under the Tools nav, each the shared check page and nothing else
+        from plexcache import libhealth
+        self.assertEqual(set(check_pages), set(libhealth.CHECKS), "a category of checks without a check page, or a check page without its category (libhealth.CHECKS)")
+        self.assertLessEqual(set(check_pages.values()), nav, "a check page that isn't under the Tools nav")
+        for category, name in check_pages.items():
+            body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S)
+            self.assertIsNotNone(body, f"no page{name.capitalize()}()")
+            self.assertRegex(body.group(1).strip(), r'(?s)^return checksPage\("' + name + r'", "' + category + r'", "[^"]+", H\(.*\)\);\s*\}$',
+                             f"page{name.capitalize()} isn't the shared check page (checksPage) and nothing else: a check tool is drawn by the shared code, "
+                             "extended for what it needs")
+        # the shared check page draws a category as every other: no category of its own is named in it
+        shared = js[js.index("  function libHealthView("):js.index("\n  }\n", js.index("  function libHealthView("))] + \
+            js[js.index("  function checksPage("):js.index("\n  }\n", js.index("  function checksPage("))]
+        for category in check_pages:
+            self.assertNotRegex(shared, r'(?:only|cat) === "' + category + '"', f"the shared check page draws the {category} category its own way")
         from plexcache.plex import KIND_BY_LIBRARY_TYPE
         for name in tool_pages:
             body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S)
@@ -4805,6 +4897,7 @@ class PageStructureTests(unittest.TestCase):
         app.scan_library()
         for name, tool in app.tools.items():
             tt._run(tool, tool.scan_async("1"))
+        evaluated(app)
         st = app.state()
         for name in tool_pages:
             with self.subTest(page=name, when="rows"):
@@ -4814,7 +4907,8 @@ class PageStructureTests(unittest.TestCase):
                 self.assertIn("Scan Again", text, "no Scan Again")
                 self.assertIn('data-act="tool-switch"', html, "no options block (the tool's switches for this library)")
                 self.assertLess(html.index('data-act="tool-switch"'), html.index('data-act="tool-scan"'), "the options come under the library tabs, before Scan Again")
-                self.assertRegex(html, r'data-act="tool-lib"[^>]*>.*?<span class="count warn"', "no count on the library tab")
+                self.assertRegex(html, r'data-act="tool-lib"[^>]*>.*?<span class="count ' + ("fail" if "1" in st["tools_red"][name] else "warn") + '"',
+                                 "no count on the library tab (red while something red on the page stops part of it)")
                 # the top, one layout: the tabs, and on their right what was read (green), the issues found (yellow), what
                 # passes the tests as set (green) and all of them (grey)
                 self.assertRegex(html, r'<div class="lctl tooltop"><div class="seg small strong" role="tablist".*?</div><div class="toolstats">'
@@ -4863,8 +4957,9 @@ class PageStructureTests(unittest.TestCase):
                 self.assertNotIn("cmprow", got["html"])
                 self.assertNotRegex(got["text"], r"Apply to \d+ Selected")
                 app.settings.update({"tools": {name: {}}})
-        # the same pages with nothing found: a sentence, not a blank (the films' folders named for them, so nothing is to rename)
-        app2, _p2, _c2, _cat2, _ = tt._app()
+        # the same pages with nothing found: a sentence, not a blank (the films' folders named for them, so nothing is to rename;
+        # the mirror the same as here)
+        app2, _p2, _c2, _cat2, _ = tt._app(mirror=True)
         for i, m in enumerate(_p2.cat["movies"]):
             m["title"] = f"Movie & Friends {i}"
         app2.scan_library()
@@ -4877,6 +4972,12 @@ class PageStructureTests(unittest.TestCase):
                 text = self._render(st2, name)["text"]
                 self.assertIn("Nothing found", text)
                 self.assertIn("Scan Again", text)
+        # with what a tool compares with not there to read (Sync Libraries with no mirror): said, rather than nothing found
+        app3, _p3, _c3, _cat3, _ = tt._app()
+        tt._run(app3.tools["sync"], app3.tools["sync"].scan_async("1"))
+        text = self._render(app3.state(), "sync")["text"]
+        self.assertIn("Doesn’t apply This library isn’t paired with one on a mirrored server", text)    # (its count: na, a grey dash on its tab)
+        self.assertNotIn("Nothing found", text)
         # a run, and its card at the bottom of the tool's page: the one card the Processes page lists too, with the ways back
         self.assertIn("toolHistory(name)", js[js.index("  function toolPage("):js.index("  function toolKind(")])
         self.assertEqual(js.count('data-act="job-revert"'), 1)                                         # (only undoButtons draws it: on the run's card)
@@ -4896,7 +4997,7 @@ class PageStructureTests(unittest.TestCase):
         self.assertIn("function renderStill()", js)                                                  # (what opens or closes under a click leaves the page where it is)
         self.assertIn('data-act="tool-history"', js)
         # the two check pages: the Health view, one category each, every item of the library listed
-        for name, said in (("filechecks", "File Checks"), ("plexchecks", "Plex Checks")):
+        for _cat, name, said in self._check_pages():
             self.assertIn("/" + name, server.PAGES)
             text = self._render(st, name)["text"]
             self.assertIn(said, text)
@@ -4904,9 +5005,10 @@ class PageStructureTests(unittest.TestCase):
             self.assertTrue("Running the checks" in text or "items checked" in text, text[:300])   # (the Health view: fetched when the page opens)
 
     # the tools' library, with something for every tool: a duplicate record, a duplicate file, a loose film, a hard link, an AVI
-    def _tools_library(self):
+    # — and, with ``mirror``, the mirrored server the films were there before these (Sync Libraries' rows)
+    def _tools_library(self, mirror=False):
         tt = ToolsTests()
-        app, plex, client, cat, _ = tt._app()
+        app, plex, client, cat, _ = tt._app(mirror=mirror)
         rootd = os.path.join(cat["root"], "Movies")
         copy = os.path.join(rootd, "Film 1 (2011) [copy].mkv")
         fakes.make_mkv(copy, 1024 * 1024)
@@ -4922,6 +5024,7 @@ class PageStructureTests(unittest.TestCase):
         app.scan_library()
         for name, tool in app.tools.items():
             tt._run(tool, tool.scan_async("1"))
+        evaluated(app)  # (the scans' refreshes move the data on: the earlier tools' counts worked out again, every library's)
         return app, tt
 
     @staticmethod
@@ -4945,10 +5048,11 @@ class PageStructureTests(unittest.TestCase):
         here, fixed; Convert to MKV: Original file deleted / New MKV created, fixed; Unlink Files: File kept / what's done to
         the link (This hardlink deleted, Hardlink replaced with file, Symlink replaced with file), fixed; the Optimizer, a
         card per file: File as it is now / File after optimizing, fixed (nothing it does is turned back but by the backup).
+        Sync Libraries: the side brought in line as it is now / after syncing, fixed.
         Each card lists its files under it, numbered as its File n chips — grey, each opening to what happens to the file."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
-        app, tt = self._tools_library()
+        app, tt = self._tools_library(mirror=True)
         # the source: the tools pass a card; only cmpRow draws one (its frames, its arrow); toolPage and the optimizer call it
         for name in app.tools:
             body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S).group(1)
@@ -4966,7 +5070,8 @@ class PageStructureTests(unittest.TestCase):
         st = app.state()
         labels = {"merge": ("Metadata kept", "Metadata lost", True), "versions": ("This file kept", "This file deleted", True),
                   "folders": ("Folder moved here", "Original folder", False), "convert": ("New MKV created", "Original file deleted", False),
-                  "unlink": ("File kept", "This hardlink deleted|Hardlink replaced with file|Symlink replaced with file", False)}
+                  "unlink": ("File kept", "This hardlink deleted|Hardlink replaced with file|Symlink replaced with file", False),
+                  "sync": ("Starlit after syncing", "Starlit now", False)}
         self.assertEqual(set(labels), set(app.tools))
         for name, (keep, drop, turns) in labels.items():
             with self.subTest(page=name):
@@ -5013,14 +5118,19 @@ class PageStructureTests(unittest.TestCase):
                       "This file is here now: it will be moved to the new folder", "This hard link will be replaced with a file of its own",
                       "This path to the file will be deleted", "This symlink will be replaced with a file of its own"):
             self.assertIn(words, js)
+        for words in ("Listed on {name} too: it stays as it is.", "Not listed on {name}: its folder is scanned there, and Plex there adds it.",
+                      "An item of its own on {name} now: merged there into one item, as one of its versions.", "Only on {name}: it stays as it is. Nothing is deleted."):
+            self.assertIn(words, js)
         # the merge card's file chips: grey (green: the kept record's own), opening to the explanation (syncSide's ``explain``) —
         # the Sync view's own stay coloured
         side = js[js.index("  function fileChips("):js.index("  function syncSide(")]
         self.assertIn('(explain ? (x.own ? "pass" : "grey") : both ? "pass" : "warn")', side)
         self.assertEqual(js.count("mergeFileKept, true)") + js.count("mergeFileLost, true)"), 2)  # (with its slots: the checks from elsewhere among its chips)
-        # the unlink labels follow the option: removing the paths Plex doesn't list, the hard link is deleted
+        # the unlink labels follow the option: removing the paths Plex doesn't list, the hard link is deleted (no mirror known:
+        # with one, removing isn't offered)
         st2 = copy.deepcopy(st)
         st2["tools"]["unlink"]["enabled"] = {"1": {"hardlink": True, "symlink": True, "remove": "remove"}}
+        st2["tools"]["unlink"]["scan"]["mirror"] = None
         (card,) = self._cards(self._render(st2, "unlink")["html"])
         self.assertIn('<div class="mgdrop"><div class="mgdroplbl">This hardlink deleted</div>', card[2])
         self.assertIn('<div class="mgkeep"><div class="mgkeeplbl">File kept</div>', card[2])
@@ -5035,6 +5145,7 @@ class PageStructureTests(unittest.TestCase):
         st["_optfiles"] = {"library": "1", "files": files, "total": 2, "offset": 0, "paths": [f["path"] for f in files], "pages": [{"offset": 0, "from": "F", "to": "F"}]}
         from plexcache import safety
         st["_ready"] = safety.readiness(app, "1", 0)
+        st = counted(st, {"optimizer": {"1": 2}})                                                    # (the scan's count, as the summary made here says)
         html = self._render(st, "optimizer")["html"]
         self.assertNotIn("What Optimize Does", html)
         # the standard tool page: the library tabs, the library's choices on top (as every tool's options), Scan Again
@@ -5082,7 +5193,7 @@ class PageStructureTests(unittest.TestCase):
         self.assertIn('recordLink(bt.page, key, x.key)', js)                                   # (a blocking check's link to it)
 
     def test_blocking_checks_from_elsewhere_go_on_their_records_side(self):
-        """The standard way a check from elsewhere stops a row (ROW_BLOCKS, placeBlocks): on the side of its record, else
+        """The standard way a check from elsewhere stops a row (cmpBlocks, placeBlocks): on the side of its record, else
         the side that stays, else the card; first among that side's chips; a side that stays, with a red one, greyed."""
         fn = self._js_fn("placeBlocks")
         c = {"checks": [{"id": "why"}], "left": [{"kind": "keep", "rk": "1", "checks": [{"id": "own"}]}], "right": [{"kind": "drop", "rk": "2"}]}
@@ -5194,15 +5305,16 @@ class PageStructureTests(unittest.TestCase):
     def test_what_is_still_counted_turns_and_options_say_their_count(self):
         """A count not known yet isn't drawn as nothing to do: a library still being read, or read and its count not worked
         out, shows a turning wheel on its tab and on the Tools page's card — and the count is worked out in the background
-        (counts() asks for it, once per state of the data), so it comes without opening the tool. The Optimizer the same
-        while its first scan runs, with a bar that fills (done of total) and, once there's a scan before, its findings said
-        to be the last scan's. Every option is one line: its ⓘ, its choice, and on the right what the scan found for it."""
+        (the evaluator, evaluate.py), so it comes without opening the tool. The Optimizer the same while its first scan
+        runs, with a bar that fills (done of total) and, once there's a scan before, its findings said to be the last
+        scan's. Every option is one line: its ⓘ, its choice, and on the right what the scan found for it."""
         app, tt = self._tools_library()
-        st = copy.deepcopy(app.state())
+        st = copy.deepcopy(jsonable(app.state()))
         libs = [l for l in st["library"]["libraries"] if l.get("kind")]
         self.assertGreaterEqual(len(libs), 2)
         k1, k2 = str(libs[0]["key"]), str(libs[1]["key"])
-        st["tool_counts"]["convert"] = {"total": 1, "ignored": 0, "libraries": {k1: 1}, "pending": [k2]}
+        st["counts"]["convert"] = {"libraries": {k1: {"s": "done", "n": 1}, k2: {"s": "pending", "why": "Reading the library’s files…"}},
+                                   "total": {"s": "pending", "why": "Reading the library’s files…"}}
         html = self._render(st, "convert")["html"]
         self.assertRegex(html, r'data-tool="convert" data-key="' + k1 + r'">.*?<span class="count warn"[^>]*>1</span></button>')
         self.assertRegex(html, r'data-tool="convert" data-key="' + k2 + r'">(?:(?!</button>).)*<span class="count busy"[^>]*><span class="spin"')
@@ -5215,15 +5327,19 @@ class PageStructureTests(unittest.TestCase):
         tool = app.tools["convert"]
         with tool.lock:
             tool._analysis.clear()
-        self.assertIn(k1, tool.counts()["pending"])
+        self.assertEqual(app.evaluator.count("convert", k1)["s"], "pending")
+        app.evaluator.start()
+        self.addCleanup(setattr, app.evaluator, "started", False)
         for _ in range(200):
-            if k1 not in tool.counts()["pending"]:
+            if app.evaluator.count("convert", k1)["s"] == "done":
                 break
             time.sleep(0.05)
-        self.assertNotIn(k1, tool.counts()["pending"])
+        self.assertEqual(app.evaluator.count("convert", k1)["s"], "done")
         self.assertIn(k1, tool.counts()["libraries"])
         # the optimizer: its first scan running — the tabs and the card turn; the bar fills
         st["optimizer"] = dict(st.get("optimizer") or {}, configured=True, surveying=True, libraries={}, survey_progress={"done": 250, "total": 1000})
+        busy = {"s": "pending", "why": "Counting…", "progress": {"done": 250, "total": 1000}}
+        st["counts"]["optimizer"] = {"libraries": {k: dict(busy) for k in st["counts"]["optimizer"]["libraries"]}, "total": dict(busy)}
         html = self._render(st, "optimizer")["html"]
         self.assertIn('<span class="count busy"', html)
         self.assertIn("250 of 1,000 · 25%", html)
@@ -5233,6 +5349,7 @@ class PageStructureTests(unittest.TestCase):
         st["optimizer"]["libraries"] = {k1: {"files": 6, "mkv": 6, "mkv_done": 2, "todo": 2, "sync_todo": 1, "mkv_todo": 2, "why": {"new": 2}, "conflicts": [],
                                              "zfs": {"status": "pass", "issues": [], "rs": 1048576, "best": 1048576, "compression": "zstd-9"}}}
         st["optimizer"]["surveyed_at"] = time.time() - 60
+        st["counts"]["optimizer"]["libraries"][k1] = {"s": "done", "n": 2}                       # (its files as they are now: the scan running is of another)
         html = self._render(st, "optimizer")["html"]
         self.assertIn("From the last scan:", html)
         self.assertIn("Scanning…", html)
@@ -5252,7 +5369,7 @@ class PageStructureTests(unittest.TestCase):
         self.assertEqual([(g["live"], g["blocked"], g["shown"]) for g in got],
                          [(False, False, False), (True, False, True), (False, True, True), (True, True, True), (False, False, False), (True, False, True), (False, True, True)])
         # the tools' cards give yellow only as their issue: never a status of "warn"
-        for fn_name in ("mergeCard", "versionsCard"):
+        for fn_name in ("mergeCard", "versionsCard", "syncCard"):
             body = js[js.index("  function " + fn_name + "("):]
             body = body[:body.index("\n  }\n") + 4]
             self.assertNotIn('status: "warn"', body, f"{fn_name} gives a yellow that isn't its issue")
@@ -5261,8 +5378,8 @@ class PageStructureTests(unittest.TestCase):
             self.assertNotIn('status: "warn"', body, f"page{name.capitalize()} gives a yellow that isn't its issue")
         self.assertIn('return String(html).replace(/\\bb-(warn|fail)\\b/g, "b-grey")', js)            # (a side drawn by the tool's own code: greyed)
         # as drawn: every row shown has a yellow or a red; its tick is open exactly when it has yellow and no red; yellow only
-        # on its own line, never inside the sides; All ticks those rows and no other
-        app, tt = self._tools_library()
+        # on its own line, never inside the sides; All ticks those rows and no other (a mirror watched: Sync Libraries' rows)
+        app, tt = self._tools_library(mirror=True)
         st = app.state()
         merged = {str(k) for r in st["tools"]["merge"]["scan"]["rows"] for k in r["rks"]}
         for name in app.tools:
@@ -5288,15 +5405,78 @@ class PageStructureTests(unittest.TestCase):
                 else:
                     self.assertNotIn('data-act="tool-apply"', html)
 
+    def test_red_on_a_tool_page_reaches_the_tools_page(self):
+        """The standard for a tool's red (no tool exempt without the maintainer's say: CLAUDE.md): something red on a tool's
+        page that stops part of it — a row a red chip stops (Tool.mark_stops: the tool's own reason, a blocking check, a
+        record to merge first), the optimizer not set up, a check page's checks that couldn't run — is the server's to
+        say, per library (the state's tools_red, App._tools_red, with a key for every page of the Tools menu), and one
+        function on the page reads it (toolBad): the library's tab, the tool's card on the Tools page and the menu's count
+        turn red with it. With nothing red, a count is yellow with something to do and green at 0."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        menu = js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES")]
+        pages = re.findall(r'^    \["(\w+)", N\(', menu, re.M)
+        self.assertGreaterEqual(len(pages), 10)
+        # one function for every tool: a lookup of the server's word, nothing worked out per tool
+        body = js[js.index("  function toolBad(name, key) {"):]
+        body = body[:body.index("\n  }\n")]
+        self.assertIn("ST.tools_red", body)
+        for name in pages:
+            self.assertNotIn('"' + name + '"', body, f"toolBad has a rule of its own for {name}")
+        self.assertNotIn("checkCategory", body)
+        # the tabs take their red from it — every libTabs call names its page — as the Tools page's cards and the menu do
+        tabs = js[js.index("  function libTabs(o) {"):]
+        tabs = tabs[:tabs.index("\n  }\n")]
+        self.assertIn("countChip(countOf(o.tool, l.key), toolBad(o.tool, l.key))", tabs)
+        self.assertEqual(set(re.findall(r"libTabs\(\{ (\w+):", js)), {"tool"}, "a libTabs call that doesn't name its page")
+        self.assertEqual(len(re.findall(r"libTabs\(\{", js)), len(re.findall(r"libTabs\(\{ tool: ", js)))
+        self.assertIn("countChip(countOf(t[0]), toolBad(t[0]))", js)
+        self.assertIn("TOOLS.some(function (t) { return toolBad(t[0]); })", js)
+        # the server says it for every page of the Tools menu
+        app, tt = self._tools_library()
+        st = jsonable(app.state())
+        self.assertEqual(set(st["tools_red"]), set(pages))
+        # every tool's rows: the red cards its page draws are the rows the server says are stopped, and its tab and its
+        # card on the Tools page are red exactly when there's one
+        tools = self._render(st, "tools")["html"]
+        reds = 0
+        for name in app.tools:
+            with self.subTest(tool=name):
+                html = self._render(st, name)["html"]
+                red = sum(1 for _tick, top, rest in self._cards(html) if "b-fail" in top + rest or "note badbox" in rest)
+                stopped = [r for r in app.tools[name].live("1", st["tools"][name]["scan"]["rows"]) if r.get("stopped")]
+                self.assertEqual(red, len(stopped))
+                self.assertEqual(st["tool_counts"][name]["blocked"].get("1", 0), len(stopped))
+                self.assertEqual(st["tools_red"][name], ["1"] if stopped else [])
+                c, tot = st["counts"][name]["libraries"]["1"], st["counts"][name]["total"]
+                if c["s"] != "na":                                                                  # (the page's count is the tool's)
+                    self.assertEqual(c, {"s": "done", "n": st["tool_counts"][name]["libraries"]["1"]})
+                chip = lambda c: "fail" if stopped else "na" if c["s"] == "na" else "warn" if c["n"] else "ok"  # (red over the number; grey where it doesn't apply)
+                self.assertRegex(tools, r'<a href="/' + name + r'" data-nav>[^<]*</a> <span class="count ' + chip(tot) + '"')
+                self.assertRegex(html, r'(?s)data-tool="' + name + r'" data-key="1">(?:(?!</button>).)*<span class="count ' + chip(c) + '"')
+                reds += bool(stopped)
+        self.assertTrue(reds, "no row a red chip stops in this library: the red isn't shown to reach anything")
+        # the optimizer not set up, with files to optimize: its card red; set up, not
+        got = app._tools_red({"tool_counts": {}, "health_counts": {"1": {"unchecked": ["mirror"]}, "2": {"unchecked": []}},
+                              "optimizer": {"configured": False, "libraries": {"1": {"todo": 3}, "2": {"todo": 0}}}})
+        self.assertEqual(got, {"optimizer": ["1"], "dataset": [], "filechecks": [], "plexchecks": [], "mirrorchecks": ["1"]})
+        self.assertEqual(app._tools_red({"tool_counts": {}, "health_counts": {}, "optimizer": {"configured": True, "libraries": {"1": {"todo": 3}}}})["optimizer"], [])
+        st["tools_red"]["optimizer"] = ["1"]
+        self.assertRegex(self._render(st, "tools")["html"], r'<a href="/optimizer" data-nav>[^<]*</a> <span class="count fail"')
+        # nothing to do and nothing red: green, not grey
+        st = counted(st, {"unlink": dict.fromkeys(st["counts"]["unlink"]["libraries"], 0)})
+        st["tools_red"]["unlink"] = []
+        self.assertRegex(self._render(st, "tools")["html"], r'<a href="/unlink" data-nav>[^<]*</a> <span class="count ok"')
+
     def test_check_pages_show_only_what_they_flag(self):
-        """File Checks and Plex Checks show only the items their checks flag — an orange chip, or a grey one (ignored) —
+        """Every check page (File Checks, Plex Checks, Mirror Checks) shows only the items its checks flag — an orange chip, or a grey one (ignored) —
         never an item with nothing flagged: those are counted, and the Library page lists every item (its view is left as
         it is). With nothing flagged, the page says so."""
         from plexcache.libhealth import library_health
-        app, tt = self._tools_library()
-        st = app.state()
+        app, tt = self._tools_library(mirror=True)                                                  # (Mirror Checks applies: a mirror watched)
+        st = counted(app.state())                                                                    # (the answers are made here: their counts with them)
         h = jsonable(library_health(app, "1"))
-        for name, cat in (("filechecks", "file"), ("plexchecks", "plex")):
+        for cat, name, _title in self._check_pages():
             with self.subTest(page=name):
                 ids = {c["id"] for c in h["checks"][cat]}
                 on = sorted(c["id"] for c in h["checks"][cat] if c.get("on") and not c.get("of"))
@@ -5314,7 +5494,7 @@ class PageStructureTests(unittest.TestCase):
                 self.assertRegex(html, r'<div class="lctl tooltop"><div class="seg small strong".*?<div class="toolstats"><span class="badge b-pass">' + str(n) + r' items read</span>'
                                        r'<span class="badge b-warn"[^>]*>1 issue found</span><span class="badge b-pass"[^>]*>' + str(n - 1) + r' pass current tests</span>')
                 self.assertIn('<div class="optgrid"><div class="optcell"><div class="chk lhchk optrow">', html)
-                self.assertNotIn('class="lhgrid"', html)
+                self.assertNotIn('class="lhtools"', html)
                 for it in its:
                     it["results"] = [r for r in it["results"] if r["id"] not in ids]
                 text = self._render(dict(st, _health=fake), name)["text"]
@@ -5322,7 +5502,7 @@ class PageStructureTests(unittest.TestCase):
         # the Library page's view is every item's, as before
         lib = self._render(dict(st, _health=h), "library")["html"]
         self.assertNotIn("No item has anything these checks flag", lib)
-        self.assertIn('<div class="lhgrid">', lib)
+        self.assertIn('<div class="lhtools">', lib)
         self.assertNotIn("tooltop", lib)
         # the tabs, drawn by the one function every tool's page draws them with (libTabs), each with its count — the
         # page's checks' findings there, ignored items left out — or the turning wheel while it's being counted
@@ -5332,35 +5512,113 @@ class PageStructureTests(unittest.TestCase):
             body = body[:body.index("\n  }\n")]
             self.assertIn("libTabs({", body, f"{fn} draws library tabs of its own")
             self.assertNotIn('role="tab"', body, f"{fn} draws library tabs of its own")
-        for name, cat in (("filechecks", "file"), ("plexchecks", "plex")):
-            st2 = dict(st, _health=h, health_counts={"1": {"file": 3, "plex": 0, "stamp": 7}}, libdata={"libraries": {"1": {"ready": True, "stamp": 7}}, "queue": [], "current": None})
+        for cat, name, _title in self._check_pages():
+            st2 = dict(counted(st, {name: {"1": 3 if cat == "file" else 0}}), _health=h)
             html = self._render(st2, name)["html"]
-            self.assertRegex(html, r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count' + (' warn"[^>]*>3<' if cat == "file" else '"[^>]*>0<'))
-            st2["libdata"]["libraries"]["1"]["stamp"] = 8                                              # (read again: counted again)
+            self.assertRegex(html, r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count' + (' warn"[^>]*>3<' if cat == "file" else ' ok"[^>]*>0<'))  # (nothing found: green)
+            st2["counts"][name]["libraries"]["1"] = {"s": "pending", "why": "Reading the library’s files…"}  # (read again: counted again)
             self.assertRegex(self._render(st2, name)["html"], r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count busy"')
+            # a page that doesn't apply to the library (Mirror Checks with no mirror watched): said so, greyed — no number,
+            # not even a green 0, and none of the items
+            st2["counts"][name]["libraries"]["1"] = {"s": "na", "why": "No mirror is watched: choose one on the [Mirror page](/mirrors)."}
+            got = self._render(st2, name)
+            self.assertRegex(got["html"], r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count na"[^>]*>–</span>')
+            self.assertIn("Doesn’t apply No mirror is watched", got["text"])
+            self.assertNotIn('class="ssitem lhitem', got["html"])
+            self.assertNotIn("toolstats", got["html"])
+
+    def test_library_health_lists_the_tools(self):
+        """The Library page's Health view lists every tool a line of its own, stacked, File Checks and Plex Checks among
+        them: its name a link to its page, how many items it flags, and a Hide or Show button — its chips shown there or
+        not, a view only: no checkbox, which would read as a setting. No descriptions. The file and Plex checks themselves are set on their own pages and nowhere else: none of their
+        switches here, nor the subtitle language or the audio quality level. The check pages still draw them."""
+        from plexcache.libhealth import library_health
+        app, tt = self._tools_library()
+        st = counted(app.state())                                                                    # (every line's count in: its number)
+        h = jsonable(library_health(app, "1"))
+        ids = {cat: {c["id"] for c in h["checks"][cat]} for cat, _page, _title in self._check_pages()}
+        self.assertTrue(all(ids.values()) and h["checks"]["tools"])
+        lib = self._render(dict(st, _health=h), "library")["html"]
+        self.assertIn('<div class="lhtools">', lib)
+        self.assertNotIn("lhgrid", lib)
+        self.assertNotIn("What each tool would do about an item", lib)
+        line = re.compile(r'<div class="chk lhchk lhtool( lhhidden)?"><button type="button" class="info"(?:(?!</div>).)*?</button>'
+                          r'<button class="btn sm" type="button" data-act="lh-show" data-id="([^"]+)" data-on="([01])"[^>]*>(Hide|Show)</button>'
+                          r'<a href="([^"]+)" data-nav>([^<]+)</a>(?:<span class="badge b-(?:warn|pass)"[^>]*>[0-9,]+</span>| <span class="count na"[^>]*>–</span>)</div>')
+        got = [(m.group(2), m.group(5), m.group(6), m.group(4), m.group(3), bool(m.group(1))) for m in line.finditer(lib)]
+        want = [(c["id"], c["link"], c["name"]["_t"] if isinstance(c["name"], dict) else c["name"], "Hide", "0", False) for c in h["checks"]["tools"]] + \
+               [("page_" + page, "/" + page, title, "Hide", "0", False) for _cat, page, title in self._check_pages()]
+        self.assertEqual(got, want)
+        self.assertRegex(lib, r'<a href="/sync" data-nav>Sync Libraries</a> <span class="count na"')   # (no mirror: grey, never a green 0)
+        self.assertNotIn('type="checkbox"', re.search(r'<div class="lhtools">.*?(?=<div class="det">|<div class="sshdr)', lib, re.S).group(0))
+        self.assertEqual(set(re.findall(r'data-lhcheck="([^"]+)"', lib)) & set().union(*ids.values()), set(),
+                         "a file or Plex check's switch on the Library page")
+        for attr in ("data-lhlang", "data-lhquality", "data-lhcheck-revert"):
+            self.assertNotIn(attr, lib)
+        # a check page's box off: its chips gone from the Library page's items, its count with them; its own page as it was
+        flagged = [r for it in h["items"] for r in it["results"] if r["category"] == "file"]
+        self.assertTrue(flagged)
+        off = json.loads(json.dumps(jsonable(st)))
+        off.setdefault("settings", {}).setdefault("library_health", {}).setdefault("checks", {})["page_filechecks"] = False
+        lib_off = self._render(dict(off, _health=h), "library")["html"]
+        self.assertRegex(lib_off, r'<div class="chk lhchk lhtool lhhidden">(?:(?!</div>).)*<button[^>]*data-id="page_filechecks" data-on="1"[^>]*>Show</button>'
+                                  r'<a href="/filechecks" data-nav>File Checks</a><span class="badge b-warn"[^>]*>[0-9,]+</span></div>')
+        # what was found, as the tools' pages say it: chips, not lines of text — the items read, the issues (each item once,
+        # with something shown here), the items with nothing; hiding a tool takes its items out of the issues
+        chip = lambda html, what: re.search(r'<div class="libstats"><div class="toolstats">.*?<span class="badge b-\w+"[^>]*>([0-9,]+) ' + what, html)
+        self.assertNotIn("have nothing flagged", lib)
+        self.assertNotIn("items checked", lib)
+        read, issues, passing = (int(chip(lib, w).group(1)) for w in ("items read", "issues? found", "pass(?:es)? current tests"))
+        self.assertEqual(read, h["checked"])
+        self.assertEqual(issues + passing, read)
+        self.assertLessEqual(int(chip(lib_off, "issues? found").group(1)), issues)
+        # the Caching view says its the same way: chips (libStats), the numbers in them
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        for fn, gone in (("libSummary", "{n} files checked:"),):
+            body = js[js.index("  function " + fn + "("):]
+            body = body[:body.index("\n  }\n")]
+            self.assertIn("libStats({", body, f"{fn} says what it found in a line of text")
+            self.assertNotIn(gone, body)
+        names = {c["id"]: c["name"]["_t"] if isinstance(c["name"], dict) else c["name"] for c in h["checks"]["file"]}
+        chips = lambda html: re.findall(r'class="badge b-(?:warn|grey) sschip[^>]*>([^<]+)<', html)
+        self.assertTrue(any(n.split(" ×")[0] in names.values() for n in chips(lib)))
+        self.assertFalse(any(n.split(" ×")[0] in names.values() for n in chips(lib_off)))
+        self.assertEqual(self._render(dict(off, _health=h), "filechecks")["html"].count("lhitem"), self._render(dict(st, _health=h), "filechecks")["html"].count("lhitem"))
+        for cat, name, _title in self._check_pages():
+            with self.subTest(page=name):
+                html = self._render(dict(st, _health=h), name)["html"]
+                top = {c["id"] for c in h["checks"][cat] if not c.get("of")}
+                self.assertLessEqual(top, set(re.findall(r'data-lhcheck="([^"]+)"', html)))
+        # the switch is kept as the tools' are
+        from plexcache.config import _coerce
+        self.assertEqual(_coerce("library_health", "checks", {"page_filechecks": False, "tool_merge": True}, {}), {"page_filechecks": False, "tool_merge": True})
 
     def test_checks_are_worked_out_in_the_background(self):
-        """Library Health is worked out in the background, as the tools' counts are: the state asks for each library's
-        count, and one not worked out — or worked out before a check was switched — is worked out in a thread while its
-        tab turns; the answer is kept, so opening a check page, or a library on it, shows it at once."""
+        """Library Health is worked out in the background, as the tools' counts are (the evaluator: evaluate.HealthUnit):
+        one not worked out — or worked out before a check was switched — is worked out in its turn while its count is a
+        placeholder; the answer is kept, so opening a check page, or a library on it, shows it at once."""
         app, tt = self._tools_library()
         with app._health_lock:
             app._health.clear()
         app.health_counts.clear()
-        app._health_tried.clear()
-        self.assertNotIn("1", app._health_counts_now())                                              # (asked for: being worked out)
+        self.assertNotIn("1", app._health_counts_now())
+        self.assertEqual(app.evaluator.count("plexchecks", "1")["s"], "pending")                     # (not worked out: never a number)
+        app.evaluator.start()
+        self.addCleanup(setattr, app.evaluator, "started", False)
         for _ in range(200):
-            if "1" in app.health_counts:
+            if app.health_current("1"):
                 break
             time.sleep(0.05)
         hc = app._health_counts_now()["1"]
         self.assertFalse(hc["stale"])
         got = app.library_health("1")
         self.assertIs(app.library_health("1"), got)                                                   # (kept: not worked out again)
-        # a check switched: the count is stale (the tab turns) until worked out again, by itself
+        # a check switched: the count is a placeholder until worked out again, by itself (the page asking for the state)
         app.settings.update({"library_health": {"checks": {"linked_file": False}}})
         self.assertTrue(app._health_counts_now()["1"]["stale"])
+        self.assertEqual(app.evaluator.count("filechecks", "1")["s"], "pending")
         for _ in range(200):
+            app.state()
             if not app._health_counts_now()["1"]["stale"]:
                 break
             time.sleep(0.05)
@@ -5390,17 +5648,38 @@ class PageStructureTests(unittest.TestCase):
         got = self._render(st, "folders")
         self.assertTrue(any("<code>Title (Year)</code>" in h for h in got["info"].values()))
 
+    def test_a_choice_acts_when_changed_not_when_clicked(self):
+        """A dropdown acts when its value changes, never on a click: the page acts on a click on anything carrying data-act
+        and redraws, which shut a dropdown the moment it was opened (Sync Libraries' Whose edits win). So no <select> carries
+        data-act — a choice carries data-change, which the page acts on when it changes — on any page, drawn with a library
+        holding something for every tool, a mirror watched."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8") as fh:
+            js = fh.read()
+        self.assertIsNone(re.search(r"<select[^>]*\bdata-act=", js))
+        self.assertIn('if (el.dataset.change && el.tagName === "SELECT") { action(el.dataset.change, el); return; }', js)
+        app, tt = self._tools_library(mirror=True)
+        st = app.state()
+        seen = 0
+        for page in self.PAGES_DRAWN + ("filechecks", "plexchecks"):
+            with self.subTest(page=page):
+                html = self._render(st, page)["html"]
+                self.assertIsNone(re.search(r"<select[^>]*\bdata-act=", html))
+                seen += len(re.findall(r'<select[^>]*\bdata-change="', html))
+        self.assertIn('data-change="tool-switch" data-tool="sync" data-opt="source"', self._render(st, "sync")["html"])
+        self.assertGreater(seen, 0)
+
     def test_every_tool_says_what_apply_does(self):
         """Right before every tool's Apply, a box says what it does, what it changes (and where: this server, the folder
         sync, a mirror) and the backup made first — the rule for every tool: a tool page passes applies() to toolPage,
         and toolApply draws the box just above the button. Merge Duplicates' box tells how a mirror's records follow:
-        through Sync when this server is its source and applying is on, by hand on the mirror when it's the source, or
-        not at all for a mirror Sync doesn't watch."""
+        through Sync Libraries when this server's edits win there and it groups versions, by hand on the mirror when the
+        mirror's win, or not at all for a mirror that isn't watched."""
         from plexcache import safety
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
         tt = ToolsTests()
-        app, plex, client, cat, _ = tt._app()
+        app, plex, client, cat, _ = tt._app(mirror=True)                                               # (Sync Libraries: a mirror to compare with)
         for name in app.tools:
             body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S).group(1)
             self.assertRegex(body, r"\n      applies: function \(sc\)", f"page{name.capitalize()} doesn't say what Apply does (applies:)")
@@ -5435,11 +5714,14 @@ class PageStructureTests(unittest.TestCase):
                 self.assertRegex(between, r'</div></div><div class="row"[^>]*><label class="det"><input type="checkbox" $', "something comes between the box and Apply")
                 self.assertNotIn("<section", between)
                 self.assertIn("You back up yourself", between)                                     # (the backup the preference says is made first: of the files, or of Plex’s records)
-        # Merge Duplicates: this server's Plex only, and what that means for a mirror
+        # Merge Duplicates: this server's Plex only, and what that means for a mirror — with none chosen, nothing of one
         def merge_box(st):
             html = self._render(st, "merge")["html"]
             at = html.index('data-act="tool-all"')
             return html[html.rfind('class="note applybox', 0, at):at]
+        app.settings.update({"sync": {"mirrors": "none"}})
+        tt._run(app.tools["merge"], app.tools["merge"].scan_async("1"))
+        st = app.state()
         said = merge_box(st)
         self.assertIn("Only this server’s Plex records", said)
         self.assertIn("You back up yourself", said)
@@ -5455,22 +5737,21 @@ class PageStructureTests(unittest.TestCase):
         app.scan_library()
         tt._run(app.tools["merge"], app.tools["merge"].scan_async("1"))
         self.assertEqual(app.tools["merge"].scan_result["mirror"], {"name": "Starlit", "how": "watched"})
-        for sync, says, warn in (({"source": "this", "mode": "apply"}, "applying it merges them on Starlit", False),
-                                 ({"source": "this", "mode": "compare"}, "Sync can merge them there too once it’s set to", False),
-                                 ({"source": "this", "mode": "apply", "what": {"grouping": False}}, "Sync can merge them there too once it’s set to", False),
-                                 ({"source": "mirror", "mode": "apply"}, "is the sync source</strong>, so Sync can’t carry a merge from here", True)):
+        for sync, says, warn in (({"source": "this", "grouping": True}, "and applying it merges them on Starlit", False),
+                                 ({"source": "this", "grouping": False}, "can merge them there too once “Versions grouped differently” is on", False),
+                                 ({"source": "mirror", "grouping": True}, "Starlit’s edits win</strong> in Sync Libraries, so it can’t carry a merge from here", True)):
             with self.subTest(sync=sync):
-                app.settings.update({"sync": dict({"what": {"grouping": True}}, **sync)})
+                app.settings.update({"tools": {"sync": {"1": sync}}})                              # (Sync Libraries' options for the library)
                 said = merge_box(app.state())
                 self.assertIn("Only this server’s Plex records", said)
                 self.assertIn(says, said)
                 self.assertEqual("warnbox" in said[:60], warn)
-        # a mirror Sync doesn't watch (another Plex Cache sharing the folders): merged there by hand
+        # a mirror that isn't watched (another Plex Cache sharing the folders): merged there by hand
         app.settings.update({"sync": {"mirrors": "unknown"}})
         app.peers_summary = {"systems": [{"name": "Cabin", "libraries": ["1"]}]}
         tt._run(app.tools["merge"], app.tools["merge"].scan_async("1"))
         said = merge_box(app.state())
-        self.assertIn("Cabin looks like a mirror of these files, but Sync doesn’t watch it", said)
+        self.assertIn("Cabin looks like a mirror of these files, but it isn’t watched", said)
         self.assertIn("Run Merge Duplicates there too", said)
 
     def test_paged_lists_use_the_pager(self):
@@ -5623,36 +5904,26 @@ class PageStructureTests(unittest.TestCase):
         return json.loads(got.stdout)
 
     def test_library_and_tool_pages_scan_by_themselves(self):
-        """The Library page starts the view's job by itself — inspecting the files for Caching and
-        Health, comparing with the mirror for Sync — pausing the other; once the view's job is done the
-        other carries on, so it's ready when that view is opened; a job paused by hand stays paused.
-        A tool's page scans the library opened once by itself. (libAutoPlan and toolAutoPlan, run in node.)"""
+        """The Library page starts the view's job by itself — inspecting the files for Caching — and never pauses it off
+        its view: the inspector reads every library in the background (evaluate.Evaluator.steer); a job paused by hand
+        stays paused. A tool's page scans the library opened once by itself. (libAutoPlan and toolAutoPlan, run in node.)"""
         fn = self._js_fn("libAutoPlan") + "\n" + self._js_fn("toolAutoPlan")
         cases = [
             # landing on Caching with files to inspect: inspected
-            ["caching", {"inspect": {"needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, ["inspect:start"]],
+            ["caching", {"inspect": {"needed": True, "known": True}}, ["inspect:start"]],
             # the files to inspect not known yet (the library's data still loading): nothing
-            ["caching", {"inspect": {"needed": False, "known": False}, "sync": {"on": True, "needed": True, "known": True}}, []],
-            # Health (the view the page opens on) runs no job of its own — and pauses one left running
-            ["health", {"inspect": {"needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, []],
-            ["health", {"inspect": {"running": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, ["inspect:pause"]],
-            # switching to Sync while inspecting: the compare started, the inspection paused
-            ["sync", {"inspect": {"running": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, ["sync:start", "inspect:pause"]],
-            # back on Caching while the compare runs: the inspection resumed, the compare paused
-            ["caching", {"inspect": {"paused": True, "needed": True, "known": True}, "sync": {"on": True, "running": True, "needed": True, "known": True}}, ["inspect:start", "sync:pause"]],
+            ["caching", {"inspect": {"needed": False, "known": False}}, []],
+            # Health (the view the page opens on) runs no job of its own — and leaves one running in the background
+            ["health", {"inspect": {"needed": True, "known": True}}, []],
+            ["health", {"inspect": {"running": True, "needed": True, "known": True}}, []],
+            # back on Caching with the inspection paused: resumed
+            ["caching", {"inspect": {"paused": True, "needed": True, "known": True}}, ["inspect:start"]],
             # the view's job running: left alone
-            ["caching", {"inspect": {"running": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, []],
-            # the view's job done: the other isn't started off its own view
-            ["caching", {"inspect": {"needed": False, "known": True}, "sync": {"on": True, "needed": True, "known": True}}, []],
-            ["sync", {"inspect": {"paused": True, "needed": True, "known": True}, "sync": {"on": True, "needed": False, "known": True}}, []],
+            ["caching", {"inspect": {"running": True, "needed": True, "known": True}}, []],
             # everything done: nothing
-            ["sync", {"inspect": {"needed": False, "known": True}, "sync": {"on": True, "needed": False, "known": True}}, []],
-            # no mirror: nothing to compare; an inspection left running is paused all the same
-            ["sync", {"inspect": {"running": True, "needed": True, "known": True}, "sync": {"on": False, "needed": True, "known": True}}, ["inspect:pause"]],
+            ["caching", {"inspect": {"needed": False, "known": True}}, []],
             # paused by hand: stays paused
-            ["caching", {"inspect": {"paused": True, "needed": True, "known": True}, "sync": {"on": True, "needed": True, "known": True}, "hold": {"inspect": True}}, []],
-            # a compare waiting its turn (another library's first) isn't started again
-            ["sync", {"inspect": {"needed": False, "known": True}, "sync": {"on": True, "queued": True, "needed": True, "known": True}}, []],
+            ["caching", {"inspect": {"paused": True, "needed": True, "known": True}, "hold": {"inspect": True}}, []],
         ]
         tools = [
             ["1", {"running": False, "scan": None}, {}, "scan"],
@@ -6016,11 +6287,12 @@ class FakeOptimizer:
     def optimize(self, path, images, force, cover=None, tags="keep"):
         return self._done(path, self.result, {"path": path, "action": "optimize", "images": images, "force": force, "cover": cover, "tags": tags})
 
-    def convert(self, path, images, cover=None, tags="keep"):
-        """Converts as the real one does: <name>.mkv next to the original (or the next free name), optimized and tagged."""
+    def convert(self, path, images, cover=None, tags="keep", name=""):
+        """Converts as the real one does: <name> MKV-<EXT>.mkv next to the original (or ``name``, or the next free
+        name), optimized and tagged."""
         from plexcache.optimize import VERSION, convert
-        self.sent.append({"path": path, "action": "convert", "images": images, "tags": tags})
-        new = convert.free_target(path)
+        self.sent.append({"path": path, "action": "convert", "images": images, "tags": tags, "name": name})
+        new = next(t for t in convert._in_order(path, name) if not os.path.lexists(t))
         if self.convert_result == "converted":
             build_mkv(new, ours={"PLEXCACHE_OPTIMIZER": VERSION})
             st = os.stat(new)
@@ -6038,6 +6310,8 @@ class FakeOptimizer:
 
     def mark(self, folder, instance, info):
         from plexcache.optimize import claims
+        if not os.path.isdir(folder):  # (as the service: a library folder that's there — never one made at the machine's root, like /music)
+            raise OSError("path is outside the media folders")
         return {"marked": claims.mark(folder, instance, info)}
 
     def file_action(self, action, path, to="", root=""):
@@ -6218,7 +6492,7 @@ class OptimizerTests(unittest.TestCase):
         run_job(op)
         self.assertEqual([x for x in client.sent if x.get("action") == "convert"], [])
         r = op.convert_one(avi, "1")
-        self.assertEqual((r["result"], r["new"]), ("converted", os.path.join(d, "old.mkv")))
+        self.assertEqual((r["result"], r["new"]), ("converted", os.path.join(d, "old MKV-AVI.mkv")))
         self.assertTrue(os.path.exists(avi) and os.path.exists(r["new"]))                           # (the original stays: Plex first)
         # a file that can't be converted without losing something: the reason kept while the file is unchanged
         clip = os.path.join(d, "clip.flv")
@@ -6352,11 +6626,12 @@ class OptimizerTests(unittest.TestCase):
         self.assertFalse(app.other.configured())
 
     def test_library_sync_compare(self):
-        """Library Sync, read-only: items matched across the two servers by their files' place in the
-        library folder (shows through their episodes), the differences listed source → mirror — a file
-        not listed there, versions grouped differently, another match, edited fields, posters chosen by
-        hand, collections, labels, editions — and the direction follows the "source" setting. The mirror
-        choice gates converting; the settings must be reviewed again once changed."""
+        """Sync Libraries, what it finds: items matched across the two servers by their files' place in the library folder
+        (shows through their episodes), the differences from the side whose edits win to the other — a file not listed
+        there (its folder to scan), another match, edited fields, posters chosen by hand, collections, labels, editions —
+        read through the data layer (both servers' items, each one's own page where the two differ). Whose edits win, per
+        library, turns every row round over the same data, nothing read; each other option says whether rows about it are
+        live. The mirror choice gates converting; the mirror's discovery and the other Plex Caches seen in the folders."""
         from plexcache import checks, sync
         from plexcache.plex import Library
         app, op, client, d, state = self._app(names=("film.mkv",))
@@ -6386,115 +6661,79 @@ class OptimizerTests(unittest.TestCase):
         app.plex = lambda timeout=30: mk(here)
         app.other.client = lambda timeout=30: mk(there)
         app.run_checks_async = lambda **kw: None
-        # nothing chosen yet: Health asks, comparing refuses, converted originals wait
+        tool = app.tools["sync"]
+        scan = lambda key="1": tool.analysis(app.libdata.gather(key, wait=True, refresh=True))
+        # nothing chosen yet: Health asks, converted originals wait, and there's nothing to compare with
         (h,) = [x for x in checks._sync_items(app) if "mirrored Plex server" in en(x["title"])]
         self.assertEqual(h["status"], "warn")
-        with self.assertRaises(ValueError):
-            app.sync.compare()
+        self.assertEqual((scan()["why"], scan()["rows"]), ("none", []))
         app.conversions.items = [{"original": "/x.avi", "new": "/x.mkv", "state": "waiting", "library": "1", "plex_original": "/x.avi", "plex_new": "/x.mkv", "title": "x", "rating_key": "r", "checked": 0, "scanned": 0, "converted": 0}]
         app.conversions.tick()
         self.assertIn("isn’t chosen yet", app.conversions.items[0]["note"])
         app.settings.update({"plex2": {"url": "http://10.9.0.2:32400", "token": "tok", "name": "Cabin", "machine_id": "abc"}, "sync": {"mirrors": "plex2"}})
         self.assertEqual(app.sync.decided(), "plex2")
-        rep = app.sync.compare()
-        m = rep["libraries"]["1"]
-        self.assertEqual((m["matched"], m["total"]), (3, 3))
-        rows = {it["title"]: it for it in m["items"]}
+        m = scan()
+        self.assertEqual((m["matched"], m["records"], m["source"], m["mirror"], m["names"]["mirror"]), (3, 3, "this", "Movies", "Cabin"))
+        rows = {it["title"]: it for it in m["rows"]}
         self.assertEqual(sorted(rows["A"]["kinds"]), ["art", "collections", "editions", "edits", "missing"])   # a2.mkv isn't listed there, and the rest
+        self.assertEqual(rows["A"]["issues"], ["art", "collections", "editions", "edits", "scan"])               # (the options they're about)
         self.assertEqual((rows["B"]["kinds"], rows["C"]["kinds"]), (["match"], ["match"]))      # another entry; unmatched here, matched there
         self.assertEqual(next(c for c in rows["A"]["changes"] if c["kind"] == "edits"), {"kind": "edits", "from": "title: A!", "to": "title: A"})
-        self.assertEqual((rows["A"]["src"]["label"], rows["A"]["dst"]["key"], rows["A"]["src"]["art"]), ("A", "70", ["thumb"]))
-        # C is unmatched here with no description, matched there: copying it over would replace metadata with none
+        self.assertEqual((rows["A"]["src"]["label"], rows["A"]["dst"]["key"], rows["A"]["src"]["art"], rows["A"]["rks"]), ("A", "70", ["thumb"], ["10"]))
+        # the file not listed there: its folder there, to scan — whether it's on that disk can't be told (no Plex Cache there)
+        self.assertEqual((rows["A"]["scan"], rows["A"]["scan_files"], rows["A"]["unknown"], m["disk"]), (["/srv/Movies/A"], ["A/a2.mkv"], ["A/a2.mkv"], False))
+        # C is unmatched here with no description, matched there: bringing it over would replace metadata with none
         self.assertEqual((rows["C"]["warn"], rows["A"]["warn"], rows["B"]["warn"]), (True, False, False))
         self.assertEqual(en(next(c for c in rows["C"]["changes"] if c["kind"] == "match")["from"]), "unmatched")
-        self.assertEqual(rep["names"]["mirror"], "Cabin")
-        # edits on the other server the source doesn't have (tag fields too): listed as lost
+        # live, counted, flagged: every row, each option on by default
+        self.assertEqual((len(tool.live("1", m["rows"])), tool.counts()["libraries"]["1"]), (3, 3))
+        self.assertEqual(set(tool.flags(app.libdata.data("1"))), {"10", "11", "12"})
+        # edits on the other server the winning side doesn't have (tag fields too): listed, to be undone there
         here[("1", 1)][2]["locked"] = []
         there[("7", 1)][2]["locked"] = ["title", "genre", "writer"]
         there[("7", 1)][2]["fields"] = {"title": "Carmen"}
-        rep_l = app.sync.compare()
-        c_row = next(it for it in rep_l["libraries"]["1"]["items"] if it["title"] == "C")
+        c_row = next(it for it in scan()["rows"] if it["title"] == "C")
         lost = next(c for c in c_row["changes"] if "would be lost" in en(c["to"]))
         self.assertEqual(en(lost["to"]), "edited: title, genre, writer — these edits would be lost")
         self.assertEqual(c_row["dst"]["locked"], ["title", "genre", "writer"])
         here[("1", 1)][2]["locked"] = there[("7", 1)][2]["locked"] = []
         there[("7", 1)][2]["fields"] = {}
         self.assertEqual(c_row["src"]["files"], ["c.mkv"])                                      # (the file's name, where the match is in question)
-        # an edit the listing doesn't show, only the item's own page: found all the same (the listed
-        # items' pages are read from both servers)
+        # an edit the listing doesn't show, only the item's own page: found all the same (the pages of the items on both
+        # servers are read)
         detail_there = dict(there[("7", 1)][1], locked=["studio"], fields={})
         mk_there = mk(there)
         mk_there.item_detail = lambda key: detail_there if str(key) == "71" else next((it for its in there.values() for it in its if it["key"] == str(key)), None)
         app.other.client = lambda timeout=30: mk_there
-        rep_d = app.sync.compare()
-        b_row = next(it for it in rep_d["libraries"]["1"]["items"] if it["title"] == "B")
+        b_row = next(it for it in scan()["rows"] if it["title"] == "B")
         self.assertIn("studio", en(next(c["to"] for c in b_row["changes"] if c["kind"] == "edits")))
         self.assertEqual(b_row["dst"]["locked"], ["studio"])
         app.other.client = lambda timeout=30: mk(there)
         # a field edited the same on both: not a difference
         here[("1", 1)][1]["locked"] = there[("7", 1)][1]["locked"] = ["title", "genre"]
         here[("1", 1)][1]["fields"] = there[("7", 1)][1]["fields"] = {"title": "B"}
-        rep_s = app.sync.compare()
-        b_row = next(it for it in rep_s["libraries"]["1"]["items"] if it["title"] == "B")
+        b_row = next(it for it in scan()["rows"] if it["title"] == "B")
         self.assertEqual([c["kind"] for c in b_row["changes"]], ["match"])
         here[("1", 1)][1]["locked"] = there[("7", 1)][1]["locked"] = []
         here[("1", 1)][1]["fields"] = there[("7", 1)][1]["fields"] = {}
-        app.sync.compare()                                                                      # (the report as before)
-        t = rep["libraries"]["2"]
-        self.assertEqual((t["matched"], {k for it in t["items"] for k in it["kinds"]}), (3, {"labels"}))    # the show matched through its episode; its labels differ
-        self.assertEqual(rep["totals"]["labels"], 1)
-        self.assertEqual(app.sync.snapshot()["report"]["libraries"]["1"]["counts"]["edits"], 1)
-        self.assertEqual(app.sync.differences("2")["title"], "TV")
-        # the mirror as the source: the same pairs, the other way round
-        app.settings.update({"sync": {"source": "mirror"}})
-        rep2 = app.sync.compare()
-        self.assertEqual(rep2["source"], "mirror")
-        rows2 = {it["title"]: it for it in rep2["libraries"]["1"]["items"]}
-        self.assertIn("grouping", rows2["A"]["kinds"])                                          # seen from the mirror: this server's A has a file more
-        self.assertNotIn("missing", rows2["A"]["kinds"])
-        self.assertFalse(rows2["C"]["warn"])                                                    # the matched side as the source: fine
-        self.assertEqual(rep2["libraries"]["2"]["counts"]["labels"], 1)
-        # what's compared can be narrowed
-        app.settings.update({"sync": {"what": {"edits": False, "collections": False, "editions": False, "art": False}}})
-        rep3 = app.sync.compare()
-        self.assertEqual({k for k, n in rep3["totals"].items() if n}, {"grouping", "match"})         # (still from the mirror's side)
-        with self.assertRaises(config.SettingsError):
-            app.settings.update({"sync": {"what": {"posters": True}}})
-        # review: the settings changed since they were approved → said; approved → quiet, until the next change
-        self.assertTrue(app.sync.review_needed())
-        app.sync.approve()
-        self.assertFalse(app.sync.review_needed())
-        app.settings.update({"sync": {"source": "this"}})
-        self.assertTrue(app.sync.review_needed())
-        self.assertTrue(any("changed since" in en(x["title"]) for x in checks._sync_items(app)))
-        self.assertTrue(any("differences between" in en(x["title"]) for x in checks._sync_items(app)))
-        # one library at a time, as inspecting: starting one pauses the other (which picks up when
-        # started again), and each library's result shows as soon as it's done
-        gate = threading.Event()
-        slow = mk(here)
-        slow_items = slow.library_items
-        slow.library_items = lambda key, leaf: (gate.wait(5), slow_items(key, leaf))[1]
-        app.plex = lambda timeout=30: slow
-        app.sync.report = None
-        app.sync.start("1")
-        self.assertTrue(wait_for(lambda: app.sync.snapshot()["libs"]["1"]["running"]))
-        app.sync.start("2")                                                                     # (1 paused, 2 next)
-        gate.set()
-        self.assertTrue(wait_for(lambda: app.sync.snapshot()["libs"]["2"].get("finished")))
-        self.assertIn("2", app.sync.report["libraries"])
-        self.assertTrue(app.sync.snapshot()["libs"]["1"]["paused"])
-        app.sync.start("1")
-        self.assertTrue(wait_for(lambda: app.sync.snapshot()["libs"]["1"].get("finished")))
-        self.assertEqual(set(app.sync.report["libraries"]), {"1", "2"})
-        self.assertEqual(app.sync.differences("1")["job"]["pct"], 100)
-        self.assertIsNone(app.sync.snapshot()["progress"])
-        app.plex = lambda timeout=30: mk(here)
-        # due every compare_hours, unless off (once the worker has let go: it clears "running" after the result is in)
-        self.assertTrue(wait_for(lambda: not app.sync.running))
-        self.assertFalse(app.sync.due())
-        self.assertTrue(app.sync.due(now=time.time() + 7 * 3600))
-        app.settings.update({"sync": {"mode": "off"}})
-        self.assertFalse(app.sync.due(now=time.time() + 7 * 3600))
+        m = scan()
+        t = scan("2")
+        self.assertEqual((t["matched"], [(r["title"], r["kinds"], r["rks"]) for r in t["rows"]]), (3, [("Show", ["labels"], ["20"])]))    # the show matched through its episode; its labels differ
+        # the mirror's edits winning: the same pairs, the other way round — worked out again over the same data, nothing read
+        data = app.libdata.data("1")
+        stamp = data.stamp
+        app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}})
+        m2 = tool.analysis(data)
+        self.assertEqual((data.stamp, m2["source"], tool.plex_server("1"), tool.plex_server("2")), (stamp, "mirror", "here", "mirror"))
+        rows2 = {it["title"]: it for it in m2["rows"]}
+        self.assertEqual(sorted(rows2["A"]["kinds"]), ["collections", "editions", "edits"])   # (this server's A has a file more: it stays — no row for that)
+        self.assertTrue(rows2["A"]["id"].startswith("mirror:") and rows2["A"]["rks"] == ["10"])      # (the side changed is this one)
+        self.assertFalse(rows2["C"]["warn"])                                                    # the matched side winning: fine
+        # an option off for the library: its rows aren't live (counted, flagged, applied) — found all the same
+        app.settings.update({"tools": {"sync": {"1": {"source": "mirror", "edits": False, "collections": False, "editions": False, "art": False}}}})
+        self.assertEqual(tool.analysis(data)["rows"], m2["rows"])
+        self.assertEqual(sorted(r["title"] for r in tool.live("1", m2["rows"])), ["B", "C"])
+        app.settings.update({"tools": {"sync": {"1": {}}}})
         # another Plex Cache, seen by its marker in a library folder
         sdir = os.path.join(d, ".plexcache", "systems")
         os.makedirs(sdir)
@@ -6514,11 +6753,7 @@ class OptimizerTests(unittest.TestCase):
             (c,) = app.sync.discover()
         self.assertEqual((c["name"], c["rate"], c["libraries"][0]["found"], c["libraries"][0]["of"]), ("Cabin", 0.5, 1, 2))
         self.assertEqual(app.sync.snapshot()["candidates"][0]["id"], "zzz")
-        # a report made by an older version isn't shown as current: compared again
-        app.sync.report["version"] = 1
-        app.sync.save()
-        self.assertIsNone(sync.Sync(app).report)
-        self.assertEqual(sync.Sync(app).candidates[0]["id"], "zzz")
+        self.assertEqual(sync.Sync(app).candidates[0]["id"], "zzz")                              # (kept)
 
     def test_library_sync_grouping_shapes(self):
         """Versions grouped differently on the two servers, in every shape: one item here split into
@@ -6773,29 +7008,35 @@ class OptimizerTests(unittest.TestCase):
     def test_two_plex_caches_sharing_folders(self):
         """Two Plex Caches on servers sharing library folders (peers.py): each publishes its settings in
         the folder's marker (through the optimizer service), and the other refuses what would fight —
-        Library Sync applying from both sides, optimizer choices that differ, a file tool just run
-        there — saying so on Health. A claim's hourly refresh keeps the marker's content."""
+        Sync Libraries run on both sides with the same side's edits winning, optimizer choices that differ, a file tool
+        just run there — saying so on Health. A claim's hourly refresh keeps the marker's content."""
         from plexcache import checks, peers
         from plexcache.optimize import claims
         app, op, client, d, state = self._app(names=("film.mkv",))
         app.plex_name = "Here"
-        app.settings.update({"sync": {"mode": "apply", "source": "this"}})
         self.assertEqual(peers.publish(app), 1)
         mine = json.load(open(os.path.join(d, ".plexcache", "systems", app.optimizing.instance() + ".json")))
-        self.assertEqual((mine["name"], mine["sync"]["mode"], mine["sync"]["source"], mine["optimizer"]["images"]), ("Here", "apply", "this", op.options("1")["images"]))
+        self.assertEqual((mine["name"], mine["sync"]["source"], mine["optimizer"]["images"]), ("Here", "this", op.options("1")["images"]))
         self.assertEqual(peers.read(app), {})                                                       # (only our own marker)
-        # the other side's marker arrives (the folder sync): it applies with itself as the source too
-        other = {"name": "There", "version": "0.16.0", "sync": {"mode": "apply", "source": "this"}, "optimizer": dict(mine["optimizer"]), "tools": {}}
-        claims.mark(d, "system-b", other)
+        # the other side's marker arrives (the folder sync): it ran Sync Libraries this week with its own edits winning too
+        other = {"name": "There", "version": "0.16.0", "sync": {"source": "this"}, "optimizer": dict(mine["optimizer"]), "tools": {}}
+        claims.mark(d, "system-b", dict(other, tools={"sync": time.time() - 3600}))
         found = peers.read(app)
         self.assertEqual((list(found), found["system-b"]["libraries"]), (["system-b"], ["1"]))
-        self.assertIn("back and forth", en(peers.sync_conflict(app)))
-        app.settings.update({"sync": {"source": "mirror"}})                                          # one side the source: fine
-        self.assertIsNone(peers.sync_conflict(app))
-        claims.mark(d, "system-b", dict(other, sync={"mode": "apply", "source": "mirror"}))         # both pulling: fights too
-        self.assertIn("back and forth", en(peers.sync_conflict(app)))
-        claims.mark(d, "system-b", dict(other, sync={"mode": "compare", "source": "this"}))
-        self.assertIsNone(peers.sync_conflict(app))
+        self.assertIn("back and forth", en(peers.sync_conflict(app, "1")))
+        self.assertIn("Whose edits win to The mirror", en(peers.tool_conflict(app, "1", "sync")))  # (Apply refuses it: Tool.apply_async)
+        self.assertIn("1", peers.summary(app)["sync_conflicts"])
+        app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}})                        # one side's edits win on both: fine
+        self.assertIsNone(peers.sync_conflict(app, "1"))
+        claims.mark(d, "system-b", dict(other, sync={"source": "mirror"}, tools={"sync": time.time() - 3600}))  # both pulling: fights too
+        self.assertIn("back and forth", en(peers.sync_conflict(app, "1")))
+        claims.mark(d, "system-b", dict(other, sync={"source": "mirror"}, tools={"sync": time.time() - (peers.SYNC_DAYS + 1) * 86400}))
+        self.assertIsNone(peers.sync_conflict(app, "1"))                                             # (not run there lately)
+        claims.mark(d, "system-b", dict(other, sync={"mode": "apply", "source": "mirror"}))          # an older Plex Cache, applying on a timer
+        self.assertIn("back and forth", en(peers.sync_conflict(app, "1")))
+        claims.mark(d, "system-b", dict(other, sync={"mode": "compare", "source": "mirror"}))
+        self.assertIsNone(peers.sync_conflict(app, "1"))
+        app.settings.update({"tools": {"sync": {"1": {"source": "this"}}}})
         # optimizer choices that change the bytes must agree
         self.assertIsNone(peers.optimizer_conflict(app, "1"))
         claims.mark(d, "system-b", dict(other, optimizer=dict(mine["optimizer"], images="remove" if mine["optimizer"]["images"] != "remove" else "compress")))
@@ -6872,7 +7113,7 @@ class OptimizerTests(unittest.TestCase):
         f = app.files[0]
         f.rating_key, f.title = "r1", "Film"
         app.file_maps.files[f.path] = {"map": {"format": "matroska", "size": 100, "tracks": [{"type": "video", "codec": "V_X"}]}, "stat": {}}
-        maps = lambda path, st=None: {"tracks": [{"type": "video", "codec": "V_X"}]}
+        maps = lambda path, st=None, full=False: {"tracks": [{"type": "video", "codec": "V_X"}]}
         app.file_maps.get = maps
         got = libhealth.library_health(app, "1")
         self.assertEqual(([r["id"] for r in got["items"][0]["results"]], got["counts"]), (["no_audio"], {"no_audio": 1}))
@@ -6882,7 +7123,7 @@ class OptimizerTests(unittest.TestCase):
         app._lh_ignored = None                                                                   # (a restart: read from disk)
         self.assertTrue(libhealth.library_health(app, "1")["items"][0]["results"][0]["ignored"])
         # a new kind of issue on the item: a warning still
-        app.file_maps.get = lambda path, st=None: {"tracks": [{"type": "video", "codec": "V_X"}, {"type": "audio", "codec": "A_X", "language": "eng"}, {"type": "subtitles", "codec": "S_X", "language": "eng"}]}
+        app.file_maps.get = lambda path, st=None, full=False: {"tracks": [{"type": "video", "codec": "V_X"}, {"type": "audio", "codec": "A_X", "language": "eng"}, {"type": "subtitles", "codec": "S_X", "language": "eng"}]}
         app.settings.update({"library_health": {"checks": {"subtitles_text": True}}})
         got = libhealth.library_health(app, "1")
         self.assertEqual([(r["id"], r["ignored"]) for r in got["items"][0]["results"]], [("no_subtitles", False)])
@@ -6949,13 +7190,15 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in libhealth.plex_checks({"files": ["/m/Big (2000).mkv", "/m/Big (2001).mkv"]}, off)], [])
 
     def test_every_library_health_check_has_a_preference(self):
-        """Each check — file or Plex — has a switch in the settings, is on by default, and can be turned
-        off; an unknown id is refused."""
+        """Each check — file, Plex or mirror — has a switch in the settings, is on by default, and can be turned
+        off; an unknown id is refused. Each category of checks is one with a check page of its own (CHECK_PAGES)."""
         from plexcache import libhealth
         settings = config.Settings(tempfile.mkdtemp(dir=TMP))
         on = libhealth.enabled(settings.get())
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8") as fh:
+            pages = dict(re.findall(r'(\w+): \["(\w+)", "[^"]+"\]', re.search(r"var CHECK_PAGES = \{([^}]*)\}", fh.read()).group(1)))
         for cat, checks in libhealth.CHECKS.items():
-            self.assertIn(cat, ("file", "plex"))
+            self.assertIn(cat, pages, f"{cat}: a category of checks without a check page of its own (CHECK_PAGES, on checksPage)")
             for c in checks:
                 self.assertEqual(on[c["id"]], c.get("default", True), c["id"])
                 settings.update({"library_health": {"checks": {c["id"]: not c.get("default", True)}}})
@@ -6974,32 +7217,37 @@ class OptimizerTests(unittest.TestCase):
             settings.update({"library_health": {"subtitle_language": "english"}})
 
     def test_convert_names_a_free_mkv(self):
-        """A converted file's MKV is <name>.mkv, or where a file has that name already, <name> - MKV.mkv,
-        <name> - MKV 2.mkv…: never over a file that's there. Deleting the original and reverting take
-        any of those names as its MKV, and nothing else."""
+        """A converted file's MKV is <name> MKV-<EXT>.mkv (what it was converted from in its name), or where
+        a file has that name already, <name> MKV-<EXT> 2.mkv…: never over a file that's there, nor a name
+        given to another file's MKV. Deleting the original and reverting take any of those names as its
+        MKV (and the names MKVs were given before), and nothing else."""
         from plexcache.optimize import convert
         d = tempfile.mkdtemp(dir=TMP)
         mov = os.path.join(d, "Our School (1981) 2.mov")
         with open(mov, "wb") as fh:
             fh.write(b"x" * 100)
-        self.assertEqual(convert.free_target(mov), os.path.join(d, "Our School (1981) 2.mkv"))
-        open(os.path.join(d, "Our School (1981) 2.mkv"), "wb").close()                            # another file, the same name
-        self.assertEqual(convert.free_target(mov), os.path.join(d, "Our School (1981) 2 - MKV.mkv"))
-        open(os.path.join(d, "Our School (1981) 2 - MKV.mkv"), "wb").close()
-        self.assertEqual(convert.free_target(mov), os.path.join(d, "Our School (1981) 2 - MKV 2.mkv"))
+        name = lambda n: os.path.join(d, n)
+        open(name("Our School (1981) 2.mkv"), "wb").close()                                        # a file by the plain name: no matter
+        self.assertEqual(convert.free_target(mov), name("Our School (1981) 2 MKV-MOV.mkv"))
+        self.assertEqual(convert.free_target(name("Our School (1981) 2.mp4")), name("Our School (1981) 2 MKV-MP4.mkv"))
+        self.assertEqual(convert.free_target(mov, {name("Our School (1981) 2 MKV-MOV.mkv")}),   # (given to another file in the scan)
+                         name("Our School (1981) 2 MKV-MOV 2.mkv"))
+        open(name("Our School (1981) 2 MKV-MOV.mkv"), "wb").close()
+        self.assertEqual(convert.free_target(mov), name("Our School (1981) 2 MKV-MOV 2.mkv"))
         for t in convert.targets_of(mov):
             if not os.path.exists(t):
                 open(t, "wb").close()
         self.assertIsNone(convert.free_target(mov))                                               # every name taken
-        self.assertTrue(convert.is_target_of(mov, os.path.join(d, "Our School (1981) 2 - MKV 2.mkv")))
-        self.assertFalse(convert.is_target_of(mov, os.path.join(d, "Other.mkv")))
-        self.assertFalse(convert.is_target_of(mov, os.path.join(d, "x", "Our School (1981) 2.mkv")))
-        build_mkv(os.path.join(d, "Our School (1981) 2 - MKV.mkv"))
+        self.assertTrue(convert.is_target_of(mov, name("Our School (1981) 2 MKV-MOV 2.mkv")))
+        self.assertTrue(convert.is_target_of(mov, name("Our School (1981) 2 - MKV.mkv")))          # (named the earlier way)
+        self.assertFalse(convert.is_target_of(mov, name("Other.mkv")))
+        self.assertFalse(convert.is_target_of(mov, os.path.join(d, "x", "Our School (1981) 2 MKV-MOV.mkv")))
+        build_mkv(name("Our School (1981) 2 MKV-MOV.mkv"))
         with self.assertRaises(ValueError):
-            convert.delete_original(mov, os.path.join(d, "Other.mkv"))                            # not its MKV
-        convert.remove_converted(os.path.join(d, "Our School (1981) 2 - MKV 2.mkv"), mov)         # (a revert: its MKV goes)
-        self.assertFalse(os.path.exists(os.path.join(d, "Our School (1981) 2 - MKV 2.mkv")))
-        convert.delete_original(mov, os.path.join(d, "Our School (1981) 2 - MKV.mkv"))
+            convert.delete_original(mov, name("Other.mkv"))                                       # not its MKV
+        convert.remove_converted(name("Our School (1981) 2 MKV-MOV 2.mkv"), mov)                  # (a revert: its MKV goes)
+        self.assertFalse(os.path.exists(name("Our School (1981) 2 MKV-MOV 2.mkv")))
+        convert.delete_original(mov, name("Our School (1981) 2 MKV-MOV.mkv"))
         self.assertFalse(os.path.exists(mov))
 
     def test_convert_with_the_real_tools(self):
@@ -7023,17 +7271,21 @@ class OptimizerTests(unittest.TestCase):
         os.utime(avi, (1_600_000_000, 1_600_000_000))
         before = _sha256(avi)
         r = convert.convert_file(avi)
-        self.assertEqual((r["result"], r["new"], r["verified"]), ("converted", os.path.join(d, "a.mkv"), "passed"))
+        self.assertEqual((r["result"], r["new"], r["verified"]), ("converted", os.path.join(d, "a MKV-AVI.mkv"), "passed"))
         self.assertTrue(mkv.check(r["new"])["optimized"])
         self.assertEqual(int(os.stat(r["new"]).st_mtime), 1_600_000_000)                         # the original's timestamps
         self.assertEqual(_sha256(avi), before)                                                    # the original untouched
-        r2 = convert.convert_file(avi)                                                            # a.mkv is there: the next free name
-        self.assertEqual(r2["new"], os.path.join(d, "a - MKV.mkv"))
+        r2 = convert.convert_file(avi)                                                            # its MKV is there: the next free name
+        self.assertEqual(r2["new"], os.path.join(d, "a MKV-AVI 2.mkv"))
         os.remove(r2["new"])
+        self.assertEqual(convert.convert_file(avi, name="a MKV-AVI 5.mkv")["new"], os.path.join(d, "a MKV-AVI 5.mkv"))   # (the name the app showed)
+        os.remove(os.path.join(d, "a MKV-AVI 5.mkv"))
+        self.assertEqual(convert.convert_file(avi, name="../elsewhere.mkv")["new"], os.path.join(d, "a MKV-AVI 2.mkv"))  # (not one of its names: ignored)
+        os.remove(os.path.join(d, "a MKV-AVI 2.mkv"))
         with self.assertRaises(Skipped) as cm:
             convert.convert_file(mp4)
         self.assertIn("episode_id, show", str(cm.exception))
-        self.assertFalse(os.path.exists(os.path.join(d, "b.mkv")))
+        self.assertFalse(os.path.exists(os.path.join(d, "b MKV-MP4.mkv")))
         self.assertFalse([n for n in os.listdir(d) if n.startswith(".plexcache")])               # nothing left behind
         with self.assertRaises(ValueError):
             convert.delete_original(mp4, os.path.join(d, "b.mkv"))                                # no MKV
@@ -9093,6 +9345,492 @@ class MigrateTests(unittest.TestCase):
             self.assertTrue(migrate.compare(folder, folder)["same"] and os.path.exists(os.path.join(folder, "Late.m4b")))
             # kept across restarts
             self.assertEqual(migrating.Migration(app).snapshot()["state"]["step"], "done")
+
+
+class MirrorMigrationTests(unittest.TestCase):
+    """Converting a mirrored folder to a child dataset (migrating.py): the folder sync over it, a conversion left partway on
+    either side, the other side running TrueNAS, converting both servers or one, and the other side holding its file jobs
+    while one switches (mirrorhealth.converting) — each told by the link, or the marker (peerlink.facts)."""
+
+    K = 1024
+
+    def _setup(self, mirror=True):
+        """A library folder that can become a dataset (tank/media/Books), the optimizer and TrueNAS faked as in
+        MigrateTests.test_steps, and the other side's facts as the test sets them (``self.facts["v"]``)."""
+        from types import SimpleNamespace
+        from plexcache import checks, migrating
+        from plexcache.optimize import migrate
+        d = tempfile.mkdtemp(dir=TMP)
+        folder = os.path.join(d, "Books")
+        MigrateTests._tree(self, folder)
+        app = _new_app()
+        app.libraries = [{"key": "9", "title": "Books", "kind": "audio", "type": "artist", "locations": [folder], "excluded": False, "count": 1}]
+        app.files = [SimpleNamespace(path=os.path.join(folder, "Book Two.m4b"), library_key="9", size=150_000, kind="audio")]
+        app.map_path = lambda p: p
+        app.run_checks_async = lambda **kw: None
+        mounted = {d}
+        self.ml = [{"mountpoint": d, "fstype": "zfs", "source": "tank/media", "root": "/", "options": ["rw"], "optional": ["master:1"]}]
+        props = {}
+
+        class TN:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+            def dataset_cache_props(self, name):
+                return props.get(name)
+        app.truenas = lambda: TN()
+        app.plex = lambda timeout=None: SimpleNamespace(library_count=lambda key: 12)
+
+        class Client:
+            configured = True
+            results = []
+
+            def ready(self):
+                return True
+
+            def status(self, fresh=False):
+                return {"current": None, "results": self.results, "paused": False, "propagation": {d: True}, "since": 0}
+
+            def _call(self, path, body, timeout=5):
+                a = body["action"]
+                if a == "probe":
+                    pr = migrate.probe(body["path"])
+                    pr["is_mount"] = body["path"] in mounted
+                    return pr
+                if a == "compare":
+                    return migrate.compare(body["path"], body["to"])
+                if a == "rename":
+                    return {"path": migrate.rename_folder(body["path"], body["name"])}
+                if a == "delete":
+                    migrate.delete_old(body["path"])
+                    return {"deleted": True}
+                return {"ok": True}
+        app.optimizing.client = Client()
+        self.facts = {"v": None}
+        if mirror:
+            app.peerlink.mirror_id = lambda: "plexB"
+            app.peerlink.wanted = lambda: True
+            app.peerlink.facts = lambda: self.facts["v"]
+            app.settings.update({"plex2": {"name": "Cabin"}})
+        record = lambda app, key, rs=None: {"status": "warn", "rs": 1024 * self.K, "best": 512 * self.K, "alt": 128 * self.K}
+        self.enterContext(mock.patch.object(zfs, "mounts", lambda: self.ml))
+        self.enterContext(mock.patch.object(checks, "library_record", record))
+        mig = migrating.Migration(app)
+        app.migration = mig
+        return app, mig, d, folder, mounted, props
+
+    def _ready_dataset(self, folder, mounted, props):
+        """The new dataset made as asked: there, mounted, right record size and compression."""
+        props["tank/media/Books-new"] = {"recordsize": 512 * self.K, "compression": "zstd"}
+        os.makedirs(folder + "-new", exist_ok=True)
+        mounted.add(folder + "-new")
+
+    def _facts(self, **lib):
+        """The other side's facts: TrueNAS for certain, talking, the library's folder there with room, as ``lib`` changes it."""
+        there = dict({"folders": [{"name": "Books", "state": "folder", "room": {"free": 10e12, "needed": 2e9, "ok": True}}],
+                      "converting": None, "holding": False, "key": "3"}, **lib)
+        return {"via": "link", "at": time.time(), "name": "Cabin", "platform": {"name": "truenas", "truenas": True, "how": "api", "version": "25.10", "label": "TrueNAS 25.10"},
+                "truenas_api": True, "migration": None, "libraries": {"9": there}}
+
+    @staticmethod
+    def _by_id(snap):
+        return {c["id"]: c for c in snap["checks"]}
+
+    def test_sync_root_and_ignore_patterns(self):
+        """Syncthing's root found from its marker, at the folder or above it; its ignore patterns read as Syncthing does
+        (anchored or not, wildcards, prefixes, the first match deciding, a folder's contents with it); the other side's
+        folder that is this one."""
+        from plexcache import migrating as mg
+        d = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(d, "media", "Books"))
+        self.assertIsNone(mg.sync_root(os.path.join(d, "media", "Books")))
+        os.mkdir(os.path.join(d, "media", ".stfolder"))
+        self.assertEqual(mg.sync_root(os.path.join(d, "media", "Books")), os.path.join(d, "media"))
+        os.mkdir(os.path.join(d, "media", "Books", ".stfolder"))
+        self.assertEqual(mg.sync_root(os.path.join(d, "media", "Books") + "/"), os.path.join(d, "media", "Books"))
+        root = os.path.join(d, "media")
+        self.assertFalse(mg.ignored(root, "Books-new"))                                    # (no .stignore at all)
+        with open(os.path.join(root, ".stignore"), "w", encoding="utf-8") as fh:
+            fh.write("// a comment\n#include more.txt\n!/Keep-new\n(?d)/Books-new\n(?i)*.PLEXCACHE-OLD\n/x/**/y\n")
+        for rel, want in (("Books-new", True), ("Books-new/a/b.m4b", True), ("sub/Books-new", False), (".Books.plexcache-old", True),
+                          ("deep/.Films.plexcache-old", True), ("Keep-new", False), ("x/a/b/y", True), ("Books", False)):
+            self.assertEqual(mg.ignored(root, rel), want, rel)
+        rows = [{"name": "Books"}, {"name": "Films"}]
+        self.assertEqual(mg.their_folder(rows, "Films"), {"name": "Films"})
+        self.assertIsNone(mg.their_folder(rows, "Music"))                                 # (several there, none of that name)
+        self.assertEqual(mg.their_folder([{"name": "Audiobooks"}], "Books"), {"name": "Audiobooks"})  # (its only one)
+        self.assertIsNone(mg.their_folder(None, "Books"))
+
+    def test_folder_sync_checks(self):
+        """With Syncthing's root at the folder: said, nothing to do. Above it: its .stignore must leave out the new dataset
+        and the old folder (the lines to add given). None found with a mirror watched: you say nothing else carries them
+        away. Paused before the set-aside (it stops it), resumed after the switch. With neither Syncthing nor a mirror:
+        nothing asked."""
+        app, mig, d, folder, mounted, props = self._setup(mirror=False)
+        self._ready_dataset(folder, mounted, props)
+        mig.plan("9", folder)
+        ids = self._by_id(mig.refresh())
+        self.assertFalse({"sync_root", "sync_ignore", "sync_checked"} & set(ids))     # (no Syncthing, no mirror)
+        self.assertEqual(mig.state["scope"], "this")
+        os.mkdir(os.path.join(d, ".stfolder"))                                          # Syncthing's root above the folder
+        c = self._by_id(mig.refresh())["sync_ignore"]
+        self.assertFalse(c["ok"])
+        self.assertEqual(c["cmd"], "/Books-new\n/.Books.plexcache-old")
+        self.assertIn("above the library folder", en(c["detail"]))
+        self.assertEqual([x["id"] for x in mig.blocking()], ["sync_ignore"])
+        with self.assertRaises(ValueError):
+            mig.start_copy()
+        with open(os.path.join(d, ".stignore"), "w", encoding="utf-8") as fh:
+            fh.write("/Books-new\n/.Books.plexcache-old\n")
+        self.assertTrue(self._by_id(mig.refresh())["sync_ignore"]["ok"])
+        os.rmdir(os.path.join(d, ".stfolder"))
+        os.mkdir(os.path.join(folder, ".stfolder"))                                     # Syncthing's root is the folder itself
+        ids = self._by_id(mig.refresh())
+        self.assertTrue(ids["sync_root"]["ok"])
+        self.assertNotIn("sync_ignore", ids)
+        # the switch: paused before the set-aside, which it stops until then
+        mig.state.update(step="switch", compare={"same": True}, compare_at=time.time())
+        c = self._by_id(mig.refresh())["sync_paused"]
+        self.assertEqual((c["ok"], c["action"], c["gate"]), (False, "sync_paused", "aside"))
+        with self.assertRaises(ValueError):
+            mig.pass_then_move()
+        with self.assertRaises(ValueError):
+            mig.rename_old()
+        with self.assertRaises(ValueError):
+            mig.confirm("sync_resumed")                                                 # (not before the dataset is in place)
+        mig.confirm("sync_paused")
+        mig.state["compare_at"] = time.time()
+        mig.rename_old()
+        self.assertTrue(os.path.isdir(os.path.join(d, ".Books.plexcache-old")))
+        self.assertTrue(self._by_id(mig.refresh())["sync_paused"]["ok"])
+        # renamed: Verify asks for it to be resumed before the old copy goes
+        shutil.copytree(os.path.join(d, ".Books.plexcache-old"), folder + "-new", symlinks=True, dirs_exist_ok=True)  # (as the copy left it)
+        os.rename(folder + "-new", folder)
+        mounted.add(folder)
+        props["tank/media/Books"] = props.pop("tank/media/Books-new")
+        self.assertEqual(mig.refresh()["state"]["step"], "verify")
+        self.assertEqual([x["id"] for x in mig.blocking()], ["sync_resumed"])
+        with self.assertRaises(ValueError):
+            mig.delete_old()
+        mig.confirm("sync_resumed")
+        self.assertEqual(mig.delete_old()["state"]["step"], "done")
+        with self.assertRaises(ValueError):
+            mig.confirm("nonsense")
+        # none found, a mirror watched: said by you
+        app2, mig2, d2, folder2, mounted2, props2 = self._setup()
+        self.facts["v"] = self._facts()
+        self._ready_dataset(folder2, mounted2, props2)
+        mig2.plan("9", folder2)
+        c = self._by_id(mig2.refresh())["sync_checked"]
+        self.assertEqual((c["ok"], c["action"]), (False, "sync_checked"))
+        mig2.confirm("sync_checked")
+        self.assertTrue(self._by_id(mig2.refresh())["sync_checked"]["ok"])
+
+    def test_the_other_side_runs_truenas(self):
+        """The other side must say TrueNAS for certain: not reached (each reason said), an older Plex Cache that doesn't say,
+        not TrueNAS, TrueNAS not detected for certain — each stops the copy, with what to do."""
+        app, mig, d, folder, mounted, props = self._setup()
+        self._ready_dataset(folder, mounted, props)
+        mig.plan("9", folder)
+        mig.confirm("sync_checked")
+        check = lambda: self._by_id(mig.refresh())["mirror_truenas"]  # noqa: E731
+        self.assertIn("pair the two Plex Caches", en(check()["detail"]))
+        app.peerlink.wanted = lambda: False
+        self.assertIn("there’s no Plex Cache at the mirror’s site", en(check()["detail"]))
+        f = self._facts()
+        self.facts["v"] = dict(f, platform=None)
+        self.assertIn("older Plex Cache", en(check()["detail"]))
+        self.facts["v"] = dict(f, platform={"name": "linux", "truenas": False, "label": "Linux without ZFS"})
+        self.assertIn("It says: Linux without ZFS", en(check()["detail"]))
+        self.facts["v"] = dict(f, platform={"name": "linux-zfs", "truenas": None, "label": "Linux with ZFS — TrueNAS not detected"})
+        c = check()
+        self.assertIn("isn’t detected there for certain", en(c["detail"]))
+        self.assertIn("mirror_truenas", [x["id"] for x in mig.blocking()])
+        self.facts["v"] = f
+        c = check()
+        self.assertTrue(c["ok"])
+        self.assertEqual(en(c["title"]), "Cabin runs TrueNAS 25.10")
+        self.assertEqual(mig.blocking(), [])
+
+    def test_both_servers_or_this_one(self):
+        """Both by default with a mirror watched: the other side's room for its own copy checked (short: stops the copy,
+        with what's missing; not known: a warning); this server only needs none. The other side busy with another library,
+        or with this one as a child dataset of another record size: warnings. Chosen before the switch."""
+        app, mig, d, folder, mounted, props = self._setup()
+        self._ready_dataset(folder, mounted, props)
+        self.facts["v"] = self._facts()
+        mig.plan("9", folder)
+        mig.confirm("sync_checked")
+        self.assertEqual(mig.state["scope"], "both")
+        ids = self._by_id(mig.refresh())
+        self.assertEqual(en(ids["scope"]["title"]), "Both servers: Cabin converts its copy once this one is done")
+        self.assertTrue(ids["mirror_room"]["ok"])
+        short = self._facts(folders=[{"name": "Books", "state": "folder", "room": {"free": 1e9, "needed": 3e9, "ok": False}}])
+        self.facts["v"] = short
+        c = self._by_id(mig.refresh())["mirror_room"]
+        self.assertFalse(c["ok"])
+        self.assertIn("1.0 GB free there, and its copy needs 3.0 GB", en(c["detail"]))
+        self.assertEqual([x["id"] for x in mig.blocking()], ["mirror_room"])
+        mig.set_scope("this")
+        ids = self._by_id(mig.refresh())
+        self.assertNotIn("mirror_room", ids)
+        self.assertEqual(en(ids["scope"]["title"]), "This server only: Cabin keeps its folder as it is")
+        self.assertEqual(mig.blocking(), [])
+        mig.set_scope("both")
+        self.facts["v"] = self._facts(folders=[{"name": "Books", "state": "folder"}])  # (an older Plex Cache: room not said)
+        c = self._by_id(mig.refresh())["mirror_room"]
+        self.assertEqual((c["ok"], c["level"]), (False, "warn"))
+        self.assertEqual(mig.blocking(), [])                                            # (a warning stops nothing)
+        f = self._facts(folders=[{"name": "Books", "state": "dataset", "rs": 1024 * self.K}])
+        f["migration"] = {"library": "4", "title": "Films", "folder": "Films", "step": "copy"}
+        self.facts["v"] = f
+        ids = self._by_id(mig.refresh())
+        self.assertNotIn("mirror_room", ids)                                            # (a child dataset there already)
+        self.assertEqual(ids["mirror_rs"]["level"], "warn")
+        self.assertEqual(en(ids["mirror_busy"]["title"]), "Cabin is converting Films to a child dataset")
+        self.assertEqual(mig.blocking(), [])
+        with self.assertRaises(ValueError):
+            mig.set_scope("everywhere")
+        mig.state["step"] = "switch"
+        with self.assertRaises(ValueError):
+            mig.set_scope("this")                                                       # (chosen before the switch)
+
+    def test_partly_converted_on_the_other_side(self):
+        """A conversion of the library left partway at the other site: a warning before the switch here, an error from then
+        on that keeps the old folder where it is (and turns the tool and Health red), until completed or reverted there;
+        the other side holding its file jobs, confirmed over the link (said only, through the marker)."""
+        from plexcache import checks
+        app, mig, d, folder, mounted, props = self._setup()
+        self._ready_dataset(folder, mounted, props)
+        partial = self._facts(converting={"step": "switch", "aside": True, "folder": "Books", "since": time.time() - 86400, "title": "Books"})
+        self.facts["v"] = partial
+        mig.plan("9", folder)
+        mig.confirm("sync_checked")
+        c = self._by_id(mig.refresh())["mirror_partial"]
+        self.assertEqual((c["ok"], c["level"]), (False, "warn"))
+        self.assertIn("Cabin has a partly finished conversion of Books (Switch, since", en(c["detail"]))
+        self.assertIn("Put the Old Folder Back, Cancel, then delete Books-new", en(c["detail"]))
+        self.assertEqual(mig.blocking(), [])                                            # (the copy can go ahead)
+        mig.state.update(step="switch", compare={"same": True}, compare_at=time.time())
+        mig.confirm("sync_paused")
+        c = self._by_id(mig.refresh())["mirror_partial"]
+        self.assertEqual((c["ok"], c["level"], c["gate"]), (False, "error", "aside"))
+        self.assertEqual({x["id"] for x in mig.blocking("aside")}, {"mirror_partial", "mirror_holding"})
+        with self.assertRaises(ValueError):
+            mig.pass_then_move()
+        with self.assertRaises(ValueError):
+            mig.rename_old()
+        (h,) = checks._migration_items(app)
+        self.assertEqual(h["status"], "fail")
+        self.assertEqual(app._tools_red(dict(app.state(), migration=mig.snapshot()))["dataset"], ["9"])
+        # completed (or reverted) there, and holding its file jobs: the old folder can be set aside
+        self.facts["v"] = self._facts(folders=[{"name": "Books", "state": "dataset", "rs": 512 * self.K}], holding=True)
+        ids = self._by_id(mig.refresh())
+        self.assertTrue(ids["mirror_partial"]["ok"] and ids["mirror_holding"]["ok"])
+        self.assertEqual(app._tools_red(dict(app.state(), migration=mig.snapshot()))["dataset"], [])
+        mig.state["compare_at"] = time.time()
+        mig.rename_old()
+        self.assertTrue(mig.state["old_path"])
+        # only the marker: holding can't be confirmed, said as a warning
+        mig.undo_rename()
+        self.facts["v"] = dict(self._facts(), via="marker")
+        c = self._by_id(mig.refresh())["mirror_holding"]
+        self.assertEqual((c["ok"], c["level"]), (False, "warn"))
+        self.assertIn("aren’t talking", en(c["detail"]))
+
+    def test_partly_converted_here_found_on_disk(self):
+        """A conversion left partway here, whatever migration.json says: the new dataset there (Create, the copy picking up),
+        the old folder set aside (Switch, both compared again), the switch done with the old copy still there (Verify), the
+        new dataset left over beside a finished one. A state out of step with the disk is put right, and said."""
+        app, mig, d, folder, mounted, props = self._setup(mirror=False)
+        # the new dataset made, nothing copied (or some): Create, picked up
+        self._ready_dataset(folder, mounted, props)
+        mig._cand = None
+        (c,) = mig.candidates()
+        self.assertEqual(c["partial"], {"step": "create"})
+        st = mig.plan("9", folder)["state"]
+        self.assertEqual((st["step"], st["picked_up"]), ("create", "create"))
+        mig.cancel()
+        # the old folder set aside, the dataset not yet renamed: Switch, compared again
+        import shutil as sh
+        sh.copytree(folder, folder + "-new", symlinks=True, dirs_exist_ok=True)
+        os.rename(folder, os.path.join(d, ".Books.plexcache-old"))
+        mig._cand = None
+        (c,) = mig.candidates()
+        self.assertEqual(c["partial"]["step"], "switch")
+        st = mig.plan("9", folder)["state"]
+        self.assertEqual((st["step"], st["old_path"], st["compare"]["same"]), ("switch", os.path.join(d, ".Books.plexcache-old"), True))
+        with self.assertRaises(ValueError):
+            mig.cancel()                                                                # (put it back first)
+        mig.undo_rename()
+        self.assertTrue(os.path.isdir(folder))
+        # migration.json out of step: the old folder found set aside by hand — picked up from there, and said
+        mig.state.update(step="copy", copying=False)
+        mig.state.pop("old_path", None)
+        os.rename(folder, os.path.join(d, ".Books.plexcache-old"))
+        st = mig.refresh()["state"]
+        self.assertEqual((st["step"], st["old_path"]), ("switch", os.path.join(d, ".Books.plexcache-old")))
+        self.assertIn("found set aside", en(st["corrected"]))
+        # put back by hand: set aside no more
+        os.rename(os.path.join(d, ".Books.plexcache-old"), folder)
+        st = mig.refresh()["state"]
+        self.assertNotIn("old_path", st)
+        self.assertIn("back at its name", en(st["corrected"]))
+        mig.cancel()
+        # the switch done (the dataset at the folder's path), the old copy still there: Verify
+        os.rename(folder, os.path.join(d, ".Books.plexcache-old"))
+        os.rename(folder + "-new", folder)
+        self.ml.append({"mountpoint": folder, "fstype": "zfs", "source": "tank/media/Books", "root": "/", "options": ["rw"], "optional": []})
+        mounted.add(folder)
+        props["tank/media/Books"] = props.pop("tank/media/Books-new")
+        mig._cand = None
+        (c,) = mig.candidates()
+        self.assertEqual((c["partial"]["step"], c["child"]), ("verify", "tank/media/Books"))
+        st = mig.plan("9", folder)["state"]
+        self.assertEqual(st["step"], "verify")
+        self.assertEqual(mig.delete_old()["state"]["step"], "done")
+        # a new dataset left over beside the finished one: said
+        os.mkdir(folder + "-new")
+        mig._cand = None
+        (c,) = mig.candidates()
+        self.assertEqual((c.get("leftover"), c.get("partial")), (folder + "-new", None))
+        # an old copy deleted by hand during Verify: nothing left to compare with, and the end needs no delete
+        mig.state = {"folder": folder, "step": "verify", "old_path": os.path.join(d, ".gone.plexcache-old"), "library": "9", "child": "tank/media/Books",
+                     "rs": 512 * self.K, "alt": 128 * self.K, "temp_folder": folder + "-new"}
+        st = mig.refresh()["state"]
+        self.assertNotIn("old_path", st)
+        self.assertIn("isn’t there any more", en(st["corrected"]))
+
+    def test_what_each_side_tells_the_other(self):
+        """Each side's status and marker say what it runs on, whether its TrueNAS API is connected, the conversion under
+        way, and per library its folders (a dataset or not, room for a copy), a conversion of one, and whether it holds its
+        file jobs; the other side's facts read from the link (its library keys turned into ours) or the marker (the paired
+        one's, or the one next to the mirror's Plex)."""
+        from types import SimpleNamespace
+        from plexcache import peerlink as pl, peers
+        app, mig, d, folder, mounted, props = self._setup(mirror=False)
+        own = pl.own_facts(app)
+        self.assertEqual(set(own), {"platform", "truenas_api", "migration"})
+        self.assertIn(own["platform"]["truenas"], (True, False, None))
+        self.assertIsNone(own["migration"])
+        (row,) = pl.own_library(app, "9")["folders"]
+        self.assertEqual((row["name"], row["state"]), ("Books", "folder"))
+        self.assertGreater(row["room"]["needed"], 150_000)
+        self._ready_dataset(folder, mounted, props)
+        mig.plan("9", folder)
+        mig.state["step"] = "switch"
+        lib = pl.own_library(app, "9")
+        self.assertEqual((lib["folders"][0]["state"], lib["converting"]["step"], lib["holding"]), ("converting", "switch", False))
+        self.assertEqual(pl.own_facts(app)["migration"]["step"], "switch")
+        body = peers.info(app, "9")
+        self.assertEqual((body["migration"]["folder"], body["converting"]["step"]), ("Books", "switch"))
+        # the other side's facts, from the link: its keys turned into ours
+        link = app.peerlink
+        link.paired, link.last_ok = {"instance": "b", "name": "Cabin"}, time.time()
+        link.status = {"name": "Cabin", "platform": own["platform"], "truenas_api": True, "migration": None,
+                       "libraries": {"3": {"folders": [{"name": "Books", "state": "dataset"}], "converting": None, "holding": True}}}
+        app.other.pairs = lambda: {"9": SimpleNamespace(key="3")}
+        f = link.facts()
+        self.assertEqual((f["via"], f["libraries"]["9"]["key"], f["libraries"]["9"]["holding"]), ("link", "3", True))
+        # not talking: the marker, the one next to the mirror's Plex
+        link.paired, link._facts = None, None
+        link.mirror_id = lambda: "plexB"
+        with mock.patch.object(peers, "read", lambda app: {"x": {"marker": {"plex": "plexC", "name": "Other"}, "by_library": {}},
+                                                           "y": {"marker": {"plex": "plexB", "name": "Cabin", "at": 5, "platform": {"truenas": True}},
+                                                                 "by_library": {"9": {"converting": {"step": "verify"}, "folders": []}}}}):
+            f = link.facts()
+        self.assertEqual((f["via"], f["name"], f["libraries"]["9"]["converting"]["step"]), ("marker", "Cabin", "verify"))
+        link._facts = None
+        with mock.patch.object(peers, "read", lambda app: {}):
+            self.assertIsNone(link.facts())
+
+    def test_the_other_side_holds_while_one_switches(self):
+        """While the other side switches a library's folder (Switch, Verify): optimizing, the file tools and Sync Libraries
+        are held here (mirrorhealth.hold, which every one of them goes by), Mirror Checks don't compare it (said why) and do
+        once it's done, and Health says so. Before its switch (Create, Copy): nothing held."""
+        from plexcache import checks
+        app = _new_app()
+        app.libraries = [{"key": "9", "title": "Books", "kind": "audio", "type": "artist", "locations": ["/data/Books"]}]
+        app.peerlink.mirror_id = lambda: "plexA"
+        facts = {"v": None}
+        app.peerlink.facts = lambda: facts["v"]
+        health = app.mirror_health
+        health.paired = lambda: (["9"], None)
+        conv = lambda step: {"name": "Home", "libraries": {"9": {"converting": {"step": step, "folder": "Books"}}}}  # noqa: E731
+        facts["v"] = conv("copy")
+        self.assertIsNone(health.converting("9"))
+        self.assertIsNone(health.not_applicable("9"))
+        facts["v"] = conv("switch")
+        why = health.hold("9")
+        self.assertIn("Home is converting this library’s folder to a child dataset (Switch)", en(why))
+        self.assertIn("compared again once it’s done", en(health.not_applicable("9")))
+        items = checks._mirror_items(app)
+        self.assertIn("The other site is converting a folder to a child dataset: Books", [en(i["title"]) for i in items])
+        self.assertNotIn("Optimizing is held: Books", [en(i["title"]) for i in items])  # (not said as the folder sync's)
+        facts["v"] = conv("verify")
+        self.assertIsNotNone(health.hold("9"))
+        facts["v"] = None                                                               # done there: compared again
+        self.assertIsNone(health.not_applicable("9"))
+        self.assertIn("9", health.wanted)
+        self.assertIsNone(health.converting("9"))
+
+    def test_the_same_files_as_the_other_site(self):
+        """Once switched: the dataset's files against the other site's, over the link — a file only here, of another size,
+        or (one folder on both sides) only there; a file changed in the last hour left out. Not talking: a warning."""
+        from types import SimpleNamespace
+        app, mig, d, folder, mounted, props = self._setup()
+        old = time.time() - 7200
+        rows = [{"local": folder + "/a.m4b", "size": 10, "mtime": old}, {"local": folder + "/b.m4b", "size": 20, "mtime": old},
+                {"local": folder + "/new.m4b", "size": 5, "mtime": time.time()}]
+        app.libdata.data = lambda key: SimpleNamespace(ready=True, files=rows, unlisted=[])
+        theirs = {"ready": True, "files": [["a.m4b", 10, old], ["b.m4b", 20, old]]}
+        app.peerlink.files = lambda key: theirs
+        st = {"folder": folder, "library": "9", "step": "verify", "title": "Books"}
+        lib = {"key": "3", "folders": [{"name": "Books"}]}
+        got = mig._compare_with_mirror(st, lib)
+        self.assertEqual((got["files"], got["missing"], got["different"], got["extra"]), (3, [], [], []))
+        theirs["files"] = [["a.m4b", 11, old], ["c.m4b", 1, old]]
+        got = mig._compare_with_mirror(st, lib)
+        self.assertEqual((got["missing"], got["different"], got["extra"]), (["b.m4b"], ["a.m4b"], ["c.m4b"]))
+        out = []
+        check = mig._collector(out)
+        mig._check_mirror_files(st, check, {"via": "link"}, "Cabin", lib, True)
+        self.assertEqual((out[0]["id"], out[0]["ok"]), ("mirror_files", False))
+        self.assertIn("b.m4b", en(out[0]["detail"]))
+        out.clear()
+        mig._check_mirror_files(st, check, {"via": "marker"}, "Cabin", lib, True)
+        self.assertEqual((out[0]["ok"], out[0]["level"]), (False, "warn"))
+        theirs["ready"] = False
+        self.assertEqual(mig._compare_with_mirror(st, lib), {"pending": True})
+
+    def test_the_page_draws_it(self):
+        """The Child Dataset page: an error red, a warning as one, the scope's button, the Mirror column with each folder as
+        it is there, and a folder left partway picked up."""
+        app, mig, d, folder, mounted, props = self._setup()
+        self._ready_dataset(folder, mounted, props)
+        self.facts["v"] = self._facts(converting={"step": "copy", "folder": "Books", "since": time.time()})
+        app.zfs = {"datasets": [{"dataset": "tank/media", "pool": "tank", "keys": ["9"]}], "pools": {}}   # (looked at)
+        state = app.state()
+        html = PageStructureTests()._render(state, "dataset")["html"]
+        self.assertIn("Partly converted", html)                                         # (here, and there)
+        self.assertIn("Pick Up This Conversion", html)
+        self.assertIn("<th scope=\"col\">Cabin</th>", html)
+        mig.plan("9", folder)
+        mig.state.update(step="switch", compare={"same": True}, compare_at=time.time())
+        self.facts["v"] = self._facts(converting={"step": "switch", "folder": "Books", "since": time.time()})
+        mig.refresh()
+        html = PageStructureTests()._render(app.state(), "dataset")["html"]
+        self.assertIn('class="badge b-fail">Error', html)
+        self.assertIn("I’ve Paused the Folder Sync Here", html)
+        self.assertRegex(html, r'data-mig="pass_then_move" disabled')
+        mig.state["step"] = "create"
+        mig.refresh()
+        html = PageStructureTests()._render(app.state(), "dataset")["html"]
+        self.assertIn('class="badge b-warn">Warning', html)
+        self.assertIn('data-scope="this"', html)
 
 
 class OptimizerSetupTests(unittest.TestCase):
@@ -11604,7 +12342,7 @@ class ToolsTests(unittest.TestCase):
                 fh.write(b"x" * 100)
             os.utime(p, (time.time() - 3600, time.time() - 3600))
         plex.cat["movies"] += [{"path": avi, "size": 100, "kbps": 1, "key": "301", "title": "Old Film", "year": 2001, "guid": "plex://movie/301", "duration": 5400000},
-                               {"path": mp4, "size": 100, "kbps": 1, "key": "302", "title": "Home", "year": 2002, "guid": "plex://movie/302", "duration": 5400000}]
+                               {"path": mp4, "size": 100, "kbps": 1, "key": "302", "title": "Home", "year": 2002, "guid": "plex://movie/302", "duration": 6000000}]  # (running times apart: not the very same file to Merge, whose finds come first)
         app.scan_library()
         tool = app.tools["convert"]
         snap = self._run(tool, tool.scan_async("1"))
@@ -11625,7 +12363,7 @@ class ToolsTests(unittest.TestCase):
         # Apply: a process; the MKV written next to the original, which stays; Plex asked to scan; the history's columns
         self.assertFalse(tool.apply_async([sc["rows"][0]["id"]]))                                   # (a grey row isn't done)
         self._run(tool, tool.apply_async([sc["rows"][1]["id"]]))
-        mkv = os.path.join(root, "Old Film (2001).mkv")
+        mkv = os.path.join(root, "Old Film (2001) MKV-AVI.mkv")
         self.assertEqual([x["path"] for x in client.sent if x.get("action") == "convert"], [avi])
         self.assertTrue(os.path.exists(mkv) and os.path.exists(avi))
         (e,) = app.conversions.snapshot()["items"]
@@ -11677,8 +12415,8 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual([r["name"] for r in tool.live("1", snap["scan"]["rows"])], ["Home (2002).mp4"])
         self.assertEqual((tool.counts()["libraries"]["1"], snap["enabled"]["1"]["mp4"]), (1, True))
         self._run(tool, tool.apply_async([snap["scan"]["rows"][0]["id"]]))
-        home_mkv = os.path.join(root, "Home (2002).mkv")
-        plex.cat["movies"].append({"path": home_mkv, "size": 100, "kbps": 1, "key": "303", "title": "Home", "year": 2002, "guid": "plex://movie/303", "duration": 5400000})
+        home_mkv = os.path.join(root, "Home (2002) MKV-MP4.mkv")
+        plex.cat["movies"].append({"path": home_mkv, "size": 100, "kbps": 1, "key": "303", "title": "Home", "year": 2002, "guid": "plex://movie/303", "duration": 6000000})
         plex.changed_at = "2"
         app.scan_library()
         app.conversions.act(mp4, "check")
@@ -11693,7 +12431,7 @@ class ToolsTests(unittest.TestCase):
         with open(flv, "wb") as fh:
             fh.write(b"x" * 100)
         os.utime(flv, (time.time() - 3600, time.time() - 3600))
-        plex.cat["movies"].append({"path": flv, "size": 100, "kbps": 1, "key": "304", "title": "Clip", "year": 2003, "guid": "plex://movie/304", "duration": 5400000})
+        plex.cat["movies"].append({"path": flv, "size": 100, "kbps": 1, "key": "304", "title": "Clip", "year": 2003, "guid": "plex://movie/304", "duration": 6600000})  # (not the very same file as another, to Merge)
         plex.changed_at = "3"
         for _ in range(400):
             if not tool.running:
@@ -11712,30 +12450,46 @@ class ToolsTests(unittest.TestCase):
         self.assertIn("left as it is", en(tool.flag_lines([row])[0]))
 
     def test_convert_to_mkv_name_taken(self):
-        """Convert to MKV with a file already there by the MKV's name (one Plex doesn't list): the card
-        shows the next free name, the MKV is written by it, and it's that name followed into Plex."""
+        """Convert to MKV names each MKV for what it was converted from, never a name a file has already
+        nor one another file in the scan gets: two files of one name (a .mov and an .mp4) and a .MOV of
+        the same name too, beside an MKV of that name. The card shows each the name it will get, and
+        that's the name written, and followed into Plex."""
         app, plex, client, cat, _ = self._app()
         root = os.path.join(cat["root"], "Movies")
-        avi = os.path.join(root, "Our School (1981) 2.avi")
-        with open(avi, "wb") as fh:
-            fh.write(b"x" * 100)
-        os.utime(avi, (time.time() - 3600, time.time() - 3600))
+        names = ("Our School (1981) 2.mov", "Our School (1981) 2.mp4", "Our School (1981) 2.MOV")
+        for k, n in enumerate(names):
+            with open(os.path.join(root, n), "wb") as fh:
+                fh.write(b"x" * 100)
+            os.utime(os.path.join(root, n), (time.time() - 3600, time.time() - 3600))
+            plex.cat["movies"].append({"path": os.path.join(root, n), "size": 100, "kbps": 1, "key": str(311 + k), "title": "Our School", "year": 1981,
+                                       "guid": f"plex://movie/{311 + k}", "duration": 5400000 + k * 600000})  # (not the very same file to Merge)
         taken = os.path.join(root, "Our School (1981) 2.mkv")
         with open(taken, "wb") as fh:
             fh.write(b"someone else's")
-        plex.cat["movies"].append({"path": avi, "size": 100, "kbps": 1, "key": "311", "title": "Our School", "year": 1981, "guid": "plex://movie/311", "duration": 5400000})
         app.scan_library()
         tool = app.tools["convert"]
-        (row,) = self._run(tool, tool.scan_async("1"))["scan"]["rows"]
-        self.assertEqual(row["new_name"], "Our School (1981) 2 - MKV.mkv")
-        self._run(tool, tool.apply_async([row["id"]]))
-        new = os.path.join(root, "Our School (1981) 2 - MKV.mkv")
-        self.assertTrue(os.path.exists(new))
+        app.settings.update({"tools": {"convert": {"1": {"mp4": True, "mov": True}}}})
+        for _ in range(400):
+            if not tool.running:
+                break
+            time.sleep(0.05)
+        rows = self._run(tool, tool.scan_async("1"))["scan"]["rows"]
+        got = {r["name"]: r["new_name"] for r in rows}
+        self.assertEqual(sorted(got.values()), ["Our School (1981) 2 MKV-MOV 2.mkv", "Our School (1981) 2 MKV-MOV.mkv", "Our School (1981) 2 MKV-MP4.mkv"])
+        self.assertEqual(got["Our School (1981) 2.mp4"], "Our School (1981) 2 MKV-MP4.mkv")
+        for r in sorted(rows, key=lambda r: r["new_name"]):                                         # (in the order the scan gave the names out)
+            self._run(tool, tool.apply_async([r["id"]]))
+            for _ in range(400):
+                if not tool.running:
+                    break
+                time.sleep(0.05)
+            new = os.path.join(root, r["new_name"])
+            self.assertTrue(os.path.exists(new), r["new_name"])
+            e = app.conversions.get(r["local"])
+            self.assertEqual((e["new"], os.path.basename(e["plex_new"])), (new, r["new_name"]))
         with open(taken, "rb") as fh:
             self.assertEqual(fh.read(), b"someone else's")                                         # (left alone)
-        e = app.conversions.get(avi)
-        self.assertEqual((e["new"], os.path.basename(e["plex_new"])), (new, "Our School (1981) 2 - MKV.mkv"))
-        self.assertEqual(en(tool.apply_row(row, lambda text: None)["reason"]), "Converted already: its MKV is on its way into Plex")
+        self.assertEqual(en(tool.apply_row(rows[0], lambda text: None)["reason"]), "Converted already: its MKV is on its way into Plex")
 
     def test_merge_duplicates(self):
         """The same film on two records (the same match; or unmatched, files named for the same title
@@ -12578,7 +13332,7 @@ class ToolsTests(unittest.TestCase):
         self.assertTrue(got["started"])
         self._run(app.tools["merge"], True)
         st = json.loads(urllib.request.urlopen(base + "/api/state", timeout=10).read())
-        self.assertEqual(sorted(st["tools"]), ["convert", "folders", "merge", "unlink", "versions"])
+        self.assertEqual(sorted(st["tools"]), ["convert", "folders", "merge", "sync", "unlink", "versions"])
         self.assertEqual((st["tools"]["merge"]["scan"]["library"], st["trash"]["items"], st["trash"]["hold_days"]), ("1", [], 30))  # (the hold: the backup length)
         with self.assertRaises(urllib.error.HTTPError):
             post("/api/tools/nothing", {"action": "scan", "library": "1"})
@@ -12586,16 +13340,21 @@ class ToolsTests(unittest.TestCase):
             post("/api/trash", {"path": "/nowhere", "action": "keep"})
         self.assertFalse(post("/api/tools/merge", {"action": "apply", "ids": []})["started"])
 
-    def test_library_sync_apply_and_undo(self):
-        """Library Sync, applying: the differences ticked made true on the other server — edited fields
-        (set and locked as the source has them), the match, a poster chosen by hand (uploaded),
-        collections, several items there merged into one — only with the mode "apply" and after a
-        review; each change logged with what the item had before, and undone from the log."""
-        from plexcache import sync as sync_mod
+    def test_sync_libraries_apply_and_revert(self):
+        """Sync Libraries, applying: the rows ticked made true on the side whose edits don't win, through its Plex — edited
+        fields (set and locked as on the winning side), the match, a poster chosen by hand (uploaded), collections, several
+        items there merged into one, a file it doesn't list (its folder scanned) — as a process, like every tool's, the
+        history saying where and what. Revert, with no backup of the records made, puts each back the tool's own way: the
+        title back and unlocked, the collection off, the match back, the poster chosen before chosen again (a merge can't
+        be). The mirror's edits winning, this server is the one changed — its records backed up first, and put back from
+        that backup."""
+        from plexcache import libhealth, plexbackup
+        from plexcache.tools import revert_job
         app, plex, client, cat, other = self._app(mirror=True)
-        sy = app.sync
-        # this server (the source): Film 1's title edited and in a collection; Film 2 matched to another entry;
-        # Film 3's poster chosen by hand; Film 0 one record here, two on the mirror
+        app.run_checks_async = lambda *a, **k: None
+        tool = app.tools["sync"]
+        # this server: Film 1's title edited and in a collection; Film 2 matched to another entry on the mirror; Film 3's
+        # poster chosen by hand; Film 0 one record here, two on the mirror; Film 4 here only, its file on the disk they share
         cat["movies"][1].update(title="Film One", locked=["title"], collections=["Best"])
         other.cat["movies"][2]["guid"] = "plex://movie/other"
         cat["movies"][3]["locked"] = ["thumb"]
@@ -12603,58 +13362,1318 @@ class ToolsTests(unittest.TestCase):
         fakes.make_mkv(copy, 1024 * 1024)
         cat["movies"][0]["more"] = [copy]
         other.cat["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 0", "year": 2010, "guid": "plex://movie/0", "duration": 5400000})
-        app.settings.update({"sync": {"libraries": {"2": False, "3": False, "4": False, "5": False}}})  # (the films only)
+        new = os.path.join(cat["root"], "Movies", "Film 4 (2014)", "Film 4.mkv")
+        os.makedirs(os.path.dirname(new))
+        fakes.make_mkv(new, 1024 * 1024)
+        cat["movies"].append({"path": new, "size": 1, "kbps": 1, "key": "104", "title": "Film 4", "year": 2014, "guid": "plex://movie/4", "duration": 5400000})
         app.scan_library()
-        sy.compare()
-        rows = {r["title"]: r for r in sy.report["libraries"]["1"]["items"]}
+        sc = self._run(tool, tool.scan_async("1"))["scan"]
+        rows = {r["title"]: r for r in sc["rows"]}
         self.assertEqual(sorted((t, r["shape"], r["kinds"]) for t, r in rows.items()),
-                         [("Film 0 (2010)", "split", ["grouping"]), ("Film 2 (2012)", "pair", ["match"]), ("Film 3 (2013)", "pair", ["art"]), ("Film One (2011)", "pair", ["edits", "collections"])])
-        # not without the mode, nor before a review
-        with self.assertRaises(ValueError):
-            sy.applier.apply_async("1", [rows["Film One (2011)"]["id"]])
-        app.settings.update({"sync": {"mode": "apply"}})
-        self.assertIn("reviewed", en(sy.applier.allowed()))
-        sy.approve()
-        self.assertIsNone(sy.applier.allowed())
-        self.assertFalse(sy.applier.apply_async("1", ["nothing"]))
-        self.assertTrue(sy.applier.apply_async("1", [r["id"] for r in rows.values()]))
-        for _ in range(400):
-            if not sy.applier.running:
-                break
-            time.sleep(0.05)
-        snap = sy.snapshot()["apply"]
-        self.assertFalse(snap["running"])
-        log = {e["title"]: e for e in snap["log"]}
-        self.assertEqual({t: (e["result"], e["done"]) for t, e in log.items()},
-                         {"Film 0 (2010)": ("done", ["grouping"]), "Film 2 (2012)": ("done", ["match"]), "Film 3 (2013)": ("done", ["art"]), "Film One (2011)": ("done", ["edits", "collections"])})
+                         [("Film 0 (2010)", "split", ["grouping"]), ("Film 2 (2012)", "pair", ["match"]), ("Film 3 (2013)", "pair", ["art"]),
+                          ("Film 4 (2014)", "missing", ["missing"]), ("Film One (2011)", "pair", ["edits", "collections"])])
+        self.assertEqual(rows["Film 4 (2014)"]["scan"], [os.path.join(cat["root"], "Movies", "Film 4 (2014)")])   # (its folder, as the mirror has the library)
+        self.assertIn("brought in line on Starlit", en(tool.flag_lines([rows["Film 2 (2012)"]])[0]))
+        # Film 0's two files named apart here (Movie 0, Film 0 [copy]): Plex Checks' Dissimilar file versions stops its row —
+        # merging the mirror's two records over them could join two films — until it's ignored on the record (Tool.block_ids)
+        f0 = json.loads(json.dumps(rows["Film 0 (2010)"]))
+        self.assertEqual(tool.mark_stops("1", [f0], tool.merge_first("1")), 1)
+        self.assertEqual([b["id"] for b in f0["blocks"] if b["on"] and not b["ignored"]], ["versions_named_differently"])
+        libhealth.set_ignored(app, "1", f0["blocks"][0]["key"], ["versions_named_differently"])
+        self.assertEqual(tool.mark_stops("1", [f0], tool.merge_first("1")), 0)
+        self.assertFalse(tool.apply_async(["nothing"]))
+        self._run(tool, tool.apply_async([r["id"] for r in rows.values()]))
+        job = app.jobs.log.jobs()[0]
+        self.assertEqual((job["kind"], job["tool"], job["status"], job["backup"]["kind"]), ("tool", "sync", "finished", "manual"))  # (you back up yourself, here)
+        files = {f["title"]: f for f in app.jobs.log.files(job["job"])["files"]}
+        self.assertEqual({t: (f["result"], en(f["history"]["server"]), en(f["history"]["what"])) for t, f in files.items()},
+                         {"Film 0 (2010)": ("done", "Starlit", "versions grouped"), "Film 2 (2012)": ("done", "Starlit", "the match"),
+                          "Film 3 (2013)": ("done", "Starlit", "posters chosen by hand"), "Film 4 (2014)": ("done", "Starlit", "files not listed"),
+                          "Film One (2011)": ("done", "Starlit", "edited fields, collections")})
         puts = [(p, q) for p, q in other.puts]
         self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "title.value": "Film One", "title.locked": "1"}), puts)
         self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "collection[0].tag.tag": "Best"}), puts)
         self.assertIn(("/library/metadata/102/match", {"guid": "plex://movie/2", "name": "Film 2 (2012)"}), puts)
         self.assertEqual(other.posts, [("/library/metadata/103/posters", b"IMG")])
         self.assertEqual(other.merged, [("100", "190")])
+        self.assertEqual(other.scanned, [os.path.join(cat["root"], "Movies", "Film 4 (2014)")])
+        self.assertEqual((getattr(plex, "puts", []), getattr(plex, "merged", [])), ([], []))         # (this server: untouched)
         self.assertEqual((other.cat["movies"][1]["title"], other.cat["movies"][1]["locked"], other.cat["movies"][2]["guid"]), ("Film One", ["title"], "plex://movie/2"))
-        self.assertEqual(sy.report["libraries"]["1"]["items"], [])                                  # applied: off the report
-        self.assertEqual(sum(sy.report["totals"].values()), 0)
-        self.assertEqual(log["Film 3 (2013)"]["before"]["art"], {"thumb": "upload://posters/old"})
-        self.assertIn("can’t be undone", en(log["Film 0 (2010)"]["notes"][0]))
-        # compared again: in step (but Film 0's merge, which the fake's listing shows as the other's own record now)
-        sy.compare()
-        self.assertEqual([r["title"] for r in sy.report["libraries"]["1"]["items"]], [])
-        # undone: the title back, unlocked; the collection taken off; the match back; the poster chosen before chosen again
+        # scanned again after the run: in step (Film 0 merged there; Film 4 there once its Plex has scanned — not in the fake)
+        for _ in range(400):
+            if not tool.running:
+                break
+            time.sleep(0.05)
+        self.assertEqual([r["title"] for r in tool.snapshot()["scan"]["rows"]], ["Film 4 (2014)"])
+        # Revert: each put back the tool's own way — the title back, unlocked; the collection taken off; the match back; the
+        # poster chosen before chosen again; the merge can't be, nor need the scan
         other.puts = []
-        for e in log.values():
-            sy.applier.undo(e["id"])
+        self.assertEqual(revert_job(app, job["job"]), {"reverted": 5, "failed": 0})
         puts = [(p, q) for p, q in other.puts]
         self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "title.value": "Film 1", "title.locked": "0"}), puts)
         self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "collection[].tag.tag-": "Best"}), puts)
         self.assertIn(("/library/metadata/102/match", {"guid": "plex://movie/other", "name": "Film 2 (2012)"}), puts)
         self.assertIn(("/library/metadata/103/poster", {"url": "upload://posters/old"}), puts)
         self.assertEqual((other.cat["movies"][1]["title"], other.cat["movies"][1]["locked"]), ("Film 1", []))
-        undone = {e["title"]: e for e in sy.snapshot()["apply"]["log"]}
-        self.assertTrue(all(e["undone"] for e in undone.values()))
-        self.assertIn("split the item", en(undone["Film 0 (2010)"]["left"][0]))
+        for _ in range(400):
+            if not tool.running:
+                break
+            time.sleep(0.05)
+        self.assertEqual(sorted(r["title"] for r in tool.snapshot()["scan"]["rows"]), ["Film 2 (2012)", "Film 4 (2014)", "Film One (2011)"])  # (the poster chosen again: chosen by hand there too)
+        # the mirror's edits winning: this server's record brought in line — backed up first, and put back from the backup
+        app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}, "general": {"backup": "snapshot"}})
+        sc = self._run(tool, tool.scan_async("1"))["scan"]
+        row = next(r for r in sc["rows"] if r["title"] == "Film 2 (2012)")
+        self.assertEqual((row["source"], row["kinds"], row["rks"], tool.plex_server("1")), ("mirror", ["match"], ["102"], "here"))
+        self._run(tool, tool.apply_async([row["id"]]))
+        self.assertIn(("/library/metadata/102/match", {"guid": "plex://movie/other", "name": "Film 2 (2012)"}), [(p, q) for p, q in getattr(plex, "puts", [])])
+        job = app.jobs.log.jobs()[0]
+        self.assertEqual((job["status"], job["backup"]["kind"], job["backup"]["plex"]["records"]), ("finished", "records", 1))
+        self.assertEqual(plexbackup.find(app, job["backup"]["plex"]["id"])["server"], "here")
+        self.assertEqual(revert_job(app, job["job"]), {"reverted": 1, "failed": 0})
+        self.assertEqual(next(m for m in plex.cat["movies"] if m["key"] == "102")["guid"], "plex://movie/2")
+
+
+class MirrorLinkTests(unittest.TestCase):
+    """The Plex Cache at the mirror's site (peerlink.py: System → Mirror Plex Cache) and Mirror Checks (mirrorhealth.py:
+    Tools → Mirror Checks)."""
+
+    def _side(self, me, mirror):
+        """A Plex Cache with a web server of its own, its Plex ``me``, watching ``mirror`` as the mirrored server."""
+        from plexcache.server import serve
+        app = App(tempfile.mkdtemp(dir=TMP))
+        httpd = serve(app, "127.0.0.1", 0)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        app.settings.update({"plex2": {"url": "http://127.0.0.1:1", "token": "t", "machine_id": mirror}, "sync": {"mirrors": "plex2"}})
+        app.peerlink._own_plex = (time.time() + 1e9, me)   # (no Plex here: which one it sits next to, said)
+        app.peerlink._hosts = (time.time() + 1e9, [])        # (nor plex.tv: the mirror's addresses are its one url)
+        app.plex_name = me
+        return app, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def _pair(self):
+        a, ua = self._side("plexA", "plexB")
+        b, ub = self._side("plexB", "plexA")
+        a.settings.update({"peer": {"url": ub}})
+        b.settings.update({"peer": {"url": ua}})
+        return a, ua, b, ub
+
+    def test_keys_signatures_and_addresses(self):
+        from plexcache import peerlink as pl
+        x, y = 0x1234567 | (1 << 255), 0x7654321 | (1 << 254)
+        px, py = format(pow(pl.G, x, pl.P), "x"), format(pow(pl.G, y, pl.P), "x")
+        self.assertEqual(pl.shared_key(x, py), pl.shared_key(y, px))                       # (the same key on both sides, never sent)
+        self.assertNotEqual(pl.shared_key(x, py), pl.shared_key(x + 2, py))
+        self.assertEqual(pl.fingerprint(px, py), pl.fingerprint(py, px))
+        self.assertRegex(pl.fingerprint(px, py), r"^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$")
+        for bad in ("", "1", "0", "zz", format(pl.P - 1, "x"), "f" * 600, None, 5):
+            self.assertIsNone(pl.valid_public(bad), bad)                                       # (1 and P-1 give away the key)
+        with self.assertRaises(pl.PeerError):
+            pl.shared_key(x, "1")
+        key = pl.shared_key(x, py)
+        sig = pl.signature(key, "GET", "/peer/v1/files?library=1", "100", "n", b"")
+        self.assertNotEqual(sig, pl.signature(key, "GET", "/peer/v1/files?library=2", "100", "n", b""))
+        self.assertNotEqual(sig, pl.signature(key, "GET", "/peer/v1/files?library=1", "101", "n", b""))
+        self.assertNotEqual(sig, pl.signature(key, "POST", "/peer/v1/files?library=1", "100", "n", b"x"))
+        for typed, want in (("192.168.1.20", "http://192.168.1.20:8642"), ("nas.tailnet:9000", "http://nas.tailnet:9000"),
+                            ("https://cache.lan/", "https://cache.lan:443"), ("http://[fd00::5]:9", "http://[fd00::5]:9"), ("", "")):
+            self.assertEqual(pl.base_url(typed), want)
+        # the setting: an address typed as on the other fields, filled in; a port in range
+        app = _new_app()
+        app.settings.update({"peer": {"url": "192.168.1.20"}})
+        self.assertEqual(app.settings.section("peer")["url"], "http://192.168.1.20:8642")
+        for bad in ({"port": 70000}, {"port": -1}, {"url": "ftp://x"}, {"auto_pair": "yes"}):
+            with self.assertRaises(config.SettingsError):
+                app.settings.update({"peer": bad})
+
+    def test_two_plex_caches_find_pair_and_talk(self):
+        """Found at the address set by hand; not paired by itself until the other's marker (its public key, carried by
+        the synced folder) is seen; then paired both ways and talking, the fingerprints alike; every signed request
+        checked — a forged one, a replayed one, an old one refused; Unpair is both sides', and neither pairs again by
+        itself — Pair Now on both does."""
+        from plexcache import peerlink as pl
+        a, ua, b, ub = self._pair()
+        a.peerlink.tick(force=True)
+        self.assertEqual(a.peerlink.found["url"], pl.base_url(ub))
+        self.assertIsNone(a.peerlink.paired)
+        self.assertIn("marker hasn’t reached", en(jsonable(a.peerlink.pair_error)))
+        lights = a.peerlink.lights()
+        self.assertEqual((lights["found"]["status"], lights["paired"]["status"], lights["talking"]["status"]), ("ok", "warn", "off"))
+        # who may pair by itself: the mirror's Plex, at the mirror's address (or the one set), with the marker's key
+        hello = b.peerlink.hello()
+        a.peerlink._marker_public = lambda inst: b.peerlink.public()
+        self.assertIsNone(a.peerlink.may_pair(hello, ub))
+        self.assertIn("isn’t an address of the mirror’s Plex", en(jsonable(a.peerlink.may_pair(hello, "http://10.9.9.9:8642"))))
+        self.assertIn("isn’t the mirror", en(jsonable(a.peerlink.may_pair(dict(hello, plex="plexC"), ub))))
+        self.assertIn("doesn’t match", en(jsonable(a.peerlink.may_pair(dict(hello, public=a.peerlink.public()), ub))))
+        a.settings.update({"peer": {"auto_pair": False}})
+        self.assertIn("Pairing by itself is off", en(jsonable(a.peerlink.may_pair(hello, ub))))
+        a.settings.update({"peer": {"auto_pair": True}})
+        # the markers seen both ways: paired by itself, on both sides, and talking
+        b.peerlink._marker_public = lambda inst: a.peerlink.public()
+        a.peerlink.tick(force=True)
+        self.assertEqual((a.peerlink.paired["instance"], a.peerlink.paired["how"]), (b.peerlink.instance(), "auto"))
+        self.assertEqual(b.peerlink.paired["instance"], a.peerlink.instance())
+        self.assertTrue(a.peerlink.talking())
+        self.assertEqual(a.peerlink.snapshot()["fingerprint"], b.peerlink.snapshot()["fingerprint"])
+        self.assertTrue(b.peerlink.talk())
+        self.assertEqual({k: v["status"] for k, v in a.peerlink.lights().items()}["paired"], "ok")
+        self.assertEqual(a.peerlink.files("1"), {"ready": False, "files": []})            # (a signed request: no such library there)
+        # signed requests: a forged signature, the same request twice, one from too long ago — refused
+        def send(at, nonce, sig):
+            req = urllib.request.Request(ub + "/peer/v1/status", headers={"X-Plexcache-Peer": a.peerlink.instance(), "X-Plexcache-Time": str(at),
+                                                                         "X-Plexcache-Nonce": nonce, "X-Plexcache-Signature": sig})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read())
+        now = int(time.time())
+        self.assertEqual(send(now, "n1", "00")[0], 403)
+        good = pl.signature(a.peerlink._key(), "GET", "/peer/v1/status", str(now), "n2", b"")
+        self.assertEqual(send(now, "n2", good)[0], 200)
+        self.assertEqual(send(now, "n2", good), (403, {"error": "seen before"}))
+        old = now - pl.MAX_AGE - 60
+        self.assertEqual(send(old, "n3", pl.signature(a.peerlink._key(), "GET", "/peer/v1/status", str(old), "n3", b""))[0], 403)
+        with urllib.request.urlopen(ub + "/peer/v1/hello", timeout=10) as r:                    # (the hello is open: public facts only)
+            self.assertEqual(set(json.loads(r.read())), {"app", "api", "instance", "name", "version", "plex", "public", "time"})
+        # Unpair: both sides; a new key here; not paired again by itself
+        before = a.peerlink.public()
+        a.peerlink.unpair()
+        self.assertIsNone(a.peerlink.paired)
+        self.assertIsNone(b.peerlink.paired)
+        self.assertNotEqual(a.peerlink.public(), before)
+        self.assertEqual(os.stat(os.path.join(a.config_dir, "peer-key.json")).st_mode & 0o777, 0o600)          # (the private half: the app's alone)
+        self.assertEqual((a.peerlink.declined, b.peerlink.declined), ([b.peerlink.instance()], [a.peerlink.instance()]))
+        a.peerlink._marker_public = lambda inst: b.peerlink.public()
+        b.peerlink._marker_public = lambda inst: a.peerlink.public()
+        a.peerlink.tick(force=True)
+        self.assertIsNone(a.peerlink.paired)
+        self.assertIn("unpaired here by hand", en(jsonable(a.peerlink.pair_error)))
+        # Pair Now on both: paired again, by hand
+        b.peerlink.pair_now()
+        a.peerlink.window = time.time() + pl.PAIR_WINDOW
+        a.peerlink.declined = []
+        a.peerlink.tick(force=True)
+        self.assertEqual((a.peerlink.paired or {}).get("how"), "manual")
+        self.assertEqual(a.peerlink.snapshot()["fingerprint"], pl.fingerprint(a.peerlink.public(), b.peerlink.public()))
+        # with no mirror watched, a pairing request isn't even looked into
+        c, uc = self._side("plexC", "plexA")
+        c.settings.update({"sync": {"mirrors": "none"}})
+        self.assertEqual(c.peerlink.handle_pair({"instance": "x", "public": a.peerlink.public()}, "127.0.0.1")["paired"], False)
+
+    def test_port_and_addresses_advertised(self):
+        app = _new_app()
+        self.assertEqual(app.peerlink.own_port(), 8642)
+        app.web_url = "http://192.168.1.10:30042"
+        self.assertEqual(app.peerlink.own_port(), 30042)                                       # (the port this page is open on)
+        app.peerlink._tn_port = (time.time() + 1e9, 31000)
+        self.assertEqual(app.peerlink.own_port(), 31000)                                       # (TrueNAS's published port first)
+        app.settings.update({"peer": {"port": 9000}})
+        self.assertEqual(app.peerlink.own_port(), 9000)                                        # (and the one set, before both)
+        self.assertIn("192.168.1.10", app.peerlink.own_addresses())
+        ad = app.peerlink.advert()
+        self.assertEqual((ad["api"], ad["port"], ad["public"]), (1, 9000, app.peerlink.public()))
+        # with no mirror chosen, the lights say so and nothing is looked for
+        lights = app.peerlink.lights()
+        self.assertEqual({v["status"] for v in lights.values()}, {"off"})
+        self.assertIn("Mirror page", en(jsonable(lights["found"]["detail"])))
+        self.assertFalse(app.peerlink.wanted())
+        self.assertEqual(app.peerlink.health(), "off")
+
+    def _mirror(self):
+        app, plex, _client, cat, other = ToolsTests()._app(mirror=True)
+        self.addCleanup(plex.close)
+        self.addCleanup(other.close)
+        return app, plex, cat, other
+
+    @staticmethod
+    def _compared(app, key="1"):
+        """The library compared as the evaluator does it in its turn (evaluate.MirrorUnit): over its data as it is now,
+        kept with the stamp it's of — its count done."""
+        app.libdata.gather(key, ("records", "files"), wait=True)
+        app.mirror_health.evaluate(key)
+
+    def test_mirror_health_compares_both_sites(self):
+        """Mirror Checks over a library paired with one on the mirror: a file the mirror's Plex doesn't list, one only it
+        lists, a file here Plex doesn't list; with the other Plex Cache talking, the two disks too — a file on one side
+        only, a different size, a file changed in the last hour left out — and the folder sync not carrying .plexcache,
+        which holds optimizing and the file tools until it's fixed or ignored. Scan Folder asks the Plex concerned."""
+        from plexcache import mirrorhealth as mh
+        app, plex, cat, other = self._mirror()
+        app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}})                    # (the mirror's edits win: a file its Plex doesn't list is Mirror Checks's)
+        root = os.path.join(cat["root"], "Movies")
+        self.assertEqual(app.mirror_health.libraries()[0], "1")
+        gone = other.cat["movies"].pop(0)
+        other.cat["movies"].append(dict(other.cat["movies"][0], path=os.path.join(root, "Extra (2020)", "Extra.mkv"), key="999"))
+        loose = os.path.join(root, "Loose (2019)", "Loose.mkv")
+        os.makedirs(os.path.dirname(loose))
+        fakes.make_mkv(loose, 1024 * 1024)
+        for d, _dirs, names in os.walk(root):                                                  # (all written hours ago: none still syncing)
+            for name in names:
+                os.utime(os.path.join(d, name), (time.time() - 7200, time.time() - 7200))
+        app.libdata.invalidate_files("1")
+        # the link not talking, and no Plex Cache known at the mirror's site (none found yet): the Plexes compared, the
+        # disks not — and nothing red, since nothing known to be there went unread (the link's own warning says it)
+        got = app.mirror_health.check("1")
+        rows = {(r["kind"], r["rel"]) for r in got["rows"]}
+        self.assertIn(("not_listed_there", os.path.relpath(gone["path"], root)), rows)
+        self.assertIn(("only_listed_there", "Extra (2020)/Extra.mkv"), rows)
+        self.assertIn(("unlisted_here", "Loose (2019)/Loose.mkv"), rows)
+        self.assertFalse(got["disk"])
+        self.assertEqual(got["unchecked"], [])
+        app.settings.update({"peer": {"enabled": False}})                                       # (said to have none: a line, not red)
+        got = app.mirror_health.check("1")
+        self.assertEqual(got["unchecked"], [])
+        self.assertIn("aren’t compared", " ".join(en(jsonable(n)) for n in got["notes"]))
+        app.settings.update({"peer": {"enabled": True}})
+        # one found there, the link not working: the checks that need the other site's files said not to have run, and
+        # why — the page's red chip and red counts
+        app.peerlink.found = {"url": "http://cottage:8642", "hello": {"name": "Cottage", "instance": "cottage"}, "at": time.time()}
+        got = app.mirror_health.check("1")
+        self.assertEqual([(u["checks"], u["link"]) for u in got["unchecked"]],
+                         [(["mirror_only_here", "mirror_only_there", "mirror_size_differs", "mirror_sync_files"], "/system#peer")])
+        self.assertIn("isn’t working", en(jsonable(got["unchecked"][0]["why"])))
+        # the link talking: its files against ours (a file only here, one only there, one a different size, one too new to say)
+        here = {r: (s, m) for r, s, m in __import__("plexcache.peerlink", fromlist=["rel_files"]).rel_files(app.libdata.data("1"))}
+        old = time.time() - 7200
+        theirs = [[r, s, old] for r, (s, _m) in here.items() if r != "Loose (2019)/Loose.mkv"]
+        first = sorted(r for r in here if r != "Loose (2019)/Loose.mkv")[0]
+        theirs = [[r, s + 1 if r == first else s, m] for r, s, m in theirs] + [["Only There (2001)/x.mkv", 5, old], ["New (2026)/y.mkv", 5, time.time()]]
+        link = app.peerlink
+        link.talking = lambda: True
+        link.files = lambda key: {"ready": True, "files": theirs}
+        link.folder_sync = lambda: {"1": {"status": "fail", "out": None, "in": None}}
+        got = app.mirror_health.check("1")
+        kinds = {}
+        for r in got["rows"]:
+            kinds.setdefault(r["kind"], []).append(r["rel"])
+        self.assertTrue(got["disk"])
+        self.assertEqual(got["unchecked"], [])
+        self.assertEqual(kinds["only_here"], ["Loose (2019)/Loose.mkv"])
+        self.assertEqual(kinds["only_there"], ["Only There (2001)/x.mkv"])                     # (not New: changed in the last hour)
+        self.assertEqual(kinds["size_differs"], [first])
+        self.assertEqual(kinds["sync_files"], [".plexcache"])
+        self.assertEqual(kinds["only_listed_there"], ["Extra (2020)/Extra.mkv"])              # (on neither disk: the mirror's Plex lists what isn't there)
+        # Library Health's: each finding a chip on its item — Plex's record here where it lists the file, else an item of
+        # its own (the file here; its place, for one only at the other site; .plexcache, for the folder sync) — counted
+        with app.mirror_health.lock:
+            app.mirror_health.results["1"] = got
+        app.mirror_health._snap = None
+        from plexcache import checks, libhealth
+        h = libhealth.library_health(app, "1")
+        self.assertEqual([c["id"] for c in h["checks"]["mirror"]], ["mirror_" + k for k in mh.KINDS + mh.LIVE])
+        on = {(it["key"], r["id"]) for it in h["items"] for r in it["results"] if r["category"] == "mirror"}
+        rk = next(str(f["rk"]) for f in app.libdata.data("1").files if f["path"] == gone["path"])
+        unl = next(r for r in got["rows"] if r["kind"] == "unlisted_here")
+        self.assertTrue({(rk, "mirror_not_listed_there"), (unl["item"], "mirror_unlisted_here"), ("there:Only There (2001)/x.mkv", "mirror_only_there"),
+                         (".plexcache", "mirror_sync_files")} <= on, on)
+        self.assertEqual(next(it["label"] for it in h["items"] if it["key"] == unl["item"]), "Loose (2019)/Loose.mkv")  # (no record here: its place)
+        self.assertEqual(h["counts"]["mirror_sync_files"], 1)
+        self.assertGreater(app.library_health("1")["counts"]["mirror_only_here"], 0)
+        self.assertGreater(app.health_counts["1"]["mirror"], 0)                                     # (the check page's tab, the Tools card)
+        # the folder sync not carrying .plexcache: optimizing and the file tools held, until the finding is ignored (Library
+        # Health's Ignore, on its item) or its check switched off
+        self.assertIn(".plexcache", en(jsonable(app.mirror_health.hold("1"))))
+        libhealth.set_ignored(app, "1", ".plexcache", ["mirror_sync_files"])
+        self.assertIsNone(app.mirror_health.hold("1"))
+        h = libhealth.library_health(app, "1")
+        self.assertEqual([r["ignored"] for it in h["items"] for r in it["results"] if r["id"] == "mirror_sync_files"], [True])
+        self.assertNotIn("mirror_sync_files", h["counts"])
+        libhealth.set_ignored(app, "1", ".plexcache", None)
+        self.assertIsNotNone(app.mirror_health.hold("1"))
+        app.settings.update({"library_health": {"checks": {"mirror_sync_files": False}}})
+        self.assertIsNone(app.mirror_health.hold("1"))
+        app.settings.update({"library_health": {"checks": {"mirror_sync_files": True}}})
+        self.assertIsNotNone(app.mirror_health.hold("1"))
+        # Scan Folder, a finding's action: the mirror's Plex asked for a file it doesn't list, Plex here for a file it doesn't
+        there = next(r for r in got["rows"] if r["kind"] == "not_listed_there")
+        with self.assertRaises(ValueError):                                                        # (refused while the findings aren't of the data now: being worked out again)
+            libhealth.act(app, "1", there["item"], "mirror_not_listed_there")
+        with app.mirror_health.lock:
+            app.mirror_health.results["1"] = dict(got, stamp=app.libdata.data("1").stamp)          # (compared over the data as it is)
+        with mock.patch.object(mh, "RECHECK_AFTER", 3600):
+            libhealth.act(app, "1", there["item"], "mirror_not_listed_there")
+            self.assertEqual(other.scanned, [os.path.dirname(gone["path"])])
+            libhealth.act(app, "1", unl["item"], "mirror_unlisted_here")
+            self.assertEqual(plex.scanned, [os.path.dirname(loose)])
+            with self.assertRaises(ValueError):
+                libhealth.act(app, "1", unl["item"], "mirror_only_here")                            # (not a finding a scan helps)
+            with self.assertRaises(ValueError):
+                libhealth.act(app, "1", rk, "no_audio")                                             # (a check with nothing to do)
+        asked = next(f["result"] for f in app.mirror_health.findings("1") if f["item"] == there["item"] and f["result"]["id"] == "mirror_not_listed_there")
+        self.assertTrue(asked["action"]["done_at"])
+        self.assertNotIn("action", next(f["result"] for f in app.mirror_health.findings("1") if f["result"]["id"] == "mirror_only_there"))
+        # the Health page: the hold, and the differences waiting
+        app.library_health("1")
+        said = [en(jsonable(i["title"])) for i in checks._mirror_items(app)]
+        self.assertIn("Optimizing is held: Movies", said)
+        self.assertTrue(any("differ between the two sites" in s for s in said), said)
+
+    def test_mirror_health_leaves_sync_libraries_what_it_does(self):
+        """Mirror Checks lists only what Sync Libraries can't bring in line: the Sync Libraries page is what can or will be
+        synced, Mirror Checks what may stop it. A file the mirror's Plex doesn't list is Sync Libraries' to scan for while
+        this server's edits win and its "Files the other side doesn't list" is on — Mirror Checks's with that off, or with
+        the mirror's edits winning (then only this server is changed); a file Plex here doesn't list that the mirror's does,
+        the other way round. One item's versions that are several items on the other side are Sync Libraries' to merge; the
+        winning side's several items that are one here can't be (that's a split): Mirror Checks's "Grouped differently on
+        the mirror", on the item here, from Sync Libraries' analysis as it stands."""
+        from plexcache import libhealth
+        app, plex, cat, other = self._mirror()
+        root = os.path.join(cat["root"], "Movies")
+        gone = other.cat["movies"].pop(0)                                                           # (listed here, not by the mirror's Plex)
+        loose = os.path.join(root, "Loose (2019)", "Loose.mkv")                                     # (on disk; listed by the mirror's Plex only)
+        os.makedirs(os.path.dirname(loose))
+        fakes.make_mkv(loose, 1024 * 1024)
+        other.cat["movies"].append(dict(other.cat["movies"][0], path=loose, key="990", title="Loose", year=2019, guid="plex://movie/990"))
+        two = cat["movies"][2]
+        twin = os.path.join(os.path.dirname(two["path"]), "Film 2 twin.mkv")                       # (one item's two versions here, two items there)
+        shutil.copy2(two["path"], twin)
+        two["more"] = [twin]
+        other.cat["movies"].append(dict(next(m for m in other.cat["movies"] if m["key"] == two["key"]), path=twin, key="991"))
+        app.scan_library()
+        app.libdata.gather("1", wait=True, refresh=True)
+        got = app.mirror_health.check("1")
+        with app.mirror_health.lock:
+            app.mirror_health.results["1"] = got
+        app.mirror_health._snap = None
+        rk = next(str(f["rk"]) for f in app.libdata.data("1").files if f["path"] == gone["path"])
+        self.assertTrue({"not_listed_there", "unlisted_here"} <= {r["kind"] for r in got["rows"]}, got["rows"])        # (the check finds both: what's listed is decided as it's shown)
+        self.assertEqual([(r["rel"], r["listed_there"]) for r in got["rows"] if r["kind"] == "unlisted_here"], [("Loose (2019)/Loose.mkv", True)])
+        found = lambda: {(f["result"]["id"], f["item"]) for f in app.mirror_health.findings("1")}
+        ids = lambda: {i for i, _item in found()}
+        sync_rows = lambda: {r["title"]: r for r in app.tools["sync"].analysis(app.libdata.data("1"))["rows"]}
+        # this server's edits win: the file the mirror doesn't list, and the versions it has as two items, are Sync Libraries'
+        rows = sync_rows()
+        self.assertEqual({t: (r["shape"], r["kinds"]) for t, r in rows.items()}, {"Film 0 (2010)": ("missing", ["missing"]), "Film 2 (2012)": ("split", ["grouping"])})
+        self.assertNotIn("mirror_not_listed_there", ids())
+        self.assertIn("mirror_unlisted_here", ids())                                                 # (Plex here: not Sync Libraries' while it changes the mirror)
+        self.assertNotIn("mirror_regroup", ids())
+        stamp = app.mirror_health.stamp("1")
+        # its "Files the other side doesn't list" off: nothing else would say it — Mirror Checks's again
+        app.settings.update({"tools": {"sync": {"1": {"scan": False}}}})
+        self.assertIn(("mirror_not_listed_there", rk), found())
+        self.assertNotEqual(app.mirror_health.stamp("1"), stamp)                                     # (Library Health's answer worked out again)
+        # the mirror's edits win: this server is what's changed — the file Plex here doesn't list is Sync Libraries' to scan
+        # for here, the one the mirror's Plex doesn't is Mirror Checks's, and the two items there that are one here a split
+        app.settings.update({"tools": {"sync": {"1": {"scan": True, "source": "mirror"}}}})
+        rows = sync_rows()
+        self.assertEqual((rows["Loose (2019)"]["kinds"], rows["Loose (2019)"]["scan"]), (["missing"], [os.path.dirname(loose)]))
+        self.assertNotIn("Film 2 (2012)", rows)
+        self.assertIn(("mirror_not_listed_there", rk), found())
+        self.assertNotIn("mirror_unlisted_here", ids())
+        self.assertIn(("mirror_regroup", str(two["key"])), found())
+        regroup = next(f["result"] for f in app.mirror_health.findings("1") if f["result"]["id"] == "mirror_regroup")
+        self.assertIn("2 items on Starlit are one item on", en(jsonable(regroup["text"])))
+        self.assertIn("Sync Libraries can’t split it", en(jsonable(regroup["text"])))
+        h = libhealth.library_health(app, "1")
+        self.assertIn("mirror_regroup", [c["id"] for c in h["checks"]["mirror"]])
+        self.assertEqual(h["counts"].get("mirror_regroup"), 1)
+        self.assertIn("mirror_regroup", {r["id"] for it in h["items"] if it["key"] == str(two["key"]) for r in it["results"]})
+
+    def test_mirror_health_warns_on_the_link_and_holds_the_tools(self):
+        """The tool warns while the link to the other Plex Cache isn't healthy (it relies on it); Optimize Now and a file
+        tool's Apply are refused while .plexcache doesn't reach the other site; the page's routes answer."""
+        from plexcache.server import serve
+        app, _plex, _cat, _other = self._mirror()
+        link = app.peerlink
+        link.lights = lambda: {"found": {"status": "ok", "text": "x", "detail": ""}, "paired": {"status": "ok", "text": "x", "detail": ""},
+                               "talking": {"status": "fail", "text": "Not answering", "detail": ""}, "folders": {"status": "off", "text": "f", "detail": ""},
+                               "version": {"status": "off", "text": "v", "detail": ""}}
+        conn = app.mirror_health.connection()
+        self.assertEqual(conn["status"], "warn")
+        self.assertIn("Not answering", en(jsonable(conn["text"])))
+        self.assertEqual(link.health(), "fail")
+        self.assertEqual(en(jsonable(next(i for i in __import__("plexcache.checks", fromlist=["x"])._mirror_items(app))["title"])),
+                         "The link to the Plex Cache at the mirror’s site needs attention")
+        app.settings.update({"peer": {"enabled": False}})
+        self.assertEqual(app.mirror_health.connection()["status"], "ok")                       # (none there: nothing to warn about)
+        app.settings.update({"peer": {"enabled": True}})
+        # held: Optimize Now refused, and a file tool's Apply
+        link.talking = lambda: True
+        link.folder_sync = lambda: {"1": {"status": "fail", "out": None, "in": None}}
+        httpd = serve(app, "127.0.0.1", 0)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        def post(path, body):
+            req = urllib.request.Request(base + path, data=json.dumps(body).encode(), method="POST", headers={"Content-Type": "application/json", "Origin": base})
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read())
+        code, got = post("/api/optimize/library", {"library": "1", "mode": "optimize"})
+        self.assertEqual(code, 400)
+        self.assertIn(".plexcache", en(got["error"]))
+        tool = app.tools["unlink"]
+        tool.scan_result = {"library": "1", "rows": []}
         with self.assertRaises(ValueError):
-            sy.applier.undo(log["Film One (2011)"]["id"])                                          # (already undone)
-        sy.compare()  # (the poster chosen again counts as chosen by hand there too: no art difference any more)
-        self.assertEqual(sorted(r["title"] for r in sy.report["libraries"]["1"]["items"]), ["Film 2 (2012)", "Film One (2011)"])
+            tool.apply_async([])
+        # the routes: the findings as Library Health's (the link's warning above them), Scan Again, a finding's action
+        from plexcache.libhealth import set_ignored
+        set_ignored(app, "1", ".plexcache", ["mirror_sync_files"])
+        with urllib.request.urlopen(base + "/api/library/health?key=1", timeout=20) as r:
+            h = json.loads(r.read())
+        self.assertIn("mirror", h["checks"])
+        self.assertTrue(any(n["status"] == "warn" and "Not answering" in en(n["text"]) for n in h["notes"]["mirror"]), h["notes"])
+        self.assertEqual(post("/api/library/health/scan", {"library": "1", "category": "file"})[0], 400)          # (File Checks don't scan by themselves)
+        self.assertEqual(post("/api/library/health/scan", {"library": "99", "category": "mirror"})[0], 400)
+        self.assertEqual(post("/api/library/health/action", {"library": "1", "item": "nope", "check": "mirror_unlisted_here"})[0], 400)
+        self.assertEqual(post("/api/library/health/action", {"library": "1"})[0], 400)
+        link.files = lambda key: {"ready": True, "files": []}
+        code, got = post("/api/library/health/scan", {"library": "1", "category": "mirror"})
+        self.assertEqual((code, got["started"]), (200, True))
+        for _ in range(200):
+            if app.mirror_health.running is None:
+                break
+            time.sleep(0.05)
+        self.assertIsNone(app.mirror_health.running)
+        self.assertTrue((app.mirror_health.results.get("1") or {}).get("at"))
+        code, got = post("/api/peer/test", {})
+        self.assertEqual((code, set(got) >= {"lights", "paired", "fingerprint", "own"}), (200, True))
+        for path in ("/mirrorchecks", "/mirror"):                                                 # (and where Mirror Health was)
+            with urllib.request.urlopen(base + path, timeout=20) as r:
+                self.assertEqual(r.status, 200)
+
+    def test_a_scan_from_before_shows_red_and_is_done_again(self):
+        """A scan saved before the checks it couldn't run were recorded (no "v"): stale at once — its count waits, never the
+        old scan's number, and the page shows none of its findings — and done again in the evaluator's next turn, though
+        just checked: its red then, without the old line under the findings, and not due again until hours from now."""
+        from plexcache import mirrorhealth as mh
+        from plexcache.i18n import M
+        app, _plex, _cat, _other = self._mirror()
+        app.peerlink.lights = lambda: {"talking": {"status": "fail", "text": "Not answering", "detail": ""}}
+        old = {"at": time.time(), "rows": [], "counts": dict.fromkeys(mh.KINDS, 0), "error": None, "disk": False, "mirror": "Movies",
+               "notes": [M("The other site’s disk isn’t compared: the link to its Plex Cache isn’t working ([System → Mirror Plex Cache](/system#peer)).")]}
+        with app.mirror_health.lock:
+            app.mirror_health.results["1"] = old
+            app.mirror_health.checked_at = time.time()
+        app.mirror_health._snap = None
+        self.assertTrue(app.mirror_health.due_for("1"))                                           # (done again at once, though just checked)
+        self.assertEqual(app.mirror_health.unchecked("1"), [])                                    # (no Plex Cache known there: not red)
+        app.peerlink.paired = {"instance": "cottage", "name": "Cottage", "url": "http://cottage:8642", "public": "ab", "at": time.time(), "how": "auto"}
+        app.mirror_health._snap = None
+        un = app.mirror_health.unchecked("1")
+        self.assertEqual(un[0]["checks"][:3], ["mirror_only_here", "mirror_only_there", "mirror_size_differs"])
+        self.assertEqual(en(jsonable(un[0]["why"])), "The other site’s disk isn’t compared: the link to its Plex Cache isn’t working.")
+        said = [en(jsonable(n["text"])) for n in app.mirror_health.notes("1")]
+        self.assertFalse(any("isn’t compared" in t or "needs attention" in t for t in said), said)  # (the red chip says it)
+        st = jsonable(app.state())
+        self.assertEqual(st["counts"]["mirrorchecks"]["libraries"]["1"]["s"], "pending")         # (the old scan's count never shown)
+        st["_health"] = jsonable(app.library_health("1"))
+        html = PageStructureTests()._render(st, "mirrorchecks")["html"]
+        self.assertNotIn(">Other site’s files not compared</a>", html)
+        self.assertRegex(html, r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count busy')
+        # done again (the evaluator's turn) records it: its red, and not due again until hours from now
+        app.peerlink.talking = lambda: False
+        self._compared(app)
+        self.assertEqual(app.mirror_health.results["1"]["v"], mh.FORMAT)
+        self.assertFalse(app.mirror_health.due_for("1"))
+        h = jsonable(app.library_health("1"))
+        st = jsonable(app.state())
+        st["_health"] = h
+        self.assertEqual(st["health_counts"]["1"]["unchecked"], ["mirror"])
+        self.assertEqual(st["counts"]["mirrorchecks"]["libraries"]["1"]["s"], "done")
+        html = PageStructureTests()._render(st, "mirrorchecks")["html"]
+        self.assertIn(">Other site’s files not compared</a>", html)
+        self.assertRegex(html, r'data-lhcheck="mirror_only_here"(?:(?!</div>).)*<span class="badge b-fail"')
+
+    def test_a_scan_shows_at_once(self):
+        """A Mirror Checks scan done: the count it changed is waiting at once (never the old number), and when the
+        evaluator's turn comes (evaluate.HealthUnit) its findings are laid over Library Health's answer as kept
+        (libhealth.with_sources) — nothing else worked out again. A scan starting, or the link changing, leaves the
+        answer of a library that isn't compared as it was."""
+        from plexcache import libhealth
+        app, _plex, _cat, other = self._mirror()
+        app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}})                    # (the mirror's edits win: a file its Plex doesn't list is Mirror Checks's)
+        other.cat["movies"].pop(0)
+        app.library_health("1")
+        before = app._health_counts_now()["1"]
+        self.assertFalse(before["stale"])
+        got = app.mirror_health.check("1")
+        with app.mirror_health.lock:
+            app.mirror_health.results["1"] = got
+            app.mirror_health.checked_at = time.time()
+        app.mirror_health._snap = None
+        worked, real = [], libhealth.base_health
+        libhealth.base_health = lambda a, key: worked.append(key) or real(a, key)
+        self.addCleanup(setattr, libhealth, "base_health", real)
+        self.assertTrue(app._health_counts_now()["1"]["stale"])                                    # (its count waiting: the placeholder, not the old number)
+        self.assertFalse(app.health_current("1", "mirror"))
+        self.assertTrue(app.health_current("1", "file"))                                          # (the File Checks count as it was)
+        h = app.library_health("1")                                                               # (the evaluator's turn)
+        now = app._health_counts_now()["1"]
+        self.assertFalse(now["stale"])
+        self.assertGreater(now["mirror"], before["mirror"])
+        self.assertNotEqual(now["rev"], before["rev"])                                            # (the page fetches the new answer)
+        self.assertEqual(worked, [])                                                              # (the rest as kept)
+        self.assertEqual(h["counts"]["mirror_not_listed_there"], got["counts"]["not_listed_there"])
+        self.assertEqual(dict(h, rev=None), dict(libhealth.library_health(app, "1"), rev=None))   # (the same as worked out whole)
+        # a library not compared: its stamp the same whatever the scan or the link does
+        stamp = app.mirror_health.stamp("9")
+        app.mirror_health.running = "1"
+        app.peerlink.lights = lambda: {"talking": {"status": "fail", "text": "Not answering", "detail": ""}}
+        app.mirror_health._snap = None
+        self.assertEqual(app.mirror_health.stamp("9"), stamp)
+        app.mirror_health.running = None
+
+    def test_pages_draw_the_link_and_the_findings(self):
+        """System's Mirror Plex Cache card: its five lights, its settings once a mirror is watched, Pair Now; Tools →
+        Mirror Checks, the shared check page (checksPage): its library tabs and what was found, its checks as options,
+        Scan Again, the warning while the link isn't healthy, and the findings as chips on their items with Ignore."""
+        app, _plex, _cat, other = self._mirror()
+        app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}})                    # (the mirror's edits win: a file its Plex doesn't list is Mirror Checks's)
+        other.cat["movies"].pop(0)
+        link = app.peerlink
+        link.lights = lambda: {"found": {"status": "ok", "text": "Plex Cache found on Cottage", "detail": ""}, "paired": {"status": "warn", "text": "Not paired", "detail": ""},
+                               "talking": {"status": "off", "text": "Not talking", "detail": ""}, "folders": {"status": "off", "text": "Folder sync", "detail": ""},
+                               "version": {"status": "off", "text": "Version and clock", "detail": ""}}
+        # no Plex Cache known at the mirror's site yet: its files not compared, and nothing red anywhere
+        self._compared(app)                                                                       # (the evaluator's turn)
+        app.library_health("1")
+        st = jsonable(app.state())
+        self.assertEqual((st["health_counts"]["1"]["unchecked"], st["tools_red"]["mirrorchecks"]), ([], []))
+        self.assertNotRegex(PageStructureTests()._render(st, "tools")["html"], r'<a href="/mirrorchecks" data-nav>Mirror Checks →</a> <span class="count fail"')
+        link.found = {"url": "http://cottage:8642", "hello": {"name": "Cottage", "instance": "cottage"}, "at": time.time()}  # (known there: its files unread are red)
+        self._compared(app)                                                                       # (the evaluator's turn)
+        evaluated(app)                                                                            # (and every library's: the Tools page's count is over them all)
+        h = jsonable(app.library_health("1"))
+        st = jsonable(app.state())
+        st["_health"] = h
+        self.assertEqual(st["health_counts"]["1"]["unchecked"], ["mirror"])
+        pages = PageStructureTests()
+        text = pages._render(st, "system")["text"]
+        card = text[text.index("Mirror Plex Cache"):text.index("Media Mappings")]
+        for said in ("Plex Cache found on Cottage", "Not paired", "Not talking", "Pair by itself", "Its address", "Pair Now", "Test Again"):
+            self.assertIn(said, card)
+        self.assertNotIn("Unpair", card)                                                          # (nothing paired)
+        drawn = pages._render(st, "mirrorchecks")
+        # the other site's files not compared (the link down): a red chip on top, leading to the link's card, in place of a
+        # warning further down — and the checks that need them, their counts red
+        self.assertRegex(drawn["html"], r'<div class="toolstats">.*<a class="badge b-fail" href="/system#peer" data-nav title="[^"]*isn’t working[^"]*">Other site’s files not compared</a>')
+        self.assertNotIn('<div class="note warnbox">', drawn["html"])
+        for cid in ("mirror_only_here", "mirror_only_there", "mirror_size_differs", "mirror_sync_files"):
+            self.assertRegex(drawn["html"], r'data-lhcheck="' + cid + r'"(?:(?!</div>).)*<span class="badge b-fail" title="Not checked: [^"]+">0</span>')
+        self.assertRegex(drawn["html"], r'data-lhcheck="mirror_not_listed_there"(?:(?!</div>).)*<span class="badge b-warn">')
+        # and red down the ladder: the library's tab, the Tools page's card, the Library page's line for it
+        self.assertRegex(drawn["html"], r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count fail"')
+        self.assertRegex(pages._render(st, "tools")["html"], r'<a href="/mirrorchecks" data-nav>Mirror Checks →</a> <span class="count fail"')
+        self.assertNotRegex(pages._render(st, "tools")["html"], r'<a href="/filechecks" data-nav>File Checks →</a> <span class="count fail"')
+        self.assertRegex(pages._render(st, "library")["html"], r'<a href="/mirrorchecks" data-nav>Mirror Checks</a><span class="badge b-fail"')
+        self.assertIn('<div class="lctl tooltop"><div class="seg small strong"', drawn["html"])                 # (the tabs, as every tool's)
+        self.assertIn('data-lhcheck="mirror_not_listed_there"', drawn["html"])                                # (its checks, as the options)
+        self.assertRegex(drawn["html"], r'class="badge b-warn sschip"[^>]*>Not in the mirror’s Plex')         # (a chip on the item)
+        self.assertIn('data-act="lh-scan"', drawn["html"])
+        self.assertIn('data-act="lh-ignore"', drawn["html"])
+        self.assertIn("Mirror Checks", pages._render(st, "tools")["text"])
+
+
+class CountStandardTests(unittest.TestCase):
+    """Every number a page shows of what's been found, one standard (evaluate.py): each page's count for each library is
+    done, pending, na or failed — evaluated before it shows, the page drawing a placeholder until it's done, never a
+    number — and the evaluator works them out in the order the page open needs them: its library first, with what stops
+    its rows before it (Mirror Checks, Merge Duplicates), the data layer breaking off for it. Held for every page of the
+    Tools menu and the Library page, present and future (CLAUDE.md: none let off)."""
+
+    @staticmethod
+    def _js():
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+
+    def _tool_pages(self):
+        """Every page of the Tools menu (app.js TOOLS)."""
+        block = re.search(r"\n  var TOOLS = \[(.*?)\]\];", self._js(), re.S).group(1)
+        got = re.findall(r'\["(\w+)", N\("', block)
+        self.assertGreaterEqual(len(got), 11)
+        return got
+
+    @staticmethod
+    def _forced(st, c):
+        """The state with every count — each library's, each page's total, the menu's — the one given."""
+        st = json.loads(json.dumps(st))
+        for got in st["counts"].values():
+            got["total"] = dict(c)
+            for k in got["libraries"]:
+                got["libraries"][k] = dict(c)
+        return st
+
+    NUMBER_CHIP = re.compile(r'<span class="count(?: (?:ok|warn|fail))?"[^>]*>\s*[\d,.]+\s*</span>')
+
+    def test_every_count_is_evaluated_before_it_shows(self):
+        """The state gives every page of the Tools menu, and the Library page, a count for every library Plex Cache works
+        on and over them all, each in one of the four states; nothing is done before the data it reads is in. Every page
+        draws them one way: with every count still to come there's no number anywhere — not in a tab, a card, the menu nor
+        a Library page line — a turning wheel in their place, and the placeholder (countBox) where what was found goes;
+        while a count grows as it's read (partial), what's been found so far beside the wheel, said to be still counting;
+        where a page doesn't apply, a grey dash, never a green 0; where it couldn't be worked out, a red !; once done, the
+        numbers."""
+        from plexcache import evaluate
+        app, _plex, _client, _cat, _other = ToolsTests()._app(mirror=True)
+        pages = self._tool_pages()
+        libs = [str(lib["key"]) for lib in app.libraries if lib.get("kind")]
+        st = jsonable(app.state())
+        self.assertEqual(set(st["counts"]), set(pages) | {"library", "tools"})                     # (every page, a new one too)
+        for page in pages + ["library"]:
+            got = st["counts"][page]
+            self.assertEqual(set(got["libraries"]), set(libs), page)
+            for c in list(got["libraries"].values()) + [got["total"]]:
+                self.assertIn(c["s"], evaluate.STATES, page)
+                self.assertEqual(set(c) - {"progress", "partial"}, {"s", "n"} if c["s"] == "done" else {"s", "why"}, (page, c))
+                self.assertTrue("partial" not in c or c["s"] == "pending", (page, c))                 # (found so far: only while still counting)
+                self.assertNotEqual(c["s"], "done", f"{page}: a number before its data was read")  # (nothing gathered yet)
+        self.assertEqual(st["counts"]["merge"]["libraries"]["3"]["s"], "na")                       # (Merge Duplicates doesn't work on music)
+        # drawn: every page of the Tools menu, the Tools page and the Library page, in each state
+        h = jsonable(app.library_health("1"))
+        base = jsonable(app.state())
+        base["_health"] = h
+        tabbed = [p for p in pages if p != "dataset"]                                              # (the pages with library tabs)
+        drawn = PageStructureTests()
+        cases = (("pending", {"s": "pending", "why": "Reading the library’s records from Plex…", "progress": {"done": 3, "total": 12}}),
+                 ("na", {"s": "na", "why": "Doesn’t work on this kind of library."}),
+                 ("failed", {"s": "failed", "why": "The library’s records couldn’t be read: boom"}),
+                 ("partial", {"s": "pending", "why": "Inspecting the files: 3 of 12", "progress": {"done": 3, "total": 12}, "partial": 4}),
+                 ("done", {"s": "done", "n": 7}))
+        for name, c in cases:
+            st = self._forced(base, c)
+            for page in pages + ["tools", "library"]:
+                with self.subTest(state=name, page=page):
+                    got = drawn._render(st, page)
+                    html = got["html"]
+                    chips = re.findall(r'<span class="count[^"]*"[^>]*>(?:(?!</span>).)*(?:</span>)?</span>|<span class="count[^"]*"[^>]*>[^<]*</span>', html)
+                    if page == "tools":
+                        self.assertGreaterEqual(len(chips), len(pages), html[:3000])                  # (every card its count)
+                    elif page in tabbed:                                                             # (every tab — a library of the kinds it works on — its count)
+                        tabs = re.findall(r'<button role="tab"[^>]*data-act="(?:tool-lib|lib-tab)"(?:(?!</button>).)*</button>', html)
+                        self.assertTrue(tabs, html[:3000])
+                        for tab in tabs:
+                            self.assertIn('<span class="count', tab)
+                    if name == "done":
+                        self.assertNotIn("countbox", html)
+                        if page in tabbed or page == "tools":
+                            self.assertRegex(html, r'<span class="count (?:warn|fail)"[^>]*>7</span>')
+                        continue
+                    self.assertIsNone(self.NUMBER_CHIP.search(html), f"a number while the count is {name}")
+                    if page in tabbed or page in ("dataset", "library"):
+                        self.assertIn("countbox", html)                                           # (the placeholder where what was found goes)
+                        self.assertNotIn('class="toolstats"', html)                               # (no stats: they're numbers)
+                    if name == "pending":
+                        self.assertIn('class="count busy"', html) if page != "dataset" else None
+                        if page in tabbed or page in ("dataset", "library"):
+                            self.assertIn("Reading the library’s records from Plex…", got["text"])
+                            self.assertIn("3 of 12", got["text"])
+                    elif name == "partial":                                                          # (the number so far, still turning)
+                        if page != "dataset":
+                            self.assertRegex(html, r'<span class="count busy partial (?:warn|fail)"[^>]*>4 <span class="spin"')  # (coloured as what it holds)
+                        if page in tabbed or page in ("dataset", "library"):
+                            self.assertIn("4 found so far — still counting", got["text"])
+                            self.assertIn("3 of 12", got["text"])
+                    elif name == "na":
+                        if page != "dataset":
+                            self.assertRegex(html, r'<span class="count na"[^>]*>–</span>')
+                    else:
+                        if page != "dataset":
+                            self.assertRegex(html, r'<span class="count fail"[^>]*>!</span>')
+                        self.assertNotIn("countbox", html) if page == "tools" else None
+            # the menu: the Tools menu's own count
+            menu = drawn._render(st, "tools")["menu"]
+            if name == "pending":
+                self.assertEqual((menu["hidden"], "busy" in menu["cls"], "spin" in menu["html"]), (False, True, True))
+                self.assertIn("Reading the library’s records", menu["title"])
+            elif name == "partial":
+                self.assertEqual((menu["hidden"], "busy" in menu["cls"], menu["html"].startswith("4<span class=\"spin\"")), (False, True, True))
+                self.assertTrue("warn" in menu["cls"] or "fail" in menu["cls"], menu["cls"])
+                self.assertIn("4 found so far", menu["title"])
+            elif name == "na":
+                self.assertTrue(menu["hidden"])
+            elif name == "failed":
+                self.assertEqual((menu["hidden"], menu["html"], "fail" in menu["cls"]), (False, "!", True))
+            else:
+                self.assertEqual((menu["hidden"], menu["html"], "busy" in menu["cls"]), (False, "7", False))
+        # the Library page: each line (a tool's, a check page's) its page's count — a turning wheel while it's to come
+        st = self._forced(base, cases[0][1])
+        html = drawn._render(st, "library")["html"]
+        lines = re.findall(r'<div class="chk lhchk lhtool[^"]*">.*?</div>', html)
+        self.assertGreaterEqual(len(lines), len(pages) - 2, html[:3000])                           # (every tool, and the check pages, but the dataset's and the optimizer's)
+        for line in lines:
+            self.assertIn('class="count busy"', line)
+            self.assertNotRegex(line, r'class="badge b-(?:warn|pass)">\d')
+        hrefs = re.findall(r'<div class="chk lhchk lhtool[^"]*">.*?<a href="/(\w+)"', html)
+        self.assertTrue(hrefs and all(h in st["counts"] for h in hrefs), hrefs)                    # (a line's page always counts)
+
+    def test_counts_are_drawn_by_the_shared_code_only(self):
+        """No page works a count out, nor draws one, on its own: the state's counts are read in one place (countOf), a
+        count chip is drawn in one place (countChip) — and the menu's by menuCount, as countChip would — the library tabs
+        of every tool and check page are libTabs' with the page's count, and nothing reads the old per-tool tallies."""
+        js = self._js()
+        self.assertNotIn("tool_counts", js)
+        self.assertEqual(len(re.findall(r"\bST\.counts\b", js)), 1)                                  # (countOf)
+        body = lambda fn: re.search(r"\n  function " + fn + r"\(.*?(?=\n  (?:function |var |// ))", js, re.S).group(0)
+        self.assertIn("ST.counts", body("countOf"))
+        chip = body("countChip")
+        at = js.index(chip)
+        for m in re.finditer(r'class="count[ "]', js):
+            self.assertTrue(at <= m.start() < at + len(chip), "a count chip drawn outside countChip: " + js[max(0, m.start() - 120):m.start() + 60])
+        self.assertNotIn("o.count(", js)                                                             # (libTabs counts by the page: no callback of its own)
+        self.assertIn("countChip(countOf(o.tool, l.key)", body("libTabs"))
+        for fn in ("toolPage", "checksPage", "pageOptimizer", "libHealthView", "pageTools", "migrationCard"):
+            self.assertRegex(body(fn), r"countOf\(|countChip\(|optLibTabs\(|toolLibs\(|libTabs\(", fn)
+        for fn in ("toolPage", "libHealthView", "pageOptimizer", "migrationCard"):
+            self.assertIn("countBox(", body(fn), f"{fn} draws what was found without the placeholder")
+        # health_counts: read only for which answer to fetch (rev), never for a number
+        for line in [ln for ln in js.splitlines() if "health_counts" in ln and not ln.strip().startswith("//")]:
+            self.assertRegex(line, r"health_counts \|\| \{\}\)\[key\]", line)
+
+    def test_the_page_open_is_evaluated_first(self):
+        """The order (Evaluator.order): with no page open, library by library, Mirror Checks and Merge Duplicates first —
+        their findings stop the other tools' rows — Library Health after the tools; a page open, its own library first, with
+        what comes before it, then its other libraries, then the rest. And the data layer breaks off between its steps for
+        the library a page has open, picking up where it was after."""
+        from plexcache import libdata
+        app, plex, _client, _cat, _other = ToolsTests()._app(mirror=True)
+        ev = app.evaluator
+        names = list(ev.units())
+        self.assertEqual(names[:2], ["mirrorchecks", "merge"])
+        self.assertLess(max(names.index(n) for n in app.tools), names.index("health"))
+        self.assertEqual(ev.closure("sync"), ["mirrorchecks", "merge", "sync"])
+        self.assertEqual(ev.closure("versions"), ["merge", "versions"])
+        for name in app.tools:
+            if name != "merge":
+                self.assertIn("merge", ev.closure(name), name)                                     # (every tool, a new one too)
+        order = ev.order()
+        self.assertEqual(order[:len(names)], [(n, "1") for n in names])
+        # Sync Libraries' page open on TV Shows
+        app.libdata.working = True                                                                 # (no reading thread: the order only)
+        ev.focus("sync", "2")
+        order = ev.order()
+        self.assertEqual(order[:3], [("mirrorchecks", "2"), ("merge", "2"), ("sync", "2")])
+        self.assertEqual(order[3:6], [("mirrorchecks", "1"), ("merge", "1"), ("sync", "1")])        # (the page's other libraries)
+        self.assertEqual(len(order), len(set(order)))
+        self.assertEqual(app.libdata.queue[0][0], "2")                                              # (its data read first)
+        self.assertEqual(jsonable(app.state())["evaluating"]["focus"], {"page": "sync", "library": "2"})
+        ev.focused = None
+        # the data layer: reading Movies, TV Shows opened — Movies breaks off after its records, TV Shows is read, then the
+        # rest of Movies
+        ld = app.libdata
+        for k in ("1", "2"):
+            for w in ("records", "files"):
+                ld._stale(ld.data(k), w)
+        seen, real_plex, real_files = [], app.plex, ld._gather_files
+
+        def plex_(timeout=30):
+            c = real_plex(timeout=timeout)
+            items = c.library_items
+
+            def library_items(key, leaf):
+                seen.append((str(key), "records"))
+                if str(key) == "1" and not ld.urgent:
+                    ld.fast_track("2", ("records", "files"))                                       # (the page opened, mid-read)
+                return items(key, leaf)
+            c.library_items = library_items
+            return c
+        app.plex = plex_
+        ld._gather_files = lambda d, lib, step: (seen.append((d.key, "files")), real_files(d, lib, step))[1]
+        with ld.lock:
+            ld.queue = [("1", ("records", "files"))]
+            ld.urgent, ld.working = None, True
+        ld._work()
+        self.assertEqual(seen, [("1", "records"), ("2", "records"), ("2", "files"), ("1", "files")])
+        self.assertTrue(ld.data("1").ready and ld.data("2").ready)
+        self.assertEqual(libdata.ALL[:2], ("records", "files"))
+
+    def test_sync_libraries_counts_and_what_stops_it(self):
+        """Sync Libraries' count: not applicable where no mirror is watched (or the library isn't paired), waiting while the
+        mirror is still to be read, failed when it couldn't be — never 0 for any of them. Mirror Checks is worked out
+        before it: a finding that the item's files aren't the same at the two sites stops its row (a red tag, Apply
+        refusing it) until it's put right, ignored there, or its check switched off; and the folder sync not carrying
+        .plexcache holds it, as it holds the file tools."""
+        from plexcache import libhealth, mirrorhealth as mh
+        app, _plex, _client, _cat, _other = ToolsTests()._app()
+        ev = app.evaluator
+        d = app.libdata.data("1")
+        self.assertEqual(ev.count("sync", "1")["s"], "pending")
+        self.assertIn("Waiting its turn", en(jsonable(ev.count("sync", "1")["why"])))
+        app.libdata.gather("1", wait=True)
+        self.assertIsNone(d.mirror)
+        c = ev.count("sync", "1")
+        self.assertEqual(c["s"], "na")                                                              # (no mirror watched)
+        self.assertIn("isn’t paired", en(jsonable(c["why"])))
+        self.assertEqual(ev.count("mirrorchecks", "1")["s"], "na")
+        d.errors["mirror"] = "Connection refused"                                                   # (the mirror couldn't be read)
+        c = ev.count("sync", "1")
+        self.assertEqual(c["s"], "failed")
+        self.assertIn("Connection refused", en(jsonable(c["why"])))
+        d.errors.pop("mirror")
+        # Mirror Checks' findings on the items' files stop the rows
+        app, _plex, _client, cat, other = ToolsTests()._app(mirror=True)
+        tool = app.tools["sync"]
+        cat["movies"][1].update(title="Film One", locked=["title"])                                # (a row: an edit to bring over)
+        app.scan_library()
+        data = app.libdata.gather("1", wait=True, refresh=True)
+        rows = tool.analysis(data)["rows"]
+        row = next(r for r in rows if r["title"].startswith("Film One"))
+        rk = str(row["rks"][0] if row.get("rks") else row["rk"])
+        self.assertEqual(tool.mark_stops("1", [row], set()), 0)
+        with app.mirror_health.lock:
+            app.mirror_health.results["1"] = {"at": time.time(), "v": mh.FORMAT, "stamp": data.stamp, "rows": [
+                {"kind": "size_differs", "item": rk, "label": "Film One", "rel": "x.mkv", "size": 10, "size_there": 20}], "counts": {}, "notes": []}
+        app.mirror_health._snap = None
+        self.assertEqual(tool.mark_stops("1", [row], set()), 1)
+        self.assertEqual([(b["id"], b.get("source"), b["on"], b["ignored"]) for b in row["blocks"]], [("mirror_size_differs", "mirror", True, False)])
+        self.assertTrue(row["held"] and row["stopped"])
+        app.settings.update({"library_health": {"checks": {"mirror_size_differs": False}}})          # (its check off: freed at once)
+        self.assertEqual(tool.mark_stops("1", [row], set()), 0)
+        app.settings.update({"library_health": {"checks": {"mirror_size_differs": True}}})
+        libhealth.set_ignored(app, "1", rk, ["mirror_size_differs"])                                # (ignored on Mirror Checks: freed)
+        self.assertEqual(tool.mark_stops("1", [row], set()), 0)
+        self.assertEqual(row["blocks"][0]["ignored"], True)
+        # the page: a red tag on the row, linking to the item on Mirror Checks
+        self.assertEqual(tool.blocking_sources, ("mirror",))
+        self.assertIn('mirror_size_differs: mirrorBlock(', self._js())
+        # held while .plexcache doesn't reach the other site
+        self.assertTrue(tool.held_by_folder_sync)
+        app.peerlink.talking = lambda: True
+        app.peerlink.folder_sync = lambda: {"1": {"status": "fail"}}
+        self.assertIsNotNone(app.mirror_health.hold("1"))
+        got = dict(tool.analysis(data), library="1")
+        with tool.lock:
+            tool.scan_result = got
+        with self.assertRaises(ValueError):
+            tool.apply_async([row["id"]])
+
+    def test_merge_first_in_every_library(self):
+        """A row of another tool on a film's several records is stopped (merge first) in whichever library — from Merge
+        Duplicates' analysis of that library, worked out before the tool's, not only the library Merge last scanned."""
+        app, plex, _client, cat, _other = ToolsTests()._app()
+        copy = os.path.join(cat["root"], "Movies", "Film 1 (2011) [copy].mkv")
+        fakes.make_mkv(copy, 1024 * 1024)
+        plex.cat["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000})
+        app.scan_library()
+        merge = app.tools["merge"]
+        with merge.lock:
+            merge.scan_result = {"library": "2", "rows": [], "v": merge.scan_version}               # (its last scan another library's)
+        data = app.libdata.gather("1", wait=True, refresh=True)
+        self.assertIsNone(merge.analysis_if_current(data))
+        app.evaluator.bring("versions", "1")                                                         # (what a scan of another tool does: Merge first)
+        self.assertIsNotNone(merge.analysis_if_current(data))
+        self.assertEqual(app.tools["versions"].merge_first("1"), {"101", "190"})
+
+    def test_file_checks_wait_for_the_inspector(self):
+        """File Checks' count waits until the inspector has read the library's files — what it's found so far shown with
+        the turning wheel (partial), and how far it's got — and the inspector reads every library in the background, the
+        page's library first; one paused by hand stays paused (the next is read), one paused for another picks up after
+        it."""
+        from plexcache import filemap
+        app, _plex, _client, _cat, _other = ToolsTests()._app()
+        ev = app.evaluator
+        for k in ("1", "2"):
+            app.libdata.gather(k, wait=True)
+            app.library_health(k)
+        c = ev.count("filechecks", "1")
+        hc = app.health_counts["1"]
+        self.assertEqual((c["s"], c["partial"]), ("pending", hc["file"]))                            # (found so far, from what's been read)
+        self.assertIn("inspector", en(jsonable(c["why"])))
+        self.assertEqual(c["progress"], {"done": hc["files"] - hc["unread"], "total": hc["files"]})
+        self.assertEqual(ev.count("plexchecks", "1")["s"], "done")                                  # (the other checks don't wait for it)
+        ins, started = app.inspector, []
+
+        def start(key, force=False):
+            started.append(key)
+            ins.looked[key] = time.time()                                                           # (its files looked over: as Inspector.start)
+            return {}
+        ins.start = start
+        ev.kick = lambda: None                                                                      # (the steering only: no evaluating thread)
+        ev.started = True
+        ev.focus("filechecks", "2")
+        self.assertEqual(started[:1], ["2"])                                                        # (the page's library first)
+        ins.held.add("2")
+        started.clear()
+        ev.steer()
+        self.assertEqual(started, ["1"])                                                             # (paused by hand: the next one)
+        started.clear()
+        ev.steer()
+        self.assertEqual(started, [])                                                                # (gone through at this state: not again)
+        ins.libs["1"] = {"todo": ["x"], "done": 0, "total": 1, "read": 0, "paused": True, "finished": None, "force": False}
+        ev.steer()
+        self.assertEqual(started, ["1"])                                                             # (paused for another: picked up)
+        ev.started = False
+        ins.held.discard("2")
+        # once read, a day on: its files looked over again for those read long ago (INSPECT_ROUND), as a round of its own
+        started.clear()
+        ins.looked["1"] = time.time() - filemap.INSPECT_ROUND - 5
+        ins.libs["1"]["todo"] = []
+        ev.started = True
+        ev.steer()
+        self.assertEqual(started, ["1"])
+        ev.started = False
+
+    def test_a_reread_that_finds_nothing_new_keeps_the_counts(self):
+        """A library read again for its age that finds it as it was keeps its stamp: what's worked out from it — every
+        count — stands, nothing turns. One said to have changed (its stamp moved, Scan Again) is read and worked out again."""
+        app, _plex, _client, _cat, _other = ToolsTests()._app()
+        ld = app.libdata
+        ld.gather("1", wait=True)
+        app.evaluator.bring("merge", "1")
+        stamp = ld.data("1").stamp
+        self.assertEqual(app.evaluator.count("merge", "1")["s"], "done")
+        d = ld.data("1")
+        d.records_at = d.files_at = 1.0                                                              # (old: read again for its age)
+        ld.gather("1", ("records", "files"), wait=True)
+        self.assertEqual(ld.data("1").stamp, stamp)
+        self.assertEqual(app.evaluator.count("merge", "1")["s"], "done")
+        ld.gather("1", ("records",), wait=True, refresh=True)                                        # (Scan Again)
+        self.assertGreater(ld.data("1").stamp, stamp)
+        self.assertEqual(app.evaluator.count("merge", "1")["s"], "pending")
+
+    def test_the_optimizer_counts_like_every_page(self):
+        """The optimizer's count: not applicable where neither rewrite is chosen, a placeholder until its scan has looked at
+        the library's files as they are now, then the files to optimize."""
+        app, _plex, _client, _cat, _other = ToolsTests()._app()
+        ev = app.evaluator
+        app.libdata.gather("1", wait=True)
+        self.assertEqual(ev.count("optimizer", "1")["s"], "pending")
+        app.optimizing.survey()
+        c = ev.count("optimizer", "1")
+        self.assertEqual(c["s"], "done")
+        self.assertEqual(c["n"], ((app.optimizing.summary or {}).get("1") or {}).get("todo") or 0)
+        lib = app.settings.get().get("optimizer") or {}
+        app.optimizing.options = lambda key: {"sync": False, "mkv": False}
+        c = ev.count("optimizer", "1")
+        self.assertEqual(c["s"], "na")
+        self.assertIn("Neither rewrite", en(jsonable(c["why"])))
+
+    def test_inspections_are_kept_and_read_again_only_when_due(self):
+        """What the inspector reads of a file is kept (filemap.FileMaps), and read again only when it's due: the file
+        changed on disk, an update reads more of each file (MAP_VERSION: counted "outdated" — File Checks' count waiting
+        meanwhile, what was found so far shown with it), or read longer ago than INSPECT_EVERY — its count standing
+        meanwhile, since nothing it reads changed."""
+        from plexcache import filemap
+        app, _plex, _client, _cat, _other = ToolsTests()._app()
+        evaluated(app, "1")
+        ev, maps = app.evaluator, app.file_maps
+        self.assertEqual(ev.count("filechecks", "1")["s"], "done")
+        path = next(app.map_path(f.path) for f in app.files if str(f.library_key) == "1")
+        st = os.stat(path)
+        self.assertFalse(maps.due(path, st))                                                         # (read, unchanged: kept)
+        self.assertIs(app.inspector._current(maps, path), True)
+        with maps.lock:
+            e = maps.files[path]
+            read = e["map"]["read"]
+            e["map"]["read"] = time.time() - filemap.INSPECT_EVERY - 5                                # (read long ago: due)
+        self.assertTrue(maps.due(path, st))
+        self.assertEqual(ev.count("filechecks", "1")["s"], "done")                                  # (the count stands meanwhile)
+        with maps.lock:
+            e["map"]["read"] = read
+            e["v"] = filemap.MAP_VERSION - 1                                                         # (read by an older version)
+        self.assertTrue(maps.due(path, st))
+        app.forget_health("1")
+        app.library_health("1")
+        self.assertEqual(app.health_counts["1"]["outdated"], 1)
+        c = ev.count("filechecks", "1")
+        self.assertEqual((c["s"], c["partial"]), ("pending", app.health_counts["1"]["file"]))         # (waiting, what's found so far with it)
+        with maps.lock:
+            e["v"] = filemap.MAP_VERSION
+        os.utime(path, (st.st_atime, st.st_mtime + 60))                                              # (changed on disk: due)
+        self.assertTrue(maps.due(path, os.stat(path)))
+
+    def test_every_unit_has_a_stale_period(self):
+        """Each unit is worked out again after a stale period of its own (Unit.stale_after: a tool's, Library Health's,
+        Mirror Checks', the optimizer's scan), though nothing it reads changed — after everything that isn't current, and
+        with its count standing meanwhile (aged, again)."""
+        from plexcache import evaluate
+        app, _plex, _client, _cat, _other = ToolsTests()._app(mirror=True)
+        ev = app.evaluator
+        for name, u in ev.units().items():
+            self.assertIsInstance(u.stale_after, (int, float), name)
+            self.assertGreater(u.stale_after, 0, name)
+            if name in app.tools:
+                self.assertEqual(u.stale_after, app.tools[name].stale_after)
+        evaluated(app, "1")
+        merge = app.tools["merge"]
+        before = merge.analysis_if_current(app.libdata.data("1"))
+        self.assertIsNotNone(before)
+        ev.evaluated[("merge", "1")] = time.time()
+        self.assertFalse(ev.aged("merge", "1"))
+        ev.evaluated[("merge", "1")] = time.time() - merge.stale_after - 5
+        self.assertTrue(ev.aged("merge", "1"))
+        self.assertEqual(ev.count("merge", "1")["s"], "done")                                       # (standing while it's due)
+        ev.units()["merge"].again("1")                                                              # (the evaluator's turn: worked out afresh)
+        after = merge.analysis_if_current(app.libdata.data("1"))
+        self.assertIsNotNone(after)
+        self.assertIsNot(after, before)
+        self.assertEqual(ev.count("merge", "1")["s"], "done")
+        self.assertEqual(evaluate.Unit.stale_after, 24 * 3600)
+
+    def test_a_total_shows_what_is_in_so_far(self):
+        """A count over several libraries (a page's total, the menu's) while some are still to come: what's in so far — the
+        libraries done, and what those still counting have found so far — beside the wheel (partial), once any of it is in;
+        none while nothing is. Never a number without the wheel before every library is in."""
+        from plexcache.evaluate import done, failed, na, pending, total
+        self.assertEqual(total([done(331), pending("x"), pending("y")]).get("partial"), 331)
+        self.assertEqual(total([done(2), pending("x", partial=1), na("n")]).get("partial"), 3)
+        self.assertEqual(total([done(2), failed("f"), pending("x")]).get("partial"), 2)
+        self.assertNotIn("partial", total([pending("x"), pending("y")]))
+        self.assertEqual(total([pending("x"), pending("y", partial=0)]).get("partial"), 0)
+        got = total([done(5), pending("x")])
+        self.assertEqual(got["s"], "pending")                                                       # (still to come: the wheel)
+        self.assertNotIn("n", got)
+        self.assertEqual(total([done(5), done(1)]), done(6))
+        app, _plex, _client, _cat, _other = ToolsTests()._app()
+        st = jsonable(app.state())                                                                  # (the menu's own, over its pages)
+        tools = total([v["total"] for k, v in st["counts"].items() if k not in ("tools", "library")])
+        self.assertEqual(st["counts"]["tools"]["total"].get("partial"), tools.get("partial"))
+
+    def test_mirror_checks_never_say_no_mirror_before_it_is_known(self):
+        """A mirror watched but its libraries not read yet — or not reached — is never "no mirror" (a grey dash, a line
+        saying so): Mirror Checks' count says it's reading them (pending), or that the mirror couldn't be reached (failed),
+        the page says the same, and once they're in, the libraries paired are compared."""
+        app, _plex, _client, _cat, other = ToolsTests()._app(mirror=True)
+        mh, ev = app.mirror_health, app.evaluator
+        app.libdata.gather("1", wait=True)
+        real = app.other.client
+
+        def unknown():
+            with app.other.lock:
+                app.other.libs, app.other.libs_at, app.other.error = None, 0.0, None
+            mh._libs = mh._snap = None
+
+        def said(key="1"):
+            return " ".join(en(jsonable(n["text"])) for n in mh.notes(key)) + " " + en(jsonable(mh.connection()["text"]))
+        # being read (the evaluator's thread reads them): pending, said so
+        unknown()
+        mh.reading = True
+        ev.started, started = True, ev.started
+        try:
+            c = ev.count("mirrorchecks", "1")
+            self.assertEqual(c["s"], "pending")
+            self.assertIn("Reading the mirror’s libraries", en(jsonable(c["why"])))
+            self.assertIsNone(mh.not_applicable("1"))
+            self.assertNotIn("No mirror is watched", said())
+            self.assertIn("Reading the mirror’s libraries", said())
+            self.assertNotEqual(ev.count("sync", "1")["s"], "na")
+            self.assertTrue(ev.units()["mirrorchecks"].busy("1"))
+        finally:
+            ev.started, mh.reading = started, False
+        # not reached: failed, said why — never "no mirror"
+
+        def down(timeout=30):
+            raise PlexError("Connection refused")
+        app.other.client = down
+        unknown()
+        c = ev.count("mirrorchecks", "1")
+        self.assertEqual(c["s"], "failed")
+        self.assertIn("Connection refused", en(jsonable(c["why"])))
+        self.assertNotIn("No mirror is watched", said())
+        self.assertIn("Connection refused", said())
+        self.assertTrue(ev.settled("mirrorchecks", "1"))                                            # (what waits for it goes on)
+        # reached: the library paired is compared
+        app.other.client = real
+        unknown()
+        self.assertIn("1", mh.libraries())
+        self.assertIsNone(mh.waiting())
+        self.assertEqual(ev.count("mirrorchecks", "1")["s"], "pending")
+        mh.evaluate("1")
+        app.library_health("1")
+        self.assertEqual(ev.count("mirrorchecks", "1")["s"], "done")
+        # this Plex's libraries not read yet (starting up): what's paired with them isn't known — never a dash, and once
+        # they're in, what's paired follows at once (not a minute later, from what was kept)
+        libs, app.libraries = app.libraries, []
+        mh._snap = None
+        self.assertEqual(mh.waiting(), ("pending", None))
+        self.assertNotIn("No mirror is watched", said())
+        app.libraries = libs
+        mh._snap = None
+        self.assertIn("1", mh.libraries())
+        self.assertIsNone(mh.waiting())
+        # before Plex's libraries are first read, no page says it doesn't apply: every count waits (or says Plex couldn't be read)
+        app.libraries, app.libraries_read = [], False
+        st = jsonable(app.state())
+        for page, got in st["counts"].items():
+            self.assertEqual(got["total"]["s"], "pending", page)
+        app.scan_error = "Connection refused"
+        self.assertEqual({got["total"]["s"] for got in jsonable(app.state())["counts"].values()}, {"failed"})
+        app.scan_error = None
+        app.scan_library()
+        self.assertTrue(app.libraries_read)
+        self.assertIn("1", ev.counts()["mirrorchecks"]["libraries"])
+        # no mirror watched at all: then it's said, a grey dash
+        app.settings.update({"sync": {"mirrors": "none"}})
+        unknown()
+        self.assertEqual(ev.count("mirrorchecks", "1")["s"], "na")
+        self.assertIn("No mirror is watched", said())
+
+    def test_a_count_so_far_has_the_colour_of_what_it_holds(self):
+        """What's been found so far (partial) is coloured as a finished count would be, so its number never reads as the
+        grey of what's still to come: red where something red was found (red over yellow), yellow with something to do,
+        grey — never green — at 0; a count with nothing so far, grey (partialTone, run in node)."""
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        src = re.search(r"// @testable: partialTone\n(  function .*?)\n  // @end", self._js(), re.S).group(1)
+        cases = [[{"s": "pending", "partial": 4118}, False, "warn"], [{"s": "pending", "partial": 4118}, True, "fail"],
+                 [{"s": "pending", "partial": 0}, True, "fail"], [{"s": "pending", "partial": 0}, False, ""],
+                 [{"s": "pending"}, True, ""], [{"s": "done", "n": 3}, False, ""]]
+        code = src + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(function (k) { return partialTone(k[0], k[1]); })));"
+        got = subprocess.run([node, "-e", code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertEqual(json.loads(got.stdout), [k[2] for k in cases])
+        js = self._js()
+        chip = re.search(r"\n  function countChip\(.*?\n  \}", js, re.S).group(0)
+        menu = re.search(r"\n  function menuCount\(.*?\n  \}", js, re.S).group(0)
+        self.assertIn("partialTone(c, bad)", chip)                                                  # (the one rule: the chips, the menu)
+        self.assertIn("partialTone(c, bad)", menu)
+        self.assertNotIn("countChip(pc)", js)                                                       # (every chip given its red)
+
+    def test_a_check_page_worked_out_again_shows_what_it_last_found(self):
+        """A check page worked out again — Mirror Checks scanning again, every check page after a restart — shows what it
+        found last time beside the wheel (partial, "last": said so) and its findings as last known, updated when they're
+        in, never a bare wheel over nothing; meanwhile its findings' buttons (Scan Folder, Ignore, Bring Back) are refused,
+        on the server and on the page."""
+        from plexcache import libhealth
+        app, _plex, _client, _cat, _other = ToolsTests()._app(mirror=True)
+        ev, mh = app.evaluator, app.mirror_health
+        evaluated(app, "1")
+        before = ev.count("mirrorchecks", "1")
+        self.assertEqual(before["s"], "done")
+        self.assertFalse(mh.scanning("1"))
+        mh.wanted.add("1")                                                                          # (Scan Again: in its turn)
+        c = ev.count("mirrorchecks", "1")
+        self.assertEqual((c["s"], c.get("partial"), c.get("last")), ("pending", before["n"], True))
+        self.assertTrue(ev.counts()["mirrorchecks"]["total"].get("last"))
+        self.assertTrue(mh.scanning("1"))
+        self.assertIn("1", libhealth.scans(app)["mirror"]["busy"])
+        self.assertIn("mirror_only_here", libhealth.scans(app)["mirror"]["checks"])
+        self.assertIsNotNone(libhealth.scanning(app, "1", ["mirror_size_differs"]))
+        self.assertIsNone(libhealth.scanning(app, "1", ["no_audio"]))                               # (another page's checks: free)
+        with self.assertRaises(ValueError):
+            libhealth.act(app, "1", "x", "mirror_size_differs")
+        mh.evaluate("1")
+        app.library_health("1")
+        self.assertEqual(ev.count("mirrorchecks", "1")["s"], "done")
+        self.assertFalse(mh.scanning("1"))
+        self.assertEqual(libhealth.scans(app)["mirror"]["busy"], [])
+        # a restart: the counts last worked out kept, shown as last known while every check page is worked out again
+        saved = app._load_json("health-counts.json")
+        self.assertIn("1", saved)
+        app.health_counts.clear()
+        app._health.clear()
+        app._load_health_counts()
+        self.assertFalse(app.health_current("1"))
+        for page, cat in (("filechecks", "file"), ("plexchecks", "plex"), ("library", "flagged")):
+            c = ev.count(page, "1")
+            self.assertEqual((c["s"], c.get("partial"), c.get("last")), ("pending", int(saved["1"].get(cat) or 0), True), page)
+        # the page: said to be last time's, the buttons disabled saying why
+        js = self._js()
+        for fn in ("countBox", "countWhy"):
+            body = re.search(r"\n  function " + fn + r"\(.*?\n  \}", js, re.S).group(0)
+            self.assertIn("c.last ?", body, fn)
+            self.assertIn("found last time", body, fn)
+        self.assertEqual(js.count('data-act="lh-action"'), 1)
+        self.assertIn("busyAttr(scanBusy(key, [r.id])", js)
+        self.assertIn("busyAttr(scanBusy(key, live)", js)
+        self.assertIn("busyAttr(scanBusy(key, [x.id]), tip)", js)
+
+    def test_the_mirror_not_reached_keeps_what_was_read_of_it(self):
+        """The mirror's libraries not read (it couldn't be reached): what's paired isn't known — never taken for "not
+        paired", which would throw away what was read of the mirror and work every library out again."""
+        app, _plex, _client, _cat, _other = ToolsTests()._app(mirror=True)
+        d = app.libdata.gather("1", wait=True)
+        self.assertIsNotNone(d.mirror)
+        stamp, mirror = d.stamp, d.mirror
+
+        def down(timeout=30):
+            raise PlexError("Connection refused")
+        app.other.client = down
+        with app.other.lock:
+            app.other.libs, app.other.libs_at, app.other.error = None, 0.0, None
+        self.assertEqual(app.libdata.mirror_of("1"), (None, None))
+        app.libdata.gather("1", ("mirror",), wait=True)
+        self.assertIs(d.mirror, mirror)
+        self.assertEqual(d.stamp, stamp)
+
+    def test_a_check_page_shows_one_bar(self):
+        """While a check page's count is still to come — a scan running among it — the one bar is the placeholder's
+        (countBox): Scan's own row draws none."""
+        js = self._js()
+        body = re.search(r"\n  function lhScanBar\(.*?\n  \}", js, re.S).group(0)
+        self.assertNotIn("meter", body)
+        self.assertNotIn("progressbar", body)
+        mh_cur = ToolsTests()._app(mirror=True)[0].mirror_health
+        mh_cur.running = "1"
+        self.assertFalse(mh_cur.current("1"))                                                       # (being compared: its count pending)
+
+
+class BlockStandardTests(unittest.TestCase):
+    """What stops a tool's row, held to one standard (Tool.block_ids, Tool.mark_stops, app.js blockText): each block
+    explained the one way, with both ways out — put it right, or Ignore it — and ignoring it frees the row at once."""
+
+    def test_every_block_says_why_and_both_ways_out(self):
+        """Every block that can stop a tool's rows (Tool.block_ids: a check's finding on a record, Mirror Checks' on its
+        files, the record one of a film's several) is explained the one way on the tool's page (app.js blockText): why
+        it's stopped and the page that found it, what could go wrong were it done anyway — said for that tool —, how to
+        put it right, and the other way out, Ignore on the record, with its button; ignored, grey, saying so, with Bring
+        Back. Sync Libraries is stopped by Mirror Checks' findings on the files and a file that looks like another film's."""
+        from plexcache import mirrorhealth
+        from plexcache.tools import MERGE_FIRST
+        pages = PageStructureTests()
+        app, _tt = pages._tools_library(mirror=True)
+        st = jsonable(app.state())
+        tools = {name: t.block_ids() for name, t in app.tools.items()}
+        self.assertTrue(all(tools.values()), tools)                                                 # (every tool: Merge Duplicates' first, at least)
+        self.assertTrue(set(mirrorhealth.BLOCK_IDS) | {"versions_named_differently", MERGE_FIRST} <= set(tools["sync"]), tools["sync"])
+        self.assertNotIn(MERGE_FIRST, tools["merge"])
+        for name, ids in tools.items():
+            for ignored in (False, True):
+                with self.subTest(tool=name, ignored=ignored):
+                    st2 = copy.deepcopy(st)
+                    rows = st2["tools"][name]["scan"]["rows"]
+                    row = next(r for r in rows if app.tools[name].live("1", [r]))
+                    rk = str(row.get("rk") or (row.get("rks") or [""])[0])
+                    row["blocks"] = [{"key": rk, "id": i, "title": "x", "text": "Only on one side: Film.mkv", "on": True, "ignored": ignored} for i in ids]
+                    st2["tools"][name]["scan"]["rows"] = [row]
+                    got = pages._render(st2, name)
+                    chips = re.findall(r'class="badge b-(\w+) sschip[^"]*"[^>]*data-id="[^"]*/block:([\w]+)"', got["html"])
+                    self.assertEqual(sorted(chips), sorted(("grey" if ignored else "fail", i) for i in ids))  # (red, grey once ignored)
+                    for i in ids:
+                        said = got["blocks"].get(name + ":" + i + (":ignored" if ignored else ""))
+                        self.assertTrue(said, f"{name}: {i} isn't explained")
+                        button = 'data-key="1" data-item="' + rk + '" data-ids="' + i + '"'
+                        if ignored:
+                            self.assertTrue(said.startswith("<strong>Ignored:</strong> "), said)
+                            self.assertIn('data-act="lh-restore" ' + button, said)
+                            continue
+                        parts = re.split(r"<strong>([^<]+)</strong> ", said)
+                        self.assertEqual(parts[1::2], ["Why it’s stopped:", "What could go wrong:", "To fix it:", "Or ignore it:"], said)
+                        for part in parts[2::2]:
+                            self.assertGreater(len(re.sub(r"<[^>]+>", "", part).strip()), 30, f"{name}: {i} says too little: {part!r}")
+                        self.assertRegex(parts[2], r'Found by <a href="/[^"]+" data-nav>[^<]+</a>\.')
+                        self.assertIn('data-act="lh-ignore" ' + button, parts[8])
+
+    def test_ignoring_a_block_frees_the_row_at_once(self):
+        """On the server, a block ignored on its record frees the row at once — no scan again — and brought back (that one
+        alone: the record's other ignored findings stay ignored) stops it again: the page, Apply and the Tools page's red
+        alike (Tool.mark_stops). The record one of a film's several (MERGE_FIRST) is a block like the others."""
+        from plexcache import libhealth
+        from plexcache.tools import MERGE_FIRST
+        app, _tt = PageStructureTests()._tools_library(mirror=True)
+        sync = app.tools["sync"]
+        rows = copy.deepcopy(sync.live("1", sync.analysis(app.libdata.data("1"))["rows"]))
+        sync.mark_stops("1", rows, set())
+        row = next(r for r in rows if not r["stopped"])                                              # (nothing else stops it)
+        rk = str(row.get("rk") or row["rks"][0])
+        row["rk"] = rk
+        self.assertEqual(sync.mark_stops("1", [row], {rk}), 1)
+        self.assertIn((MERGE_FIRST, True, False), [(b["id"], b["on"], b["ignored"]) for b in row["blocks"]])
+        libhealth.set_ignored(app, "1", rk, ["other_check", MERGE_FIRST])
+        self.assertEqual(sync.mark_stops("1", [row], {rk}), 0)
+        self.assertFalse(row["held"] or row["stopped"])
+        libhealth.set_ignored(app, "1", rk, [MERGE_FIRST], restore=True)                             # (Bring Back on the chip: that one)
+        self.assertEqual(libhealth.ignored(app)["1"][rk], ["other_check"])
+        self.assertEqual(sync.mark_stops("1", [row], {rk}), 1)
+        libhealth.set_ignored(app, "1", rk, None)                                                    # (the Library page's Bring Back: all)
+        self.assertNotIn(rk, libhealth.ignored(app).get("1") or {})
+        self.assertEqual(sync.mark_stops("1", [row], set()), 0)                                      # (merged: nothing stops it)

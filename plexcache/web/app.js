@@ -638,9 +638,8 @@ PCI18N.ready.then(function () {
     }).join("") + "</div>";
   }
   document.addEventListener("click", function (e) {
-    var a = e.target.closest && e.target.closest("[data-synclib], [data-libkey]");
-    if (a && a.dataset.synclib !== undefined) { LIB.key = a.dataset.synclib; LIB.view = "sync"; LIB.diff = {}; }
-    else if (a) { LIB.key = a.dataset.libkey; LIB.view = a.dataset.libview || "caching"; LIB.data = null; LIB.at = 0; }
+    var a = e.target.closest && e.target.closest("[data-libkey]");
+    if (a) { LIB.key = a.dataset.libkey; LIB.view = a.dataset.libview || "caching"; LIB.data = null; LIB.at = 0; }
   }, true);
   document.addEventListener("input", function (e) {
     var el = e.target;
@@ -1263,14 +1262,10 @@ PCI18N.ready.then(function () {
     return out + "</div>";
   }
   // the library tabs, as every tool's (toolLibs): each library with its count of files to optimize
-  function optLibTabs(libs, sums) {
+  function optLibTabs(libs) {
     var u = TOOL.optimizer;
     if (!u.key || !libs.some(function (l) { return String(l.key) === String(u.key); })) u.key = libs.length ? String(libs[0].key) : null;
-    return libTabs({ libs: libs, key: u.key, attrs: function (l) { return 'data-act="tool-lib" data-tool="optimizer" data-key="' + esc(l.key) + '"'; },
-      count: function (l) {
-        var k = String(l.key), c = optChoices(k), sm = sums[k];
-        return { n: sm && (c.sync || c.mkv) ? sm.todo || 0 : null, pending: !sm && !!(ST.optimizer || {}).surveying };
-      } });
+    return libTabs({ tool: "optimizer", libs: libs, key: u.key, attrs: function (l) { return 'data-act="tool-lib" data-tool="optimizer" data-key="' + esc(l.key) + '"'; } });
   }
   // Scan / Scan Again, as every tool's: every library's files looked at again now (the optimizer also does it by itself)
   function optScanBar(op, more) {
@@ -1299,15 +1294,16 @@ PCI18N.ready.then(function () {
         (lib0.scanning || plexSet) ? H("Reading your libraries from Plex…") : H("No libraries yet. Connect Plex in <a href=\"/system\" data-nav>System</a>.");
       return out + '<p class="muted">' + why + "</p></section></div>";
     }
-    var tabs = optLibTabs(libs, sums);
-    var key = String(TOOL.optimizer.key), l = libs.filter(function (x) { return String(x.key) === key; })[0], c = optChoices(key), sm = sums[key];
+    var tabs = optLibTabs(libs);
+    var key = String(TOOL.optimizer.key), l = libs.filter(function (x) { return String(x.key) === key; })[0], c = optChoices(key), cnt = countOf("optimizer", key);
+    var sm = countDone(cnt) ? sums[key] : null;  // (what the scan found, once the library's count is done: until then the placeholder)
     var some = sm && (c.sync || c.mkv), nf = sm ? sm.files || 0 : null, conf = sm ? (sm.conflicts || []).length : 0;
     out += toolTop({ tabs: tabs, options: optOptions(l, key, c, sm, op), scan: optScanBar(op, optCovers(key, c, sm, op)),
       stats: sm && { last: !!op.surveying, read: nf, readText: P(nf, "{n} file read", "{n} files read", { n: fmtNum(nf) }), issues: some ? sm.todo || 0 : null,
         passNow: some ? nf - (sm.todo || 0) : null, passAll: sm.clean_all,
         extra: conf ? [statChip("grey", P(conf, "{n} Syncthing conflict copy", "{n} Syncthing conflict copies", { n: fmtNum(conf) }), T("Copies the folder sync made when two systems wrote a file at once: optimizing the whole library (All) deletes the ones the optimizer made that are the same as the file."))] : [] } });
-    if (!sm) return out + '<p class="muted toolempty">' + (op.surveying ? H("Looking at this library’s files…") : H("This library’s files haven’t been looked at yet: press Scan.")) + "</p></section>" + jobCard(true) + queueCard() + "</div>";
     if (!c.sync && !c.mkv) return out + '<p class="muted toolempty">' + badge("info", T("Nothing chosen")) + " " + H("Tick what the optimizer should do for this library above.") + "</p></section>" + jobCard(true) + queueCard() + "</div>";
+    if (!sm) return out + (countDone(cnt) ? loadingBar(T("Looking at this library’s files…")) : countBox(cnt)) + "</section>" + jobCard(true) + queueCard() + "</div>";
     if (!sm.todo) return out + '<p class="muted toolempty">' + badge("pass", T("Nothing to optimize")) + " " + H("Every file is optimized as chosen.") + "</p></section>" + jobCard(true) + queueCard() + "</div>";
     var d = optFiles(key, sm.todo);
     if (!d && optState(key).error) return out + '<p class="bad">' + H("The files to optimize couldn’t be read: {why}", { why: esc(optState(key).error) }) +
@@ -1330,15 +1326,26 @@ PCI18N.ready.then(function () {
   function cmdBox(cmd) {
     return '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) + '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button></div>";
   }
+  // A check's badge: done; a step to do; a warning (said, stopping nothing); an error (something wrong that stops the step: red)
+  function migBadge(c) {
+    if (c.ok) return badge("pass", T("Done"));
+    if (c.level === "error") return badge("fail", T("Error"));
+    return badge("warn", c.level === "warn" ? T("Warning") : T("To do"));
+  }
+  // done, or only a warning: what lets the step go ahead (migrating.py: blocking)
+  function migClear(c) { return c.ok || c.level === "warn"; }
   function migChecks(checks) {
+    // each one's button with it, but for the one on Next, above (shown for every step but the copy)
+    var next = (((ST.migration || {}).state) || {}).step === "copy" ? null : (checks || []).filter(function (c) { return !migClear(c); })[0];
     return (checks || []).map(function (c) {
-      return '<div class="row">' + badge(c.ok ? "pass" : "warn", c.ok ? T("Done") : T("To do")) + '<div class="grow"><div class="what">' + esc(c.title) + "</div>" +
-        (c.detail ? '<div class="det">' + esc(c.detail) + "</div>" : "") + (c.cmd ? cmdBox(c.cmd) : "") + "</div></div>";
+      return '<div class="row">' + migBadge(c) + '<div class="grow"><div class="what">' + esc(c.title) + "</div>" +
+        (c.detail ? '<div class="det">' + esc(c.detail) + "</div>" : "") + (c.cmd ? cmdBox(c.cmd) : "") +
+        (c !== next && (c.action === "scope" || !migClear(c)) ? migAction(c) : "") + "</div></div>";
     }).join("");
   }
   // What to do now: the first thing still to do (the list below it says the rest). Checked again by itself.
   function migNext(checks) {
-    var first = (checks || []).filter(function (c) { return !c.ok; })[0];
+    var first = (checks || []).filter(function (c) { return !migClear(c); })[0];
     if (!first) return checks && checks.length ? '<div class="note">' + H("<strong>Ready.</strong> Everything below is done.") + "</div>" : "";
     var at = (ST.migration || {}).checked_at;
     return '<div class="note"><strong>' + H("Next:") + "</strong> " + esc(first.title) + (first.detail ? '<div class="det">' + esc(first.detail) + "</div>" : "") +
@@ -1348,10 +1355,32 @@ PCI18N.ready.then(function () {
   }
   // a check the app can put right itself: its button
   function migAction(c) {
-    if (c.action === "restart") return '<div style="margin-top:6px"><button class="btn pri" type="button" data-act="mig" data-mig="restart">' + H("Restart Now") + "</button></div>";
+    var b = function (mig, label, pri, extra) {
+      return '<button class="btn' + (pri ? " pri" : "") + '" type="button" data-act="mig" data-mig="' + mig + '"' + (extra || "") + ">" + label + "</button> ";
+    };
+    var row = function (html) { return '<div style="margin-top:6px">' + html + "</div>"; };
+    if (c.action === "restart") return row(b("restart", H("Restart Now"), true));
+    // what you've done where Plex Cache can't see it
+    if (c.action === "sync_paused") return row(b("sync_paused", H("I’ve Paused the Folder Sync Here"), true));
+    if (c.action === "sync_resumed") return row(b("sync_resumed", H("I’ve Resumed the Folder Sync Here"), true));
+    if (c.action === "sync_checked") return row(b("sync_checked", H("Nothing Else Carries Them Away"), true));
+    // both servers, or this one only (chosen before the copy)
+    if (c.action === "scope") {
+      var both = (((ST.migration || {}).state) || {}).scope === "both";
+      return row(both ? b("scope", H("Convert This Server Only"), false, ' data-scope="this"') : b("scope", H("Convert Both Servers"), false, ' data-scope="both"'));
+    }
     return "";
   }
   function rsOr(n) { return n ? fmtRs(n) : "?"; }
+  function migStep(step) { return { create: T("Create"), copy: T("Copy"), switch: T("Switch"), verify: T("Verify") }[step] || step || ""; }
+  // a folder as it is at the other site (migrating.py folders): a dataset, a folder, a conversion under way or left partway
+  function migThere(r) {
+    if (!r) return '<span class="muted">' + H("Not known") + "</span>";
+    if (r.state === "dataset") return badge("pass", T("Child dataset")) + (r.rs ? ' <span class="muted">' + H("record size {size}", { size: rsOr(r.rs) }) + "</span>" : "");
+    if (r.state === "converting" || r.state === "partial") return badge("warn", r.state === "partial" ? T("Partly converted") : T("Converting")) + ' <span class="muted">' + esc(migStep(r.step)) + "</span>";
+    if (r.state === "folder") return '<span class="muted">' + H("A folder") + "</span>";
+    return '<span class="muted">' + H("Can’t become one") + "</span>";
+  }
   // Converting to MKV (tools/convert.py, optimize/convert.py, converting.py): which kinds, and the converted files on their
   // way into Plex. Each kind: [key, name, what it is, what could be lost, how converting handles it] — for its ⓘ
   var CONVERT_TYPES = [
@@ -1384,14 +1413,14 @@ PCI18N.ready.then(function () {
       [N("The timecode track: dropped — nothing you watch."), N("Camera details: where and when it was filmed, make and model."), N("Trims made without re-encoding (edit lists) — kept as far as MKV can; worth a look after.")],
       N("A file with camera details is left as it is; the timecode track is dropped.")]];
   var CONVERT_HELP = H("Each file is inspected first: what MKVToolNix reads of it against everything in it. If anything wouldn’t be kept — a track, chapters, cover art, details like an iTunes show and episode — or it’s protected by DRM, it’s left as it is, with the reason on its row, and isn’t tried again while it stays as it is. Converted, the MKV is checked against the original (every video and audio track with the same number of packets, every subtitle track, captions in the video), then optimized like any MKV.") +
-    "<br><br>" + H("<strong>Plex keeps its metadata.</strong> The MKV is written next to the original, and Plex is asked to scan that folder (needed when libraries are scanned by hand). Plex adds it as a second version of the same item; once it has — on the mirrored server too, where one is watched (<a href=\"/sync#plex2\" data-nav>Sync → Second Plex Server</a>) — the original is deleted and the folder scanned again: the item keeps its edits, watch history and collections. If Plex makes the MKV an item of its own instead, nothing is deleted: merge the two in Plex, or keep both.") +
+    "<br><br>" + H("<strong>Plex keeps its metadata.</strong> The MKV is written next to the original, and Plex is asked to scan that folder (needed when libraries are scanned by hand). Plex adds it as a second version of the same item; once it has — on the mirrored server too, where one is watched (<a href=\"/mirrors#plex2\" data-nav>Mirror → Second Plex Server</a>) — the original is deleted and the folder scanned again: the item keeps its edits, watch history and collections. If Plex makes the MKV an item of its own instead, nothing is deleted: merge the two in Plex, or keep both.") +
     "<br><br>" + H("<strong>The way back.</strong> The run backs up first, like every tool that changes files; while the backup lasts, Revert on the run removes the MKVs and puts back any original that has gone, and the run is on the <a href=\"/processes\" data-nav>Processes page</a> like any other.");
   // Where each Plex server is with a converted file: this one, and the second one if it's watched
   function serversLine(e) {
     var sv = e.servers || {};
     if (!sv.there) return "";
     var words = { same: T("has it"), other: T("an item of its own"), absent: T("doesn’t have this file"), waiting: T("waiting"),
-      unpaired: T("paths don’t line up (Sync → Second Plex Server)") };
+      unpaired: T("paths don’t line up (Mirror → Second Plex Server)") };
     return '<div class="det">' + esc(T("This server: {here} · {name}: {there}", { here: words[sv.here] || sv.here, name: (ST.plex2 || {}).name || T("the other server"), there: words[sv.there] || sv.there })) + "</div>";
   }
   // Each kind's ⓘ on the Convert to MKV page's options (the standard block draws the tool's options; this is the help it shows)
@@ -1441,19 +1470,30 @@ PCI18N.ready.then(function () {
       "<br><br>" + H("<strong>Ideal already</strong>: its dataset has the record size recommended for it. <strong>Sufficient</strong>: the second best — fine as it is. <strong>Split dataset</strong>: neither; converting the folder lets it read in the size that suits it.") +
       "<br><br>" + H("How: a new dataset is made next to the folder, the files are copied into it (which also gives them its record size and compression), and it takes the folder’s place. Plex keeps every file’s metadata, and is restarted once, at the end. You’ll need room for a second copy until the old one is deleted; snapshots keep the old copy’s space until they expire."));
     if (!st || st.step === "done") {
-      if (st && st.step === "done") out += '<div class="note">' + H("{folder} is now the dataset {name}.", { folder: st.host_folder || st.folder, name: st.child }) +
-        ' <button class="link" type="button" data-act="mig" data-mig="cancel">' + H("Close") + "</button></div>";
-      var cands = mg.candidates || [];
+      if (st && st.step === "done") {
+        var mvd = mg.mirror, thereD = mvd && st.scope === "both" ? (mvd.folders || {})[st.folder] : null;
+        out += '<div class="note">' + H("{folder} is now the dataset {name}.", { folder: st.host_folder || st.folder, name: st.child }) +
+          (mvd && st.scope === "both" ? " " + (thereD && thereD.state === "dataset" ? H("{name} has converted its copy too: both servers are done.", { name: mvd.name })
+            : H("Now it’s {name}’s turn: open its Convert Folder to Child Dataset page and start this library there.", { name: mvd.name }) +
+              (mvd.url ? ' <a href="' + esc(mvd.url) + '" target="_blank" rel="noopener">' + H("Open {name}", { name: mvd.name }) + "</a>" : "")) : "") +
+          ' <button class="link" type="button" data-act="mig" data-mig="cancel">' + H("Close") + "</button></div>";
+      }
+      var cands = mg.candidates || [], dc = countOf("dataset");
+      if (dc.s !== "done") return out + countBox(dc) + "</section>";  // (what each folder would become: once the datasets are looked at — or why it doesn't apply)
       if (!cands.length) return out + '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No library folders yet.")) + "</p></section>";
+      var mv = mg.mirror;  // with a mirror watched: each folder as it is there (migrating.py mirror_view)
       out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library folder") + '</th><th scope="col">' + H("Would become") +
-        '</th><th scope="col">' + H("Size") + '</th><th scope="col"></th></tr></thead><tbody>';
+        '</th><th scope="col">' + H("Size") + "</th>" + (mv ? '<th scope="col">' + esc(mv.name) + "</th>" : "") + '<th scope="col"></th></tr></thead><tbody>';
       cands.forEach(function (c) {
         var advice = { ideal: badge("pass", T("Ideal already")), sufficient: badge("pass", T("Sufficient")), split: badge("warn", T("Split dataset")) }[c.advice];
         out += "<tr><td>" + libIcon(c.library) + esc(c.title) + '<div class="det mono">' + esc(c.folder) + "</div>" +
           (advice ? '<div class="det">' + advice + (c.now_rs ? ' <span class="muted">' + H("record size {size} now", { size: rsOr(c.now_rs) }) + "</span>" : "") + "</div>" : "") +
           "</td><td>" + (c.child ? '<span class="mono">' + esc(c.child) + '</span><div class="det">' + H("Record size {size}, ZSTD-3", { size: rsOr(c.rs) }) + "</div>" : '<span class="muted">' + esc(c.why || "") + "</span>") +
-          '</td><td class="nw">' + esc(fmtGB(c.size)) + "</td><td>" + (c.child ? '<button class="btn" type="button" data-act="mig" data-mig="plan" data-lib="' + esc(c.library) +
-          '" data-folder="' + esc(c.folder) + '">' + H("Start") + "</button>" : "") + "</td></tr>";
+          (c.partial ? '<div class="det">' + badge("warn", T("Partly converted")) + " " + H("Left at {step}: picked up where it is.", { step: migStep(c.partial.step) }) + "</div>" : "") +
+          (c.leftover ? '<div class="det">' + badge("warn", T("Left over")) + " " + H("The new dataset {name} is still there beside it: delete it in TrueNAS.", { name: c.leftover.split("/").pop() }) + "</div>" : "") +
+          '</td><td class="nw">' + esc(fmtGB(c.size)) + "</td>" + (mv ? "<td>" + migThere((mv.folders || {})[c.folder]) + "</td>" : "") +
+          "<td>" + (c.child ? '<button class="btn" type="button" data-act="mig" data-mig="plan" data-lib="' + esc(c.library) +
+          '" data-folder="' + esc(c.folder) + '">' + (c.partial ? H("Pick Up This Conversion") : H("Start")) + "</button>" : "") + "</td></tr>";
       });
       return out + "</tbody></table></div></section>";
     }
@@ -1465,6 +1505,7 @@ PCI18N.ready.then(function () {
     out += '<div class="det" style="margin:8px 0">' + steps.map(function (s, i) {
       return (i < at ? "✓ " : i === at ? "▶ " : "") + (i === at ? "<strong>" + esc(s[1]) + "</strong>" : esc(s[1]));
     }).join(" &nbsp;→&nbsp; ") + "</div>";
+    if (st.corrected) out += '<div class="note">' + esc(st.corrected) + "</div>";
     if (st.step !== "copy") out += migNext(checks);
     var optBusy = !!((ST.job || {}).running);  // one file job at a time
     var btn = function (act, label, pri, disabled) {
@@ -1476,7 +1517,7 @@ PCI18N.ready.then(function () {
     if (st.step === "create" && made) {  // created: what's left is in Next and the list
       out += '<p class="help">' + H("✓ The dataset {name} is created.", { name: temp }) + "</p>";
       out += migChecks(checks);
-      var ready0 = checks.length && checks.every(function (c) { return c.ok; });
+      var ready0 = checks.length && checks.every(migClear);
       var gateM = readinessPanel(String(st.library), 0, "dataset", T("the old folder itself: set aside once the copy is checked, deleted only when you say"), 0);
       out += gateM.html + '<div style="margin-top:10px">' + btn("check", H("Check Again")) + btn("copy", H("Start Copying"), true, !ready0 || !gateM.ready) + btn("cancel", H("Cancel")) + "</div>";
     } else if (st.step === "create") {
@@ -1488,7 +1529,7 @@ PCI18N.ready.then(function () {
         "<li>" + H("Name: {name}. Under Advanced Options: Record Size {size}, Compression Level ZSTD. Save.", { name: temp.split("/").pop(), size: rs }) + "</li>" +
         "<li>" + H("Select it → Edit Permissions: owner {uid}, group {gid} (the folder’s). Save.", { uid: owner.uid != null ? owner.uid : 568, gid: owner.gid != null ? owner.gid : 568 }) + "</li></ol></div>";
       out += migChecks(checks);
-      var ready = checks.length && checks.every(function (c) { return c.ok; });
+      var ready = checks.length && checks.every(migClear);
       out += '<div style="margin-top:10px">' + btn("check", H("Check Again")) + btn("copy", H("Start Copying"), true, !ready) + btn("cancel", H("Cancel")) + "</div>";
     } else if (st.step === "copy" || (st.step === "switch" && st.copying)) {
       // the copy runs as the file job: its progress, Pause and Cancel are in the card above
@@ -1513,7 +1554,8 @@ PCI18N.ready.then(function () {
           H("<strong>The last pass</strong>: copies anything that changed in the folder since the copy, then compares both copies, file by file (names, sizes, modification times). It ran by itself when the copy finished.") + passLine) +
         stepRow("", H("In Plex, turn off <strong>Empty trash automatically after every scan</strong> (Settings → Library) until the end, so files briefly out of sight don’t lose their metadata.")) +
         stepRow(st.old_path ? btn("undo_rename", H("Put the Old Folder Back"))
-            : btn("pass_then_move", H("Compare, Then Set the Old Folder Aside"), true, st.copying || !(cmp && cmp.same)),
+            : btn("pass_then_move", H("Compare, Then Set the Old Folder Aside"), true, st.copying || !(cmp && cmp.same) ||
+                checks.some(function (c) { return c.gate === "aside" && !migClear(c); })),
           (st.old_path ? badge("pass", T("Set aside")) + " " + H("As {name}, in the same place. Nothing is deleted until the very end (after Verify). Plex Cache’s other file jobs wait until the dataset is renamed.", { name: st.old_path.split("/").pop() })
             : H("<strong>Set the old folder aside</strong>: the new dataset needs the folder’s name, so the folder is renamed to {name}, in the same place. Nothing is deleted — that’s at the very end, after Verify — and Put Back undoes it.", { name: aside }) +
               '<div class="det">' + H("The last pass runs first, every time: anything changed since is copied and both copies are compared, and only if they’re the same is the folder set aside. Plex Cache’s other file jobs wait until the dataset is renamed. Pause anything else that writes to this folder first: downloads, Sonarr or Readarr, Syncthing.") + "</div>") +
@@ -1523,7 +1565,7 @@ PCI18N.ready.then(function () {
         "</ol>" + migChecks(checks) + '<div style="margin-top:10px">' + btn("check", H("Check Again")) + (st.old_path ? "" : btn("cancel", H("Cancel"))) + "</div>";
     } else if (st.step === "verify") {
       out += '<p class="help">' + H("Now restart Plex (TrueNAS: Apps → Plex → Restart) so it sees the dataset, and let it scan. Then check again.") + "</p>" + migChecks(checks);
-      var ok = checks.length && checks.every(function (c) { return c.ok; });
+      var ok = checks.length && checks.every(migClear);
       out += '<div style="margin-top:10px">' + btn("check", H("Check Again"));
       if (MIG_CONFIRM_DELETE) out += '<span class="det">' + H("Delete {path} for good?", { path: (st.old_path || "").split("/").pop() }) + "</span> " + btn("delete_old", H("Delete"), true) +
         '<button class="link" type="button" data-act="mig-nodelete">' + H("Cancel") + "</button>";
@@ -1890,7 +1932,7 @@ PCI18N.ready.then(function () {
   // video and 60% of a block of video; at its end, every block holding metadata. Every block the
   // same size, filled in proportion with what's in it. Layouts come from Read the Files (filemap.py);
   // a file opened shows its blocks larger: click one for what's in it and how ZFS might store it.
-  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, hold: { inspect: {}, sync: {} }, finishedSeen: {}, rev: null, view: "health", diff: {}, health: {}, healthOffset: 0, syncOffset: 0 };
+  var LIB = { key: null, data: null, at: 0, offset: 0, q: "", open: null, detail: {}, est: {}, block: {}, hold: { inspect: {} }, finishedSeen: {}, rev: null, view: "health", health: {}, healthOffset: 0 };
   var PART_NAMES = { header: N("Matroska header"), segment: N("Segment start"), seekhead: N("Table of contents"), info: N("File info"), tracks: N("Track list"), chapters: N("Chapters"),
     attachments: N("Attachments list"), tags: N("Tags"), index: N("Index"), padding: N("Padding"), checksum: N("Checksum"), video: N("Video"),
     other: N("Other"), image: N("Cover art"), font: N("Fonts"), attachment: N("Attachment"), empty: N("Unused"), head: N("File header"),
@@ -1934,45 +1976,39 @@ PCI18N.ready.then(function () {
         }
       }).catch(function () { LIB.at = 0; });
   }
-  // What the Library page does by itself for the library opened (libAutoPlan, pure): the view's job — inspecting
-  // the files (Caching) or comparing with the mirror (Sync) — started when it's needed, and any other job paused:
-  // only the view you're on, only the library opened (Health runs no job: it reads what's been inspected).
-  // A job paused by hand (Pause) stays paused until Resume, or the library is opened again.
+  // What the Library page does by itself for the library opened (libAutoPlan, pure): the files inspected for Caching
+  // when that's needed, and the inspection paused off its view — only the view you're on, only the library opened
+  // (Health runs no job: it reads what's been inspected). Paused by hand (Pause), it stays paused until Resume, or the
+  // library is opened again.
   var LIB_DRIVE = { at: 0, last: "" };
   function libAutoDrive() {
     var key = LIB.key;
     if (!key || Date.now() - LIB_DRIVE.at < 2000) return;
-    var ins = libJob(key), sj = ((ST.sync || {}).libs || {})[key] || {}, d = LIB.data && LIB.data.library === key ? LIB.data : null, diff = LIB.diff[key];
+    var ins = libJob(key), d = LIB.data && LIB.data.library === key ? LIB.data : null;
     var acts = libAutoPlan(LIB.view, {
       inspect: { running: ins.running, paused: ins.paused, needed: !!d && d.surveyed < d.total, known: !!d },
-      sync: { on: (ST.sync || {}).decided === "plex2", running: !!sj.running, queued: !!sj.queued, paused: !!sj.paused, needed: !(diff && diff.counts) && !sj.finished && !sj.error, known: diff !== undefined && diff !== null },
-      hold: { inspect: !!LIB.hold.inspect[key], sync: !!LIB.hold.sync[key] } });
+      hold: { inspect: !!LIB.hold.inspect[key] } });
     var sig = key + ":" + acts.join(",");
     if (!acts.length || (sig === LIB_DRIVE.last && Date.now() - LIB_DRIVE.at < 15000)) return;
     LIB_DRIVE.at = Date.now(); LIB_DRIVE.last = sig;
     acts.forEach(function (a) {
       if (a === "inspect:start") api("/api/library/survey", { library: key }).then(function () { load(); }).catch(function () {});
-      if (a === "inspect:pause") api("/api/library/survey", { library: key, pause: true }).then(function () { load(); }).catch(function () {});
-      if (a === "sync:start") api("/api/sync/start", { library: key }).then(function () { load(); }).catch(function () {});
-      if (a === "sync:pause") api("/api/sync/start", { library: key, pause: true }).then(function () { load(); }).catch(function () {});
     });
   }
-  // @testable: libAutoPlan — pure: the actions for the library opened, given the view ("health" | "caching" | "sync")
-  // and each job's state {running, paused, needed, known} (sync: also on, queued; hold: paused by hand).
-  // Returns ["inspect:start" | "inspect:pause" | "sync:start" | "sync:pause"…]: the view's own job started when it's
-  // needed and known, every other job paused while it runs — nothing runs off its own view.
+  // @testable: libAutoPlan — pure: the actions for the library opened, given the view ("health" | "caching") and each
+  // job's state {running, paused, needed, known} (hold: paused by hand). Returns ["inspect:start"]: the view's own job
+  // started when it's needed and known. Nothing is paused off its view: the inspector reads every library in the
+  // background (File Checks' counts wait for it), the library opened first (evaluate.py steers it).
   function libAutoPlan(view, st) {
-    var acts = [], job = { inspect: st.inspect, sync: st.sync }, hold = st.hold || {};
-    var mine = view === "sync" ? "sync" : view === "caching" ? "inspect" : null;
-    var wants = function (name) {  // a job that should run: needed (or paused with work left), not held, and — sync — a mirror watched
+    var acts = [], job = { inspect: st.inspect }, hold = st.hold || {};
+    var mine = view === "caching" ? "inspect" : null;
+    var wants = function (name) {  // a job that should run: needed (or paused with work left), not held
       var j = job[name];
-      if (!j || hold[name] || (name === "sync" && !j.on)) return false;
+      if (!j || hold[name]) return false;
       return !!(j.needed || j.paused);
     };
-    var running = function (name) { var j = job[name]; return !!(j && j.running); };
     var busy = function (name) { var j = job[name]; return !!(j && (j.running || j.queued)); };
     if (mine && job[mine] && job[mine].known && wants(mine) && !busy(mine)) acts.push(mine + ":start");
-    Object.keys(job).forEach(function (name) { if (name !== mine && running(name)) acts.push(name + ":pause"); });
     return acts;
   }
   // @end
@@ -2111,8 +2147,9 @@ PCI18N.ready.then(function () {
   // The library's files through their checks: how many are Ideal, Pass or Warning, and what warns most
   function libSummary(sm) {
     if (!sm || !sm.checked) return "";
-    var out = '<div class="lsummary"><div>' + H("{n} files checked:", { n: fmtNum(sm.checked) }) + " " + healthBadge("ideal") + " " + esc(fmtNum(sm.ideal)) +
-      " " + healthBadge("pass") + " " + esc(fmtNum(sm.pass)) + " " + healthBadge("warn") + " " + esc(fmtNum(sm.warn)) + "</div>";
+    // the files checked, then how many are Ideal, Pass and Warning: chips with the numbers in them, as the tools' pages say it
+    var out = '<div class="lsummary">' + libStats({ read: sm.checked, readText: P(sm.checked, "{n} file read", "{n} files read", { n: fmtNum(sm.checked) }),
+      extra: ["ideal", "pass", "warn"].map(function (k) { var b = HEALTH_BADGE[k], n = sm[k] || 0; return statChip(k === "warn" && !n ? "pass" : b[0], T(b[1]) + " " + fmtNum(n)); }) });
     if ((sm.warnings || []).length) out += '<div class="det">' + H("Warnings:") + "<ul>" + sm.warnings.map(function (w) { return "<li>" + esc(msg(w.text)) + "</li>"; }).join("") + "</ul></div>";
     if (sm.cover && sm.cover.files) out += '<div class="det">' + esc(T("Cover art compressed losslessly: {pct}% of the {n} files with cover art",
       { pct: Math.round(100 * sm.cover.compressed / sm.cover.files), n: fmtNum(sm.cover.files) })) + "</div>";
@@ -2225,8 +2262,8 @@ PCI18N.ready.then(function () {
   }
   // Each bar part's size, as much of it as fits: the size ("774 KB"), else just its number ("774"), else
   // nothing (it's in the part's tip either way) — worked out again as the page's width changes
-  // the two sides of each Sync item: the cards one height, their buttons starting level (the titles made as tall)
-  function levelSync(root) {
+  // the two sides of each comparison card (cmpRow): the cards one height, their buttons starting level (the titles made as tall)
+  function levelSides(root) {
     (root || main).querySelectorAll(".ssitem").forEach(function (it) {
       var whats = it.querySelectorAll(".sscard .what");
       whats.forEach(function (w) { w.style.minHeight = ""; });
@@ -2236,7 +2273,7 @@ PCI18N.ready.then(function () {
     });
   }
   function fitBars(root) {
-    levelSync(root);
+    levelSides(root);
     (root || main).querySelectorAll(".lcbar>span[data-full]").forEach(function (el) {
       var w = el.clientWidth;
       el.textContent = el.dataset.full;
@@ -2359,21 +2396,8 @@ PCI18N.ready.then(function () {
     }
     return out + "</div>";
   }
-  // The Library page's Sync view: one library's differences from the mirror, as last compared — each
-  // item with both servers' versions side by side, what applying would copy (source → the other), and
-  // a warning where that would replace filled-in metadata with none
-  // A compare under way: how far (each library in three steps: read here, read there, compared)
-  function syncProgress(sy, key) {
-    var job = key ? ((sy.libs || {})[key] || {}) : null, p = sy.progress;
-    var steps = { here: T("reading it here"), there: T("reading it on the mirror"), compare: T("comparing"), details: T("reading the items that differ") };
-    if (job && job.paused) return '<div class="det">' + esc(T("Paused: it carries on when this library is opened again.")) + "</div>";
-    if (job && job.queued && !job.running) return '<div class="det">' + esc(T("Waiting: another library is being compared first.")) + "</div>";
-    if (!(job ? job.running : sy.running)) return "";
-    var pct = job ? job.pct || 0 : (p ? p.pct : 0), step = job ? job.step : (p ? p.step : null), started = job ? job.started : (p ? p.started : null);
-    var text = job ? T("Comparing: {step}…", { step: steps[step] || T("starting") }) : p ? T("Comparing {library}: {step}…", { library: p.library, step: steps[step] || T("starting") }) : T("Starting…");
-    return '<div class="linspect"><div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>' +
-      '<div class="det">' + esc(text) + (started ? ' <span class="muted">' + esc(T("started {when}", { when: ago(started) })) + "</span>" : "") + "</div></div>";
-  }
+  // Two Plex records side by side (Sync Libraries: the two servers'; Merge Duplicates: one film's) — the sides of a
+  // comparison card (cmpRow), each record's fields that differ a chip, opening to its value with the other side's beside it
   // Plex's names for the fields you can edit (and lock), as the page says them
   var FIELD_NAMES = { title: N("Title"), titleSort: N("Sort title"), originalTitle: N("Original title"), summary: N("Description"), tagline: N("Tagline"), year: N("Year"),
     studio: N("Studio"), contentRating: N("Content rating"), originallyAvailableAt: N("Release date"), genre: N("Genres"), writer: N("Writers"), director: N("Directors"),
@@ -2502,126 +2526,6 @@ PCI18N.ready.then(function () {
       '<div class="sschips">' + facts + chips + (slots ? CHIP_SLOT : "") + "</div>" + shown + (slots ? SHOWN_SLOT : "") + tagHtml + "</div></div></div>";
   }
   var CHIP_SLOT = "\u0001chips\u0001", SHOWN_SLOT = "\u0001shown\u0001";
-  // what applying did (syncapply.py): each change, with Undo — the whole log on the Sync page, one library's on the Library page
-  function syncLogCard(libKey) {
-    var ap = ((ST.sync || {}).apply) || {}, log = (ap.log || []).filter(function (e) { return !libKey || String(e.library) === String(libKey); });
-    if (!log.length) return "";
-    var names = (ST.sync || {}).names || {};
-    var rows = log.slice(0, 30).map(function (e) {
-      var what = (e.done || []).map(function (k) { return esc(names[k] || k); }).join(", ");
-      var res = e.result === "done" ? badge("pass", T("Applied")) : e.result === "failed" ? badge("warn", T("Failed")) : badge("info", T("Nothing applied"));
-      return "<tr><td>" + esc(e.title) + '<div class="det">' + H("On {server}", { server: e.dst_server }) + " · " + fmtWhen(e.at) + "</div></td><td>" + res + (what ? " " + what : "") +
-        (e.reason ? '<div class="det bad">' + esc(msg(e.reason)) + "</div>" : "") + (e.notes || []).map(function (n) { return '<div class="det">' + esc(msg(n)) + "</div>"; }).join("") +
-        (e.undone ? '<div class="det">' + badge("info", T("Undone")) + " " + fmtWhen(e.undone_at) + (e.left || []).map(function (l) { return " · " + esc(msg(l)); }).join("") + "</div>" : "") + "</td><td>" +
-        (e.result === "done" && !e.undone ? '<button class="btn sm" type="button" data-act="sync-undo" data-id="' + esc(e.id) + '">' + H("Undo") + "</button>" : "") + "</td></tr>";
-    }).join("");
-    var body = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Item") + '</th><th scope="col">' + H("Change") + '</th><th scope="col"></th></tr></thead><tbody>' + rows + "</tbody></table></div>";
-    if (libKey) return '<h3 style="margin-top:16px">' + H("Applied") + "</h3>" + body;
-    return '<section class="card">' + heading(esc(T("Applied Changes")), N("Each difference applied to the other server, with what the item had before. Undo puts that back: the fields (unlocked again if they weren’t locked), the match, the poster chosen before, collections and labels. A merge is undone from the backup of the records made first: split apart, each record with its own metadata again.")) + body + "</section>";
-  }
-  var SYNC_SEL = {};  // the differences ticked on the Library page's Sync view, by library: {id: true}
-  var SYNC_CONFIRM = false;
-  function syncApplyBar(key, items, sy) {
-    var ap = sy.apply || {}, mode = (S.sync || {}).mode, sel = SYNC_SEL[key] || {}, n = items.filter(function (it) { return sel[it.id]; }).length;
-    if (ap.running && ap.progress) {
-      var pg = ap.progress, pct = pg.total ? Math.round(100 * pg.done / pg.total) : 0;
-      return '<div class="migprog"><div class="what">' + H("Applying…") + '</div><div class="det">' + H("{done} of {total} · {pct}%", { done: fmtNum(pg.done), total: fmtNum(pg.total), pct: pct }) + (pg.row ? " · " + esc(pg.row) : "") + "</div>" +
-        '<div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div></div>';
-    }
-    if (mode !== "apply") return '<p class="help">' + H("To apply differences from here, set Sync to “Compare, and apply what I tick” on the <a href=\"/sync\" data-nav>Sync page</a>.") + "</p>";
-    if (ap.allowed) return '<p class="help">' + esc(msg(ap.allowed)) + "</p>";
-    var all = items.every(function (it) { return sel[it.id]; });
-    var out = plexBackupNote() + '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px"><label class="det"><input type="checkbox" data-act="sync-all" data-key="' + esc(key) + '"' + (all ? " checked" : "") + "> " + H("All") + "</label>";
-    if (SYNC_CONFIRM && n) {
-      var over = n > ((S.sync || {}).ask_over || 25);
-      out += "<span>" + esc(P(n, "Apply {n} difference to the other server? Its items are changed to match the source; each change is logged and can be undone.", "Apply {n} differences to the other server? Its items are changed to match the source; each change is logged and can be undone.", { n: n })) +
-        (over ? " " + esc(T("That’s more than {n} at once.", { n: (S.sync || {}).ask_over || 25 })) : "") + "</span>" +
-        '<button class="btn pri" type="button" data-act="sync-apply-yes" data-key="' + esc(key) + '">' + H("Yes, Apply") + "</button>" +
-        '<button class="btn" type="button" data-act="sync-apply-no">' + H("Cancel") + "</button>";
-    } else {
-      out += '<button class="btn pri" type="button" data-act="sync-apply" data-key="' + esc(key) + '"' + (!n ? " disabled" : "") + ">" +
-        ((ST.plex_backup || {}).label === "none" ? H("Apply {n} Selected Without Backing Up", { n: fmtNum(n) }) : H("Backup and Apply {n} Selected", { n: fmtNum(n) })) + "</button>";
-    }
-    if (ap.error) out += '<span class="bad">' + esc(msg(ap.error)) + "</span>";
-    return out + "</div>";
-  }
-  var SYNC_FIELD = null;  // the one field opened, of all the items: {at: "key/i", id}
-  var SYNC_OPEN = {};  // the items opened on the Library page's Sync view (the first is, until closed)
-  function libSyncView() {
-    var key = LIB.key, d = LIB.diff[key], sy = ST.sync || {};
-    if (d === undefined) {
-      LIB.diff[key] = null;
-      api("/api/library/differences?key=" + encodeURIComponent(key)).then(function (got) { LIB.diff[key] = got; if (page === "library") render(); })
-        .catch(function () { LIB.diff[key] = { none: true }; if (page === "library") render(); });
-      return loadingBar(T("Reading the comparison…"));
-    }
-    if (sy.decided !== "plex2") return '<p class="muted">' + H("No mirrored server is set up yet: choose it on the <a href=\"/sync\" data-nav>Sync page</a>.") + "</p>";
-    if (!d || !d.counts) return syncProgress(sy, key) || '<p class="muted">' + H("Not compared yet.") + '</p><div><button class="btn" type="button" data-act="sync-start" data-key="' + esc(key) + '">' + H("Compare Now") + "</button></div>";
-    var names = d.names || {}, mirrorIsSrc = d.source === "mirror";
-    var srcName = mirrorIsSrc ? names.mirror : names.this, dstName = mirrorIsSrc ? names.this : names.mirror;
-    var n = Object.keys(d.counts || {}).reduce(function (a, k) { return a + (d.counts[k] || 0); }, 0);
-    var out = syncProgress(sy, key) + '<div class="note">' + H("<strong>{src}</strong> is the source: applying (a later part, only after your review) would make <strong>{dst}</strong>’s items like it — never the other way.", { src: srcName, dst: dstName }) +
-      ' <span class="muted">' + H("Change which on the Sync page.") + "</span></div>";
-    out += '<div class="det" style="margin:8px 0">' + esc(T("{matched} of {total} items matched on the other server", { matched: fmtNum(d.matched || 0), total: fmtNum(d.total || 0) })) +
-      (d.at ? " · " + esc(T("compared {when}", { when: ago(d.at) })) : "") + ' · <button class="link" type="button" data-act="sync-start" data-key="' + esc(key) + '" data-force="1">' + H("Compare again") + "</button></div>";
-    if (!n) return out + '<p class="muted">' + H("No differences.") + "</p>";
-    var warned = (d.items || []).filter(function (it) { return it.warn; }).length;
-    out += '<div class="det">' + Object.keys(d.counts).filter(function (k) { return d.counts[k]; }).map(function (k) { return esc((sy.names || {})[k] || k) + " " + esc(fmtNum(d.counts[k])); }).join(" · ") + "</div>";
-    if (warned) out += '<div class="note warn">' + H("{n} items would lose metadata: the source’s copy is unmatched with no description, while the other server’s is filled in. Those are marked below — check whether the source is the right server before anything is applied.", { n: fmtNum(warned) }) + "</div>";
-    // which server is which, once, over the list (they're the comparison's: the same for every item)
-    out += '<div class="sshdr"><div>' + H("Source: {name}", { name: srcName }) + '</div><div></div><div>' + H("Overwritten: {name}", { name: dstName }) + "</div></div>";
-    var spages = { pages: pageRanges((d.items || []).map(function (it) { return it.title; }), perPage()), total: (d.items || []).length };
-    if (LIB.syncOffset >= (d.items || []).length) LIB.syncOffset = 0;
-    var soff = LIB.syncOffset;
-    out += (d.items || []).slice(soff, soff + perPage()).map(function (it, k) {
-      var i = soff + k;
-      // the other server's edits the source doesn't have: applying would undo them — said under both sides
-      var lost = it.changes.filter(function (c) { return c.kind === "edits" && /would be lost/.test(msg(c.to)); });
-      var lostNames = lost.length ? msg(lost[0].to).replace(/^[^:]*: /, "").replace(/ —.*$/, "").split(", ").map(fieldName) : [];
-      var notes = [];
-      if (it.warn) notes.push('<span title="' + H("The source’s copy is unmatched with no description; the other server’s is filled in. Check whether the source is the right server.") + '">' + badge("warn", T("Would lose metadata")) + "</span>");
-      if (lostNames.length) notes.push('<span title="' + H("Edited on {name} but not on the source, so applying would undo them: {fields}.", { name: dstName, fields: lostNames.join(", ") }) + '">' + badge("warn", T("Edits lost")) + "</span>");
-      // how the versions are grouped across the two servers (the engine's shape): what applying would do
-      var srcs = it.src_items || (it.src ? [it.src] : []), dsts = it.dst_items || (it.dst ? [it.dst] : []);
-      var shapeNote = { split: [T("Combines items"), H("Its files are {n} items on {name}: applying would merge them into one item there, every file a version.", { n: dsts.length, name: dstName })],
-        merge: [T("Splits an item"), H("{n} items here are one item on {name}: applying would split it into the same items as here.", { n: srcs.length, name: dstName })],
-        regroup: [T("Regrouped"), H("{a} items here and {b} on {name} share files in another way: too tangled for a copy to be worked out. Both sides are shown as they are; applying would leave this group alone.", { a: srcs.length, b: dsts.length, name: dstName })],
-        extra: [T("Only there"), H("Only on {name}: nothing is copied, and nothing is deleted — it stays as it is.", { name: dstName })],
-        missing: [T("Not there"), H("Not listed on {name}: its folder needs a scan there.", { name: dstName })] }[it.shape];
-      if (shapeNote) notes.push('<span title="' + shapeNote[1] + '">' + badge(it.shape === "regroup" ? "warn" : "info", shapeNote[0]) + "</span>");
-      // a pair whose record here holds a file the other server doesn't list at all: nothing can be attached there until it's scanned
-      if (it.shape === "pair" && it.kinds.indexOf("missing") >= 0) {
-        var mc = it.changes.filter(function (c) { return c.kind === "missing"; })[0];
-        notes.push('<span title="' + H("{name} doesn’t list {files} at all — it isn’t attached to any item there. Its folder needs a scan there; applying can’t attach a file Plex hasn’t seen, and never deletes any. Once scanned, Plex there either adds it to this item or makes it one of its own — compared again, that shows here.", { name: dstName, files: mc ? msg(mc.from) : "" }) + '">' + badge("info", T("Needs a scan there")) + "</span>");
-      }
-      // a record that fails a Plex check (libhealth): its data likely bad on that side — tagged on the record itself
-      var wrongN = [].concat.apply([], ((it.tags || {}).src || []).concat((it.tags || {}).dst || [])).length;
-      if (wrongN) notes.push('<span title="' + H("A record here fails a Plex check (its versions are named for different titles, say): the data is likely bad on that side. See the tag on it, and check before anything is applied.") + '">' + badge("warn", T("Looks wrong")) + "</span>");
-      // the row's files, numbered over both sides (the source's first): chips on the cards, the names underneath
-      var dstFiles = [].concat.apply([], dsts.map(function (x) { return x.files || []; }));
-      var srcFiles = [].concat.apply([], srcs.map(function (x) { return x.files || []; }));
-      var allFiles = srcFiles.concat(dstFiles).filter(function (f, k, a) { return a.indexOf(f) === k; }), fidx = {};
-      allFiles.forEach(function (f, k) { fidx[f] = k + 1; });
-      var act = 'data-act="sync-field" data-key="' + esc(key) + '" data-i="' + i + '"', openId = SYNC_FIELD && SYNC_FIELD.at === key + "/" + i ? SYNC_FIELD.id : null;
-      var stack = function (items, otherFirst, server, isSource, tagList, otherNames) {
-        if (!items.length) return syncSide(null);
-        var cards = items.map(function (x, k) { return syncSide(x, otherFirst, server, isSource, it.kinds, act, openId, (tagList || [])[k], fidx, otherNames); });
-        return cards.length > 1 ? '<div class="ssstack">' + cards.join("") + "</div>" : cards[0];
-      };
-      var fileNames = allFiles.length ? '<div class="ssnotes ssfilelist' + (!srcs.length ? " only-dst" : !dsts.length ? " only-src" : "") + '">' +
-        '<div class="ssfiles many">' + allFiles.map(function (f) { return "<div><span class=\"ssfn\">" + fidx[f] + "</span> " + esc(f) + "</div>"; }).join("") + "</div></div>" : "";
-      var tick = (S.sync || {}).mode === "apply" && it.shape !== "extra" && it.shape !== "missing" && it.shape !== "regroup" && it.shape !== "merge" ?
-        '<input type="checkbox" class="sstick" data-act="sync-sel" data-key="' + esc(key) + '" data-id="' + esc(it.id) + '"' + ((SYNC_SEL[key] || {})[it.id] ? " checked" : "") + ' aria-label="' + esc(T("Apply {title}", { title: it.title })) + '"> ' : "";
-      return '<div class="ssitem' + (it.warn || lostNames.length || wrongN ? " warn" : "") + '"><div class="sstop"><span class="what">' + tick + esc(it.title) + "</span>" +
-        (notes.length ? '<span class="sswarn">' + notes.join(" ") + "</span>" : "") + "</div>" +
-        stack(srcs, dsts[0] || null, mirrorIsSrc ? "mirror" : "", true, (it.tags || {}).src, dstFiles) +
-        '<div class="ssarrow" aria-label="' + esc(T("copied to")) + '">' + (it.shape === "regroup" || it.shape === "extra" ? "" : "→") + "</div>" +
-        stack(dsts, srcs[0] || null, mirrorIsSrc ? "" : "mirror", false, (it.tags || {}).dst, srcFiles) + fileNames + "</div>";
-    }).join("");
-    out += pager(spages, soff, perPage(), 'data-act="sync-page"');
-    if ((d.items || []).length < n) out += '<p class="muted">' + H("The first {n} items shown.", { n: fmtNum((d.items || []).length) }) + "</p>";
-    return out + syncApplyBar(key, d.items || [], sy) + syncLogCard(key);
-  }
   // The Library page's Health view: the content checks (libhealth.py) — file checks on the files as
   // inspected, Plex checks on how Plex has the items — each with its switch, and the items flagged
   // a view's data on its way: a bar that moves, not a word — how far it is where that's known (pg: {done, total}: a bar
@@ -2635,30 +2539,67 @@ PCI18N.ready.then(function () {
     return '<div class="loading"><div class="meter thin busy" role="progressbar" aria-busy="true" aria-label="' + esc(text || T("Loading")) + '"><div></div></div><div class="det">' + esc(text || T("Loading…")) + "</div></div>";
   }
   var LH_OPEN = {};  // the issue chips opened on the Health view: "item key/check id" -> true
-  var HEALTH_PAGES = { library: 1, filechecks: 1, plexchecks: 1 };  // the pages that draw the Health view
-  // only: a check page's category ("file", "plex"), drawn as every tool's page — its library tabs (tabs) and the top
-  // (toolTop: what was found on their right, the checks as options under them); without, the Library page's Health view
-  function libHealthView(only, tabs) {
-    var key = LIB.key, d = LIB.health[key], head = only ? toolTop({ tabs: tabs }) : "";
-    if (d === undefined) {
-      LIB.health[key] = null;
-      api("/api/library/health?key=" + encodeURIComponent(key)).then(function (got) { LIB.health[key] = got; if (HEALTH_PAGES[page]) render(); })
-        .catch(function () { LIB.health[key] = { error: true }; if (HEALTH_PAGES[page]) render(); });  // (said, with Try Again)
-      return head + loadingBar(T("Running the checks…"));
+  var HEALTH_PAGES = { library: 1, filechecks: 1, plexchecks: 1, mirrorchecks: 1 };  // the pages that draw the Health view
+  // each category's own page: where its checks are set (checksPage, every one of them)
+  var CHECK_PAGES = { file: ["filechecks", "File Checks"], plex: ["plexchecks", "Plex Checks"], mirror: ["mirrorchecks", "Mirror Checks"] };
+  function checkCategory(name) { return Object.keys(CHECK_PAGES).filter(function (c) { return CHECK_PAGES[c][0] === name; })[0]; }
+  // a library's answer fetched (again): the one on the page kept while a newer one comes — the state's count names the
+  // answer that's out (health_counts' rev: worked out again in the background as the data changes, or a scan finishes)
+  var LH_NEXT = {}, LH_ASKED = {};
+  function healthFetch(key, rev) {
+    if (LH_NEXT[key]) return;
+    LH_NEXT[key] = 1;
+    LH_ASKED[key] = rev;  // (asked once for each answer the state names: an answer newer than the state isn't asked for again)
+    if (LIB.health[key] === undefined) LIB.health[key] = null;
+    api("/api/library/health?key=" + encodeURIComponent(key)).then(function (got) { LIB.health[key] = got; })
+      .catch(function () { if (!LIB.health[key]) LIB.health[key] = { error: true }; })  // (said, with Try Again)
+      .then(function () { delete LH_NEXT[key]; if (HEALTH_PAGES[page]) render(); });
+  }
+  // a check page whose findings are worked out in the background (Mirror Checks: libhealth.SOURCES): Scan / Scan Again, as
+  // every tool's, for a library it can scan
+  // Why findings (their check ids) can't be acted on now in library ``key`` — their action, Ignore, Bring Back: the source
+  // whose checks they are (Mirror Checks) is scanning it, what was found being worked out again (the state's health_scans
+  // "busy"; the server refuses them the same way, libhealth.scanning) — else "". busyAttr: a button's, disabled saying why
+  function scanBusy(key, ids) {
+    var sc = ST.health_scans || {}, cats = Object.keys(sc);
+    for (var i = 0; i < cats.length; i++) {
+      var s = sc[cats[i]];
+      if ((s.busy || []).map(String).indexOf(String(key)) >= 0 && (ids || []).some(function (id) { return (s.checks || []).indexOf(id) >= 0; }))
+        return T("{page} is scanning this library: wait for it to finish.", { page: CHECK_PAGES[cats[i]] ? toolTitle(CHECK_PAGES[cats[i]][0]) : cats[i] });
     }
+    return "";
+  }
+  function busyAttr(why, tip) { return why ? ' disabled title="' + esc(why) + '"' : tip ? ' title="' + tip + '"' : ""; }
+  function lhScanBar(only, key) {
+    var sc = (ST.health_scans || {})[only];
+    if (!sc || (sc.libraries || []).map(String).indexOf(String(key)) < 0) return "";
+    var at = (sc.at || {})[key], scanning = String(sc.running) === String(key);
+    return '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap"><button class="btn" type="button" data-act="lh-scan" data-key="' + esc(key) + '" data-cat="' + esc(only) + '"' + (sc.running ? " disabled" : "") + ">" +
+      (scanning ? H("Scanning…") : at ? H("Scan Again") : H("Scan")) + "</button>" +
+      (at && !scanning ? '<span class="det">' + H("Scanned {when}", { when: ago(at) }) + "</span>" : "") + "</div>";
+    // (no bar of its own: a scan makes the page's count pending, and its placeholder — countBox — is the one bar shown)
+  }
+  // only: a check page's category ("file", "plex", "mirror"), drawn as every tool's page — its library tabs (tabs) and the
+  // top (toolTop: what was found on their right, the checks as options under them, Scan for a category that scans); without,
+  // the Library page's Health view
+  function libHealthView(only, tabs) {
+    var key = LIB.key, d = LIB.health[key], scanBar = only ? lhScanBar(only, key) : "", head = only ? toolTop({ tabs: tabs, scan: scanBar }) : "";
+    // the page's count for the library (countOf: a check page's, or the Library page's own): until it's done, what was found
+    // isn't counted — no stats, no counts by the checks, and on a check page the placeholder in place of the items, or, with
+    // a partial count (the files still being inspected), above the items found so far
+    var cnt = countOf(only ? CHECK_PAGES[only][0] : "library", key), ready = countDone(cnt), partial = !ready && cnt.s === "pending" && cnt.partial != null;
+    var hcNow = (ST.health_counts || {})[key];
+    if (d === undefined) healthFetch(key, hcNow && hcNow.rev);
+    else if (d && d.rev && hcNow && hcNow.rev && !hcNow.stale && hcNow.rev !== d.rev && hcNow.rev !== LH_ASKED[key]) healthFetch(key, hcNow.rev);
+    d = LIB.health[key];
     if (d && d.error) return head + '<p class="bad">' + H("The checks couldn’t be loaded.") + ' <button class="btn sm" type="button" data-act="lh-retry">' + H("Try Again") + "</button></p>";
-    if (!d) return head + loadingBar(T("Running the checks…"));
-    var cats = { file: [T("File checks"), T("What’s in each file, as inspected: its tracks.")], plex: [T("Plex checks"), T("How Plex has each item.")],
-      tools: [T("Tools"), T("What each tool would do about an item: one chip per tool, its page a click away.")] };
+    if (!d) return head + (ready || !only ? loadingBar(T("Running the checks…")) : countBox(cnt));
+    // (a check page's category: its ⓘ on the Library page)
+    var cats = { file: T("What’s in each file, as inspected: its tracks."), plex: T("How Plex has each item."), mirror: T("Whether the two sites of a mirror hold the same files, and each Plex lists them.") };
     var dflt = ((ST.library_health_defaults || {}).checks) || {};
     var stt = d.stats || {};
     var mig = d.migration ? '<div class="note">' + H("A folder of this library is on its way to a dataset of its own ({step}): <a href=\"/dataset\" data-nav>Child Dataset</a> carries on.", { step: d.migration.step }) + "</div>" : "";
-    var out = only ? "" : mig +
-      (stt.items ? '<div class="lhstats">' + esc(T("{pct}% of items have nothing flagged", { pct: stt.clean_pct })) + ' <span class="muted">(' + esc(T("{clean} of {total}", { clean: fmtNum(stt.clean), total: fmtNum(stt.items) })) + ")</span>" +
-        (stt.multi ? " · " + esc(P(stt.multi, "{n} item with more than one issue", "{n} items with more than one issue", { n: fmtNum(stt.multi) })) : "") + "</div>" : "") +
-      '<div class="det" style="margin:8px 0">' + esc(T("{n} items checked", { n: fmtNum(d.checked || 0) })) +
-      (d.unread ? " · " + esc(P(d.unread, "{n} file not inspected yet", "{n} files not inspected yet", { n: fmtNum(d.unread) })) : "") +
-      (d.pages_read != null ? " · " + esc(T("{n} items’ pages read (the locked-field check needs them: a Library Sync compare reads them)", { n: fmtNum(d.pages_read) })) : "") + "</div>";
+    var out = only ? "" : mig;
     // the language the subtitle check wants: chosen beside it, from the languages the library's files hold
     var langSel = '<select class="sel sm" data-lhlang aria-label="' + H("Subtitle language") + '">' + (d.languages || []).map(function (l) {
       return '<option value="' + esc(l.code) + '"' + (l.code === d.language ? " selected" : "") + ">" + esc(l.name) + "</option>";
@@ -2677,22 +2618,54 @@ PCI18N.ready.then(function () {
     // then the ones with nothing flagged, each said so
     var catOf = {};
     Object.keys(d.checks).forEach(function (cat) { (d.checks[cat] || []).forEach(function (c) { catOf[c.id] = cat; }); });
-    var shownItems = (d.items || []).map(function (it) { return Object.assign({}, it, { results: it.results.filter(function (r) { return onIds[r.id] && (!only || catOf[r.id] === only); }) }); });
-    var flaggedItems = shownItems.filter(function (it) { return it.results.length; }).length, clean = shownItems.length - flaggedItems;
+    // on the Library page, File Checks' and Plex Checks' chips shown or not as a tool's are (page_<page>: on unless turned off)
+    var pageOn = {}, catCounts = {};  // (and the items each check page flags, its findings ignored left out)
+    Object.keys(CHECK_PAGES).forEach(function (cat) { pageOn[cat] = chosen["page_" + CHECK_PAGES[cat][0]] !== false; catCounts[cat] = 0; });
+    (d.items || []).forEach(function (it) {
+      Object.keys(catCounts).forEach(function (cat) { if (it.results.some(function (r) { return onIds[r.id] && catOf[r.id] === cat && !r.ignored; })) catCounts[cat]++; });
+    });
+    var shownItems = (d.items || []).map(function (it) {
+      return Object.assign({}, it, { results: it.results.filter(function (r) { return onIds[r.id] && (only ? catOf[r.id] === only : !CHECK_PAGES[catOf[r.id]] || pageOn[catOf[r.id]]); }) });
+    });
+    var flaggedItems = shownItems.filter(function (it) { return it.results.length; }).length;
     // a check page (only: one category) shows only what its checks found — the items with an orange chip or a grey one
     // (ignored), as a tool's page shows only its rows with something on them; every item is the Library page's
     if (only) shownItems = shownItems.filter(function (it) { return it.results.length; });
     var counts = {};
     shownItems.forEach(function (it) { it.results.forEach(function (r) { if (!r.ignored) counts[r.id] = (counts[r.id] || 0) + 1; }); });
-    var checksHtml = Object.keys(cats).filter(function (cat) { return !only || cat === only; }).map(function (cat) {
+    // the Library page: every tool a line of its own, File Checks and Plex Checks among them — its name a link to its page,
+    // how many items it flags, and Hide or Show: its chips shown here or not, a view and nothing more (no box, which would
+    // read as a setting). The checks themselves are set on their own pages and nowhere else: never their switches here,
+    // nor the subtitle language or the quality level
+    var allCounts = {};  // (each tool's items whether its chips are shown or not, its findings ignored left out)
+    (d.items || []).forEach(function (it) {
+      var seen = {};
+      it.results.forEach(function (r) { if (!r.ignored && !seen[r.id]) { seen[r.id] = 1; allCounts[r.id] = (allCounts[r.id] || 0) + 1; } });
+    });
+    // (each line's number once its page's count for the library is done — countChip's placeholder until then)
+    var toolLine = function (id, on, href, name, help, n, bad) {
+      var pc = countOf(href.replace(/^\//, "").replace(/[#?].*$/, ""), key);
+      return '<div class="chk lhchk lhtool' + (on ? "" : " lhhidden") + '">' + info(help, name) +
+        '<button class="btn sm" type="button" data-act="lh-show" data-id="' + esc(id) + '" data-on="' + (on ? "0" : "1") + '" aria-pressed="' + !on + '" aria-label="' + (on ? H("Hide {tool}", { tool: name }) : H("Show {tool}", { tool: name })) + '">' +
+        (on ? H("Hide") : H("Show")) + "</button>" + '<a href="' + esc(href) + '" data-nav>' + esc(name) + "</a>" +
+        (!countDone(pc) ? countChip(pc, bad) : bad ? statChip("fail", fmtNum(n), T("Some checks couldn’t run: this count leaves them out")) : badge(n ? "warn" : "pass", fmtNum(n))) + "</div>";
+    };
+    var checksHtml = only ? "" : (d.checks.tools || []).map(function (c) { return toolLine(c.id, c.on, c.link, msg(c.name), richText(msg(c.help)), allCounts[c.id] || 0); })
+      .concat(Object.keys(CHECK_PAGES).map(function (cat) { var pg = CHECK_PAGES[cat]; return toolLine("page_" + pg[0], pageOn[cat], "/" + pg[0], T(pg[1]), esc(cats[cat]), catCounts[cat],
+        ((d.unchecked || {})[cat] || []).some(function (u) { return (u.checks || []).some(function (id) { return onIds[id]; }); })); })).join("");
+    // the checks the category's last scan couldn't run (Mirror Checks: the other site's files while the link to its Plex
+    // Cache is down), a group for each reason: a red chip on top, a link to where it's put right, and their counts red
+    var unchecked = only ? (d.unchecked || {})[only] || [] : [], notRun = {};
+    unchecked.forEach(function (u) { (u.checks || []).forEach(function (id) { notRun[id] = u; }); });
+    if (only) checksHtml = [only].map(function (cat) {
       var all = d.checks[cat] || [], byId = {};
       all.forEach(function (c) { byId[c.id] = c; });
       var row = function (c) {
         var n = counts[c.id] || 0, sub = !!c.of;
         var rv = dflt[c.id] !== undefined && c.on !== dflt[c.id] ? ' <button type="button" class="revert" data-lhcheck-revert="' + c.id + '" title="' + H("Back to the default ({value})", { value: dflt[c.id] ? T("on") : T("off") }) + '">↺</button>' : "";
         var help = richText(msg(c.help)) + (c.link ? '<p><a href="' + esc(c.link) + '" target="_blank" rel="noopener">' + H("The research behind it ↗") + "</a></p>" : "");
-        return '<div class="chk lhchk' + (sub ? " lhsub" : "") + (only ? " optrow" : "") + '">' + info(help, msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
-          (sub ? (c.on && n ? badge("warn", fmtNum(n)) : "") : c.on ? (n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : "") +
+        return '<div class="chk lhchk optrow' + (sub ? " lhsub" : "") + '">' + info(help, msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
+          (!ready ? "" : sub ? (c.on && n ? badge("warn", fmtNum(n)) : "") : c.on ? (notRun[c.id] ? statChip("fail", fmtNum(n), T("Not checked: {why}", { why: msg(notRun[c.id].why) })) : n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : "") +
           (c.id === "subtitles_language" ? '<div class="lhlang"><span>' + H("Language") + "</span>" + langSel +
             (d.language !== ((ST.library_health_defaults || {}).subtitle_language || "en") ? ' <button type="button" class="revert" data-lhlang-revert title="' + H("Back to the default ({value})", { value: "English" }) + '">↺</button>' : "") + "</div>" : "") +
           (c.id === "audio_low_bitrate" && c.on ? '<div class="lhlang"><span>' + H("Quality level") + "</span>" + qualSel +
@@ -2703,8 +2676,7 @@ PCI18N.ready.then(function () {
       var rows = all.filter(function (c) { return !c.of; }).map(function (c) {
         return row(c) + (c.on ? all.filter(function (o) { return o.of === c.id; }).map(row).join("") : "");
       });
-      if (only) return optionGrid(rows.map(function (r) { return '<div class="optcell">' + r + "</div>"; }));
-      return '<div class="lhcat"><div class="what">' + esc(cats[cat][0]) + '</div><div class="det">' + esc(cats[cat][1]) + "</div>" + rows.join("") + "</div>";
+      return optionGrid(rows.map(function (r) { return '<div class="optcell">' + r + "</div>"; }));
     }).join("");
     if (only) {
       // what was found, as on every tool's page: the items read, those flagged by this page's checks as they're set, and
@@ -2712,12 +2684,31 @@ PCI18N.ready.then(function () {
       // (an item whose findings are all ignored isn't an issue — as the tab's count — nor does it pass)
       var total = (d.items || []).length, failAll = (d.items || []).filter(function (it) { return it.results.some(function (r) { return catOf[r.id] === only; }); }).length;
       var issues = shownItems.filter(function (it) { return it.results.some(function (r) { return !r.ignored; }); }).length;
-      out += mig + toolTop({ tabs: tabs, options: checksHtml, stats: { read: total, readText: P(total, "{n} item read", "{n} items read", { n: fmtNum(total) }), issues: issues,
+      out += mig + toolTop({ tabs: tabs, options: checksHtml, scan: scanBar, stats: ready && { read: total, readText: P(total, "{n} item read", "{n} items read", { n: fmtNum(total) }), issues: issues,
         passNow: total - flaggedItems, passAll: total - failAll,
-        extra: d.unread ? [statChip("grey", P(d.unread, "{n} file not inspected yet", "{n} files not inspected yet", { n: fmtNum(d.unread) }), T("Files the inspector hasn’t read yet: their tracks aren’t checked until it has."))] : [] } });
-    } else out += '<div class="lhgrid">' + checksHtml + "</div>";
-    if (!shownItems.length) return out + '<p class="muted">' + (only && (d.items || []).length ? badge("pass", T("Nothing found")) + " " + H("No item has anything these checks flag.") : H("No items in this library yet.")) + "</p>";
-    if (!only) out += '<div class="det">' + esc(P(flaggedItems, "{n} item flagged", "{n} items flagged", { n: fmtNum(flaggedItems) })) + " · " + esc(P(clean, "{n} with nothing flagged", "{n} with nothing flagged", { n: fmtNum(clean) })) + "</div>";
+        extra: unchecked.map(function (u) {
+          return u.link ? '<a class="badge b-fail" href="' + esc(u.link) + '" data-nav title="' + esc(msg(u.why)) + '">' + esc(msg(u.label)) + "</a>" : statChip("fail", msg(u.label), msg(u.why));
+        }).concat(d.unread ? [statChip("grey", P(d.unread, "{n} file not inspected yet", "{n} files not inspected yet", { n: fmtNum(d.unread) }), T("Files the inspector hasn’t read yet: their tracks aren’t checked until it has."))] : []) } });
+      // what the category's source says above its findings (Mirror Checks: the link not healthy, the library held, what
+      // couldn't be compared): a warning boxed, the rest as a line
+      out += ((d.notes || {})[only] || []).map(function (n) {
+        return n.status === "warn" ? '<div class="note warnbox">' + links(msg(n.text)) + "</div>" : '<p class="muted">' + links(msg(n.text)) + "</p>";
+      }).join("");
+      if (!ready) { out += countBox(cnt); if (!partial) return out; }
+    } else {
+      // what was found, as chips — the tools' pages' (toolStats): the items checked, those with something shown here (each
+      // once), those with nothing, then those with more than one issue, the files not inspected yet and the items' pages read
+      var live = shownItems.filter(function (it) { return it.results.some(function (r) { return !r.ignored; }); });
+      var multi = live.filter(function (it) { var ids = {}; it.results.forEach(function (r) { if (!r.ignored) ids[r.id] = 1; }); return Object.keys(ids).length > 1; }).length;
+      var checked = d.checked || 0, extra = [];
+      if (multi) extra.push(statChip("grey", P(multi, "{n} item with more than one issue", "{n} items with more than one issue", { n: fmtNum(multi) })));
+      if (d.unread) extra.push(statChip("grey", P(d.unread, "{n} file not inspected yet", "{n} files not inspected yet", { n: fmtNum(d.unread) }), T("Files the inspector hasn’t read yet: their tracks aren’t checked until it has.")));
+      if (d.pages_read != null) extra.push(statChip("grey", T("{n} items’ pages read", { n: fmtNum(d.pages_read) }), T("The locked-field check needs them: they’re read after the records, and again as items change.")));
+      out += ready ? libStats({ read: checked, readText: P(checked, "{n} item read", "{n} items read", { n: fmtNum(checked) }), issues: live.length,
+        passNow: checked - flaggedItems - (d.total || 0) + (d.items || []).length, extra: extra }) : countBox(cnt);
+      out += '<div class="lhtools">' + checksHtml + "</div>";
+    }
+    if (!shownItems.length) return out + (partial && only ? "" : '<p class="muted">' + (only && (d.items || []).length ? badge("pass", T("Nothing found")) + " " + H("No item has anything these checks flag.") : H("No items in this library yet.")) + "</p>");
     var hper = only ? cardsPer() : perPage();  // (a check page is a tool's page: the tools' page size)
     var hpages = { pages: pageRanges(shownItems.map(function (it) { return it.label; }), hper), total: shownItems.length };
     if (REVEAL && String(REVEAL.lib) === String(key)) {  // (a link to a record: the page of the list that holds it)
@@ -2750,10 +2741,15 @@ PCI18N.ready.then(function () {
             (x.lines || []).map(function (l) { return '<div class="det">' + esc(msg(l)) + "</div>"; }).join("") +
             (x.link ? '<div class="det"><a href="' + esc(x.link) + '" data-nav>' + H("Open {tool}", { tool: name ? msg(name) : r.id }) + "</a></div>" : "") + "</div>";
         });
+        // what can be done about it (Mirror Checks' Scan Folder), once under the chip, and when it was last asked for
+        var ra = r.action;
+        if (on && ra && !r.ignored) shown += '<div class="det"><button class="btn sm" type="button" data-act="lh-action" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" data-check="' + esc(r.id) + '"' +
+          busyAttr(scanBusy(key, [r.id]), ra.tip ? esc(msg(ra.tip)) : "") + ">" + esc(msg(ra.label)) + "</button>" + (ra.done_at ? " " + H("Asked {when}", { when: ago(ra.done_at) }) : "") + "</div>";
       });
       // ignored: the item's issues as they are now greyed out and kept so (a new kind of issue still warns); brought back on request
-      var acts = (live.length ? '<button class="btn sm" type="button" data-act="lh-ignore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" data-ids="' + esc(live.join(",")) + '" title="' + H("Greys out this item’s issues as they are now, for good. A new kind of issue on it still shows as a warning.") + '">' + H("Ignore") + "</button> " : "") +
-        (muted ? '<button class="btn sm" type="button" data-act="lh-restore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" title="' + H("Shows this item’s ignored issues as warnings again.") + '">' + H("Bring Back") + "</button>" : "");
+      var ignTip = H("Greys out this item’s issues as they are now, for good. A new kind of issue on it still shows as a warning."), backTip = H("Shows this item’s ignored issues as warnings again.");
+      var acts = (live.length ? '<button class="btn sm" type="button" data-act="lh-ignore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '" data-ids="' + esc(live.join(",")) + '"' + busyAttr(scanBusy(key, live), ignTip) + ">" + H("Ignore") + "</button> " : "") +
+        (muted ? '<button class="btn sm" type="button" data-act="lh-restore" data-key="' + esc(key) + '" data-item="' + esc(it.key) + '"' + busyAttr(scanBusy(key, it.results.filter(function (r) { return r.ignored; }).map(function (r) { return r.id; })), backTip) + ">" + H("Bring Back") + "</button>" : "");
       if (!it.results.length) chips = badge("pass", T("Nothing flagged"));
       var rid = recordId(key, it.key);
       return '<div class="ssitem lhitem' + (live.length ? "" : " lhquiet") + (REVEAL && REVEAL.id === rid ? " revealed" : "") + '" id="' + esc(rid) + '"><div class="sscard"><div class="ssbody">' + poster + '<div class="ssinfo"><div class="what">' + esc(it.label) + '</div><div class="lhacts">' + acts + "</div></div></div></div>" +
@@ -2767,8 +2763,6 @@ PCI18N.ready.then(function () {
     var libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
     // the settings changed (an optimizer choice, say): the checks and estimates are fetched again —
     // they're worked out from the settings, never kept past a change
-    var lf = (((ST.sync || {}).libs || {})[LIB.key] || {}).finished || ((ST.sync || {}).report || {}).at;
-    if (LIB.cmpAt !== lf) { LIB.cmpAt = lf; LIB.diff = {}; }
     if (LIB.rev !== ST.settings_rev) {
       if (LIB.rev !== null) {
         LIB.at = 0;
@@ -2789,10 +2783,8 @@ PCI18N.ready.then(function () {
     var btn = !LIB.key ? "" : lj.running ? '<button class="btn" type="button" data-act="lib-survey" data-how="pause">' + H("Pause") + "</button>"
       : lj.paused ? '<button class="btn" type="button" data-act="lib-survey" data-how="resume">' + H("Resume") + "</button>"
       : '<button class="btn" type="button" data-act="lib-survey" data-how="again">' + H("Inspect Files Again") + "</button>";
-    var syncOn = (ST.sync || {}).decided === "plex2";
-    if (LIB.view === "sync" && !syncOn) LIB.view = "health";
-    var out = top(T("Library"), LIB.view === "sync" ? H("How this library differs from the mirrored server’s, as last compared. Nothing is changed by itself.")
-      : LIB.view === "health" ? H("The content itself: what’s in each file, and how Plex has each item. Each check can be turned off.")
+    if (LIB.view !== "caching") LIB.view = "health";
+    var out = top(T("Library"), LIB.view === "health" ? H("The content itself: what’s in each file, and how Plex has each item. Each check can be turned off.")
       : H("What’s where in each file — its start, the video, and the metadata at its end — the blocks they land on, and what caching keeps of it.") +
       " " + H("Files are inspected when the page opens: only ones new or changed since."), LIB.view !== "caching" ? "" : btn);
     out += '<div class="stack"><section class="card">';
@@ -2804,11 +2796,10 @@ PCI18N.ready.then(function () {
     out += '<div class="lctl"><div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + libs.map(function (l) {
       return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(LIB.key)) + '" data-act="lib-tab" data-key="' + esc(l.key) + '">' + libIcon(l.key) + esc(l.title) + "</button>";
     }).join("") + "</div>" +
-      // the views: caching health (the files' blocks), and, with a mirror watched, how the library differs from it
-      '<div class="seg small" role="tablist" aria-label="' + H("View") + '">' + [["health", T("Health")], ["caching", T("Caching")]].concat(syncOn ? [["sync", T("Sync")]] : []).map(function (v) {
+      // the views: the content checks, and caching health (the files' blocks)
+      '<div class="seg small" role="tablist" aria-label="' + H("View") + '">' + [["health", T("Health")], ["caching", T("Caching")]].map(function (v) {
         return '<button role="tab" type="button" aria-selected="' + (LIB.view === v[0]) + '" data-act="lib-view" data-view="' + v[0] + '">' + esc(v[1]) + "</button>";
       }).join("") + "</div></div>";
-    if (LIB.view === "sync") return out + libSyncView() + "</section></div>";
     if (LIB.view === "health") return out + libHealthView() + "</section></div>";
     var d = LIB.data && LIB.data.library === LIB.key ? LIB.data : null;
     // while inspecting (or waiting to): a progress bar
@@ -3699,7 +3690,7 @@ PCI18N.ready.then(function () {
       '" value="" data-secret="' + sec + "." + key + '"></div>';
   }
   // Fields with no meaningful default (where your servers are): no ↺
-  var NO_REVERT = { "plex.url": 1, "truenas.url": 1, "mqtt.host": 1, "mqtt.username": 1 };
+  var NO_REVERT = { "plex.url": 1, "truenas.url": 1, "mqtt.host": 1, "mqtt.username": 1, "peer.url": 1 };
   function textInput(sec, key, label, id, help, placeholder) {
     var h = splitHelp(help);
     return '<div class="fld"><label for="' + id + '">' + esc(label) + info(h.more, label) + (NO_REVERT[sec + "." + key] ? "" : revertBtn(sec, key, "")) + '</label><input id="' + id + '" type="text" value="' + esc(S[sec][key]) + '" placeholder="' + esc(placeholder || "") +
@@ -3753,13 +3744,42 @@ PCI18N.ready.then(function () {
       secretInput("plex2", "token", T("Token"), "s-p2tok") + "</div>", false);
     return out + "</section>";
   }
-  // Sync: the servers kept in step with this one, and what uses them
-  // Library Sync (sync.py): the mirror choice, the settings (nothing acts without a review), the
-  // differences as last compared, and what uses the mirror
-  var SYNC_REVIEW = H("<strong>Nothing changes on either server without your review.</strong> Comparing only reads. Applying (a later part) never starts by itself: you look the differences over first and approve them. And whenever a setting here is changed — the source, what’s synced, a library pair — applying pauses until you’ve seen how the differences change and approved again. Comparing carries on meanwhile.");
-  function pageSync() {
-    var sy = ST.sync || {}, p2 = ST.plex2 || {}, rep = sy.report;
-    var out = top(T("Sync"), H("Another Plex server with the same files — at another site, kept in step by syncing the folders — and what Plex Cache keeps in step with it."), "");
+  // The Plex Cache at the mirror's site (peerlink.py): found from the mirrored Plex server's addresses, paired by itself
+  // through the synced folders when that's safe, then asked directly — what Mirror Checks' disk comparison relies on
+  var PEER_LIGHTS = [["found", N("Plex Cache at the mirror’s site")], ["paired", N("Paired")], ["talking", N("Talking")], ["folders", N("Folder sync")], ["version", N("Version and clock")]];
+  function peerCard() {
+    var pe = ST.peer || {}, ps = S.peer || {}, lt = pe.lights || {}, own = pe.own || {};
+    var out = '<section class="card" id="peer"><h2>' + H("Mirror Plex Cache") + ' <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional") + "</span></h2>" +
+      '<p class="hint">' + H("The Plex Cache at the mirrored server’s site, if there is one. The two talk directly, over your network or a VPN, so Mirror Checks can compare both sites’ files.") +
+      info(H("They find each other from the mirrored Plex server’s addresses, and pair by themselves when it’s safe: each writes a public key into the synced .plexcache folder, and a pairing is taken only from the mirrored server’s address, with the key the folder carried. " +
+        "Every request after that is signed with a key the two work out from those, which never leaves either side. What they ask each other only reads: how each side is, and a library’s list of files.<br><br>" +
+        "Meant for your network, a VPN or Tailscale: don’t open its port to the internet."), T("Mirror Plex Cache")) + "</p>" +
+      '<div class="lights">' + PEER_LIGHTS.map(function (l) { return lightFor(lt[l[0]], T(l[1])); }).join("") + "</div>" +
+      '<div style="margin-top:10px">' + checkbox("peer", "enabled", T("Look for a Plex Cache at the mirror’s site"),
+        { s: H("Untick when there’s none there: Mirror Checks then compare the two Plexes only.") }) + "</div>";
+    if (!ps.enabled || !pe.mirror) return out + "</section>";  // (no mirror watched: the lights say so, and there's nothing to set)
+    out += checkbox("peer", "auto_pair", T("Pair by itself"),
+      { s: H("When the other one answers from the mirrored server’s address with the key the synced folder carried."),
+        more: H("Off: the two pair only when you press Pair Now on both, within 10 minutes of each other. Then compare the fingerprints the two show: they’re the same when each is paired with the other.") });
+    out += '<div class="grid">' +
+      textInput("peer", "url", T("Its address"), "s-peerurl", H("Found by itself. Enter it when the other one runs on another port, or is reached at another address."), pe.detected || "http://192.168.1.20:8642") +
+      number("peer", "port", T("The port this one answers on"), 0, 65535,
+        { s: own.port ? H("0 works it out: {port} now.", { port: String(own.port) }) : H("0 works it out."),
+          more: H("The port the other Plex Cache reaches this one on, told to it through the synced folder. 0 works it out: from TrueNAS’s settings for this app, or the port this page is open on. Set it when a port mapping or a proxy changes it.") }) + "</div>";
+    if ((own.addresses || []).length) out += '<div class="det">' + H("This one answers at {addresses}, port {port}.", { addresses: own.addresses.join(", "), port: String(own.port) }) + "</div>";
+    if (pe.paired) out += '<div class="det">' + H("Fingerprint {fp}: the other one shows the same when the two are paired with each other.", { fp: pe.fingerprint }) + "</div>";
+    if (pe.window) out += '<div class="note">' + H("Pairing is open for {n} more minutes: press Pair Now on the other Plex Cache too.", { n: Math.max(1, Math.ceil(pe.window / 60)) }) + "</div>";
+    out += '<div class="acts"><button class="btn' + (lt.found && lt.found.status === "ok" && !pe.paired ? " pri" : "") + '" type="button" data-act="peer-pair"' + (pe.window ? " disabled" : "") + ">" + H("Pair Now") + "</button>" +
+      info(H("Opens pairing for 10 minutes, without waiting for the synced folder or the mirrored server’s address: press it on both, then compare the fingerprints. For when pairing by itself can’t, or is off."), T("Pair Now")) +
+      ' <button class="btn" type="button" data-act="peer-test"' + (pe.busy ? " disabled" : "") + ">" + (pe.busy ? H("Testing…") : H("Test Again")) + "</button>" +
+      (pe.paired ? ' <button class="link" type="button" data-act="peer-unpair" title="' + H("Forgets the pairing on both sides, and makes a new key here. Neither pairs again by itself: Pair Now on both does.") + '">' + H("Unpair") + "</button>" : "") + "</div>";
+    return out + "</section>";
+  }
+  // Mirror: the server kept in step with this one (sync.py: the mirror choice, the servers that may be one), Plex's own
+  // sync of watched state, and what uses the mirror — Sync Libraries (the tool that brings its libraries in line) among them
+  function pageMirrors() {
+    var sy = ST.sync || {}, p2 = ST.plex2 || {};
+    var out = top(T("Mirror"), H("Another Plex server with the same files — at another site, kept in step by syncing the folders — and what Plex Cache keeps in step with it."), "");
     out += '<div class="stack" style="max-width:980px">';
     // ---- the mirror: a choice to make
     out += '<section class="card"><h2>' + H("Mirrored Server") + "</h2>" +
@@ -3785,65 +3805,24 @@ PCI18N.ready.then(function () {
     if ((sy.peers || []).length) out += '<div class="note">' + H("Another Plex Cache shares these folders (it marked itself in them): {n} system(s). Each optimizes its own side; claims keep them off the same file.", { n: sy.peers.length }) + "</div>";
     out += "</section>";
     if ((S.sync || {}).mirrors === "plex2") out += plex2Card();
-    // ---- the settings
-    out += '<section class="card"><h2>' + H("Sync Settings") + "</h2>" + '<div class="note">' + SYNC_REVIEW + "</div>" +
+    // ---- what Plex's own sync carries (Sync Libraries leaves it to Plex)
+    out += '<section class="card"><h2>' + H("Watched State") + "</h2>" +
+      '<p class="hint">' + H("What each person has watched, and their ratings: Plex carries these between your servers itself. Everything else about a library is brought in line by <a href=\"/sync\" data-nav>Sync Libraries</a>.") + "</p>" +
       '<div class="grid">' +
-      select("sync", "source", T("Whose edits win"), [["this", T("This server")], ["mirror", T("The mirror")]],
-        { s: H("The source: its matches, versions, edits, posters and collections are what the other is brought in line with.") }) +
-      select("sync", "mode", T("Sync"), [["off", T("Off")], ["compare", T("Compare only")], ["apply", T("Compare, and apply what I tick")]],
-        { s: H("Compare only reads both servers and lists the differences. With applying on, the Library page’s Sync view lets you tick differences and apply them to the other server — one way, from the source; never by itself, and only once you’ve reviewed. Every change is logged below and can be undone.") }) +
       select("sync", "watched", T("Watched state and ratings"), [["plex", T("Plex’s own sync carries them")], ["off", T("Not synced")]],
         { s: H("Plex syncs watched state and ratings between your own servers when “Sync my watch state and ratings” is on in your Plex account. Leave it to Plex rather than doing it twice.") }) +
       select("sync", "users", T("Whose"), [["home", T("Everyone in my Plex Home")], ["me", T("Just me")]],
         { s: H("For what’s synced per user (a later part): every user of the Plex Home, or only you.") }) +
-      select("sync", "compare_hours", T("Compare every"), [[1, P(1, "{n} hour", "{n} hours")], [6, P(6, "{n} hour", "{n} hours")], [12, P(12, "{n} hour", "{n} hours")], [24, P(24, "{n} hour", "{n} hours")], [168, P(7, "{n} day", "{n} days")]]) +
-      "</div>";
-    var what = (S.sync || {}).what || {}, dw = ((ST.sync_defaults || {}).what) || {};
-    var WHAT = [["grouping", T("Versions: files grouped into the same items"), T("Which files make one item — a movie’s two versions, say — and files one server doesn’t list.")],
-      ["matches", T("Matches"), T("Which online entry each item is matched to; unmatched items too.")],
-      ["edits", T("Edited fields"), T("Titles, summaries, years and the like you edited (Plex locks a field you edit).")],
-      ["art", T("Posters and backgrounds chosen by hand"), ""], ["collections", T("Collections and labels"), ""],
-      ["editions", T("Editions"), T("A movie’s edition name (Director’s Cut…): Plex doesn’t carry these between servers.")]];
-    out += '<div class="what" style="margin-top:12px">' + H("What’s compared") + "</div>" + WHAT.map(function (w) {
-      var rv = dw[w[0]] === undefined || !!what[w[0]] === dw[w[0]] ? "" : ' <button type="button" class="revert" data-syncwhat-revert="' + w[0] + '" title="' + H("Back to the default ({value})", { value: dw[w[0]] ? T("on") : T("off") }) + '">↺</button>';
-      return '<div class="chk">' + infoOrGap(w[2] ? esc(w[2]) : "", w[1]) + '<label><input type="checkbox" data-syncwhat="' + w[0] + '"' + (what[w[0]] ? " checked" : "") + ">" + esc(w[1]) + "</label>" + rv + "</div>";
-    }).join("") + "</section>";
-    // ---- the differences
-    out += '<section class="card"><h2>' + H("Library Differences") + "</h2>";
-    if (sy.decided !== "plex2") out += '<p class="muted">' + H("Once a mirrored server is watched, its libraries are compared with this server’s here.") + "</p>";
-    else {
-      out += '<p class="hint">' + (rep ? H("Last compared {when}: {source}’s libraries against the other’s. Nothing was changed.", { when: ago(rep.at), source: rep.source === "mirror" ? (p2.name || T("the mirror")) : T("this server") })
-        : H("Not compared yet.")) + "</p>";
-      out += syncProgress(sy);
-      if (sy.review_needed) out += '<div class="note">' + H("The sync settings changed since they were last reviewed. Look the differences over (the Library page shows each item), then press <strong>I’ve Reviewed These</strong>. That only records that you’ve looked: nothing is applied — applying is a later part, and will never run on its own.") + "</div>";
-      if (rep) {
-        var kinds = Object.keys(sy.names || {});
-        // each heading a word to a line, so the counts' columns stay narrow and the library's column gets the room
-        var stack = function (t) { return String(t).split(/\s+/).map(esc).join("<br>"); };
-        out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library") + '</th><th scope="col">' + H("Items") + '</th><th scope="col">' + stack(T("Paired with the other server")) + '</th><th scope="col">' + stack(T("Not paired")) + "</th>" +
-          kinds.map(function (k) { return '<th scope="col">' + stack(sy.names[k]) + "</th>"; }).join("") + "</tr></thead><tbody>" +
-          Object.keys(rep.libraries || {}).map(function (key) {
-            var l = rep.libraries[key], n = Object.keys(l.counts || {}).reduce(function (a, k) { return a + (l.counts[k] || 0); }, 0);
-            var lj = (sy.libs || {})[key] || {};
-            // its name: a link to its items on the Library page
-            return "<tr><td>" + libIcon(key) + '<a href="/library" data-nav data-synclib="' + esc(key) + '">' + esc(l.title || key) + "</a>" + (l.there && l.there !== l.title ? ' <span class="muted">→ ' + esc(l.there) + "</span>" : "") +
-              (lj.running ? '<div class="det">' + esc(T("Comparing…")) + "</div>" : lj.paused ? '<div class="det">' + esc(T("Paused")) + "</div>" : lj.queued ? '<div class="det">' + esc(T("Waiting")) + "</div>" : "") +
-              (n ? "" : '<div class="det">' + H("No differences") + "</div>") + "</td>" +
-              '<td class="nw">' + esc(fmtNum(l.total || 0)) + '</td><td class="nw">' + esc(fmtNum(l.matched || 0)) + '</td><td class="nw">' + esc(fmtNum(Math.max(0, (l.total || 0) - (l.matched || 0)))) + "</td>" +
-              kinds.map(function (k) { var c = (l.counts || {})[k] || 0; return '<td class="nw">' + (c ? esc(fmtNum(c)) : '<span class="muted">0</span>') + "</td>"; }).join("") + "</tr>";
-          }).join("") + "</tbody></table></div>";
-      }
-      out += '<div class="acts" style="margin-top:10px"><button class="btn pri" type="button" data-act="sync-compare"' + (sy.running ? " disabled" : "") + ">" + (sy.running ? H("Comparing…") : H("Compare Now")) + "</button> " +
-        (sy.review_needed && rep ? '<button class="btn" type="button" data-act="sync-approve">' + H("I’ve Reviewed These") + "</button>" + info(H("Records that you’ve looked over the differences with the settings as they are now. It applies nothing. Applying is a later part; even then it never runs by itself, and any change to these settings pauses it until you’ve reviewed again."), T("I’ve Reviewed These")) : "") + "</div>";
-    }
-    out += "</section>";
-    out += syncLogCard(null);
+      "</div></section>";
     // ---- what uses it
+    var on = sy.decided === "plex2";
     out += '<section class="card">' + heading(esc(T("What Uses It")), "") + '<div class="row">' + badge(p2.configured ? "pass" : "info", p2.configured ? T("On") : T("Waiting")) +
       '<div class="grow"><div class="what">' + H("Converting to MKV") + '</div><div class="det">' +
       H("A converted file’s original is deleted only once every server watched here has the MKV as a version of the same item. <a href=\"/convert\" data-nav>Tools → Convert to MKV</a>") + "</div></div></div>" +
-      '<div class="row">' + badge((S.sync || {}).mode === "compare" && sy.decided === "plex2" ? "pass" : "info", (S.sync || {}).mode === "compare" && sy.decided === "plex2" ? T("Comparing") : T("Waiting")) + '<div class="grow"><div class="what">' + H("Library sync") + '</div><div class="det">' +
-      H("Comparing both servers’ libraries (above, and on the Library page). Applying the differences is a later part.") + "</div></div></div>" +
+      '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) + '<div class="grow"><div class="what">' + H("Sync Libraries") + '</div><div class="det">' +
+      H("Brings each paired library in line with the other server’s, one way, from the side whose edits win — when you press Apply. <a href=\"/sync\" data-nav>Tools → Sync Libraries</a>") + "</div></div></div>" +
+      '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) + '<div class="grow"><div class="what">' + H("Mirror Checks") + '</div><div class="det">' +
+      H("What Sync Libraries can’t bring in line, and what the folder sync or a Plex scan missed. <a href=\"/mirrorchecks\" data-nav>Tools → Mirror Checks</a>") + "</div></div></div>" +
       '<div class="row">' + badge("info", T("Planned")) + '<div class="grow"><div class="what">' + H("Converting a folder to a child dataset, on synced folders") + '</div><div class="det">' +
       H("Keeping the new dataset and the old folder out of the sync while the folder is converted, so nothing is sent to the other site.") + "</div></div></div></section>";
     return out + "</div>";
@@ -3915,17 +3894,20 @@ PCI18N.ready.then(function () {
         !(c.truenas_key && c.truenas_key.status === "ok")) +
       "</fieldset></section>";
 
+    // ---- the Plex Cache at the mirror's site
+    out += peerCard();
+
     // ---- Media Mappings
     out += mappingsCard();
 
     // ---- Preferences: lists, and what stands in for a snapshot before files change
     var g = S.general;
     out += '<section class="card" id="prefs"><h2>' + H("Preferences") + '</h2><div class="grid">' +
-      number("general", "page_size", T("Entries per Library page"), 25, 1000, H("On the Library views, the Sync differences, a job’s files: a long list a page at a time, with the pages told by what’s on them.")) +
+      number("general", "page_size", T("Entries per Library page"), 25, 1000, H("On the Library views, a tool’s rows, a job’s files: a long list a page at a time, with the pages told by what’s on them.")) +
       number("general", "tool_page_size", T("Entries per Tools page"), 5, 200, H("On every tool’s page, the Optimizer’s and the check pages: the cards a page at a time. All still ticks every page’s.")) +
       select("general", "backup", T("Backup before changes"), [["snapshot", T("A snapshot, taken through TrueNAS")], ["manual", T("A backup I make myself")], ["copies", T("The copies the action keeps")]],
         { s: H("Before any action rewrites, moves or deletes files — the file tools, Optimize Selected, Child Dataset — a recent snapshot of the library’s dataset must be in reach, or this stands in for it.") + " " +
-            H("Before Plex’s records change — Merge Duplicates, Library Sync’s Apply, the merge Organize Folders makes — the app backs up each record it changes, under a snapshot or the copies an action keeps; with a backup you make yourself, it doesn’t."),
+            H("Before Plex’s records change — Merge Duplicates, Sync Libraries, the merge Organize Folders makes — the app backs up each record it changes, under a snapshot or the copies an action keeps; with a backup you make yourself, it doesn’t."),
           more: H("<strong>A snapshot</strong> is the whole dataset as it is this minute, taken through TrueNAS when you press Take a Snapshot on the action’s page, named <code>plexcache-&lt;tool&gt;-&lt;library&gt;-&lt;time&gt;</code> and deleted by the app after the days set below. Needs TrueNAS connected with a key allowed to make snapshots (TrueNAS 24.10 and later).<br><br>" +
           "<strong>A backup I make myself</strong>: you make one, and say so on the action’s page; it counts for half an hour.<br><br>" +
           "<strong>The copies the action keeps</strong>: where an action sets files aside rather than deleting them (Duplicate Versions, Child Dataset), those are the backup. An action that keeps none asks for a snapshot or a backup instead.") }) +
@@ -4195,8 +4177,8 @@ PCI18N.ready.then(function () {
 
   // --------------------------------------------------------------- render
   var PAGES = { health: pageHealth, caching: pageCaching, ssd: pageSsd, library: pageLibrary, tools: pageTools, optimizer: pageOptimizer, convert: pageConvert, dataset: pageDataset,
-    merge: pageMerge, versions: pageVersions, folders: pageFolders, unlink: pageUnlink, filechecks: pageFilechecks, plexchecks: pagePlexchecks,
-    processes: pageProcesses, sync: pageSync, activity: pageActivity, system: pageSystem };
+    merge: pageMerge, versions: pageVersions, folders: pageFolders, unlink: pageUnlink, sync: pageSync, filechecks: pageFilechecks, plexchecks: pagePlexchecks, mirrorchecks: pageMirrorchecks,
+    processes: pageProcesses, mirrors: pageMirrors, activity: pageActivity, system: pageSystem };
   // the tools, under the Tools entry in the menu: [page, name, what it does]
   var TOOLS = [
     ["optimizer", N("Optimizer"), N("Rewrites media files so they suit caching: the dataset’s record size and compression, and MKV files laid out with their metadata at the end.")],
@@ -4206,61 +4188,91 @@ PCI18N.ready.then(function () {
     ["versions", N("Duplicate Versions"), N("Where one Plex item holds the same file twice, removes the extra copy — the file and Plex’s part — after a hold.")],
     ["folders", N("Organize Folders"), N("Moves loose files into a folder of their own, and renames folders to Title (Year) {edition}, without Plex losing anything.")],
     ["unlink", N("Unlink Files"), N("Replaces hard links and symlinks with files of their own — the same bytes — so synced folders match everywhere and the duplicate tools can tidy them safely.")],
+    ["sync", N("Sync Libraries"), N("Makes a library on the mirrored server the same as here, or here the same as there — the files it doesn’t list, versions, matches, edited fields, posters, collections and editions — one way, from the side whose edits win.")],
     ["filechecks", N("File Checks"), N("What’s in each file, as inspected: its tracks — audio, subtitles, their languages and codecs — checked against what a good file has. Each check can be turned off.")],
-    ["plexchecks", N("Plex Checks"), N("How Plex has each item: its versions, their names and lengths, the fields you locked. Each check can be turned off.")]];
-  var TOOL_PAGES = { optimizer: 1, convert: 1, dataset: 1, merge: 1, versions: 1, folders: 1, unlink: 1, filechecks: 1, plexchecks: 1 };
+    ["plexchecks", N("Plex Checks"), N("How Plex has each item: its versions, their names and lengths, the fields you locked. Each check can be turned off.")],
+    ["mirrorchecks", N("Mirror Checks"), N("Compares the two sites of a mirror: the files on each one’s disk, and what each Plex lists. Finds what the folder sync or a Plex scan missed, and has Plex look again.")]];
+  var TOOL_PAGES = { optimizer: 1, convert: 1, dataset: 1, merge: 1, versions: 1, folders: 1, unlink: 1, sync: 1, filechecks: 1, plexchecks: 1, mirrorchecks: 1 };
   function toolsNav(current) {
     return '<div class="lctl" style="margin-bottom:14px"><div class="seg small" role="tablist" aria-label="' + H("Tools") + '">' +
       '<a role="tab" href="/tools" data-nav aria-selected="' + (current === "tools") + '">' + H("All tools") + "</a>" +
       TOOLS.map(function (t) { return '<a role="tab" href="/' + t[0] + '" data-nav aria-selected="' + (current === t[0]) + '">' + esc(T(t[3] || t[1])) + "</a>"; }).join("") + "</div></div>";
   }
-  // What each tool flags, from the state: the four data-layer tools' counts (tool_counts), files still to optimize, folders
-  // that could be datasets of their own. null while nothing is known yet (nothing gathered), so the card shows no number.
-  function toolCount(name) {
-    var tc = (ST.tool_counts || {})[name];
-    if (tc) return Object.keys(tc.libraries || {}).length ? tc.total : null;
-    if (name === "optimizer") {
-      var sums = (ST.optimizer || {}).libraries || {}, keys = Object.keys(sums);
-      return keys.length ? keys.reduce(function (a, k) { return a + ((sums[k] || {}).todo || 0); }, 0) : null;
-    }
-    if (name === "dataset") { var c = (ST.migration || {}).candidates; return c ? c.filter(function (x) { return x.suggested && x.child; }).length : null; }
-    if (name === "filechecks" || name === "plexchecks") {  // Library Health's findings, per category, ignored items apart
-      var hc = ST.health_counts || {}, hk = Object.keys(hc), cat = name === "filechecks" ? "file" : "plex";
-      return hk.length ? hk.reduce(function (a, k) { return a + ((hc[k] || {})[cat] || 0); }, 0) : null;
-    }
-    return null;
+  // ---- Counts: every number a page shows of what's been found, one standard (evaluate.py). The state's "counts" give every
+  // page of the Tools menu — and the Library page — its count for each library and over them all ("tools": the menu's),
+  // each in one of four states: done {s, n}; pending {s, why, progress?, partial?}: not in yet — a placeholder, never a
+  // number, not even 0 — but for a count that grows as it's read (partial: File Checks while the files are inspected),
+  // what's been found so far with the turning wheel beside it — or, worked out again ("last": a check page after a
+  // restart, Mirror Checks scanning again), what was found last time, its findings shown meanwhile; na {s, why}: the page doesn't apply there (not set up) —
+  // a grey dash, information rather than a result; failed {s, why}: couldn't be worked out — red. Drawn
+  // by countChip (the tabs, the Tools page's cards, the menu, the Library page's lines) and countBox (in place of what a
+  // page found while its count isn't done); never worked out here (test_every_count_is_evaluated_before_it_shows).
+  function countOf(page, key) {
+    var c = (ST.counts || {})[page];
+    c = c && (key == null ? c.total : (c.libraries || {})[String(key)]);
+    return c && c.s ? c : { s: "pending" };  // (not in the state yet: still to come)
   }
-  // what's being counted still: a library being read from Plex, or read and its count not worked out yet — the tab or the
-  // card shows a turning wheel there instead of a number, so a missing count isn't taken for nothing to do
-  function toolPending(name) {
-    var tc = (ST.tool_counts || {})[name];
-    if (tc) return !!(tc.pending || []).length;
-    if (name === "optimizer") { var op = ST.optimizer || {}; return !!op.surveying && !Object.keys(op.libraries || {}).length; }
-    if (name === "filechecks" || name === "plexchecks") return ((ST.library || {}).libraries || []).some(function (l) { return l.kind && !l.excluded && healthPending(String(l.key)); });
-    return false;
+  function countDone(c) { return !!c && c.s === "done"; }
+  // what a count says of itself, as plain text (a title): why it isn't a number, and how far it's got
+  function countWhy(c) {
+    var w = c.why ? msg(c.why).replace(/\[([^\]]+)\]\([^)]*\)/g, "$1") : c.s === "pending" ? T("Counting…") : "", p = c.progress;
+    if (c.partial != null) w = (c.last ? P(c.partial, "{n} found last time, checking again.", "{n} found last time, checking again.", { n: fmtNum(c.partial) })
+      : P(c.partial, "{n} found so far, still counting.", "{n} found so far, still counting.", { n: fmtNum(c.partial) })) + " " + w;
+    return p && p.total ? w + " " + T("{done} of {total} · {pct}%", { done: fmtNum(p.done || 0), total: fmtNum(p.total), pct: Math.round(100 * (p.done || 0) / p.total) }) : w;
   }
-  // Library Health's count for a library still to come: the library being read, or read and its count not worked out yet
-  // (the server works it out in the background: App._health_counts_now)
-  function healthPending(k) {
-    var ld = ST.libdata || {}, hc = ST.health_counts || {}, d = (ld.libraries || {})[k], busy = (ld.queue || []).concat(ld.current ? [ld.current] : []);
-    return d && d.ready ? !hc[k] || !!hc[k].stale || hc[k].stamp !== d.stamp : busy.indexOf(k) >= 0;  // (stale: a check switched, an item ignored)
+  // A count as a chip, one way everywhere: a turning wheel while it's still to come — beside what's been found so far, for
+  // a count that grows as it's read (partial); a grey dash where the page doesn't apply; a red ! where it couldn't be
+  // worked out; else the number — red (bad: toolBad) while something red on the page stops part of it, whatever the
+  // number; yellow with something to do; green at 0. What's been found so far takes the colour of what it holds the same
+  // way (partialTone) — red over yellow — but grey, never green, while it's 0: nothing found yet isn't a result
+  // @testable: partialTone
+  function partialTone(c, bad) {
+    return c.s !== "pending" || c.partial == null ? "" : bad ? "fail" : c.partial ? "warn" : "";
   }
-  function countChip(n, pending) {
-    if (pending) return ' <span class="count busy" role="status" title="' + H("Still counting…") + '" aria-label="' + H("Still counting…") + '"><span class="spin" aria-hidden="true"></span></span>';
-    return n != null ? ' <span class="count' + (n ? " warn" : "") + '" title="' + H("Found to do") + '">' + fmtNum(n) + "</span>" : "";
+  // @end
+  function countChip(c, bad) {
+    c = c || { s: "pending" };
+    var why = esc(countWhy(c)), tone = partialTone(c, bad);
+    if (c.s === "pending") return ' <span class="count busy' + (c.partial != null ? " partial" : "") + (tone ? " " + tone : "") + '" role="status" title="' + why + '" aria-label="' + why + '">' +
+      (c.partial != null ? fmtNum(c.partial) + " " : "") + '<span class="spin" aria-hidden="true"></span></span>';
+    if (c.s === "na") return ' <span class="count na" title="' + why + '" aria-label="' + why + '">–</span>';
+    if (c.s === "failed") return ' <span class="count fail" title="' + why + '" aria-label="' + why + '">!</span>';
+    if (bad) return ' <span class="count fail" title="' + H("Something red on its page stops part of it, or couldn’t be checked") + '">' + fmtNum(c.n || 0) + "</span>";
+    return ' <span class="count ' + (c.n ? "warn" : "ok") + '" title="' + H("Found to do") + '">' + fmtNum(c.n || 0) + "</span>";
   }
-  function toolsTotal() { return TOOLS.reduce(function (a, t) { return a + (toolCount(t[0]) || 0); }, 0); }
+  // What a page found, while its count isn't done: in place of its stats and its rows, what it waits for (and how far it's
+  // got; with a partial count, what's been found so far — the rows found so far drawn under it) — or, where the page doesn't
+  // apply or couldn't be worked out, why
+  function countBox(c) {
+    c = c || { s: "pending" };
+    var why = c.why ? links(msg(c.why)) : esc(T("Counting…"));
+    if (c.s === "na") return '<p class="muted toolempty countbox">' + badge("off", T("Doesn’t apply")) + " " + why + "</p>";
+    if (c.s === "failed") return '<p class="muted toolempty countbox">' + badge("fail", T("Couldn’t be worked out")) + " " + why + "</p>";
+    var p = c.progress, pct = p && p.total ? Math.round(100 * (p.done || 0) / p.total) : null;
+    return '<div class="migprog countbox" role="status"><div class="what">' + (c.partial != null ? (c.last ? PH(c.partial, "{n} found last time — checking again", "{n} found last time — checking again", { n: fmtNum(c.partial) })
+      : PH(c.partial, "{n} found so far — still counting", "{n} found so far — still counting", { n: fmtNum(c.partial) }))
+      : H("Not in yet")) + '</div><div class="det">' + why +
+      (pct != null ? " " + H("{done} of {total} · {pct}%", { done: fmtNum(p.done || 0), total: fmtNum(p.total), pct: pct }) : "") + "</div>" +
+      (pct != null ? '<div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>'
+        : '<div class="meter thin busy" role="progressbar" aria-busy="true"><div></div></div>') + "</div>";
+  }
+  // whether something red on a tool's page stops part of it (or a check page's checks couldn't all run), in library ``key``
+  // or in any: the server's word for every tool alike (the state's tools_red, App._tools_red), so the red on a page reaches
+  // its library tab (libTabs), its card on the Tools page and the menu — never worked out here, nor tool by tool
+  function toolBad(name, key) {
+    var libs = (ST.tools_red || {})[name] || [];
+    return key == null ? libs.length > 0 : libs.indexOf(String(key)) >= 0;
+  }
   function pageTools() {
     var out = top(T("Tools"), H("What Plex Cache can do to your library beyond caching it. Each tool has a page of its own; none changes anything until you ask it to. The number on a card is what the tool has found to do, across your libraries."), "");
     out += '<div class="stack">' + toolsNav("tools") + '<div class="grid">' + TOOLS.map(function (t) {
-      var n = toolCount(t[0]);
       return '<section class="card toolcard"><h2><a href="/' + t[0] + '" data-nav>' + esc(T(t[1])) + " →</a>" +
-        countChip(n, toolPending(t[0])) + "</h2><p>" + esc(T(t[2])) + "</p></section>";
+        countChip(countOf(t[0]), toolBad(t[0])) + "</h2><p>" + esc(T(t[2])) + "</p></section>";
     }).join("") + "</div></div>";
     return out;
   }
-  // ---- the tools that scan a library and do the rows you tick (tools/): Merge Duplicates, Duplicate Versions, Organize Folders
-  var TOOL = { merge: { key: null, sel: {}, confirm: false, keep: {} }, versions: { key: null, sel: {}, confirm: false, keep: {} }, folders: { key: null, sel: {}, confirm: false }, unlink: { key: null, sel: {}, confirm: false }, convert: { key: null, sel: {}, confirm: false },
+  // ---- the tools that scan a library and do the rows you tick (tools/): Merge Duplicates, Duplicate Versions, Organize Folders…
+  var TOOL = { merge: { key: null, sel: {}, confirm: false, keep: {} }, versions: { key: null, sel: {}, confirm: false, keep: {} }, folders: { key: null, sel: {}, confirm: false }, unlink: { key: null, sel: {}, confirm: false }, sync: { key: null, sel: {}, confirm: false }, convert: { key: null, sel: {}, confirm: false },
     optimizer: { key: null, sel: {}, confirm: false, libOf: {} } };  // (the optimizer's: a file's ticks by its path, over its libraries)
   function toolState(name) { return ((ST.tools || {})[name]) || { results: [], extra: {} }; }
   // the library tabs: the ones the tool can work on
@@ -4268,17 +4280,15 @@ PCI18N.ready.then(function () {
     var u = TOOL[name], libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind && (!types || types.indexOf(l.type) >= 0); });
     if (!u.key || !libs.some(function (l) { return String(l.key) === String(u.key); })) u.key = libs.length ? String(libs[0].key) : null;
     if (!libs.length) return '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No library of the kind this tool works on.")) + "</p>";
-    var tc = (ST.tool_counts || {})[name] || {};
-    return libTabs({ libs: libs, key: u.key, attrs: function (l) { return 'data-act="tool-lib" data-tool="' + name + '" data-key="' + esc(l.key) + '"'; },
-      count: function (l) { var n = (tc.libraries || {})[l.key]; return { n: n, pending: n == null && (tc.pending || []).indexOf(String(l.key)) >= 0 }; } });
+    return libTabs({ tool: name, libs: libs, key: u.key, attrs: function (l) { return 'data-act="tool-lib" data-tool="' + name + '" data-key="' + esc(l.key) + '"'; } });
   }
-  // ---- The library tabs, drawn one way on every tool's page and both check pages: a tab per library — its icon, its name,
-  // and what the page has found there (countChip: the number, or a turning wheel while it's being counted).
-  // o: {libs, key (the library open), attrs(l) (the tab's data-act and its own), count(l) -> {n (null: not known), pending}}
+  // ---- The library tabs, drawn one way on every tool's page and the check pages: a tab per library — its icon, its name,
+  // and the page's count there (countOf, drawn by countChip: the number, a turning wheel while it's still to come, a grey
+  // dash where the page doesn't apply; red while something red on the page stops part of it there: toolBad).
+  // o: {tool (the page), libs, key (the library open), attrs(l) (the tab's data-act and its own)}
   function libTabs(o) {
     return '<div class="seg small strong" role="tablist" aria-label="' + H("Library") + '">' + o.libs.map(function (l) {
-      var c = o.count(l) || {};
-      return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(o.key)) + '" ' + o.attrs(l) + ">" + libIcon(l.key) + esc(l.title) + countChip(c.n, c.pending) + "</button>";
+      return '<button role="tab" type="button" aria-selected="' + (String(l.key) === String(o.key)) + '" ' + o.attrs(l) + ">" + libIcon(l.key) + esc(l.title) + countChip(countOf(o.tool, l.key), toolBad(o.tool, l.key)) + "</button>";
     }).join("") + "</div>";
   }
   // whether the tool is scanning this library: said by the server, or asked for from this page and not yet answered
@@ -4313,22 +4323,27 @@ PCI18N.ready.then(function () {
   // which can be ticked, is the cards' checks' doing (rowSeverity) — the same in every tool.
   // spec: {name, title, help, types?, options?, read(sc) -> {n, text} (what the scan read: toolStats), units?(r) (how many of
   //        those a row is: 1), extra?(sc) -> [chips], empty, card(r, sc) -> cmpRow's spec, confirm(n), applies(sc),
-  //        stale?(sc), choiceOff?(id, value, sc), after?(t, sc)}
+  //        stale?(sc), choiceOff?(id, value, sc), after?(t, sc)}. What the scan waits for, or why it doesn't apply (Sync
+  //        Libraries without a mirror), is the library's count's to say (countBox), as on every page.
   function toolPage(spec) {
     var name = spec.name, t = toolState(name), out = top(T(spec.title), toolBlurb(name), "");
+    // the library's count (countOf): until it's done, what the tool found there isn't drawn — not its stats, its options'
+    // counts nor its rows — and the placeholder says what it waits for (countBox)
+    var tabs = toolLibs(name, spec.types), key = TOOL[name].key, cnt = key ? countOf(name, key) : null, ready = !key || countDone(cnt);  // (the tabs first: they pick the library)
     var sc = toolRows(name, t), stale = !!(sc && spec.stale && spec.stale(sc));
-    toolAutoScan(name, stale);
-    if (stale) sc = null;  // (a scan from an older version: not shown, and scanned again by itself)
+    if (ready) toolAutoScan(name, stale);  // (the rows of a count that's done: instant, the evaluator's analysis)
+    if (stale || !ready) sc = null;  // (a scan from an older version: not shown, and scanned again by itself)
     // the rows: only those with a yellow chip (something to do) or a red one (what stops it) — a row whose issue is
     // switched off above has neither, and isn't drawn (the Library page shows every item); worked out here, from the rows
     // as found, so a switch takes effect at once
     var cards = sc ? toolCards(name, sc, spec) : null, read = sc && spec.read ? spec.read(sc) : null, units = spec.units || function () { return 1; };
     var sum = function (rows) { return rows.reduce(function (a, r) { return a + units(r); }, 0); };
     out += '<div class="stack">' + toolsNav(name) + '<section class="card">' + toolHead(name, T(spec.title), spec.help) +
-      toolTop({ tabs: toolLibs(name, spec.types), options: toolOptions(name, t, sc, spec), scan: toolScanBar(name, t) + toolRun(t),
+      toolTop({ tabs: tabs, options: toolOptions(name, t, sc, spec), scan: toolScanBar(name, t) + toolRun(t),
         stats: sc && { last: toolScanning(name, t), read: read && read.n, readText: read && read.text, issues: cards.shown.length,
           passNow: read && read.n - sum(cards.rows), passAll: read && read.n - sum(sc.rows), extra: spec.extra ? spec.extra(sc) : [] } });
-    if (sc) {
+    if (!ready) out += countBox(cnt);  // (what it waits for — the mirror not read yet, say — or why it doesn't apply: countBox, as every page's)
+    else if (sc) {
       if (!sc.rows.length) out += '<p class="muted toolempty">' + badge("pass", T("Nothing found")) + " " + spec.empty + "</p>";
       else if (!cards.shown.length) out += '<p class="muted toolempty">' + badge("info", T("Nothing to do")) + " " + H("What was found is about an issue switched off above.") + "</p>";
       else {
@@ -4385,13 +4400,13 @@ PCI18N.ready.then(function () {
     if (!key) return "";
     var kind = toolKind(key), opts = (t.options || []).filter(function (o) { return !kind || o.kinds.indexOf(kind) >= 0; });
     if (!opts.length) return "";
-    var on = toolEnabled(name, key), help = TOOL_OPTION_HELP[name] || {};
+    var on = toolEnabled(name, key), help = TOOL_OPTION_HELP[name] || {}, last = toolRows(name, t);  // (sc: null while the count isn't done — no counts; a choice the last scan rules out stays out)
     return optionGrid(opts.map(function (o) {
       var v = on[o.id], rv = v === o.default ? "" : ' <button type="button" class="revert" data-act="tool-switch-revert" data-tool="' + name + '" data-opt="' + esc(o.id) + '" data-key="' + esc(key) + '" title="' + H("Back to the default ({value})", { value: o.choices ? esc(msg((o.choices.filter(function (c) { return c[0] === o.default; })[0] || [0, o.default])[1])) : o.default ? T("on") : T("off") }) + '">↺</button>';
       var hlp = help[o.id] || richText(msg(o.help || ""));
       if (o.choices) {
-        return optionRow({ help: hlp, title: msg(o.name), label: esc(msg(o.name)) + ' <select class="sel sm" data-act="tool-switch" data-tool="' + name + '" data-opt="' + esc(o.id) + '" data-key="' + esc(key) + '">' +
-          o.choices.map(function (c) { return '<option value="' + esc(c[0]) + '"' + (v === c[0] ? " selected" : "") + ((spec.choiceOff && sc && spec.choiceOff(o.id, c[0], sc)) ? " disabled" : "") + ">" + esc(msg(c[1])) + "</option>"; }).join("") + "</select>", revert: rv });
+        return optionRow({ help: hlp, title: msg(o.name), label: esc(msg(o.name)) + ' <select class="sel sm" data-change="tool-switch" data-tool="' + name + '" data-opt="' + esc(o.id) + '" data-key="' + esc(key) + '">' +
+          o.choices.map(function (c) { return '<option value="' + esc(c[0]) + '"' + ((spec.choiceOff && last && spec.choiceOff(o.id, c[0], last)) ? " disabled" : "") + (v === c[0] ? " selected" : "") + ">" + esc(msg(c[1])) + "</option>"; }).join("") + "</select>", revert: rv });
       }
       // what the switch finds in the library, as last scanned: its rows (grey while it's off: what turning it on would show)
       var n = sc ? sc.rows.filter(function (r) { return (r.issues || []).indexOf(o.id) >= 0; }).length : null;
@@ -4429,6 +4444,8 @@ PCI18N.ready.then(function () {
     if (!out.length) return "";
     return '<div class="toolstats">' + (st.last ? '<span class="det">' + H("From the last scan:") + "</span>" : "") + out.join("") + "</div>";
   }
+  // the Library page's views (Health, Caching): what they found as the tools' pages say it, chips on a row of their own
+  function libStats(st) { var h = toolStats(st); return h ? '<div class="libstats">' + h + "</div>" : ""; }
   function statChip(status, text, tip) { return '<span class="badge b-' + esc(status) + '"' + (tip ? ' title="' + esc(tip) + '"' : "") + ">" + esc(text) + "</span>"; }
   // @testable: placeBlocks — pure: the standard way a check from elsewhere (another tool, Library Health) that stops a row
   // goes on its card: ``blocks`` [{check, rk?}] each on the side of its record (side.rk), else the side that stays (kind
@@ -4445,44 +4462,82 @@ PCI18N.ready.then(function () {
     return c;
   }
   // @end
-  // The checks from elsewhere that stop a tool's rows, one function each (name, library, row) -> [{check, rk?}]: put on every
-  // tool's cards by toolCards (placeBlocks), the server refusing the same rows (Tool.merge_first, Tool.blocking_checks)
-  var ROW_BLOCKS = [
-    function (name, key, r) { var m = mergeFirst(name, key, r); return m ? [{ check: m }] : []; },
-    recordBlocks ];
+  // What stops a tool's rows, put on every tool's cards by toolCards (placeBlocks) — the server refusing the same rows
+  // (Tool.mark_stops) — and only on a row with something to do: its blocks, each a red chip on its record's side
   function cmpBlocks(name, key, r, c) {
-    var all = [];
-    ROW_BLOCKS.forEach(function (f) { all = all.concat(f(name, key, r) || []); });
-    return placeBlocks(c, all);
+    return placeBlocks(c, toolLive(name, key, r) ? recordBlocks(name, key, r) : []);
   }
-  // A row's records flagged by a Library Health check the tool is stopped by (row.blocks, Tool.blocking_checks): a red chip
-  // on the record's side — grey once ignored on the record there, gone while the check is switched off — its text from
-  // BLOCK_TEXT, linking to the record on its checks page (recordLink), its Ignore button there
+  // ---- What stops a row, said one way for every block on every tool's page (blockText). A block (row.blocks: Tool.mark_stops,
+  // every one of Tool.block_ids) is a finding on one of the row's records — a Library Health check the tool is stopped by
+  // (Tool.blocking_checks), a source's finding on its files (Mirror Checks' on Sync Libraries' rows: Tool.blocking_sources),
+  // its record one of a film's several (Merge Duplicates': tool_merge) — gone while its check is switched off. Its red chip
+  // opens to why the row is stopped (what was found, and by which page), what could go wrong if it went ahead anyway, and
+  // the two ways out: put right what was found (an example of how), or Ignore it on the record — going ahead is still
+  // possible, and yours to choose. Ignored (here, or on the page that found it), the chip is grey, says so, and can be
+  // brought back. Every block has its words here, what could go wrong said for each tool it stops; the tests hold every
+  // tool's blocks to it (test_every_block_says_why_and_both_ways_out).
+  // {page (the one that found it), label, found(x) (html), risk: html, or {tool: html}, fix (html), ok (html: when it's right
+  // as it is), ignored (html: what it means once ignored)}
   var BLOCK_TEXT = {
     versions_named_differently: { page: "plexchecks", label: N("Dissimilar file versions"),
-      fail: function (href) {
-        return H("A file looks attached to the wrong record because the naming of the file is dissimilar. To fix this:") +
-          "<br><br><strong>" + H("If these are different titles:") + "</strong> " + H("Split the record apart in Plex (its menu: Split Apart), then scan again.") +
-          "<br><br><strong>" + H("If the files are right:") + "</strong> " + H("One film named in two languages, say: hit the “Ignore” button in <a href=\"{href}\" data-nav>Plex Checks</a> to allow it to be merged here.", { href: href });
-      },
-      ignored: function (href) { return H("This record’s files are named dissimilarly, but that’s ignored on <a href=\"{href}\" data-nav>Plex Checks</a>: the files are taken as right, and the records can be merged.", { href: href }); } } };
+      found: function () { return H("A file looks attached to the wrong record: its name is dissimilar to the record’s other files."); },
+      risk: {
+        merge: N("Merging would join another record to one that may hold a file of a different film: the film’s metadata over the wrong file, put back only by splitting the record apart again."),
+        sync: N("Its files pair it with an item on the other side: with one of them another film’s, syncing could bring the wrong item in line, and carry the wrong grouping across.") },
+      fix: N("If these are different titles: split the record apart in Plex (its menu: Split Apart), then scan again."),
+      ok: N("If the files are right — one film named in two languages, say — ignore it."),
+      ignored: N("Its files are named dissimilarly, but that’s ignored: they’re taken as right.") },
+    // Mirror Checks' findings on an item's files (mirrorhealth.BLOCKS: they aren't the same at the two sites, so the items
+    // paired by them may not be one), as the last compare found them
+    mirror_only_here: mirrorBlock(N("Only on disk here"), N("Let the folder sync copy the file to the other site, or delete it here if it shouldn’t be there, then press Scan Again on Mirror Checks.")),
+    mirror_only_there: mirrorBlock(N("Only on disk at the other site"), N("Let the folder sync copy the file here, or delete it at the other site if it shouldn’t be there, then press Scan Again on Mirror Checks.")),
+    mirror_size_differs: mirrorBlock(N("A different size at each site"), N("Let the folder sync finish copying it, or copy the right one over the other, then press Scan Again on Mirror Checks.")),
+    mirror_missing_here: mirrorBlock(N("In Plex here, not on disk"), N("Put the file back, or have Plex here look at its folder (Scan Folder on Mirror Checks) so it drops what’s gone, then press Scan Again there.")),
+    // the row's record one of a film's several, as Merge Duplicates last found them in this library (Tool.merge_first)
+    tool_merge: { page: "merge", label: N("More than 1 Plex record"),
+      found: function () { return H("This item is on more than one Plex record here."); },
+      risk: N("What’s done here would be done to one record of the film only: the others stay as they were, and the film’s records drift further apart."),
+      fix: N("Merge the records with <a href=\"/merge\" data-nav>Merge Duplicates</a> first: this row is free once they’re one."),
+      ok: N("If they’re meant to be separate records — two films Plex matched alike, say — ignore it: this record is then done on its own."),
+      ignored: N("It’s one of several Plex records, but that’s ignored: this record is done on its own.") } };
+  function mirrorBlock(label, fix) {
+    return { page: "mirrorchecks", label: label,
+      found: function (x) { return H("This item’s files aren’t the same at the two sites: {what}", { what: msg(x.text) }); },
+      risk: N("Its two sides are paired by their files, so syncing it now could bring the wrong item in line: the match, edits and posters of one film set on another."),
+      fix: fix,
+      ok: N("If it’s right as it is — a different cut kept at each site, say — ignore it."),
+      ignored: N("Its files aren’t the same at the two sites, but that’s ignored: it can be synced.") };
+  }
+  // what every red chip drawn says, by tool and block: read by the tests (tests/render.js), as PCINFO
+  var BLOCKS_SAID = {};
+  window.PCBLOCKS = BLOCKS_SAID;
+  // a block's words, the one way: why it's stopped, what could go wrong, fix it, or ignore it (with its button); ignored,
+  // what that means and Bring Back. The page that found it linked to the record there (recordLink), or to the page.
+  function blockText(name, key, x) {
+    var bt = BLOCK_TEXT[x.id], risk = H(typeof bt.risk === "string" ? bt.risk : bt.risk[name]);
+    var onChecks = Object.keys(CHECK_PAGES).some(function (c) { return CHECK_PAGES[c][0] === bt.page; });  // (its record there: a link straight to it)
+    var where = '<a href="' + esc(onChecks ? recordLink(bt.page, key, x.key) : "/" + bt.page) + '" data-nav>' + esc(toolTitle(bt.page)) + "</a>";
+    var btn = function (act, label, tip) {
+      return ' <button class="btn sm" type="button" data-act="' + act + '" data-key="' + esc(key) + '" data-item="' + esc(x.key) + '" data-ids="' + esc(x.id) + '"' + busyAttr(scanBusy(key, [x.id]), tip) + ">" + label + "</button>";
+    };
+    var out = x.ignored ?
+      "<strong>" + H("Ignored:") + "</strong> " + H(bt.ignored) + " " + H("The row can go ahead. Ignored on this record, as on {page}.", { page: "\u0001" }).replace("\u0001", where) +
+        btn("lh-restore", H("Bring Back"), H("Stops this row again until it’s put right or ignored.")) :
+      "<strong>" + H("Why it’s stopped:") + "</strong> " + bt.found(x) + " " + H("Found by {page}.", { page: "\u0001" }).replace("\u0001", where) +
+      "<br><br><strong>" + H("What could go wrong:") + "</strong> " + risk +
+      "<br><br><strong>" + H("To fix it:") + "</strong> " + H(bt.fix) +
+      "<br><br><strong>" + H("Or ignore it:") + "</strong> " + H(bt.ok) + " " + H("The row can then go ahead; it shows as ignored on {page} too.", { page: "\u0001" }).replace("\u0001", where) +
+        btn("lh-ignore", H("Ignore"), H("Lets this row go ahead as it is. It can be brought back."));
+    BLOCKS_SAID[name + ":" + x.id + (x.ignored ? ":ignored" : "")] = out;
+    return out;
+  }
+  // a row's blocks as red chips (grey once ignored) on the side of their record
   function recordBlocks(name, key, r) {
     return (r.blocks || []).filter(function (x) { return x.on !== false && BLOCK_TEXT[x.id]; }).map(function (x) {
-      var bt = BLOCK_TEXT[x.id], href = recordLink(bt.page, key, x.key);
-      return { rk: x.key, check: { id: "block:" + x.id, status: x.ignored ? "grey" : "fail", label: T(bt.label), text: x.ignored ? bt.ignored(href) : bt.fail(href) } };
+      return { rk: x.key, check: { id: "block:" + x.id, status: x.ignored ? "grey" : "fail", label: T(BLOCK_TEXT[x.id].label), text: blockText(name, key, x) } };
     });
   }
-  // A row whose Plex record is one of a film's several, as Merge Duplicates last found them in this library (the rows live
-  // there): a red tag in its card, More than 1 Plex record, opening to merge them first — what's done to it here would be
-  // done to one record of the film only. Red: the row can't be ticked (the server refuses it too: Tool.merge_first). Only
-  // on a row with something to do.
-  function mergeFirst(name, key, r) {
-    var m = toolState("merge").scan, rk = String(r.rk || "");
-    if (name === "merge" || !rk || !m || String(m.library) !== String(key) || !toolLive(name, key, r)) return null;  // (nothing to do: nothing to stop)
-    var hit = (m.rows || []).some(function (x) { return (x.rks || []).map(String).indexOf(rk) >= 0 && toolLive("merge", key, x); });
-    return hit ? { id: "mergefirst", status: "fail", label: T("More than 1 Plex record"), text: H("This item is on more than one Plex record here: <a href=\"/merge\" data-nav>merge them</a> first with Merge Duplicates. What’s done here would be done to one record of the film only.") } : null;
-  }
-  // What a tool's row says about its item: chips (the Sync and Health views' kind), each a badge that opens on a click to its
+  // What a tool's row says about its item: chips (the Health view's kind), each a badge that opens on a click to its
   // explanation and details underneath — the one way a row carries a check (the standard the tests hold the tool pages to).
   // items: [{id, issue?, status?, label, text (html), lines: [html]}]. The colours mean the same everywhere (rowSeverity):
   // yellow (warn) is what there is to do — only the row's issue is yellow, so it's given as ``issue`` (an option id), never
@@ -4596,7 +4651,7 @@ PCI18N.ready.then(function () {
     return parts.map(function (ps) { return ps.slice(k).join("/"); });
   }
   // @end
-  // a side's insides drawn by the tool's own code (Merge Duplicates' records, as the Sync view draws them): its colours greyed,
+  // a side's insides drawn by the tool's own code (two Plex records side by side: syncSide): its colours greyed,
   // so the only yellow or red on a card is a check's
   function cmpQuiet(html) { return String(html).replace(/\bb-(warn|fail)\b/g, "b-grey"); }
   // the Scan button (with a tool's own options before it), and what the last scan found
@@ -4631,8 +4686,8 @@ PCI18N.ready.then(function () {
   // Before files change: two lights — room for what's written, and a recent snapshot (or a backup you made) — both
   // green (or grey) before Apply opens. The tools that change files (peers.py FILE_TOOLS) and what each writes.
   // the tools that change only Plex's records (no files): their Apply backs the records up first, per the Backup preference
-  var PLEX_TOOLS = { merge: true };
-  // Before an Apply that changes Plex's records (Merge Duplicates, Library Sync’s Apply): what's backed up first — the records,
+  var PLEX_TOOLS = { merge: true, sync: true };
+  // Before an Apply that changes Plex's records (Merge Duplicates, Sync Libraries): what's backed up first — the records,
   // or none where you back up yourself (plexbackup.py, ST.plex_backup) — as one line, for the box above the Apply button
   function plexBackupText() { var pb = ST.plex_backup || {}; return pb.text ? links(msg(pb.text)) : ""; }
   function plexBackupNote() {
@@ -4763,11 +4818,9 @@ PCI18N.ready.then(function () {
     var sc = t.scan;
     return sc && String(sc.library) === String(TOOL[name].key) ? sc : null;
   }
-  // the records of one film side by side — the one kept and the ones folded into it — as the Sync view shows
-  // two servers' records: the poster, the fields each has, its files. The folded records' edits are lost.
   var MERGE_FIELD = null;  // the one chip opened: {row, id}
-  // the records of one film side by side, on the comparison card: the one kept and the ones folded into it, as the Sync
-  // view shows two servers' records — the poster, the fields each has, its files. The folded records' edits are lost.
+  // the records of one film side by side, on the comparison card: the one kept and the ones folded into it, as Sync
+  // Libraries shows two servers' records — the poster, the fields each has, its files. The folded records' edits are lost.
   // The records keep their places (the tool's pick on the left); the frame and the arrow say which is kept — the tool's
   // pick, or the one chosen with the arrow (sent with Apply as keep_key)
   var SWAP_KEYS = {  // what the arrow goes round, per tool that has one: the keys of a row's sides, the tool's pick first
@@ -4821,22 +4874,23 @@ PCI18N.ready.then(function () {
       applies: function (sc) { return mergeApplies(sc); } });
   }
   // Merging is this server's Plex only: no file moves, so the folder sync carries nothing and a mirror keeps its own records.
-  // Library Sync is how a mirror's records follow — when it can: only from its source to the other server, and only with
-  // applying on and versions' grouping compared. Said for the mirror there is (scan: tools mirrored()) and the sync as set.
+  // Sync Libraries is how a mirror's records follow — when it can: only from the side whose edits win to the other, and only
+  // with Versions grouped differently on. Said for the mirror there is (scan: tools mirrored()) and Sync Libraries' options
+  // for this library.
   function mergeApplies(sc) {
-    var m = sc.mirror, sy = S.sync || {}, there = "";
+    var m = sc.mirror, on = toolEnabled("sync", sc.library), there = "";
     var warn = false;
     if (m && m.how === "watched") {
-      if (sy.source === "mirror") {
+      if (on.source === "mirror") {
         warn = true;
-        there = H("<strong>{name} is the sync source</strong>, so Sync can’t carry a merge from here: the film stays a difference until it’s merged there too. Merge it on {name} instead (its own Merge Duplicates, or Plex), and Sync then merges it here.", { name: m.name });
-      } else if (sy.mode === "apply" && (sy.what || {}).grouping !== false) {
-        there = H("{name}’s Plex keeps its own records. To merge them there too, use Sync: once compared again, each merged film shows as one item here and several there, and applying it merges them on {name}.", { name: m.name });
+        there = H("<strong>{name}’s edits win</strong> in Sync Libraries, so it can’t carry a merge from here: the film stays a difference until it’s merged there too. Merge it on {name} instead (its own Merge Duplicates, or Plex), and <a href=\"/sync\" data-nav>Sync Libraries</a> then merges it here.", { name: m.name });
+      } else if (on.grouping !== false) {
+        there = H("{name}’s Plex keeps its own records. To merge them there too, use <a href=\"/sync\" data-nav>Sync Libraries</a>: scanned again, each merged film shows as one item here and several there, and applying it merges them on {name}.", { name: m.name });
       } else {
-        there = H("{name}’s Plex keeps its own records. Sync can merge them there too once it’s set to “Compare, and apply what I tick”, with “Versions grouped differently” compared, on the <a href=\"/sync\" data-nav>Sync page</a>.", { name: m.name });
+        there = H("{name}’s Plex keeps its own records. <a href=\"/sync\" data-nav>Sync Libraries</a> can merge them there too once “Versions grouped differently” is on for this library.", { name: m.name });
       }
     } else if (m) {
-      there = H("{name} looks like a mirror of these files, but Sync doesn’t watch it: its Plex keeps its own records. Run Merge Duplicates there too, or watch it on the <a href=\"/sync\" data-nav>Sync page</a>.", { name: m.name });
+      there = H("{name} looks like a mirror of these files, but it isn’t watched: its Plex keeps its own records. Run Merge Duplicates there too, or watch it on the <a href=\"/mirrors\" data-nav>Mirror page</a>.", { name: m.name });
     }
     return { warn: warn,
       does: H("Each ticked film’s records become one, with Plex’s own Merge: the kept record’s metadata stays, and the others’ files become its versions."),
@@ -4879,7 +4933,7 @@ PCI18N.ready.then(function () {
     if (r.mirror_error) checks.push({ id: "mirror", status: "info", label: T("{name} not read", { name: mname }), text: esc(r.mirror_error) });
     var notes = [];
     if (here.length) notes.push({ status: "fail", cls: "vsblocked", html: H("Record destroyed: deleting it would destroy its Plex record here, whose only file it is. Merge the records first with <a href=\"/merge\" data-nav>Merge Duplicates</a>, so it’s a version of the record kept; then it can be deleted.") });
-    if (there.length) notes.push({ status: "info", cls: "vsthere", html: H("Record destroyed on {name}: there it’s the only file of its Plex record, and the synced folder carries the deletion, so that record goes with its metadata and watched state. To keep it, merge the records there first (<a href=\"/merge\" data-nav>Merge Duplicates</a> on {name}, or Sync).", { name: mname }) });
+    if (there.length) notes.push({ status: "info", cls: "vsthere", html: H("Record destroyed on {name}: there it’s the only file of its Plex record, and the synced folder carries the deletion, so that record goes with its metadata and watched state. To keep it, merge the records there first (<a href=\"/merge\" data-nav>Merge Duplicates</a> on {name}, or Sync Libraries).", { name: mname }) });
     return { checks: checks, left: [side(all[0], 0)], right: all.slice(1).map(function (f, k) { return side(f, k + 1); }), notes: notes,
       files: all.map(function (f) { return f.path || f.name; }),
       swap: 'data-act="tool-swap" data-tool="versions" data-id="' + esc(r.id) + '"', swapTitle: T("Keep the other file instead") };
@@ -4998,7 +5052,7 @@ PCI18N.ready.then(function () {
       },
       applies: function (sc) {
         // the warning (the way to do it is the choice among the options above), with what Apply does
-        var how = { watched: T("the mirrored server watched on the Sync page"), suspected: T("a server of your account whose files are here too — a mirror until you say otherwise on the Sync page"), peer: T("another Plex Cache sharing these folders") }[sc.mirror && sc.mirror.how];
+        var how = { watched: T("the mirrored server watched on the Mirror page"), suspected: T("a server of your account whose files are here too — a mirror until you say otherwise on the Mirror page"), peer: T("another Plex Cache sharing these folders") }[sc.mirror && sc.mirror.how];
         var out = sc.mirror
           ? H("<strong>These files look mirrored on {name}</strong>{how}. Syncing files — Syncthing and the like — doesn’t carry a hard link: at the other site each path is a whole copy of its own. So here each link is made a file of its own, which copies the original into a duplicate; the sync then carries the same copies across. Afterwards, make sure your file sync and both Plex servers have caught up with the changes, then run <a href=\"/merge\" data-nav>Merge Duplicates</a> on each side. Removing the extra paths instead would delete the other site’s only copy, and Plex there would lose the item’s metadata.", { name: sc.mirror.name, how: how ? " (" + how + ")" : "" })
           : H("No mirror is known: <strong>removing the extra paths</strong> is the clean way — the file stays where Plex has it and nowhere else. Making each link a file of its own, then merging, is the safer way if these files are mirrored somewhere the app can’t see: a duplicate survives a sync, a removed path doesn’t.");
@@ -5009,16 +5063,121 @@ PCI18N.ready.then(function () {
       choiceOff: function (id, value, sc) { return id === "remove" && value === "remove" && !!sc.mirror; } });
   }
   function unlinkRemoves(sc) { return toolEnabled("unlink", TOOL.unlink.key).remove === "remove" && !(sc && sc.mirror); }
+  // ---- Sync Libraries (tools/sync.py): one item on this server and on its mirror, on the comparison card — the side brought
+  // in line as it is now (framed red, greyed) and as it will be (green: the winning side's item, as it's made there), the
+  // arrow fixed. Each side is a Plex record as syncSide draws it: the fields that differ a chip each, opening to the value
+  // with the other side's beside it. Its files are chips of their own (File n, the same file opening on both sides); the
+  // row's checks name each kind of difference — its option's issue — and what's worth knowing before it's applied.
+  var SYNC_FIELD = null;  // the one field chip opened: {row, id}
+  var SYNC_ISSUE = { missing: "scan", grouping: "grouping", match: "matches", edits: "edits", art: "art", collections: "collections", labels: "collections", editions: "editions" };
+  var SYNC_HELP = N("Makes a library on this server and on its mirror the same, one way: from the side whose edits win to the other, through the other’s Plex. A file the other side’s Plex doesn’t list has its folder scanned there; versions that are one item on the winning side and several on the other are merged into one there; then the match, the fields you edited (set and locked as on the winning side — a field edited only on the other side is unlocked and given the winning side’s value), posters and backgrounds chosen by hand, collections and labels, and a film’s edition are set as on the winning side. Watched state and ratings aren’t: Plex’s own sync carries them (the <a href=\"/mirrors\" data-nav>Mirror page</a>).<br><br>Items are paired across the two servers by their files’ place in the library folder, so another title or another match doesn’t lose the pair. Nothing is deleted on either side: a file or an item only on the other side stays. What this can’t bring in line — several items on the winning side that are one on the other, files grouped another way on each side, a file that isn’t on the other site’s disk — is on <a href=\"/mirrorchecks\" data-nav>Mirror Checks</a>.<br><br>Nothing changes until you press Apply. The records it will change are backed up first, per the Backup preference, and Revert on the run puts them back.");
+  function syncNames(sc) {  // {src, dst}: the side whose edits win, and the side brought in line
+    var n = sc.names || {};
+    return sc.source === "mirror" ? { src: n.mirror, dst: n.this } : { src: n.this, dst: n.mirror };
+  }
+  function syncCard(r, sc) {
+    var nm = syncNames({ names: sc.names, source: r.source }), mirrorWins = r.source === "mirror", kinds = r.kinds || [];
+    var srcs = r.src_items || [], dsts = r.dst_items || [], src = srcs[0] || r.src || {}, dst = dsts[0] || {};
+    var act = 'data-act="sync-field" data-id="' + esc(r.id) + '"', openId = SYNC_FIELD && SYNC_FIELD.row === r.id ? SYNC_FIELD.id : null;
+    // the files, numbered over both sides (the winning side's first) by name; each side's path is its own server's
+    var fidx = {}, order = [], pathOf = {};
+    srcs.concat(dsts).forEach(function (x) {
+      (x.files || []).forEach(function (f, i) { if (!fidx[f]) { order.push(f); fidx[f] = order.length; pathOf[f] = (x.paths || [])[i] || f; } });
+    });
+    var filesOf = function (list) { return [].concat.apply([], list.map(function (x) { return x.files || []; })); };
+    var srcFiles = filesOf(srcs), dstFiles = filesOf(dsts);
+    var base = function (p) { return String(p).split("/").pop(); };
+    var scanned = (r.scan_files || []).map(base), unknown = (r.unknown || []).map(base);
+    var fileChip = function (x, f, i, text) {
+      return { id: "f" + fidx[f], pair: "f" + fidx[f], status: "grey", label: T("File {n}", { n: fidx[f] }), text: text, lines: ['<span class="mono">' + esc((x.paths || [])[i] || f) + "</span>"] };
+    };
+    var keepFile = function (f) {
+      if (r.shape === "split") return H("An item of its own on {name} now: merged there into one item, as one of its versions.", { name: nm.dst });
+      if (dstFiles.indexOf(f) >= 0) return H("Listed on {name} too: it stays as it is.", { name: nm.dst });
+      if (scanned.indexOf(f) >= 0) return H("Not listed on {name}: its folder is scanned there, and Plex there adds it.", { name: nm.dst }) +
+        (unknown.indexOf(f) >= 0 ? " " + H("Whether it’s on disk there can’t be told: no Plex Cache answers at that site.") : "");
+      return H("Not on {name}’s disk, so a scan there can’t find it: see <a href=\"/mirrorchecks\" data-nav>Mirror Checks</a>.", { name: nm.dst });
+    };
+    var dropFile = function (f) {
+      if (r.shape === "split") return H("An item of its own on {name} now: merged into one item with the others, as a version.", { name: nm.dst });
+      return srcFiles.indexOf(f) >= 0 ? H("Listed on {name} now: it stays.", { name: nm.dst }) : H("Only on {name}: it stays as it is. Nothing is deleted.", { name: nm.dst });
+    };
+    // the side brought in line as it is now (each of its items, where the winning side's one is several there) — or, not
+    // listed there at all, a side saying so; and as it will be: the winning side's item
+    var left = dsts.length ? dsts.map(function (x) {
+      return { kind: "drop", label: T("{name} now", { name: nm.dst }), body: syncSide(Object.assign({}, x, { files: [] }), src, mirrorWins ? "" : "mirror", false, kinds, act, openId, null, null, null, null, true),
+        checks: (x.files || []).map(function (f, i) { return fileChip(x, f, i, dropFile(f)); }) };
+    }) : [{ kind: "drop", label: T("{name} now", { name: nm.dst }), poster: "", noPoster: T("Not listed there"), what: '<span class="muted">' + H("Not listed on {name}", { name: nm.dst }) + "</span>", lines: [], checks: [] }];
+    var right = [{ kind: "keep", label: T("{name} after syncing", { name: nm.dst }), body: syncSide(Object.assign({}, src, { files: [] }), dsts[0] || null, mirrorWins ? "mirror" : "", true, kinds, act, openId, null, null, null, null, true),
+      checks: (src.files || []).map(function (f, i) { return fileChip(src, f, i, keepFile(f)); }) }];
+    // the row's checks: each kind of difference, yellow while its option is on — then what's worth knowing first (grey)
+    var both = function (a, b) { return [esc(nm.src) + ": " + a, esc(nm.dst) + ": " + b]; };
+    var srcLocked = src.locked || [], dstLocked = dst.locked || [];
+    var setNow = srcLocked.filter(function (f) { return dstLocked.indexOf(f) < 0 || fieldValue(src, f) !== fieldValue(dst, f); });
+    var undone = dstLocked.filter(function (f) { return srcLocked.indexOf(f) < 0; });
+    var checks = [];
+    kinds.forEach(function (k) {
+      var issue = SYNC_ISSUE[k];
+      if (!issue) return;
+      if (k === "missing") {
+        var nf = (r.scan_files || []).length;
+        checks.push({ id: "k-missing", issue: issue, label: P(nf, "{n} file not listed there", "{n} files not listed there", { n: nf }),
+          text: H("{name}’s Plex doesn’t list it: the folder is scanned there, and Plex adds what it finds.", { name: nm.dst }), lines: (r.scan || []).map(function (f) { return '<span class="mono">' + esc(f) + "</span>"; }) });
+      } else if (k === "grouping") {
+        checks.push({ id: "k-grouping", issue: issue, label: T("Versions grouped"), text: H("One item on {src}, {n} items on {dst}: merged into one item there with Plex’s own Merge, every file a version.", { src: nm.src, dst: nm.dst, n: dsts.length }) });
+      } else if (k === "match") {
+        checks.push({ id: "k-match", issue: issue, label: T("Match"), text: H("Matched to another entry on {dst}, or unmatched there: matched as on {src}.", { src: nm.src, dst: nm.dst }),
+          lines: both(src.matched && src.guid ? guidLink(src.guid) : esc(T("Unmatched")), dst.matched && dst.guid ? guidLink(dst.guid) : esc(T("Unmatched"))) });
+      } else if (k === "edits") {
+        checks.push({ id: "k-edits", issue: issue, label: T("Edited fields"),
+          text: (setNow.length ? H("Edited on {src}: set and locked the same on {dst}.", { src: nm.src, dst: nm.dst }) : "") + (setNow.length && undone.length ? " " : "") +
+            (undone.length ? H("Edited only on {dst}: unlocked there, and given {src}’s value.", { src: nm.src, dst: nm.dst }) : ""),
+          lines: setNow.concat(undone).map(function (f) { return "<strong>" + esc(fieldName(f)) + "</strong> " + esc(fieldValue(src, f) || "—"); }) });
+      } else if (k === "art") {
+        checks.push({ id: "k-art", issue: issue, label: T("Poster chosen by hand"), text: H("The poster or background chosen by hand on {src} is uploaded to {dst} and chosen there.", { src: nm.src, dst: nm.dst }) });
+      } else if (k === "collections" || k === "labels") {
+        checks.push({ id: "k-" + k, issue: issue, label: k === "collections" ? T("Collections") : T("Labels"), text: H("Made the same as on {src}.", { src: nm.src }),
+          lines: both(esc((src[k] || []).join(", ") || "—"), esc((dst[k] || []).join(", ") || "—")) });
+      } else if (k === "editions") {
+        checks.push({ id: "k-editions", issue: issue, label: T("Edition"), text: H("Set as on {src}: Plex doesn’t carry editions between servers.", { src: nm.src }), lines: both(esc(src.edition || "—"), esc(dst.edition || "—")) });
+      }
+    });
+    if (r.warn) checks.push({ id: "empty", status: "info", label: T("Would lose metadata"), text: H("{src}’s item is unmatched with no description, while {dst}’s is filled in: check whose edits should win before applying.", { src: nm.src, dst: nm.dst }) });
+    if (kinds.indexOf("edits") >= 0 && undone.length) checks.push({ id: "undone", status: "info", label: T("Edits undone there"), text: H("Edited on {dst} only, so unlocked there and given {src}’s value: {fields}.", { src: nm.src, dst: nm.dst, fields: undone.map(fieldName).join(", ") }) });
+    var flagged = [].concat.apply([], ((r.tags || {}).src || []).concat((r.tags || {}).dst || [])).filter(function (t) { return t.id !== "locked_empty"; });
+    if (flagged.length) checks.push({ id: "flagged", status: "info", label: T("Looks wrong"), text: H("A Plex check flags a record here: its data may be wrong on that side. Check it before applying."), lines: flagged.map(function (t) { return esc(msg(t.text)); }) });
+    return { checks: checks, left: left, right: right, files: order.map(function (f) { return pathOf[f]; }) };
+  }
+  function syncApplies(sc) {
+    var nm = syncNames(sc), mirrorWins = sc.source === "mirror";
+    return { warn: mirrorWins,
+      does: H("Each ticked item on {dst} is brought in line with {src}’s, through its Plex: the folders of files it doesn’t list scanned, versions merged, then the match, edited fields, posters, collections and the edition set as on {src}.", { src: nm.src, dst: nm.dst }),
+      changes: (mirrorWins ? H("<strong>This server’s own Plex records</strong>: {src}’s edits win.", { src: nm.src }) : H("Only {dst}’s Plex records.", { dst: nm.dst })) + " " + H("No file is touched, and nothing is deleted on either server.") };
+  }
+  function pageSync() {
+    var sc0 = toolRows("sync", toolState("sync")) || {};
+    return toolPage({ name: "sync", title: "Sync Libraries",
+      help: SYNC_HELP + "<br><br>" + H("Why: the folder sync carries the files, but each Plex keeps its own records — its matches, your edits, the posters you chose, collections — so the two drift apart. This brings the other side in line, a row at a time, once you’ve seen what changes."),
+      stale: function (sc) { return !sc.names || sc.rows.some(function (r) { return !r.kinds || !r.src_items; }); },
+      read: function (sc) { return sc.records == null ? null : { n: sc.records, text: P(sc.records, "{n} record read", "{n} records read", { n: fmtNum(sc.records) }) }; },
+      extra: function (sc) {
+        var nm = syncNames(sc), out = [statChip("grey", T("{n} on {name} too", { n: fmtNum(sc.matched || 0), name: nm.dst }), T("Items found on both servers, by their files’ place in the library folder."))];
+        if (sc.disk === false) out.push(statChip("grey", T("{name}’s disk not read", { name: nm.dst }), T("No Plex Cache answers at that site: a file its Plex doesn’t list has its folder scanned there, on the disk or not.")));
+        return out;
+      },
+      empty: H("Nothing to bring in line: the two servers have this library the same."),
+      card: function (r, sc) { return syncCard(r, sc); },
+      confirm: function (n) { return P(n, "Bring {n} item on {name} in line? Its Plex records are changed to match the other side’s.", "Bring {n} items on {name} in line? Their Plex records are changed to match the other side’s.", { n: n, name: syncNames(sc0).dst }); },
+      applies: function (sc) { return syncApplies(sc); } });
+  }
   // the two check pages: Library Health's view, one category of checks at a time, over the library chosen (the same tabs)
   function checksPage(name, only, title, help) {
     var libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
     if (!LIB.key || !libs.some(function (l) { return String(l.key) === String(LIB.key); })) LIB.key = libs.length ? String(libs[0].key) : null;
     var out = top(T(title), toolBlurb(name), "") + '<div class="stack">' + toolsNav(name) + '<section class="card">' + toolHead(name, T(title), help);
     if (!libs.length) return out + '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No libraries yet.")) + "</p></section></div>";
-    // the tabs, as every tool's: each with what the page's checks found there (Library Health's counts, ignored items left out)
-    var hc = ST.health_counts || {};
-    var tabs = libTabs({ libs: libs, key: LIB.key, attrs: function (l) { return 'data-act="lib-tab" data-key="' + esc(l.key) + '"'; },
-      count: function (l) { var k = String(l.key), got = hc[k]; return { n: got && !healthPending(k) ? got[only] || 0 : null, pending: healthPending(k) }; } });
+    // the tabs, as every tool's: each with the page's count there (what its checks found, ignored items left out)
+    var tabs = libTabs({ tool: name, libs: libs, key: LIB.key, attrs: function (l) { return 'data-act="lib-tab" data-key="' + esc(l.key) + '"'; } });
     return out + libHealthView(only, tabs) + "</section></div>";
   }
   function pageFilechecks() {
@@ -5027,6 +5186,14 @@ PCI18N.ready.then(function () {
   function pagePlexchecks() {
     return checksPage("plexchecks", "plex", "Plex Checks", H("Each check looks at an item as Plex has it: several files on one item named for different titles or years (a version added to the wrong item), versions whose running times differ by more than a little, a field you locked that holds nothing. The locked-field check reads each item’s own page, which the data layer gathers after the records. Only the items a check flags are listed (every item is on the Library page), each with a chip per check."));
   }
+  function pageMirrorchecks() {
+    return checksPage("mirrorchecks", "mirror", "Mirror Checks", H("Each library paired with one on the mirrored server (the Mirror page) is compared file by file, by each file’s place in the library folder. " +
+      "<strong>The disks</strong>: through the Plex Cache at the other site, its files against these — on one side only, or a different size. A file changed in the last hour is left out: it may still be syncing. " +
+      "<strong>The Plexes</strong>: what the mirror’s Plex lists against what Plex here lists, and the files here that Plex doesn’t list. Scan Folder, under such a finding, asks the Plex that’s missing the file to look at its folder. " +
+      "<strong>The folder sync</strong>: whether the markers and claims in the hidden .plexcache folder reach the other site. While they don’t, the two Plex Caches could optimize the same file, so optimizing and the file tools are held in that library until the sync carries them, until you ignore the finding, or while its check is off.<br><br>" +
+      "It only reads, every 6 hours and when you press Scan Again. Each finding is a chip on its item — a file Plex doesn’t list, or one only at the other site, is an item of its own. Ignore greys an item’s findings out for good."));
+  }
+
   function pageConvert() {
     var kindOf = {};
     CONVERT_TYPES.forEach(function (t) { kindOf[t[0]] = t; });
@@ -5037,8 +5204,8 @@ PCI18N.ready.then(function () {
       empty: H("Every video file is MKV already, or its MKV is on its way into Plex."),
       // the comparison card, its direction fixed: the original, deleted once Plex has the MKV, and the MKV written beside it
       card: function (r) {
-        // the MKV's name: <name>.mkv, or the next free one where that's taken (r.new_name, from the scan)
-        var t = kindOf[r.kind] || [r.kind, (r.kind || "").toUpperCase(), "", [], ""], mkv = r.new_name || r.name.replace(/\.[^./]*$/, "") + ".mkv", mkvPath = r.path.replace(/[^/]*$/, "") + mkv;
+        // the MKV's name as it will be written: "<name> MKV-<EXT>.mkv", or the next free one, no two rows the same (r.new_name, from the scan)
+        var t = kindOf[r.kind] || [r.kind, (r.kind || "").toUpperCase(), "", [], ""], mkv = r.new_name || r.name.replace(/\.([^./]*)$/, function (m, ext) { return " MKV-" + ext.toUpperCase() + ".mkv"; }), mkvPath = r.path.replace(/[^/]*$/, "") + mkv;
         var checks = [{ id: "kind", issue: r.kind, label: T(t[1]), text: H(t[2]) + (t[3].length ? "<br><strong>" + H("What MKV wouldn’t keep") + "</strong>" : ""), lines: t[3].map(function (x) { return H(x); }).concat(t[4] ? ["<strong>" + H("How converting handles it") + "</strong> " + H(t[4])] : []) }];
         if (r.skipped) checks.push({ id: "skip", status: "info", label: T("Left as it is"), text: H("Converting would lose something, so the file was left as it is last time: {why}. It isn’t tried again while it stays as it is — untick it, or leave it ticked to try once more.", { why: msg(r.skipped) }) });
         return { checks: checks,
@@ -5061,7 +5228,7 @@ PCI18N.ready.then(function () {
     return top(T("Convert Folder to Child Dataset"), toolBlurb("dataset"), "") +
       '<div class="stack">' + toolsNav("dataset") + migrationCard() + "</div>";
   }
-  var ALIAS = { features: "caching", settings: "system" };  // pages before 0.15
+  var ALIAS = { features: "caching", settings: "system", mirror: "mirrorchecks" };  // pages before 0.15 (and Mirror Checks, once Mirror Health at /mirror)
 
   // The side menu folds down to its icons (remembered in this browser); folded, each item's
   // name shows on hover instead.
@@ -5100,6 +5267,22 @@ PCI18N.ready.then(function () {
     document.querySelectorAll(".posterbig").forEach(function (el) { el.style.width = Math.round(el.offsetHeight * 2 / 3) + "px"; });
   }
   window.addEventListener("resize", fitPosters);
+  // The count beside Tools in the menu: what the tools have found to do, over every page (the state's "tools" count, as
+  // countChip draws one) — a turning wheel while any page's is still to come (beside what's been found so far, coloured as
+  // countChip colours it: partialTone), a red ! where one couldn't be worked out, red
+  // while something red on a tool's page stops part of it (shown even at 0: bad), nothing at 0
+  function menuCount(el, c, bad) {
+    if (!el) return;
+    var busy = c.s === "pending", html = busy ? (c.partial ? fmtNum(c.partial) : "") + '<span class="spin" aria-hidden="true"></span>' : c.s === "failed" ? "!" : c.s === "done" && (c.n || bad) ? fmtNum(c.n) : "";
+    if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }  // (the wheel not started again with every state)
+    el.hidden = !html;
+    var tone = partialTone(c, bad);
+    el.classList.toggle("busy", busy);
+    el.classList.toggle("warn", tone === "warn");
+    el.classList.toggle("fail", tone === "fail" || (!busy && (bad || c.s === "failed")));
+    var why = busy || c.s === "failed" ? countWhy(c) : "";
+    if (why) { el.setAttribute("title", why); el.setAttribute("aria-label", why); } else { el.removeAttribute("title"); el.removeAttribute("aria-label"); }
+  }
   // a redraw that leaves the page where it is: what opens or closes under a click doesn't move what's on the screen
   function renderStill() { var y = window.scrollY; render(); window.scrollTo(window.scrollX, y); }
   function render() {
@@ -5123,8 +5306,7 @@ PCI18N.ready.then(function () {
     var dot = document.getElementById("dot-health");
     var c = ST.health ? ST.health.counts : null;
     dot.className = "dot " + (!c ? "" : c.fail ? "fail" : c.warn ? "warn" : "ok");
-    var tcount = document.getElementById("count-tools"), ttotal = toolsTotal();  // what the tools have found to do, beside Tools
-    if (tcount) { tcount.textContent = ttotal ? fmtNum(ttotal) : ""; tcount.hidden = !ttotal; }
+    menuCount(document.getElementById("count-tools"), countOf("tools"), TOOLS.some(function (t) { return toolBad(t[0]); }));
     var ver = document.getElementById("version"), up = ST.updates || {};
     // the stages: updating (asked of TrueNAS, until this page comes back on the new build), checking (just started, GitHub not
     // asked yet), an update to have (a button when TrueNAS can do it, else a link), or nothing to say
@@ -5209,8 +5391,15 @@ PCI18N.ready.then(function () {
   }
 
   var build = null;  // the server's fingerprint of these files (server.py BUILD)
+  // the page open, and the library open on it, told with every state the page asks for: the server works out what they
+  // show first (evaluate.py: Evaluator.focus) — and the inspector reads that library's files first
+  function focusQuery() {
+    if (!TOOL_PAGES[page] && !HEALTH_PAGES[page]) return "";
+    var key = TOOL[page] ? TOOL[page].key : HEALTH_PAGES[page] ? LIB.key : "";
+    return "?focus=" + encodeURIComponent(page + ":" + (key || ""));
+  }
   function load() {
-    return api("/api/state").then(function (st) {
+    return api("/api/state" + focusQuery()).then(function (st) {
       // A new version of the web UI (after an update or tnsync): reload so this tab runs it.
       // Unsaved changes are sent first; the next refresh reloads.
       if (build && st.build && st.build !== build && !Object.keys(pending).length) { location.reload(); return; }
@@ -5231,7 +5420,7 @@ PCI18N.ready.then(function () {
     if (page === "ssd") EST = {};  // the what-if sliders start from your settings every time
     if (push) history.pushState({}, "", "/" + page);
     else if (location.pathname !== "/" + page && location.pathname !== "/") history.replaceState({}, "", "/" + page + location.hash);
-    document.title = "Plex Cache – " + ({ health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), library: T("Library"), tools: T("Tools"), processes: T("Processes"), sync: T("Sync"), activity: T("Metrics"), system: T("System") }[page] ||
+    document.title = "Plex Cache – " + ({ health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), library: T("Library"), tools: T("Tools"), processes: T("Processes"), mirrors: T("Mirror"), activity: T("Metrics"), system: T("System") }[page] ||
       (TOOLS.filter(function (t) { return t[0] === page; })[0] || [0, page])[1]);
     render();
     window.scrollTo(0, 0);
@@ -5315,7 +5504,7 @@ PCI18N.ready.then(function () {
 
   document.addEventListener("click", function (e) {
     // ↺ on the Optimizer page and the second server's pairs: back to the default
-    var orv = e.target.closest("[data-optlib-revert], [data-p2lib-revert], [data-syncwhat-revert], [data-lhcheck-revert], [data-lhlang-revert], [data-lhquality-revert]");
+    var orv = e.target.closest("[data-optlib-revert], [data-p2lib-revert], [data-lhcheck-revert], [data-lhlang-revert], [data-lhquality-revert]");
     if (orv) {
       e.preventDefault();
       if (orv.dataset.lhlangRevert !== undefined) {
@@ -5333,10 +5522,6 @@ PCI18N.ready.then(function () {
         var lh = JSON.parse(JSON.stringify((S.library_health || {}).checks || {}));
         delete lh[orv.dataset.lhcheckRevert];
         queueSave("library_health", "checks", lh, true);
-      } else if (orv.dataset.syncwhatRevert !== undefined) {
-        var sw = JSON.parse(JSON.stringify((S.sync || {}).what || {}));
-        sw[orv.dataset.syncwhatRevert] = ((ST.sync_defaults || {}).what || {})[orv.dataset.syncwhatRevert];
-        queueSave("sync", "what", sw, true);
       } else {
         var pairs = JSON.parse(JSON.stringify((S.plex2 || {}).libraries || {}));
         delete pairs[orv.dataset.p2libRevert];
@@ -5483,7 +5668,7 @@ PCI18N.ready.then(function () {
         .catch(function (e) { toast(e.message); el.disabled = false; });
     }
     else if (act === "updates-check") { el.disabled = true; api("/api/updates/check", {}).then(function () { setTimeout(load, 1500); }).catch(function (e) { toast(e.message); }); }
-    else if (act === "tool-lib") { OPT_CONFIRM = null; TOOL[el.dataset.tool].key = el.dataset.key; TOOL[el.dataset.tool].sel = {}; TOOL[el.dataset.tool].confirm = false; TOOL[el.dataset.tool].offset = 0; render(); }
+    else if (act === "tool-lib") { OPT_CONFIRM = null; TOOL[el.dataset.tool].key = el.dataset.key; TOOL[el.dataset.tool].sel = {}; TOOL[el.dataset.tool].confirm = false; TOOL[el.dataset.tool].offset = 0; render(); load(); }  // (load: the library opened is worked out first)
     else if (act === "tool-swap") {  // the comparison card's arrow: the next side of the row kept instead (round and round)
       var wt = el.dataset.tool, wrow = (((toolState(wt).scan || {}).rows) || []).filter(function (r) { return r.id === el.dataset.id; })[0];
       if (wrow) {
@@ -5494,6 +5679,7 @@ PCI18N.ready.then(function () {
       }
     }
     else if (act === "merge-field") { MERGE_FIELD = MERGE_FIELD && MERGE_FIELD.row === el.dataset.id && MERGE_FIELD.id === el.dataset.f ? null : { row: el.dataset.id, id: el.dataset.f }; delete TOOL_OPEN["merge:" + el.dataset.id]; render(); }
+    else if (act === "sync-field") { SYNC_FIELD = SYNC_FIELD && SYNC_FIELD.row === el.dataset.id && SYNC_FIELD.id === el.dataset.f ? null : { row: el.dataset.id, id: el.dataset.f }; delete TOOL_OPEN["sync:" + el.dataset.id]; render(); }
     else if (act === "tool-switch" || act === "tool-switch-revert") {
       // a tool's option for this library: saved under tools.<tool>.<library>, and the page redrawn at once from the rows it has
       var sname = el.dataset.tool, skey = el.dataset.key, sopt = el.dataset.opt, st2 = toolState(sname);
@@ -5510,6 +5696,22 @@ PCI18N.ready.then(function () {
     }
     else if (act === "tool-sel") { TOOL[el.dataset.tool].sel[el.dataset.id] = el.checked; TOOL[el.dataset.tool].confirm = false; render(); }
     else if (act === "lh-retry") { delete LIB.health[LIB.key]; render(); }
+    else if (act === "lh-scan") {  // Scan Again on a check page whose findings are worked out in the background (Mirror Checks)
+      el.disabled = true;
+      api("/api/library/health/scan", { library: el.dataset.key, category: el.dataset.cat }).then(function (r) { if (!r.started) toast(T("Already running")); load(); })
+        .catch(function (e) { toast(e.message, true); load(); });
+    }
+    else if (act === "lh-action") {  // a finding's action, under its chip (Mirror Checks' Scan Folder)
+      el.disabled = true;
+      api("/api/library/health/action", { library: el.dataset.key, item: el.dataset.item, check: el.dataset.check }).then(function (r) { toast(msg(r.said)); load(); })
+        .catch(function (e) { toast(e.message, true); render(); });
+    }
+    else if (act === "lh-show") {  // a tool's chips on the Library page shown or hidden: the view only, kept as the tools' switches are
+      var shown = JSON.parse(JSON.stringify((S.library_health || {}).checks || {}));
+      shown[el.dataset.id] = el.dataset.on === "1";
+      queueSave("library_health", "checks", shown, true);
+      render();
+    }
     else if (act === "tool-page") { TOOL[el.dataset.tool].offset = Number(el.dataset.offset) || 0; render(); }
     else if (act === "tool-pagesel") {  // the rows on the page open that can be ticked
       var pu = TOOL[el.dataset.tool];
@@ -5557,6 +5759,7 @@ PCI18N.ready.then(function () {
       var ck = el.dataset.tool + ":" + el.dataset.card, cur = TOOL_OPEN[ck];
       TOOL_OPEN[ck] = cur && cur.id === el.dataset.id ? null : { id: el.dataset.id, pair: el.dataset.pair || "", group: el.dataset.group };
       if (MERGE_FIELD && MERGE_FIELD.row === el.dataset.card) MERGE_FIELD = null;
+      if (SYNC_FIELD && SYNC_FIELD.row === el.dataset.card) SYNC_FIELD = null;
       renderStill();
     }
     else if (act === "tool-history") { var th = TOOL[el.dataset.tool], open = th.history !== undefined ? th.history : true; th.history = !open; renderStill(); }
@@ -5590,7 +5793,7 @@ PCI18N.ready.then(function () {
       if (m === "ask_delete") { MIG_CONFIRM_DELETE = true; render(); return; }
       MIG_CONFIRM_DELETE = false;
       el.disabled = true;
-      api("/api/migration", { action: m, library: el.dataset.lib, folder: el.dataset.folder })
+      api("/api/migration", { action: m, library: el.dataset.lib, folder: el.dataset.folder, scope: el.dataset.scope })
         .then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "queue-remove") {
@@ -5626,44 +5829,11 @@ PCI18N.ready.then(function () {
     else if (act === "lh-ignore" || act === "lh-restore") {
       el.disabled = true;
       api("/api/library/health/ignore", { library: el.dataset.key, item: el.dataset.item, action: act === "lh-ignore" ? "ignore" : "restore", ids: (el.dataset.ids || "").split(",").filter(Boolean) })
-        .then(function () { LIB.health = {}; render(); }).catch(function (e) { toast(e.message); });
+        .then(function () { LIB.health = {}; render(); load(); }).catch(function (e) { toast(e.message); });  // (a tool's rows freed or stopped at once: the state again)
     }
-    else if (act === "sync-start") {
+    else if (act === "sync-discover") {
       el.disabled = true;
-      LIB.hold.sync[el.dataset.key] = false;
-      api("/api/sync/start", { library: el.dataset.key, force: !!el.dataset.force }).then(function () { LIB.diff = {}; load(); }).catch(function (e) { toast(e.message, true); load(); });
-    }
-    else if (act === "sync-field") {
-      var fk = el.dataset.key + "/" + el.dataset.i;
-      SYNC_FIELD = SYNC_FIELD && SYNC_FIELD.at === fk && SYNC_FIELD.id === el.dataset.f ? null : { at: fk, id: el.dataset.f };
-      render();
-    }
-    else if (act === "sync-open") {
-      var o = SYNC_OPEN[el.dataset.key] = SYNC_OPEN[el.dataset.key] || {};
-      o[el.dataset.i] = !o[el.dataset.i];
-      render();
-    }
-    else if (act === "sync-sel") { var ss = SYNC_SEL[el.dataset.key] = SYNC_SEL[el.dataset.key] || {}; ss[el.dataset.id] = el.checked; SYNC_CONFIRM = false; render(); }
-    else if (act === "sync-all") {
-      var sa = SYNC_SEL[el.dataset.key] = {};
-      if (el.checked) ((LIB.diff[el.dataset.key] || {}).items || []).forEach(function (it) { if (["extra", "missing", "regroup", "merge"].indexOf(it.shape) < 0) sa[it.id] = true; });
-      SYNC_CONFIRM = false; render();
-    }
-    else if (act === "sync-apply") { SYNC_CONFIRM = true; render(); }
-    else if (act === "sync-apply-no") { SYNC_CONFIRM = false; render(); }
-    else if (act === "sync-apply-yes") {
-      el.disabled = true;
-      var sk = el.dataset.key, ssel = SYNC_SEL[sk] || {}, sids = Object.keys(ssel).filter(function (k) { return ssel[k]; });
-      SYNC_SEL[sk] = {}; SYNC_CONFIRM = false;
-      api("/api/sync/apply", { library: sk, ids: sids }).then(function () { LIB.diff = {}; load(); }).catch(function (e) { toast(e.message, true); load(); });
-    }
-    else if (act === "sync-undo") {
-      el.disabled = true;
-      api("/api/sync/undo", { id: el.dataset.id }).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
-    }
-    else if (act === "sync-compare" || act === "sync-discover" || act === "sync-approve") {
-      el.disabled = true;
-      api("/api/" + act.replace("-", "/"), {}).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
+      api("/api/sync/discover", {}).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "plex2-use-found") {  // a server found by discovery: watched (its addresses tried again), and chosen as the mirror
       el.disabled = true;
@@ -5671,17 +5841,12 @@ PCI18N.ready.then(function () {
         .then(function () { queueSave("sync", "mirrors", "plex2", true); load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "lib-tab") {
-      // the library opened inspects its files (pausing the one before, which carries on when it's opened again)
-      var was = LIB.key;
-      LIB.key = el.dataset.key; LIB.offset = 0; LIB.healthOffset = 0; LIB.syncOffset = 0; LIB.open = null; LIB.data = null; LIB.hold.inspect[LIB.key] = false; LIB.hold.sync[LIB.key] = false;
-      // a compare of the library left: paused (it picks up when the library is opened again)
-      var wj = ((ST.sync || {}).libs || {})[was] || {};
-      if (LIB.view === "sync" && was && was !== LIB.key && (wj.running || wj.queued)) api("/api/sync/start", { library: was, pause: true });
-      libFetch(true); render();
+      // the library opened is worked out first — its counts, and the inspector reads its files first (focusQuery: load)
+      LIB.key = el.dataset.key; LIB.offset = 0; LIB.healthOffset = 0; LIB.open = null; LIB.data = null; LIB.hold.inspect[LIB.key] = false;
+      libFetch(true); render(); load();
     }
     else if (act === "lib-page") { LIB.offset = Number(el.dataset.offset) || 0; LIB.open = null; libFetch(true); }
     else if (act === "lh-page") { LIB.healthOffset = Number(el.dataset.offset) || 0; render(); window.scrollTo(0, 0); }
-    else if (act === "sync-page") { LIB.syncOffset = Number(el.dataset.offset) || 0; render(); window.scrollTo(0, 0); }
     else if (act === "lib-block") {
       var bn = el.dataset.n === "video" ? "video" : Number(el.dataset.n);
       LIB.block[el.dataset.file] = LIB.block[el.dataset.file] === bn ? null : bn;
@@ -5734,6 +5899,11 @@ PCI18N.ready.then(function () {
     else if (act === "plex2-refresh" || act === "plex2-forget") {
       el.disabled = true;
       api("/api/" + act.replace("-", "/"), {}).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
+    }
+    else if (act === "peer-pair" || act === "peer-unpair" || act === "peer-test") {  // System → Mirror Plex Cache
+      el.disabled = true;
+      flush().then(function () { return api("/api/peer/" + act.slice(5), {}); }).then(function (got) { ST.peer = got; render(); setTimeout(load, 2000); })
+        .catch(function (e) { toast(e.message, true); load(); });
     }
   }
 
@@ -5933,7 +6103,7 @@ PCI18N.ready.then(function () {
       LIB.health = {};
       return;
     }
-    if (el.dataset.act === "tool-switch" && el.tagName === "SELECT") { action("tool-switch", el); return; }  // (a tool's choice for the library)
+    if (el.dataset.change && el.tagName === "SELECT") { action(el.dataset.change, el); return; }  // (a choice acts when changed — data-change, never data-act: a click only opens it)
     if (el.dataset.lhquality !== undefined) {  // the audio quality level: the floors move, so the checks run again
       queueSave("library_health", "audio_quality", el.value, true);
       LIB.health = {};
@@ -5944,14 +6114,6 @@ PCI18N.ready.then(function () {
     checks[el.dataset.lhcheck] = el.checked;
     queueSave("library_health", "checks", checks, true);
     render();  // (the findings are all there: the view follows the switch at once)
-  });
-  // Sync: what's compared
-  document.addEventListener("change", function (e) {
-    var el = e.target;
-    if (!el.dataset || el.dataset.syncwhat === undefined) return;
-    var what = JSON.parse(JSON.stringify((S.sync || {}).what || {}));
-    what[el.dataset.syncwhat] = el.checked;
-    queueSave("sync", "what", what, true);
   });
   // The Optimizer page: each library's choices (sync, mkv: checkboxes; images: the cover art select)
   document.addEventListener("change", function (e) {

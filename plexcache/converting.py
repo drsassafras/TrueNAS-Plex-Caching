@@ -1,7 +1,7 @@
 """Converted files on their way into Plex: the original is deleted only once Plex has the MKV.
 
-Converting (optimize/convert.py) leaves the original where it was, with ``<name>.mkv`` next to it
-(or ``<name> - MKV.mkv``… where that name was taken).
+Converting (optimize/convert.py) leaves the original where it was, with ``<name> MKV-<EXT>.mkv`` next
+to it (or ``<name> MKV-<EXT> 2.mkv``… where that name was taken).
 Then, the way that keeps Plex's metadata (edits, watch history, collections): Plex is asked to scan
 the folder, and picks the MKV up as a second version of the same item. Once it has — checked here
 by asking Plex for the item's files, and on a second Plex server with the same files too (plex2.py)
@@ -120,12 +120,12 @@ class Conversions:
         now, state = time.time(), e["state"]
         if state in ("deleted",):
             return False
-        # whether this server has a mirror is a choice to make (the Sync page): until it's made, the
+        # whether this server has a mirror is a choice to make (the Mirror page): until it's made, the
         # original stays — a mirror not watched could lose its item
         sync = getattr(self.app, "sync", None)
         if sync is not None and not sync.decided():
-            if e.get("note") != str(M("Waiting: whether there’s a mirrored server isn’t chosen yet (Sync page).")):
-                e["note"] = str(M("Waiting: whether there’s a mirrored server isn’t chosen yet (Sync page)."))
+            if e.get("note") != str(M("Waiting: whether there’s a mirrored server isn’t chosen yet (Mirror page).")):
+                e["note"] = str(M("Waiting: whether there’s a mirrored server isn’t chosen yet (Mirror page)."))
                 return True
             return False
         if not os.path.exists(e["new"]):

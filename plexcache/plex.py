@@ -148,7 +148,7 @@ def poster_of(item: ET.Element) -> str:
     return item.get("thumb") or ""
 
 
-# The fields Plex locks when you edit them, and compares across servers (Library Sync): each is the
+# The fields Plex locks when you edit them, and compares across servers (Sync Libraries): each is the
 # item's attribute of the same name
 EDIT_FIELDS = ("title", "titleSort", "originalTitle", "summary", "tagline", "year", "studio", "contentRating", "originallyAvailableAt")
 ART_FIELDS = ("thumb", "art")
@@ -156,7 +156,7 @@ TAG_FIELDS = {"genre": "Genre", "writer": "Writer", "director": "Director", "pro
 
 
 def item_summary(item: ET.Element) -> dict:
-    """What Library Sync compares of an item (PlexClient.library_items)."""
+    """What Sync Libraries compares of an item (PlexClient.library_items)."""
     locked = {f.get("name") for f in item.findall("Field") if f.get("locked") in ("1", "true")}
     return {"key": item.get("ratingKey", ""), "parent": item.get("parentRatingKey", ""), "grandparent": item.get("grandparentRatingKey", ""),
             "type": item.get("type", ""), "title": item.get("title", ""), "label": title_of(item), "index": _int(item.get("index"), 0),
@@ -260,7 +260,7 @@ class PlexClient:
             self._changing("merge", [keep] + list(others))
             self._request(f"/library/metadata/{keep}/merge", {"ids": ",".join(str(k) for k in others)}, method="PUT")
 
-    # ---------------------------------------------------------- edits (Library Sync, applying)
+    # ---------------------------------------------------------- edits (Sync Libraries, applying)
     def edit(self, section_key: str, type_no: int, rating_key: str, values: dict) -> None:
         """An item's fields set as Plex's own editor does: ``values`` {"title.value": "…", "title.locked": 1,
         "genre[0].tag.tag": "Drama", "genre[].tag.tag-": "Old", "genre.locked": 1}."""
@@ -427,7 +427,7 @@ class PlexClient:
 
     def library_items(self, section_key: str, leaf: int, limit: int | None = None) -> list[dict]:
         """A library's items of one type (LEAF_TYPE's numbers: 1 movies, 2 shows, 3 seasons, 4 episodes,
-        8 artists, 9 albums, 10 tracks), paged, with what Library Sync compares: {"key", "parent",
+        8 artists, 9 albums, 10 tracks), paged, with what Sync Libraries compares: {"key", "parent",
         "grandparent", "type", "title", "label" (as Plex names it), "guid", "matched", "files":
         [(path, size)], "edition", "fields": {name: value} for the fields you edited (Plex locks them),
         "collections", "labels", "art_locked": the poster/background chosen by hand}."""

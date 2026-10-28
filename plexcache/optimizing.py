@@ -59,6 +59,7 @@ HEALTHCHECK_YAML = ('    healthcheck:\n'
                     '      test: ["CMD", "python", "-m", "plexcache.healthcheck"]')
 POSTER_SIZES = "poster-sizes.json"  # Plex's posters' sizes, by their paths (Library Health's estimates)
 RECENT_SECONDS = 600  # files written this recently may still be being imported (Sonarr, Radarr…)
+STALE_AFTER = 24 * 3600  # the scan of a library's files done again after this long, though its data didn't change (evaluate.py)
 STATUS_TTL = 15
 
 
@@ -127,8 +128,8 @@ class OptimizerClient:
     def rewrite(self, path: str) -> dict:
         return self._call("/api/rewrite", {"path": path}, timeout=60)
 
-    def convert(self, path: str, images: str, cover: bytes | None = None, tags: str = "keep") -> dict:
-        body = {"path": path, "images": images, "tags": tags}
+    def convert(self, path: str, images: str, cover: bytes | None = None, tags: str = "keep", name: str = "") -> dict:
+        body = {"path": path, "images": images, "tags": tags, **({"name": name} if name else {})}
         if cover:
             body["cover"] = base64.b64encode(cover).decode()
         return self._call("/api/convert", body, timeout=60)
@@ -174,6 +175,7 @@ class Optimizing:
         self.todo: dict[str, list] = {}  # per library, each file there's something to do to (survey): the page's cards, a page at a time
         self.surveying = False
         self.surveyed_at = 0.0  # when survey() last finished (the Optimizer page's Scanned …)
+        self.surveyed_stamps: dict[str, int] = {}  # library -> the state of its data (libdata's stamp) the last survey was of
         self.survey_progress: dict = {}  # how far the survey running is through the files: {"done", "total"}
         self.setup: dict = {"ready": False, "steps": [], "at": 0}  # diagnose(): what's left to set up
         self._diagnosing = False
@@ -518,6 +520,18 @@ class Optimizing:
         return {"status": status, "issues": issues, "rs": r.get("rs"), "best": r.get("best"), "compression": comp,
                 "rs_status": r["status"], "compression_status": comp_status or "info"}  # (each on its own: the optimizer's card)
 
+    def not_applicable(self, key: str):
+        """Why a library has nothing for the optimizer to count (an M: its count "na"): neither rewrite chosen for it."""
+        o = self.options(key)
+        if not o.get("sync") and not o.get("mkv"):
+            return M("Neither rewrite is chosen for this library: its choices are on this page.")
+        return None
+
+    def current(self, key: str) -> bool:
+        """Whether the last survey was of the library's data as it is now (the evaluator's: evaluate.OptimizerUnit)."""
+        ld = getattr(self.app, "libdata", None)
+        return ld is not None and str(key) in self.surveyed_stamps and self.surveyed_stamps[str(key)] == ld.data(str(key)).stamp
+
     def survey_soon(self) -> None:
         """survey() in the background: the first time, every MKV file's tags are read (a few small
         reads each), which can take minutes on a large library."""
@@ -530,6 +544,8 @@ class Optimizing:
             if self.surveying:
                 return
             self.surveying = True
+        ld = getattr(self.app, "libdata", None)
+        stamps = {str(lib["key"]): ld.data(str(lib["key"])).stamp for lib in getattr(self.app, "libraries", []) or [] if lib.get("kind")} if ld is not None else {}
         try:
             records = self.app.library_records()
             self.zfs.observe_datasets({r["dataset"]: {"rs": r.get("rs"), "compression": r.get("compression")}
@@ -602,6 +618,7 @@ class Optimizing:
                 for path in [p for p in self.record if p not in seen]:
                     del self.record[path]  # gone from the libraries (it's a cache: read again if it comes back)
                 self.summary = out
+                self.surveyed_stamps = stamps  # (what the counts are of: evaluate.py)
                 self.todo = {k: sorted(v, key=lambda x: (sort_key(x["title"]), x["path"])) for k, v in todo.items()}
             self.zfs.collect()
             self.zfs.save()
@@ -610,6 +627,9 @@ class Optimizing:
         finally:
             with self.lock:
                 self.surveying = False
+            ev = getattr(self.app, "evaluator", None)
+            if ev is not None:
+                ev.kick()  # (its counts are in: the next thing worked out)
 
     def note(self, path: str, key: str, r: dict, rec: dict) -> None:
         """A file the optimizer finished: its tags and identity in the record (so it isn't read
@@ -1106,10 +1126,11 @@ class Optimizing:
             self.note(path, key, r, rec)
         return r
 
-    def convert_one(self, path: str, key: str, poster: str = "", log=None) -> dict:
+    def convert_one(self, path: str, key: str, poster: str = "", log=None, name: str = "") -> dict:
         """One file converted to MKV by the optimizer service, next to the original (Convert to MKV's apply_row): the
         service's result — "converted" with "new" (the MKV, optimized and noted like any), "skipped" with the reason
-        (what MKV wouldn't keep: remembered, so the scan says it while the file stays as it is), "failed", "cancelled"."""
+        (what MKV wouldn't keep: remembered, so the scan says it while the file stays as it is), "failed", "cancelled".
+        ``name``: the MKV's name the scan showed (convert.free_target), given it while it's free."""
         if path in self.app.monitor.playing_paths():
             return {"result": "skipped", "reason": "playing"}
         try:
@@ -1128,7 +1149,7 @@ class Optimizing:
                 return {"result": "failed", "reason": msg(e)}
         if log:
             log(M("Inspecting what MKV would keep of it, then writing the MKV next to it"))
-        r = self._send(path, lambda: self.client.convert(path, images, cover, opts["tags"]), st.st_size)
+        r = self._send(path, lambda: self.client.convert(path, images, cover, opts["tags"], name), st.st_size)
         if r.get("result") == "converted" and r.get("new"):
             self.note(r["new"], key, dict(r, result="optimized"), self.app.library_records().get(key) or {})  # (the MKV: optimized, written with the dataset's settings)
         elif r.get("result") == "skipped" and r.get("reason") not in ("playing", "just written"):

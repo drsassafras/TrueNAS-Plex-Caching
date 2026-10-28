@@ -1,53 +1,41 @@
-"""Library Sync: this server and a mirror — another Plex server with the same files — compared, so
-their libraries can be kept in step. This is the read-only half: nothing on either server is changed.
+"""The mirror: another Plex server with the same files — at another site, kept in step by syncing the folders — and
+how its libraries are compared with this server's.
 
-* Mirrors (settings "sync"): whether this server has a mirrored server is a choice to make — not
-  chosen yet, none, or the server watched on the Sync page (plex2.py). Until it's made, Health asks,
-  and what would act on it (deleting converted originals) waits. discover() looks for mirrors among
-  the account's servers: for each, a sample of its files looked up here by path.
-* Another Plex Cache: a system sharing the library folders marks itself there (optimize/claims.py):
-  seen by peers(), so a Plex Cache at the other site is known without any setup.
-* compare(): each paired library read from both servers (plex.library_items), items matched across
-  them — by their files' place in the library folder (the same on both: the folders are synced),
-  else by online entry; shows, seasons, artists and albums through their episodes and tracks — and
-  the differences listed, source → mirror: files one server doesn't list (it needs a scan), versions
-  grouped differently, another online match, edited fields, posters chosen by hand, collections,
-  labels, editions. Watched state and ratings aren't compared: Plex's own sync carries them.
-* Review before anything acts (settings "approved"): the sync settings as last reviewed; changed
-  since, applying (a later part) stays paused until the differences are looked at again and approved.
+* Mirrors (settings "sync"): whether this server has a mirrored server is a choice to make — not chosen yet, none, or
+  the server watched on the Mirror page (plex2.py). Until it's made, Health asks, and what would act on it (deleting
+  converted originals) waits. discover() looks for mirrors among the account's servers: for each, a sample of its
+  files looked up here by path.
+* Another Plex Cache: a system sharing the library folders marks itself there (optimize/claims.py): seen by peers(),
+  so a Plex Cache at the other site is known without any setup.
+* compare_library(): a library on two servers — read by the data layer (libdata.py: the mirror's side) — items matched
+  across them by their files' place in the library folder (the same on both: the folders are synced), else by online
+  entry; shows, seasons, artists and albums through their episodes and tracks — and the differences listed, source →
+  the other: files the other doesn't list (it needs a scan), versions grouped differently, another online match,
+  edited fields, posters chosen by hand, collections, labels, editions. Watched state and ratings aren't compared:
+  Plex's own sync carries them. Sync Libraries (tools/sync.py) brings the other in line with what it finds; what it
+  can't is Mirror Checks' (mirrorhealth.py).
 """
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 import time
 import unicodedata
 
 from .i18n import M
-from .plex import EDIT_FIELDS, LEAF_TYPE, PlexClient, PlexError, reachable, servers
+from .plex import EDIT_FIELDS, PlexClient, PlexError, reachable, servers
 from .optimize.claims import PEER_DAYS
-from . import libhealth
 from .paging import sort_key
 
-STORE = "sync-report.json"
-REPORT_VERSION = 3  # what a report holds; one made by an older version is dropped, so it's never shown as current
-MAX_ITEMS = 1000  # differences listed per library, paged on the Library page (the counts are whole)
+STORE = "sync-report.json"  # (the servers found: named from when a compare's report was kept in it too)
+MAX_ITEMS = 1000  # differences listed per library by default (the counts are whole)
 SAMPLE = 300  # of a candidate mirror's files looked up here, per library
 KINDS = ("missing", "extra", "grouping", "match", "edits", "art", "collections", "labels", "editions")
 LEAVES = {"movie": (1,), "show": (2, 3, 4), "artist": (8, 9, 10)}
 NAMES = {"missing": M("Not listed there"), "extra": M("Only on the other server"), "grouping": M("Versions grouped differently"), "match": M("Matched to another entry"),
          "edits": M("Edited fields"), "art": M("Posters chosen by hand"), "collections": M("Collections"), "labels": M("Labels"),
          "editions": M("Editions")}
-
-
-def signature(settings: dict, plex2: dict) -> str:
-    """The sync settings that decide what a sync would do, as one string: what's reviewed."""
-    s = settings
-    return json.dumps({"mirror": plex2.get("machine_id") or plex2.get("url") or "", "pairs": plex2.get("libraries") or {},
-                       "source": s.get("source"), "what": s.get("what"), "watched": s.get("watched"), "users": s.get("users"),
-                       "libraries": s.get("libraries") or {}}, sort_keys=True)
 
 
 def _norm(rel: str) -> str:
@@ -98,7 +86,7 @@ def _empty(it: dict) -> bool:
     return not it["matched"] and not it.get("summary")
 
 
-def compare_library(src: _Side, dst: _Side, what: dict, checks_on: dict | None = None) -> dict:
+def compare_library(src: _Side, dst: _Side, what: dict, checks_on: dict | None = None, limit: int | None = MAX_ITEMS) -> dict:
     """The differences between a library on the source and on the other server: {"counts": {kind: n},
     "items": [rows], "matched": items found on both, "total"}. Items sharing files across the two
     servers (a version's file on one item here, another there) form one group, and each group is a row:
@@ -107,7 +95,8 @@ def compare_library(src: _Side, dst: _Side, what: dict, checks_on: dict | None =
     "warn", "tags": {"src": [[checks]…], "dst": [[checks]…]} — the Plex checks (libhealth) on each record,
     marking data that looks bad before anything would be copied}. "split": one item on the source is
     several there (applying merges them); "merge": several here are one there (applying splits it);
-    "regroup": several on both sides, tangled — shown as the records on each side, with no copy worked out."""
+    "regroup": several on both sides, tangled — shown as the records on each side, with no copy worked out. ``limit``: the
+    rows listed (None: every one)."""
     from .libhealth import plex_checks
     on = checks_on or {}
     counts = dict.fromkeys(KINDS, 0)
@@ -232,7 +221,7 @@ def compare_library(src: _Side, dst: _Side, what: dict, checks_on: dict | None =
             if r["kinds"]:
                 rows.append(r)
     rows.sort(key=lambda r: sort_key(r["title"]))
-    return {"counts": counts, "items": rows[:MAX_ITEMS], "matched": len(pairs), "total": len(src.items)}
+    return {"counts": counts, "items": rows[:limit] if limit else rows, "matched": len(pairs), "total": len(src.items)}
 
 
 def _compare_pair(a: dict, b: dict, what: dict, add) -> None:
@@ -264,28 +253,22 @@ def _compare_pair(a: dict, b: dict, what: dict, add) -> None:
 DETAIL_KEYS = ("fields", "locked", "art_locked", "summary", "summary_text", "tags", "thumb", "edition", "collections", "labels")
 
 
-class _Paused(Exception):
-    """The library's compare was paused (another was opened): dropped, picked up from the start later."""
-
-
 class Sync:
+    """The mirror choice (settings "sync": mirrors), the servers that may be one (discover), and the other Plex Caches seen
+    in the library folders (peers)."""
+
     def __init__(self, app):
         self.app = app
         self.lock = threading.Lock()
         saved = app._load_json(STORE) or {}
-        self.report: dict | None = saved.get("report") if (saved.get("report") or {}).get("version") == REPORT_VERSION else None
-        from .syncapply import Applier
-        self.applier = Applier(app, self)  # the differences you tick made true on the other server (syncapply.py)
         self.candidates: list[dict] = saved.get("candidates") or []
         self.discovered_at: float = saved.get("discovered_at") or 0.0
-        self.running = False  # the comparing thread is going
+        self.running = False  # looking for mirrors
         self.error: str | None = None
-        self.libs: dict[str, dict] = {}  # key -> {"queued", "running", "paused", "step", "pct", "started", "finished", "error"}
-        self.current: str | None = None
 
     def save(self) -> None:
         with self.lock:
-            data = {"report": self.report, "candidates": self.candidates, "discovered_at": self.discovered_at}
+            data = {"candidates": self.candidates, "discovered_at": self.discovered_at}
         self.app._save_json(STORE, data)
 
     def settings(self) -> dict:
@@ -378,200 +361,7 @@ class Sync:
                     self.running = False
         threading.Thread(target=work, name="sync-discover", daemon=True).start()
 
-    # ------------------------------------------------------------ comparing
-    # One library at a time, as inspecting: opening a library's Sync view starts it (pausing the one
-    # running, which picks up when it's opened again), and its result shows as soon as it's done.
-    def _pairs(self) -> dict:
-        s = self.settings()
-        libs = {str(lib["key"]): lib for lib in getattr(self.app, "libraries", []) or []}
-        return {key: (libs[key], there) for key, there in self.app.other.pairs().items()
-                if there is not None and key in libs and (s.get("libraries") or {}).get(key) is not False}
-
-    def start(self, key: str | None = None, force: bool = False) -> dict:
-        """Compare one library (``key``), or every paired one, pausing any other; ``force``: again
-        even if its result is current. The snapshot."""
-        if self.decided() != "plex2":
-            raise ValueError(M("No mirror to compare with: choose one on the Sync page."))
-        pairs = self._pairs()
-        keys = [str(key)] if key else list(pairs)
-        with self.lock:
-            for k in keys:
-                if k not in pairs:
-                    continue
-                st = self.libs.get(k)
-                done = (self.report or {}).get("libraries", {}).get(k)
-                if st and st.get("running"):
-                    continue
-                if done and not force and not (st and st.get("paused")):
-                    continue  # (compared already: its result stands until Compare Now)
-                self.libs[k] = {"queued": True, "running": False, "paused": False, "step": None, "pct": 0, "started": None, "finished": None, "error": None}
-            for k, st in self.libs.items():
-                if k not in keys and st.get("running"):
-                    st["paused"], st["queued"] = True, True  # (one at a time: it picks up when started again)
-            self.current = next((k for k in keys if self.libs.get(k, {}).get("queued")), None)
-            if self.current and not self.running:
-                self.running = True
-                threading.Thread(target=self._work, name="sync-compare", daemon=True).start()
-        return self.snapshot()
-
-    def pause(self, key: str) -> None:
-        with self.lock:
-            st = self.libs.get(str(key))
-            if st and (st.get("running") or st.get("queued")):
-                st["paused"] = True
-            if self.current == str(key):
-                self.current = None
-
-    def _work(self) -> None:
-        while True:
-            with self.lock:
-                key = self.current or next((k for k, st in self.libs.items() if st.get("queued") and not st.get("paused")), None)
-                if not key:
-                    self.running, self.current = False, None
-                    return
-                self.current = key
-                st = self.libs[key]
-                st.update(running=True, queued=False, paused=False, started=time.time(), error=None)
-            try:
-                got = self._compare_one(key)
-            except _Paused:
-                with self.lock:
-                    st.update(running=False, queued=True, paused=True, step=None)
-                    if self.current == key:
-                        self.current = None
-                continue
-            except Exception as e:  # noqa: BLE001 — said on the page
-                with self.lock:
-                    st.update(running=False, finished=time.time(), error=str(e), step=None)
-                    self.error = str(e)
-                    if self.current == key:
-                        self.current = None
-                continue
-            with self.lock:
-                rep = self.report if (self.report or {}).get("version") == REPORT_VERSION else None
-                if rep is None:
-                    rep = self.report = {"version": REPORT_VERSION, "libraries": {}, "totals": {}, "names": {}}
-                rep["libraries"][key] = got
-                rep["at"] = time.time()
-                rep["source"] = got["source"]
-                rep["names"] = got["names"]
-                rep["totals"] = {k: sum(v["counts"].get(k, 0) for v in rep["libraries"].values()) for k in KINDS}
-                st.update(running=False, finished=time.time(), step=None, pct=100)
-                self.error = None
-                if self.current == key:
-                    self.current = None
-            self.save()
-            self.app.run_checks_async()
-
-    def _step(self, key: str, what: str, pct: int) -> None:
-        with self.lock:
-            st = self.libs.get(key) or {}
-            if st.get("paused"):
-                raise _Paused()
-            st.update(step=what, pct=pct)
-
-    def _compare_one(self, key: str) -> dict:
-        """One paired library compared (read-only): its part of the report."""
-        s = self.settings()
-        lib, lib_there = self._pairs()[key]
-        other = self.app.other
-        here = self.app.plex(timeout=120)
-        other.run(lambda c: c.identity(), timeout=20)  # (reached — at another of its addresses if need be)
-        there = other.client(timeout=120)
-        src_is_mirror = s.get("source") == "mirror"
-        names = {"this": getattr(self.app, "plex_name", "") or str(M("This server")), "mirror": self.app.settings.section("plex2").get("name") or str(M("the mirror"))}
-        kind = lib.get("kind")
-        leaves = LEAVES.get(lib.get("type") or {"movie": "movie", "tv": "show", "audio": "artist"}.get(kind, ""), ())
-        self._step(key, "here", 0)
-        a_items = [it for t in leaves for it in here.library_items(key, t)]
-        self._step(key, "there", 30)
-        b_items = [it for t in leaves for it in there.library_items(lib_there.key, t)]
-        self._step(key, "compare", 60)
-        a, b = _Side(a_items, lib.get("locations") or []), _Side(b_items, lib_there.locations)
-        src, dst = (b, a) if src_is_mirror else (a, b)
-        on = libhealth.enabled(self.app.settings.get())
-        got = compare_library(src, dst, s.get("what") or {}, on)
-        # the items listed: each one's own page read from both servers (the listings leave out which
-        # fields are edited, and the summary), then compared again with that
-        src_client, dst_client = (there, here) if src_is_mirror else (here, there)
-        for i, row in enumerate(got["items"]):
-            self._step(key, "details", 70 + int(30 * i / max(1, len(got["items"]))))
-            for sd, client, key_ in [(src, src_client, it["key"]) for it in row["src_items"]] + [(dst, dst_client, it["key"]) for it in row["dst_items"]]:
-                if not key_:
-                    continue
-                try:
-                    d = client.item_detail(key_)
-                except PlexError:
-                    d = None
-                if d:
-                    sd.items[key_].update({k: d[k] for k in DETAIL_KEYS if k in d})
-        got = compare_library(src, dst, s.get("what") or {}, on)
-        got.update(title=lib.get("title"), there=lib_there.title, at=time.time(), source="mirror" if src_is_mirror else "this", names=names)
-        return got
-
-    def compare(self) -> dict:
-        """Every paired library compared now, in this thread (tests, and the scheduled run): the report."""
-        if self.decided() != "plex2":
-            raise ValueError(M("No mirror to compare with: choose one on the Sync page."))
-        for key in self._pairs():
-            got = self._compare_one(key)
-            with self.lock:
-                rep = self.report if (self.report or {}).get("version") == REPORT_VERSION else None
-                if rep is None:
-                    rep = self.report = {"version": REPORT_VERSION, "libraries": {}, "totals": {}, "names": {}}
-                rep["libraries"][key] = got
-                rep.update(at=time.time(), source=got["source"], names=got["names"])
-                rep["totals"] = {k: sum(v["counts"].get(k, 0) for v in rep["libraries"].values()) for k in KINDS}
-                self.libs[key] = {"queued": False, "running": False, "paused": False, "step": None, "pct": 100, "started": None, "finished": time.time(), "error": None}
-        with self.lock:
-            self.error = None
-        self.save()
-        self.app.run_checks_async()
-        return self.report
-
-    def compare_async(self) -> bool:
-        """Every paired library, again (Compare Now)."""
-        self.start(None, force=True)
-        return True
-
-    # ------------------------------------------------------------ review
-    def current_signature(self) -> str:
-        return signature(self.settings(), self.app.settings.section("plex2"))
-
-    def review_needed(self) -> bool:
-        """The sync settings changed since they were last reviewed and approved."""
-        return self.settings().get("approved", "") != self.current_signature()
-
-    def approve(self) -> None:
-        """The differences as they are now have been looked at: the settings count as reviewed."""
-        self.app.settings.update({"sync": {"approved": self.current_signature()}})
-        self.app.run_checks_async()
-
-    def due(self, now: float | None = None) -> bool:
-        s = self.settings()
-        if s.get("mode") == "off" or self.decided() != "plex2" or self.running:
-            return False
-        if any(st.get("queued") or st.get("paused") for st in self.libs.values()):
-            return False
-        last = (self.report or {}).get("at") or 0
-        return (now or time.time()) - last >= int(s.get("compare_hours") or 6) * 3600
-
     def snapshot(self) -> dict:
         with self.lock:
-            rep = self.report
-            summary = {"at": rep.get("at"), "source": rep.get("source"), "totals": rep.get("totals"), "names": rep.get("names"),
-                       "libraries": {k: {"title": v.get("title"), "there": v.get("there"), "counts": v.get("counts"), "matched": v.get("matched"), "total": v.get("total")}
-                                     for k, v in (rep.get("libraries") or {}).items()}} if rep else None
-            cur = self.libs.get(self.current or "") or {}
             return {"decided": self.decided(), "chosen": self.settings().get("mirrors"), "running": self.running, "error": self.error,
-                    "libs": {k: dict(st) for k, st in self.libs.items()}, "current": self.current,
-                    "progress": {"library": next((v.get("title") for k, v in (rep or {}).get("libraries", {}).items() if k == self.current), None) or self.current,
-                                 "step": cur.get("step"), "pct": cur.get("pct", 0), "started": cur.get("started")} if self.running and self.current else None,
-                    "report": summary, "candidates": list(self.candidates), "discovered_at": self.discovered_at, "apply": self.applier.snapshot(),
-                    "peers": self.peers(), "review_needed": self.review_needed(), "names": {k: str(v) for k, v in NAMES.items()}}
-
-    def differences(self, key: str) -> dict | None:
-        with self.lock:
-            got = dict((self.report or {}).get("libraries", {}).get(str(key)) or {})
-            got["job"] = dict(self.libs.get(str(key)) or {})
-            return got if got.get("counts") else {"job": got["job"]}
+                    "candidates": list(self.candidates), "discovered_at": self.discovered_at, "peers": self.peers()}

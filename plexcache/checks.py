@@ -626,8 +626,8 @@ def _job_failures(app) -> list[dict]:
 
 
 def _sync_items(app) -> list[dict]:
-    """Library Sync (sync.py): the mirror choice still to make, a server found that may be a mirror,
-    another Plex Cache seen in the folders, differences waiting, settings changed since reviewed."""
+    """The mirror (sync.py, the Mirror page): the mirror choice still to make, a server found that may be a mirror,
+    another Plex Cache seen in the folders. (What Sync Libraries would bring in line is its count, as every tool's.)"""
     sync = getattr(app, "sync", None)
     if sync is None:
         return []
@@ -637,24 +637,16 @@ def _sync_items(app) -> list[dict]:
         out.append(dict(item("warn", M("Is there a mirrored Plex server?"),
                              M("Whether another Plex server has the same files (another site, kept in step by syncing the folders) hasn’t been chosen. "
                                "Until it is, converted files’ originals aren’t deleted: a mirror that isn’t watched could lose its item."),
-                             M("On the [Sync page](/sync), choose None, or the server to watch."))))
+                             M("On the [Mirror page](/mirrors), choose None, or the server to watch."))))
     elif s.get("mirrors") == "plex2" and not app.other.configured():
         out.append(dict(item("warn", M("The mirrored Plex server isn’t set up"), M("A mirror was chosen, but no server is watched yet."),
-                             M("On the [Sync page](/sync), choose the server."))))
+                             M("On the [Mirror page](/mirrors), choose the server."))))
     likely = [c for c in sync.candidates if (c.get("rate") or 0) >= 0.9 and c.get("id") != app.settings.section("plex2").get("machine_id")]
     if likely and s.get("mirrors") != "none":
         out.append(dict(item("info", M("A server that looks like a mirror: {names}", names=[c["name"] for c in likely]),
-                             M("Its files are here too, at the same places (a sample of them)."), M("Watch it on the [Sync page](/sync), or say it isn’t a mirror."))))
+                             M("Its files are here too, at the same places (a sample of them)."), M("Watch it on the [Mirror page](/mirrors), or say it isn’t a mirror."))))
     out.extend(_peer_items(app))
-    rep = sync.report
-    if rep and sum((rep.get("totals") or {}).values()):
-        n = sum(rep["totals"].values())
-        out.append(dict(item("info", M("{n} differences between this server and its mirror", one="{n} difference between this server and its mirror", n=n),
-                             M("As last compared, {when}. Nothing is changed by itself: look them over on the [Sync page](/sync).", when=time.strftime("%Y-%m-%d %H:%M", time.localtime(rep.get("at") or 0))))))
-    if sync.review_needed() and s.get("mode") != "off" and sync.decided() == "plex2":
-        out.append(dict(item("info", M("Sync settings changed since they were reviewed"),
-                             M("Applying stays paused until the differences are looked at again and approved. Comparing goes on."),
-                             M("Press I’ve Reviewed These on the [Sync page](/sync) once you have: it applies nothing."))))
+    out.extend(_mirror_items(app))
     return out
 
 
@@ -702,7 +694,7 @@ def _link_items(app) -> list[dict]:
 
 def _peer_items(app) -> list[dict]:
     """Another Plex Cache sharing library folders (peers.py): who, with which settings, and what
-    would fight — applying both ways, optimizer choices that differ, a file tool just run there."""
+    would fight — syncing both ways, optimizer choices that differ, a file tool just run there."""
     from . import peers
     summary = getattr(app, "peers_summary", None)
     if summary is None:
@@ -714,19 +706,53 @@ def _peer_items(app) -> list[dict]:
     names = {str(lib["key"]): lib.get("title") or lib["key"] for lib in getattr(app, "libraries", []) or []}
     for sy in summary.get("systems") or []:
         s = sy.get("sync") or {}
-        how = (M("applies Library Sync with itself as the source") if s.get("mode") == "apply" and s.get("source") == "this"
-               else M("applies Library Sync with its mirror as the source") if s.get("mode") == "apply" else M("compares only") if s.get("mode") == "compare" else M("has Library Sync off"))
+        ran = (sy.get("tools") or {}).get("sync") or s.get("mode") == "apply"  # (an older Plex Cache: applying on a timer)
+        how = (M("hasn’t run Sync Libraries this week") if not ran else M("runs Sync Libraries with its own edits winning") if s.get("source") == "this"
+               else M("runs Sync Libraries with its mirror’s edits winning"))
         out.append(dict(item("info", M("Another Plex Cache shares these folders: {name}", name=sy.get("name") or sy.get("instance")),
                              M("Version {version}; shares {libs}; it {how}. Each side optimizes its own files, and claims keep the two off the same file.",
                                version=sy.get("version") or "?", libs=[names.get(k, k) for k in sy.get("libraries") or []], how=how),
                              "" if summary.get("publishing") else M("This side can’t tell the other about its own settings until the optimizer service is set up (it writes the marker).")),
-                        link={"href": "/sync", "text": M("Open the Sync page")}))
-    if summary.get("sync_conflict"):
-        out.append(dict(item("fail", M("Library Sync would go back and forth"), summary["sync_conflict"], M("Applying is refused here until it’s settled.")),
-                        link={"href": "/sync", "text": M("Open the Sync page")}))
+                        link={"href": "/mirrors", "text": M("Open the Mirror page")}))
+    for key, why in (summary.get("sync_conflicts") or {}).items():
+        out.append(dict(item("fail", M("Sync Libraries would go back and forth: {library}", library=names.get(key, key)), why,
+                             M("Its Apply is refused for this library until it’s settled.")), link={"href": "/sync", "text": M("Open Sync Libraries")}))
     for key, why in (summary.get("optimizer_conflicts") or {}).items():
         out.append(dict(item("fail", M("Optimizer choices differ between the two sides: {library}", library=names.get(key, key)), why,
                              M("Optimize Now is refused for this library until they match.")), link={"href": "/optimizer", "text": M("Open the Optimizer page")}))
+    return out
+
+
+def _mirror_items(app) -> list[dict]:
+    """The Plex Cache at the mirror's site (peerlink.py) and Mirror Checks (mirrorhealth.py): the link not healthy, a
+    library held because .plexcache doesn't reach the other site, findings waiting."""
+    link, health = getattr(app, "peerlink", None), getattr(app, "mirror_health", None)
+    if link is None or health is None:
+        return []
+    out = []
+    state = link.health()
+    if state in ("warn", "fail"):
+        bad = [v for v in link.lights().values() if v["status"] in ("warn", "fail")]
+        out.append(dict(item(state, M("The link to the Plex Cache at the mirror’s site needs attention"),
+                             M("{lights}. Mirror Checks rely on it: some of its checks are left out meanwhile.", lights=[b["text"] for b in bad]),
+                             M("See [System → Mirror Plex Cache](/system#peer).")), link={"href": "/system#peer", "text": M("Open System")}))
+    names = {str(lib["key"]): lib.get("title") or lib["key"] for lib in getattr(app, "libraries", []) or []}
+    converting = [k for k in health.libraries() if health.converting(k)]
+    if converting:
+        out.append(dict(item("info", M("The other site is converting a folder to a child dataset: {libraries}", libraries=[names.get(k, k) for k in converting]),
+                             health.converting(converting[0]),
+                             M("Mirror Checks compare these libraries again once it’s done.")), link={"href": "/mirrorchecks", "text": M("Open Mirror Checks")}))
+    held = [k for k in health.libraries() if k not in converting and health.hold(k)]
+    if held:
+        out.append(dict(item("fail", M("Optimizing is held: {libraries}", libraries=[names.get(k, k) for k in held]),
+                             M("The .plexcache folder doesn’t reach the other site, so its Plex Cache wouldn’t see this side’s claims: the two could optimize the same file."),
+                             M("Fix the folder sync (Syncthing: don’t ignore .plexcache), or ignore the finding on Mirror Checks.")),
+                        link={"href": "/mirrorchecks", "text": M("Open Mirror Checks")}))
+    n = sum((c or {}).get("mirror") or 0 for k, c in (getattr(app, "health_counts", None) or {}).items() if k in health.libraries())
+    if n:
+        out.append(dict(item("info", M("{n} items differ between the two sites of the mirror", one="{n} item differs between the two sites of the mirror", n=n),
+                             M("Files on one side only, or one Plex not listing them, as Mirror Checks last compared them (ignored ones left out).")),
+                        link={"href": "/mirrorchecks", "text": M("Open Mirror Checks")}))
     return out
 
 
@@ -737,14 +763,18 @@ def _migration_items(app) -> list[dict]:
     st = (mig.state or {}) if mig else {}
     if st.get("step") not in ("create", "switch", "verify") or st.get("copying") or st.get("queued"):
         return []
-    todo = next((c for c in mig.checks if not c.get("ok")), None)
+    failing = [c for c in mig.checks if not c.get("ok")]
+    todo = next((c for c in failing if c.get("level") == "error"), None) or \
+        next((c for c in failing if c.get("level") != "warn"), None) or \
+        next(iter(failing), None)  # (something wrong first, then a step to do; a warning when nothing else is left)
     if todo:
         what, more = todo["title"], todo.get("detail") or ""
     elif st["step"] == "switch":
         what, more = M("rename the dataset to the folder’s name"), ""
     else:
         return []
-    return [dict(item("warn", M("Action needed to finish converting {title} to a child dataset", title=st.get("title") or st.get("folder")),
+    level = "fail" if todo and todo.get("level") == "error" else "warn"  # (something wrong that stops it: red)
+    return [dict(item(level, M("Action needed to finish converting {title} to a child dataset", title=st.get("title") or st.get("folder")),
                       M("Next: {what}. {more}", what=what, more=more),
                       help=M("Turning a library folder into a dataset of its own goes step by step, and some steps are yours — in "
                              "TrueNAS, or a button on the Optimizer page. Until then nothing moves on; the folder and Plex are as they were.")),

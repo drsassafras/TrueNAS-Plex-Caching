@@ -3,13 +3,14 @@ about the other so their settings don't fight.
 
 Each system marks itself in every library folder it shares — .plexcache/systems/<instance>.json,
 written by the optimizer service (the one part that may write there) and carried to the other
-site by the folder sync. The marker holds the settings that matter to the other side: how Library
-Sync is set (does it apply, and which server is its source), the optimizer choices that change a
-file's content (cover art, tags, MKV layout, converting), and the file tools lately run there.
+site by the folder sync. The marker holds the settings that matter to the other side: whose edits
+win in Sync Libraries (tools/sync.py), per library, the optimizer choices that change a file's content
+(cover art, tags, MKV layout, converting), and the tools lately run there.
 
 From the other systems' markers this module tells:
-* **Sync direction** — both sides applying with themselves as the source (or both with the other)
-  would send edits back and forth: applying is refused here until one side is the source.
+* **Sync direction** — both sides running Sync Libraries on a library with themselves as the source (or
+  both with the other) would send edits back and forth: its Apply is refused here until one side is the
+  source.
 * **Optimizer choices** — different cover-art, tag or layout choices on the two sides would
   rewrite each other's files for ever: optimizing that library is refused here while they differ.
 * **File tools** — a tool the other side ran on a folder lately (Duplicate Versions, Organize
@@ -29,6 +30,8 @@ from .optimize.claims import PEER_DAYS
 PUBLISH_EVERY = 30 * 60
 TOOL_GAP = 3600  # a file tool run on the other side within this: ours waits
 FILE_TOOLS = ("versions", "folders", "unlink", "convert")
+TOLD_TOOLS = FILE_TOOLS + ("sync",)  # the tools whose runs the marker tells (Sync Libraries': which way it went, for sync_conflict)
+SYNC_DAYS = 7  # Sync Libraries run on the other side within this: running it here the other way round fights it
 CONTENT = ("mkv", "images", "tags")  # the optimizer choices that change a file's bytes
 
 
@@ -48,10 +51,22 @@ def info(app, key: str) -> dict:
     sy, p2 = s.get("sync") or {}, s.get("plex2") or {}
     opts = app.optimizing.options(key)
     tools = (getattr(app, "tool_runs", None) or {}).get(str(key)) or {}
+    link = getattr(app, "peerlink", None)
     return {"name": getattr(app, "plex_name", "") or "", "version": app.version, "at": time.time(),
-            "sync": {"mode": sy.get("mode"), "source": sy.get("source"), "mirror": p2.get("machine_id") or "", "mirrors": sy.get("mirrors")},
+            "sync": {"source": _source(app, key), "mirror": p2.get("machine_id") or "", "mirrors": sy.get("mirrors")},
             "optimizer": {k: opts.get(k) for k in CONTENT},
-            "tools": {name: at for name, at in tools.items() if time.time() - at < 7 * 86400}}
+            "tools": {name: at for name, at in tools.items() if time.time() - at < 7 * 86400},
+            **({"peer": link.advert(), "plex": link.own_plex_id()} if link is not None else {}),  # (how the other Plex Cache finds and pairs with this one: peerlink.py)
+            # what it runs on, and a folder being converted to a child dataset (migrating.py): for the other side even unpaired
+            **_conversion_facts(app, key)}
+
+
+def _conversion_facts(app, key: str) -> dict:
+    from .peerlink import own_facts, own_library
+    try:
+        return dict(own_facts(app), **own_library(app, str(key)))
+    except Exception:  # noqa: BLE001 — not worked out: not said
+        return {}
 
 
 def publish(app) -> int:
@@ -60,12 +75,20 @@ def publish(app) -> int:
     if client is None or not getattr(client, "configured", False):
         return 0
     n = 0
+    published = getattr(app, "published_markers", None)
+    first = getattr(app, "first_published", None)
     for key, _plex, local in _folders(app):
         try:
-            client.mark(local, app.optimizing.instance(), info(app, key))
+            body = info(app, key)
+            client.mark(local, app.optimizing.instance(), body)
             n += 1
         except Exception:  # noqa: BLE001 — a folder not writable, the service away: said by Health elsewhere
             continue
+        if isinstance(published, dict):  # (when, so the other side can say whether it arrived: peerlink.folder_sync)
+            published[key] = body["at"]
+        if isinstance(first, dict) and key not in first:
+            first[key] = body["at"]
+            app._save_json("published.json", first)
     return n
 
 
@@ -99,19 +122,30 @@ def read(app) -> dict:
     return out
 
 
-def sync_conflict(app, found: dict | None = None) -> M | None:
-    """Why applying Library Sync here would fight the other side, or None."""
-    s = app.settings.section("sync")
-    if s.get("mode") != "apply":
+def _source(app, key: str) -> str | None:
+    """Whose edits win in Sync Libraries on a library here: "this" or "mirror" (None: no such tool)."""
+    tool = (getattr(app, "tools", None) or {}).get("sync")
+    return tool.enabled(str(key)).get("source") if tool is not None else None
+
+
+def sync_conflict(app, key: str, found: dict | None = None) -> M | None:
+    """Why running Sync Libraries on library ``key`` here would fight the other side, or None: the other side ran it on the
+    library lately (SYNC_DAYS) with the same side as its source — both "this", or both "mirror" — so each run would undo the
+    other's edits."""
+    mine = _source(app, key)
+    if mine is None:
         return None
     for inst, e in (found if found is not None else read(app)).items():
-        other = (e["marker"].get("sync") or {})
-        if other.get("mode") != "apply":
+        marker = e.get("by_library", {}).get(str(key))
+        if not marker:
             continue
-        name = e["marker"].get("name") or inst
-        if other.get("source") == s.get("source"):  # both "this", or both "mirror": edits would go round and round
-            return M("{name} applies Library Sync too, with the same side as its source: the two would send edits back and forth. One side must be the source — set this side’s source to {fix}, or turn applying off there.",
-                     name=name, fix=M("the mirror") if s.get("source") == "this" else M("this server"))
+        other = marker.get("sync") or {}
+        ran = (marker.get("tools") or {}).get("sync")
+        if not (ran and time.time() - float(ran) < SYNC_DAYS * 86400) and other.get("mode") != "apply":  # (an older Plex Cache: applying on a timer)
+            continue
+        if other.get("source") == mine:
+            return M("{name} syncs this library too, with the same side’s edits winning: the two would send edits back and forth. One side’s edits must win on both — set Whose edits win to {fix} here, or stop syncing it there.",
+                     name=marker.get("name") or inst, fix=M("The mirror") if mine == "this" else M("This server"))
     return None
 
 
@@ -131,7 +165,10 @@ def optimizer_conflict(app, key: str, found: dict | None = None) -> M | None:
 
 
 def tool_conflict(app, key: str, tool: str, found: dict | None = None) -> M | None:
-    """Why a file tool shouldn't run on library ``key`` here now, or None."""
+    """Why a tool shouldn't run on library ``key`` here now, or None: a file tool the other side ran there lately, or Sync
+    Libraries the other way round (sync_conflict)."""
+    if tool == "sync":
+        return sync_conflict(app, key, found)
     if tool not in FILE_TOOLS:
         return None
     for inst, e in (found if found is not None else read(app)).items():
@@ -149,11 +186,14 @@ def summary(app) -> dict:
     """For Health and the state: the other systems, and what fights."""
     found = read(app)
     out = {"systems": [{"instance": i, "name": e["marker"].get("name") or i, "version": e["marker"].get("version"), "libraries": e["libraries"],
-                        "sync": e["marker"].get("sync"), "at": e["marker"].get("at")} for i, e in found.items()],
+                        "sync": e["marker"].get("sync"), "tools": e["marker"].get("tools") or {}, "at": e["marker"].get("at")} for i, e in found.items()],
            "publishing": bool(getattr(getattr(app, "optimizing", None), "client", None) and app.optimizing.client.configured),
-           "sync_conflict": sync_conflict(app, found), "optimizer_conflicts": {}}
+           "sync_conflicts": {}, "optimizer_conflicts": {}}
     for lib in getattr(app, "libraries", []) or []:
         why = optimizer_conflict(app, str(lib["key"]), found)
         if why:
             out["optimizer_conflicts"][str(lib["key"])] = why
+        why = sync_conflict(app, str(lib["key"]), found)
+        if why:
+            out["sync_conflicts"][str(lib["key"])] = why
     return out

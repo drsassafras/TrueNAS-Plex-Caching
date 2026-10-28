@@ -22,8 +22,9 @@ from .plex import PlexError, check_pin, create_pin
 
 log = logging.getLogger("plexcache")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
-PAGES = {"/", "/health", "/caching", "/ssd", "/library", "/tools", "/optimizer", "/convert", "/dataset", "/merge", "/versions", "/folders", "/unlink", "/filechecks", "/plexchecks", "/processes", "/sync", "/activity", "/system", "/features", "/settings"}  # the last two: links from before 0.15
+PAGES = {"/", "/health", "/caching", "/ssd", "/library", "/tools", "/optimizer", "/convert", "/dataset", "/merge", "/versions", "/folders", "/unlink", "/filechecks", "/plexchecks", "/mirrorchecks", "/processes", "/sync", "/mirrors", "/activity", "/system", "/features", "/settings", "/mirror"}  # the last three: links from before (0.15; Mirror Checks, once Mirror Health)
 MAX_BODY = 1024 * 1024
+HEALTH_WAIT = 120  # seconds a library's first Library Health answer is waited for (the evaluator's: evaluate.py)
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
 
@@ -213,8 +214,28 @@ def make_handler(app):
                 self._error("sign in first", 401)
             return False
 
+        def _peer(self, method: str):
+            """The other Plex Cache's requests (peerlink.py): open for its hello and its pairing, signed with the pairing's
+            key for the rest — never the web UI's sign-in."""
+            raw = b""
+            if method == "POST":
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    return self._error("bad Content-Length", 400)
+                if n < 0 or n > MAX_BODY:
+                    return self._error("request too large", 400)
+                raw = self.rfile.read(n) if n else b""
+            link = getattr(app, "peerlink", None)
+            if link is None:
+                return self._error("not found", 404)
+            status, answer = link.handle(method, self.path, self.headers, raw, self.client_address[0])
+            return self._json(answer, status)
+
         def do_GET(self):
             path = self.path.split("?", 1)[0]
+            if path.startswith("/peer/"):
+                return self._peer("GET") if self._allowed(path) else None
             if not self._allowed(path) or not self._signed_in(path):
                 return
             if path in PAGES or path.startswith("/api/"):  # not the open paths (/healthz, /login...)
@@ -231,6 +252,10 @@ def make_handler(app):
             if path == "/healthz":
                 return self._json({"ok": True, "version": app.version})
             if path == "/api/state":
+                # the page open and its library ("focus=<page>:<library>"): evaluated first, its data read first (evaluate.py)
+                focus = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("focus") or [""])[0]
+                if ":" in focus:
+                    app.evaluator.focus(*focus.split(":", 1))
                 return self._json(dict(app.state(), build=BUILD))  # (build: see app.js load())
             if path == "/api/tools/readiness":  # before files change: room for it, and a recent snapshot (safety.py)
                 from .safety import readiness
@@ -281,13 +306,21 @@ def make_handler(app):
                         return self._error(str(e), 400)
                     return self._json({"blocks": got}) if got is not None else self._error("not found", 404)
                 if path == "/api/library/health":  # Library Health: one library's items through the content checks
-                    app.libdata.fast_track(arg("key"))  # (the library opened: its data gathered first)
-                    if not app.library_info(arg("key")):
+                    key = arg("key")
+                    if not app.library_info(key):
                         return self._error("not found", 404)
-                    return self._json(jsonable(app.library_health(arg("key"))))  # (worked out in the background already, as a rule)
-                if path == "/api/library/differences":  # Library Sync: one library's differences, as last compared
-                    got = app.sync.differences(arg("key"))
-                    return self._json(jsonable(got)) if got else self._error("not found", 404)
+                    ev = app.evaluator
+                    if ev.started and not app.health_current(key):
+                        # worked out by the evaluator, never here: the answer kept meanwhile (the page's counts say they're
+                        # still to come, and it asks again once they're in), or the first one waited for
+                        kept = app.health_kept(key)
+                        if kept is not None:
+                            return self._json(jsonable(kept))
+                        try:
+                            ev.bring("health", key, timeout=HEALTH_WAIT)
+                        except ValueError as e:
+                            return self._error(e.args[0] if e.args else str(e), 503)
+                    return self._json(jsonable(app.library_health(key)))
                 if path == "/api/library/file":
                     try:
                         got = app.file_view(arg("path"))
@@ -371,6 +404,8 @@ def make_handler(app):
             path = self.path.split("?", 1)[0]
             if not self._allowed(path):
                 return
+            if path.startswith("/peer/"):
+                return self._peer("POST")
             if not self._same_origin():
                 return self._error("requests from other sites aren't accepted", 403)
             try:
@@ -459,9 +494,9 @@ def make_handler(app):
                     if mode not in ("optimize", "covers"):
                         raise SettingsError(M("mode must be optimize or covers"))
                     from . import peers, safety
-                    why = peers.optimizer_conflict(app, key)
+                    why = peers.optimizer_conflict(app, key) or app.mirror_health.hold(key)
                     if why:
-                        raise SettingsError(why)  # (another Plex Cache would undo it: said on Health too)
+                        raise SettingsError(why)  # (another Plex Cache would undo it, or wouldn't see the claims: said on Health / Mirror Checks too)
                     if mode == "optimize":  # files are rewritten: room for the largest (and what a snapshot keeps of the rewritten), and a backup that can be made
                         sums = (app.optimizing.summary or {}).get(key) or {}
                         ready = safety.readiness(app, key, "largest", retained=int(sums.get("todo_bytes") or 0), tool="optimizer")
@@ -472,32 +507,20 @@ def make_handler(app):
                         raise SettingsError(M("files must be a list of the files to optimize"))
                     got = app.optimizing.queue(key, mode, files)  # now, or after the jobs before it
                     return self._json({"started": got == "started", "queued": got == "queued"})
-                if path.startswith("/api/sync/"):
-                    # Library Sync (sync.py): compare now, look for mirrors, approve the settings as reviewed
-                    try:
-                        if path == "/api/sync/compare":
-                            return self._json({"started": app.sync.compare_async()})
-                        if path == "/api/sync/start":  # one library (opened on the Library page): {"library", "pause"?}
-                            key = str(body.get("library") or "")
-                            if body.get("pause"):
-                                app.sync.pause(key)
-                                return self._json(jsonable(app.sync.snapshot()))
-                            return self._json(jsonable(app.sync.start(key, force=bool(body.get("force")))))
-                        if path == "/api/sync/discover":
-                            app.sync.discover_async()
-                            return self._json({"started": True})
-                        if path == "/api/sync/approve":
-                            app.sync.approve()
-                            return self._json(jsonable(app.sync.snapshot()))
-                        if path == "/api/sync/apply":  # the differences ticked, made true on the other server: {"library", "ids"}
-                            started = app.sync.applier.apply_async(str(body.get("library") or ""), [str(i) for i in body.get("ids") or []])
-                            return self._json(dict(jsonable(app.sync.snapshot()), started=started))
-                        if path == "/api/sync/undo":  # a logged change put back: {"id"}
-                            app.sync.applier.undo(str(body.get("id") or ""))
-                            return self._json(jsonable(app.sync.snapshot()))
-                    except ValueError as e:
-                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
-                    raise SettingsError(M("unknown action"))
+                if path.startswith("/api/peer/"):
+                    # System → Mirror Plex Cache (peerlink.py): Pair Now, Unpair, Test Again
+                    if path == "/api/peer/pair":
+                        app.peerlink.pair_now()
+                    elif path == "/api/peer/unpair":
+                        app.peerlink.unpair()
+                    elif path == "/api/peer/test":
+                        app.peerlink.tick_async(force=True)
+                    else:
+                        raise SettingsError(M("unknown action"))
+                    return self._json(jsonable(app.peerlink.snapshot()))
+                if path == "/api/sync/discover":  # the Mirror page's Look Now: the account's servers that may be mirrors (sync.py)
+                    app.sync.discover_async()
+                    return self._json({"started": True})
                 if path == "/api/updates/check":  # Check Now: GitHub asked for the newest version (and, on dev, commit)
                     app.updates.check_async()
                     return self._json(app.updates.status())
@@ -559,7 +582,11 @@ def make_handler(app):
                         if action == "plan":
                             return self._json(jsonable(mig.plan(str(body.get("library") or ""), str(body.get("folder") or ""))))
                         if action == "check":
-                            return self._json(jsonable(mig.refresh()))
+                            return self._json(jsonable(mig.refresh(force=True)))
+                        if action == "scope":  # both servers, or this one only
+                            return self._json(jsonable(mig.set_scope(str(body.get("scope") or ""))))
+                        if action in ("sync_paused", "sync_resumed", "sync_checked"):  # what you've done where the app can't see
+                            return self._json(jsonable(mig.confirm(action)))
                         if action in ("copy", "catchup"):
                             if action == "copy":  # the folder copied into the new dataset: a recent snapshot first (room is among its own checks)
                                 from . import safety
@@ -597,13 +624,33 @@ def make_handler(app):
                     key = str(body.get("library") or "")
                     if not app.library_info(key) or not body.get("item"):
                         raise SettingsError(M("unknown library: {key}", key=key))
+                    from .libhealth import ignored, scanning
+                    busy = scanning(app, key, [str(i) for i in body.get("ids") or []] or ((ignored(app).get(key) or {}).get(str(body["item"])) or []))
+                    if busy:
+                        raise SettingsError(busy)
                     if body.get("action") == "ignore":
                         set_ignored(app, key, str(body["item"]), [str(i) for i in body.get("ids") or []])
-                    elif body.get("action") == "restore":
-                        set_ignored(app, key, str(body["item"]), None)
+                    elif body.get("action") == "restore":  # (``ids``: those only; none: every one)
+                        ids = [str(i) for i in body.get("ids") or []]
+                        set_ignored(app, key, str(body["item"]), ids or None, restore=True)
                     else:
                         raise SettingsError(M("unknown action"))
                     return self._json({"ok": True})
+                if path in ("/api/library/health/scan", "/api/library/health/action"):
+                    # a check page whose findings are worked out in the background (Mirror Checks, libhealth.SOURCES): Scan
+                    # Again {"library", "category"}; a finding's action (Scan Folder) {"library", "item", "check"}
+                    from . import libhealth
+                    key = str(body.get("library") or "")
+                    if not app.library_info(key):
+                        raise SettingsError(M("unknown library: {key}", key=key))
+                    try:
+                        if path == "/api/library/health/scan":
+                            return self._json({"started": libhealth.scan(app, key, str(body.get("category") or ""))})
+                        if not body.get("item") or not body.get("check"):
+                            raise SettingsError(M("item and check must name the finding"))
+                        return self._json({"said": jsonable(libhealth.act(app, key, str(body["item"]), str(body["check"])))})
+                    except (ValueError, PlexError) as e:
+                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
                 if path == "/api/library/survey":
                     # read the layout of a library's files (Library Health): {"library", "force"?, "pause"?}.
                     # One library at a time: starting one pauses the other, which carries on when started again.

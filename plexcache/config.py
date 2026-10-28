@@ -18,7 +18,7 @@ import threading
 import uuid
 
 from .i18n import CODES, M
-TOOL_NAMES = ("merge", "versions", "folders", "unlink", "convert")  # the tools (tools/), as the "tools" section keys them
+TOOL_NAMES = ("merge", "versions", "folders", "unlink", "convert", "sync")  # the tools (tools/), as the "tools" section keys them
 
 SECRET_MASK = "__unchanged__"
 SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"), ("mqtt", "password"))
@@ -30,25 +30,22 @@ DEFAULTS: dict = {
     # account's servers); "token": the chosen server's own; "libraries": this server's library key ->
     # the other's ("" for none; a library not set is paired with the one of the same name and kind).
     "plex2": {"url": "", "token": "", "account_token": "", "name": "", "machine_id": "", "libraries": {}},
-    # Library Sync (sync.py): whether this server has a mirror ("mirrors": "unknown" until chosen —
-    # "none", or "plex2", the server watched), and what a sync would do. Nothing acts without a review:
-    # "approved" holds the settings as last reviewed; changed since, applying stays paused.
+    # The mirror (sync.py, the Mirror page): whether this server has one ("mirrors": "unknown" until chosen — "none", or
+    # "plex2", the server watched), and what Plex's own sync carries between the two. What Sync Libraries brings in line,
+    # and whose edits win, are that tool's options (the "tools" section).
     # Library Health (libhealth.py): which checks run, by id ({id: true/false}; the ids are libhealth.CHECKS)
     "library_health": {"checks": {}, "subtitle_language": "en", "audio_quality": "poor"},  # (checks: each check's switch, where it differs from how it ships)
     "sync": {
         "mirrors": "unknown",
         "discover": True,        # look for mirrors among the account's servers, weekly
-        "source": "this",        # whose edits win: "this" server, or the "mirror"
-        "mode": "compare",       # "off" | "compare" (read-only) | "apply" (a later part)
-        "what": {"grouping": True, "matches": True, "edits": True, "art": True, "collections": True, "editions": True},
         "watched": "plex",       # watched state and ratings: "plex" (Plex's own sync carries them) | "off" | "both"
         "users": "home",         # whose: "me" | "home" (every user of the Plex Home)
-        "compare_hours": 6,
-        "ask_over": 25,          # a run changing more items than this asks first (applying)
-        "approved": "",
-        "libraries": {},         # library key -> false: left out of the sync
     },
     "truenas": {"url": "", "api_key": "", "verify_tls": False},
+    # The other Plex Cache, at the mirror's site (peerlink.py: System → Mirror Plex Cache). "enabled": looked for (off: there's
+    # none there); "auto_pair": paired by itself when it's safe; "port": the port the other side reaches this one on (0: worked
+    # out); "url": the other one's address ("": found by itself).
+    "peer": {"enabled": True, "auto_pair": True, "port": 0, "url": ""},
     "general": {
         "poll_seconds": 5,
         "update_check": True,  # ask GitHub every few hours whether there's a newer version
@@ -181,6 +178,7 @@ OLD_MODES = {"off": {"start": "off", "end": "none"}, "rest": {"end": "rest"}, "a
 # through _coerce(), so these are the only rules. Numbers are whole numbers in the same
 # ranges the web UI offers; dropdowns accept only their own choices.
 LIMITS = {
+    ("peer", "port"): (0, 65535),
     ("general", "hdd_mb_per_sec"): (10, 5000),
     ("general", "ram_reserve_gb"): (0, 4096),
     ("warmup", "weekday"): (0, 6),
@@ -198,8 +196,6 @@ LIMITS = {
     ("nextepisode", "pacing_percent"): (5, 100),
     ("mqtt", "port"): (1, 65535),
     ("mqtt", "interval"): (5, 600),
-    ("sync", "compare_hours"): (1, 168),
-    ("sync", "ask_over"): (1, 1000),
     ("general", "page_size"): (25, 1000),
     ("general", "tool_page_size"): (5, 200),  # (the Optimizer's files come from the server 200 at most at a time)
     ("general", "backup_days"): (1, 365),
@@ -220,8 +216,6 @@ CHOICES = {
     ("mqtt", "report_period"): ("today", "week", "month"),
     ("mqtt", "language"): tuple(CODES),
     ("sync", "mirrors"): ("unknown", "none", "plex2"),
-    ("sync", "source"): ("this", "mirror"),
-    ("sync", "mode"): ("off", "compare", "apply"),
     ("sync", "watched"): ("plex", "off", "both"),
     ("sync", "users"): ("me", "home"),
 }
@@ -265,19 +259,20 @@ def normalize_url(section: str, value: str) -> str:
 
     Plex: ``192.168.1.10`` -> ``http://192.168.1.10:32400`` (port added for http only).
     TrueNAS: ``192.168.1.10`` -> ``https://192.168.1.10`` (API keys need https).
+    The other Plex Cache (peer): ``192.168.1.20`` -> ``http://192.168.1.20:8642``.
     """
     value = value.strip().rstrip("/")
     if not value:
         return ""
     if not re.match(r"^https?://", value, re.I):
         value = ("https://" if section == "truenas" else "http://") + value
-    if section in ("plex", "plex2") and value.lower().startswith("http://"):
+    if section in ("plex", "plex2", "peer") and value.lower().startswith("http://"):
         # (an https:// address is usually a reverse proxy on 443, so leave it alone)
         scheme, rest = value.split("://", 1)
         hostport = rest.split("/", 1)[0]
         has_port = re.search(r":\d+$", hostport) and not hostport.endswith("]")
         if not has_port:
-            value = f"{scheme}://{hostport}:{PLEX_DEFAULT_PORT}" + (rest[len(hostport):] if "/" in rest else "")
+            value = f"{scheme}://{hostport}:{8642 if section == 'peer' else PLEX_DEFAULT_PORT}" + (rest[len(hostport):] if "/" in rest else "")
     return value
 
 
@@ -370,19 +365,9 @@ def _coerce(section: str, key: str, value, current):
         ids = {c["id"] for cat in CHECKS.values() for c in cat}
         if not isinstance(value, dict) or any(not isinstance(v, bool) for v in value.values()):
             raise SettingsError(M("library_health.checks must set each check’s id to true or false"))
-        # the checks' ids, and the tools' chips (tool_<name>); an id of a check that was renamed or retired is dropped,
+        # the checks' ids, the tools' chips (tool_<name>) and the check pages' (page_<page>); an id of a check that was renamed or retired is dropped,
         # not refused — else every later save of the switches would fail on it
-        return {str(k): v for k, v in value.items() if k in ids or re.fullmatch(r"tool_[a-z_]+", str(k))}
-    if (section, key) == ("sync", "what"):
-        if not isinstance(value, dict) or any(k not in DEFAULTS["sync"]["what"] or not isinstance(v, bool) for k, v in value.items()):
-            raise SettingsError(M("sync.what must set each of {keys} to true or false", keys=", ".join(DEFAULTS["sync"]["what"])))
-        return dict(DEFAULTS["sync"]["what"], **value)
-    if (section, key) == ("sync", "libraries"):
-        if not isinstance(value, dict) or len(value) > MAX_ITEMS or any(not _LIB_KEY.fullmatch(str(k)) or not isinstance(v, bool) for k, v in value.items()):
-            raise SettingsError(M("sync.libraries must be {library key: true/false}"))
-        return {str(k): v for k, v in value.items()}
-    if (section, key) == ("sync", "approved"):
-        return _text(section, key, value, 4000)
+        return {str(k): v for k, v in value.items() if k in ids or re.fullmatch(r"(tool|page)_[a-z_]+", str(k))}
     if (section, key) == ("plex2", "libraries"):
         if not isinstance(value, dict) or len(value) > MAX_ITEMS or any(
                 not _LIB_KEY.fullmatch(str(k)) or not (v == "" or (isinstance(v, str) and _LIB_KEY.fullmatch(v))) for k, v in value.items()):
@@ -611,6 +596,27 @@ class Settings:
                 kinds = o.pop("convert_types", None)
                 if isinstance(kinds, dict) and kinds and isinstance(saved.get("tools", {}), dict):  # (the kinds chosen once for every library: the tool's "*" options now)
                     saved.setdefault("tools", {}).setdefault("convert", {}).setdefault("*", {k: bool(v) for k, v in kinds.items()})
+            sy = saved.get("sync") if isinstance(saved, dict) and isinstance(saved.get("sync"), dict) else None
+            if sy is not None and isinstance(saved.get("tools", {}), dict) and any(k in sy for k in ("source", "what", "libraries")):
+                # (Library Sync is the Sync Libraries tool now: whose edits win and what's brought in line are its options — for
+                # every library, and none for a library left out; a review before applying, and comparing on a timer, are gone)
+                mine = saved.setdefault("tools", {}).setdefault("sync", {})
+                every = {}
+                if sy.get("source") in ("this", "mirror"):
+                    every["source"] = sy["source"]
+                what = sy.get("what") if isinstance(sy.get("what"), dict) else {}
+                for k, v in what.items():
+                    for opt in (("scan", "grouping") if k == "grouping" else (k,)):
+                        if opt in ("scan", "grouping", "matches", "edits", "art", "collections", "editions"):
+                            every[opt] = bool(v)
+                if every:
+                    mine.setdefault("*", every)
+                for lib, on in (sy.get("libraries") or {}).items() if isinstance(sy.get("libraries"), dict) else ():
+                    if on is False:
+                        mine.setdefault(str(lib), dict.fromkeys(("scan", "grouping", "matches", "edits", "art", "collections", "editions"), False))
+            if sy is not None:
+                for k in ("source", "mode", "what", "compare_hours", "ask_over", "approved", "libraries"):
+                    sy.pop(k, None)
             return _merge(DEFAULTS, saved)
         except FileNotFoundError:
             return copy.deepcopy(DEFAULTS)

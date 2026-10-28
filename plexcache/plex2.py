@@ -27,6 +27,7 @@ RECONNECT_EVERY = 300  # seconds between tries at reaching the server by another
 
 INDEX_TTL = 300  # seconds the other server's file list is kept
 LIBS_TTL = 600
+RETRY_LIBS = 30  # seconds: its libraries read again this soon after they couldn't be (none known yet)
 MATCHED = 0.9  # the share of a library's files found there for its paths to count as lining up
 
 
@@ -129,26 +130,36 @@ class OtherServer:
         self.app.settings.update({"plex2": {"url": "", "token": "", "account_token": "", "name": "", "machine_id": "", "libraries": {}}})
         with self.lock:
             self.libs, self.indexes, self.rates, self.error, self.found = None, {}, {}, None, []
+            self.libs_at = 0.0
 
     # ------------------------------------------------------------ its libraries
     def libraries(self, fresh: bool = False) -> list[Library]:
+        """Its libraries, kept LIBS_TTL. Not read yet, or never read for an error: ``libs`` stays None (not known — never
+        taken for "it has none"), tried again after RETRY_LIBS."""
         if not self.configured():
             return []
         with self.lock:
             if self.libs is not None and not fresh and time.time() - self.libs_at < LIBS_TTL:
                 return list(self.libs)
+            if self.libs is None and not fresh and time.time() - self.libs_at < RETRY_LIBS:
+                return []
         try:
             libs = [lib for lib in self.run(lambda c: c.libraries()) if lib.kind]
             err = None
         except PlexError as e:
-            libs, err = (self.libs or []), str(e)
+            libs, err = self.libs, str(e)
         with self.lock:
             self.libs, self.libs_at, self.error = libs, time.time(), err
-        return list(libs)
+        return list(libs or [])
 
-    def pairs(self) -> dict[str, Library | None]:
+    def known(self) -> bool:
+        """Whether its libraries have been read (pairs() says what's paired, not a guess)."""
+        with self.lock:
+            return self.libs is not None
+
+    def pairs(self, theirs: list[Library] | None = None) -> dict[str, Library | None]:
         """Each library here -> its library there (or None): as chosen, else the one of the same name and kind."""
-        theirs = self.libraries()
+        theirs = self.libraries() if theirs is None else theirs
         chosen = self.settings().get("libraries") or {}
         out = {}
         for lib in getattr(self.app, "libraries", []) or []:

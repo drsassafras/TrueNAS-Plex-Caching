@@ -18,6 +18,7 @@ The loop is: edit on your Mac → `tnsync local -y` → refresh `http://<nas-ip>
 ```
 tnsync local      your folder as it is now (uncommitted changes included)
 tnsync master     the latest code on GitHub's default branch (main or master)
+tnsync dev        the latest code on GitHub's dev branch
 tnsync release    the newest release tag, e.g. v1.2.0
 tnsync beta       the newest tag including pre-releases, e.g. v1.3.0-beta.1
 tnsync init       set up tnsync for a project
@@ -33,9 +34,11 @@ tnsync init       set up tnsync for a project
 2. **Restarts the test app** with TrueNAS's own `midclt call app.redeploy plex-cache-dev`, and waits until TrueNAS says it's done. You can refresh the page and try your change from here.
 3. **Runs the tests** (`python3 tests/run.py`) on exactly the code it copied. If any fail, a big red banner says so — the test app is already running that code, so fix it and sync again.
 
+**If the NAS already has exactly these files** (compared by content, so the same code from another branch counts too), nothing is copied and the app isn't restarted. If the last tests tnsync ran on that code passed, a green banner says you're already in sync and done. If they failed (or there's no result yet, `TN_TEST` changed, or the last run was a different command such as `tnsync master`), a yellow banner says the files are in sync and the tests run again. The last result is kept in `~/.local/state/tnsync/`.
+
 With `--tests-first`, the tests run before anything is copied instead, and if any fail **nothing is copied and the app isn't restarted**, so the NAS keeps running the last good code. Use it when the test app needs to stay working (for example, before syncing `master` or a release).
 
-`master`, `release` and `beta` copy exactly what's in git at that point; they never touch your working folder.
+`master`, `dev`, `release` and `beta` copy exactly what's in git at that point; they never touch your working folder.
 
 tnsync isn't specific to this project — any project with a `.tnsync` file in its root can use it.
 

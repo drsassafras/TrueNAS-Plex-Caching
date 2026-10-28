@@ -24,6 +24,8 @@ from .i18n import M
 
 STORE = "file-maps.json"
 MAP_VERSION = 7  # what's read from each file; a map from an older version is read again (2: JPEG tables, 3: mix, 4: audio files, 5: LZ4, 6: ZFS rounding apart, 7: track flags)
+INSPECT_EVERY = 30 * 86400  # a file read again after this long, though unchanged (what's read of it kept meanwhile)
+INSPECT_ROUND = 86400       # a library's files looked over again this often for those due (INSPECT_EVERY), with nothing else asking
 LAYOUT_VERSION = 2  # the oldest map still shown while it waits to be read again (it lacks only the mix)
 MAX_PARTS = 512  # top-level parts to read from either end before giving up
 MAX_TRACKS = 128
@@ -692,6 +694,12 @@ class FileMaps:
             return None  # read with less than is read now: again
         return e.get("map")
 
+    def due(self, path: str, st: os.stat_result) -> bool:
+        """Whether a file is to be read (again): never read, changed since, read by an older version (MAP_VERSION: an update
+        that reads more of it, for a check added since), or read longer ago than INSPECT_EVERY."""
+        m = self.get(path, st, full=True)
+        return m is None or time.time() - float(m.get("read") or time.time()) > INSPECT_EVERY
+
     def read(self, path: str, force: bool = False) -> dict:
         """The file's layout: known, or read now (and kept). ``force``: read again even if unchanged."""
         st = os.stat(path)
@@ -748,11 +756,16 @@ class FileMaps:
             self.dirty = True  # the config folder isn't writable: Health says so
 
 
+READ_REV = 1000  # files read in a library between the times Library Health is told (rev): its File Checks follow as it goes
+
+
 class Inspector:
     """Reads the layout of a library's files for the Library Health page — only files new or changed
     since they were last read, unless asked for every one. One library at a time: starting one pauses
     the one running, and each picks up where it was paused. Not a file job: it only reads a few small
-    parts of each file, so it never waits for (or holds up) optimizing."""
+    parts of each file, so it never waits for (or holds up) optimizing. Every library's files are read
+    in the background, steered by the evaluator (evaluate.Evaluator.steer: the page's library first); one
+    paused by hand (Pause) stays paused until it's started again."""
 
     def __init__(self, app):
         self.app = app
@@ -760,6 +773,11 @@ class Inspector:
         self.libs: dict[str, dict] = {}  # key -> {"todo": [paths], "done", "total", "read", "paused", "finished"}
         self.current: str | None = None
         self.working = False  # the reading thread is (still) going
+        self.held: set[str] = set()  # libraries paused by hand: left so (the evaluator steers it elsewhere) until started again
+        self.steered: dict[str, tuple] = {}  # library -> the state of its data the evaluator last started it at
+        self.looked: dict[str, float] = {}  # library -> when its files were last looked over for those to read (start)
+        self._revs: dict[str, int] = {}  # library -> raised as its files are read (READ_REV, and at the end): Library Health's sig
+        self.unreadable: dict[str, list] = {}  # path -> its identity when it couldn't be read: not tried again until it changes
 
     def start(self, key: str, force: bool = False) -> dict:
         """Inspect a library (resuming it if it was paused), pausing any other. ``force``: every file
@@ -767,8 +785,10 @@ class Inspector:
         key = str(key)
         app, maps = self.app, self.app.file_maps
         with self.lock:
+            self.held.discard(key)
             st = self.libs.get(key)
             if force or not st or not st["todo"]:
+                self.looked[key] = time.time()
                 paths = [app.map_path(f.path) for f in list(app.files) if str(f.library_key) == key]
                 todo = paths if force else [p for p in paths if not self._current(maps, p)]
                 if not todo and st:
@@ -789,48 +809,91 @@ class Inspector:
             return self.snapshot_locked()
 
     def pause(self, key: str) -> None:
+        """Paused by hand (Pause): left so until it's started again — the evaluator steers it to the next library."""
         with self.lock:
+            self.held.add(str(key))
             st = self.libs.get(str(key))
             if st and st["todo"]:
                 st["paused"] = True
             if self.current == str(key):
                 self.current = None
+        ev = getattr(self.app, "evaluator", None)
+        if ev is not None:
+            ev.steer()
 
-    @staticmethod
-    def _current(maps, path) -> bool:
+    def rev(self, key: str) -> int:
+        with self.lock:
+            return self._revs.get(str(key), 0)
+
+    def left(self, key: str) -> int:
+        """The files of a library's round still to read (0: gone through, or never started there)."""
+        with self.lock:
+            st = self.libs.get(str(key))
+            return len(st["todo"]) if st else 0
+
+    def running_for(self, key: str) -> bool:
+        """Whether it's reading this library's files now."""
+        with self.lock:
+            st = self.libs.get(str(key))
+            return bool(self.working and self.current == str(key) and st and not st["paused"] and st["todo"])
+
+    def progress_for(self, key: str) -> dict | None:
+        """How far a library's round is: {"done", "total", "running"} (None: never started there)."""
+        with self.lock:
+            st = self.libs.get(str(key))
+            if not st:
+                return None
+            return {"done": st["done"], "total": st["total"], "running": bool(self.working and self.current == str(key) and not st["paused"] and st["todo"])}
+
+    def couldnt_read(self, path: str, st) -> bool:
+        """Whether the file couldn't be read as it is (``st``: its stat): not waiting to be read, then — it can't be."""
+        return self.unreadable.get(path) == FileMaps._ident(st)
+
+    def _current(self, maps, path) -> bool:
         try:
-            return maps.get(path, os.stat(path), full=True) is not None
+            st = os.stat(path)
         except OSError:
             return True  # missing: nothing to read
+        return not maps.due(path, st) or self.couldnt_read(path, st)
 
     def _work(self) -> None:
         maps, since_save = self.app.file_maps, 0
         while True:
             finished = None
             with self.lock:  # (what to do next, and whether to stop, decided together with start())
-                st = self.libs.get(self.current) if self.current else None
+                key = self.current
+                st = self.libs.get(key) if key else None
                 if not st or st["paused"]:
                     self.working = False
                     break
                 if not st["todo"]:
                     st["finished"] = time.time()
-                    finished, self.current, self.working = (self.current, st["read"]), None, False
+                    finished, self.current, self.working = (key, st["read"]), None, False
+                    self._revs[key] = self._revs.get(key, 0) + 1
                     path = None
                 else:
                     path = st["todo"][0]  # (left in the list while it's read: the job counts as running until it's in)
             if finished:
                 self._finished(*finished)
+                ev = getattr(self.app, "evaluator", None)
+                if ev is not None:
+                    ev.kick()  # (its File Checks worked out again, and the next library's files read)
                 break
             try:
                 maps.read(path, force=st["force"])
                 with self.lock:
                     st["read"] += 1
-            except OSError:
-                pass
+            except Exception:  # noqa: BLE001 — gone, refused, or not a file it can make out: not tried again until it changes
+                try:
+                    self.unreadable[path] = FileMaps._ident(os.stat(path))
+                except OSError:
+                    pass
             with self.lock:
                 st["done"] += 1
                 if st["todo"] and st["todo"][0] == path:
                     st["todo"].pop(0)
+                if st["done"] % READ_REV == 0:
+                    self._revs[key] = self._revs.get(key, 0) + 1
             since_save += 1
             if since_save >= 200:
                 maps.save()

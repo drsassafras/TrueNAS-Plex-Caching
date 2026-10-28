@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import ipaddress
 import json
 import logging
@@ -20,12 +21,15 @@ from .i18n import Fixed, M, join, msg, size_text
 from .updates import UpdateChecker
 from .config import PLEX_DEFAULT_PORT, Settings
 from .coverage import Coverage
+from .evaluate import Evaluator
 from .filehistory import FileHistory
 from .filemap import FileMaps, Inspector
 from .pauses import L2arcPauses
 from .jobs import Jobs
 from .converting import Conversions
 from .plex2 import OtherServer
+from .peerlink import PeerLink
+from .mirrorhealth import MirrorHealth
 from .sync import Sync
 from .trash import Trash
 from .tools.merge import MergeDuplicates
@@ -33,7 +37,9 @@ from .tools.versions import DuplicateVersions
 from .tools.folders import OrganizeFolders
 from .tools.unlink import UnlinkFiles
 from .tools.convert import ConvertToMkv
+from .tools.sync import SyncLibraries
 from .libhealth import defaults as libhealth_defaults
+from .libhealth import scans as libhealth_scans
 from .languages import language_name
 from .migrating import Migration
 from .optimizing import DEFAULTS as OPT_DEFAULTS, Optimizing
@@ -50,6 +56,23 @@ from .warmup import KIND_SECONDS, KINDS, L2ARC_RATE_SHARE, NEXT_DAY, next_day_ch
 GiB = 1024 ** 3
 log = logging.getLogger("plexcache")
 TRUENAS_PROBE_PORT = 443  # tests point this at a fake server
+
+
+# the parts of a Library Health answer's sig (App._health_sig) each check page's count is of: the data's stamp, the checks'
+# settings, the items ignored — and File Checks the inspector's reads, Mirror Checks the comparing's, the tools' chips their
+# options. A change to the others leaves the category's count as it is (App.health_current)
+HEALTH_COUNTS = "health-counts.json"  # the last health_counts, kept over a restart
+HEALTH_PARTS = {"file": (0, 1, 2, 5), "plex": (0, 1, 2), "mirror": (0, 1, 2, 4), "tools": (0, 1, 2, 3)}
+
+
+def _no_sources(sig: tuple) -> tuple:
+    """A Library Health sig but what the sources found (its part 4): what the answer without their findings is of."""
+    return sig[:4] + sig[5:]
+
+
+def _rev(sig: tuple) -> str:
+    """A short name for what a Library Health answer was worked out from (App._health_sig), for the page to compare."""
+    return hashlib.sha1(repr(sig).encode()).hexdigest()[:12]
 
 
 def _split_host(host_header: str | None) -> tuple[str | None, int | None]:
@@ -148,6 +171,7 @@ class App:
         self._posters: tuple | None = None  # (files, {path: (poster, title)}) for poster_of() and title_of()
         self._thumbs: dict[str, bytes] = {}  # poster thumbnails, oldest first
         self.libraries: list = []
+        self.libraries_read = False  # (Plex's libraries read once: until then no count says a page doesn't apply)
         self.stats = LibraryStats()
         self.scan_error: str | None = None
         self.scanning = False
@@ -189,25 +213,31 @@ class App:
         self.migration = Migration(self)
         self.conversions = Conversions(self)  # converted files waiting for Plex before their originals go
         self.other = OtherServer(self)  # a second Plex server with the same files (plex2.py)
-        self.sync = Sync(self)  # Library Sync: this server and its mirror compared (sync.py)
+        self.sync = Sync(self)  # the mirror: whether there's one, and the servers that may be (sync.py; Sync Libraries is a tool)
         self.trash = Trash(self)  # files the tools set aside, purged once Plex (here and mirrored) no longer lists them
         self.tool_runs: dict = self._load_json("tool-runs.json") or {}  # {library: {tool: when}} — told to the other Plex Cache (peers.py)
         self.peers_summary: dict | None = None
+        self.published_markers: dict[str, float] = {}  # library -> when our marker was last written there (peers.publish)
+        self.first_published: dict[str, float] = self._load_json("published.json") or {}  # library -> when first: for "never arrived"
+        self.peerlink = PeerLink(self)  # the other Plex Cache, at the mirror's site: found, paired, asked (peerlink.py)
+        self.mirror_health = MirrorHealth(self)  # Tools → Mirror Checks: the two sites' files and Plexes compared (mirrorhealth.py)
         self.libdata = libdata.Gatherer(self)  # the library data layer: records and files, gathered once, read by every check and tool
-        self.tools = {t.name: t for t in (MergeDuplicates(self), DuplicateVersions(self), OrganizeFolders(self), UnlinkFiles(self), ConvertToMkv(self))}  # the Tools pages
-        for t in self.tools.values():
-            self.libdata.listeners.append(t.data_changed)  # (a gathering done: the tool's rows worked out again, its count fresh)
+        self.tools = {t.name: t for t in (MergeDuplicates(self), DuplicateVersions(self), OrganizeFolders(self), UnlinkFiles(self), ConvertToMkv(self), SyncLibraries(self))}  # the Tools pages
         from .tools import ToolJob
         self.jobs.register("tool", lambda args, saved: ToolJob(self, args, saved))  # a tool's Apply: the backup, then the rows (Processes)
         self.health_counts: dict[str, dict] = {}  # library -> {"file": n, "plex": n, "ignored": n, "items": n, "stamp"}: Library Health's counts for the cards
+        # (the last ones kept over a restart, of no state — sig None: not current — the numbers a page shows beside its wheel,
+        # as last known, while they're worked out again: evaluate.Evaluator.count)
+        self._load_health_counts()
         self._health: dict[str, tuple] = {}  # library -> (what it was worked out from: _health_sig, Library Health's answer)
+        self._health_base: dict[str, tuple] = {}  # library -> (_health_sig but the sources' stamps, the answer without their findings)
         self._health_lock = threading.Lock()
-        self._health_tried: dict[str, tuple] = {}  # library -> the _health_sig last worked out in the background
-        self._health_busy = False
-        self.libdata.listeners.append(self._count_health)
         # what's where in each media file (the Library Health page), and the job that reads it
         self.file_maps = FileMaps(self.config_dir)
         self.inspector = Inspector(self)  # Library Health: each library's files read, one library at a time
+        # every count a page shows, worked out before it's shown, in one queue — the page open first (evaluate.py)
+        self.evaluator = Evaluator(self)
+        self.libdata.listeners.append(self.evaluator.data_changed)  # (a gathering done: what reads it worked out again)
         # each file's history with the optimizer, kept for good: the Metrics page's original against now
         self.history = FileHistory(self.config_dir, log=lambda e: self.jobs.log.add(e))
         for p, e in list(self.file_maps.files.items()):  # (optimized before it was kept: what was kept then)
@@ -299,9 +329,7 @@ class App:
             mst = (self.migration.state or {}).get("step")
             if mst in ("create", "switch", "verify"):
                 threading.Thread(target=self._refresh_migration, daemon=True).start()
-            # Library Sync: the paired libraries compared every few hours; mirrors looked for weekly
-            if self.sync.due():
-                self.sync.compare_async()
+            # the mirror: looked for weekly among the account's servers, while it isn't chosen
             if self.sync.settings().get("discover") and time.time() - self.sync.discovered_at > 7 * 86400 and self.sync.settings().get("mirrors") == "unknown":
                 self.sync.discover_async()
             # converted files: Plex asked whether it has the MKVs, originals deleted once it has (and the hold is over)
@@ -317,6 +345,9 @@ class App:
             if time.time() - last_publish > peers.PUBLISH_EVERY and self.libraries:  # our marker in the shared folders (peers.py)
                 last_publish = time.time()
                 threading.Thread(target=self.publish_peers, name="peers", daemon=True).start()
+            if self.peerlink.wanted():  # the other Plex Cache: found, paired, asked how its side is (every few minutes)
+                self.peerlink.tick_async()
+            self.evaluator.kick()  # (what's due again: Mirror Checks every few hours)
             if self.libdata.started:  # the library data layer: a changed library (Plex's stamp, a folder's mtime) gathered again
                 threading.Thread(target=self.libdata.tick, name="libdata-tick", daemon=True).start()
             if time.time() - last_tools > 300:  # the tools' follow-ups on the mirror (Organize Folders)
@@ -375,6 +406,7 @@ class App:
                 lib_info.append(info)
             with self.lock:
                 self.files, self.libraries = files, lib_info
+                self.libraries_read = True
                 self.stats = LibraryStats.from_files(files, {i["key"]: i["title"] for i in lib_info})
                 self.scan_error = None
             self.libdata.invalidate_files()  # (Plex's listing read again: the data layer's files follow)
@@ -420,7 +452,7 @@ class App:
         else:
             try:
                 info = self.plex(timeout=10).ping()
-                self.plex_name = info["name"]  # (how Plex names this server: beside the mirror's, on the Sync page)
+                self.plex_name = info["name"]  # (how Plex names this server: beside the mirror's, on the Mirror page)
                 n = len(self.plex(timeout=10).libraries())
                 res["plex_token"] = {"status": "ok", "text": M("Signed in to Plex"),
                                      "detail": M("Token accepted by “{name}” · {n} libraries visible",
@@ -576,7 +608,7 @@ class App:
 
     def poster_thumb(self, path: str, server: str = "") -> bytes:
         """A small poster for lists (the Processes page), kept in memory: the last few hundred.
-        ``server`` "mirror": the mirrored server's (Library Sync's differences)."""
+        ``server`` "mirror": the mirrored server's (Sync Libraries' rows)."""
         key = (server or "") + path
         with self.lock:
             hit = self._thumbs.pop(key, None)
@@ -650,30 +682,72 @@ class App:
 
     def _health_sig(self, key: str) -> tuple:
         """What a library's Library Health answer is worked out from: its data's state, the checks' settings, the items
-        ignored, the Library Sync compare it reads locked fields from — the answer kept until one of them changes."""
+        ignored, the tools' options for it (what their chips say), what the sources found (Mirror Checks' last compare),
+        the files the inspector has read there — the answer kept until one of them changes (HEALTH_PARTS: which of them
+        each check page's count is of)."""
         from . import libhealth
-        rep = (getattr(self, "sync", None) and self.sync.report) or {}
-        row = (rep.get("libraries") or {}).get(str(key))
-        return (self.libdata.data(key).stamp, json.dumps(self.settings.get().get("library_health") or {}, sort_keys=True, default=str),
-                json.dumps(libhealth.ignored(self).get(str(key)) or {}, sort_keys=True, default=str), id(row), len((row or {}).get("items") or []))
+
+        def work():
+            return (self.libdata.data(key).stamp, json.dumps(self.settings.get().get("library_health") or {}, sort_keys=True, default=str),
+                    json.dumps(libhealth.ignored(self).get(str(key)) or {}, sort_keys=True, default=str),
+                    json.dumps({name: t.enabled(key) for name, t in (getattr(self, "tools", None) or {}).items()}, sort_keys=True, default=str),
+                    libhealth.stamps(self, key), self.inspector.rev(key))
+        ev = getattr(self, "evaluator", None)
+        return ev.memo("health_sig", str(key), work) if ev is not None else work()
+
+    def health_current(self, key: str, cat: str | None = None) -> bool:
+        """Whether a library's Library Health counts are of its state now — all of them, or one category's (``cat``:
+        HEALTH_PARTS), whose count a change to the rest leaves as it is."""
+        got = self.health_counts.get(str(key))
+        if not got or not got.get("sig"):
+            return False
+        sig = self._health_sig(str(key))
+        if cat is None:
+            return got["sig"] == sig
+        return all(got["sig"][i] == sig[i] for i in HEALTH_PARTS.get(cat, range(len(sig))))
 
     def library_health(self, key: str) -> dict:
         """A library's items through Library Health's checks (libhealth.library_health), worked out once for what it's
-        worked out from (_health_sig) and kept: worked out in the background as the data changes (_count_health), so
-        opening a check page — or a library on it — shows it at once."""
+        worked out from (_health_sig) and kept: worked out by the evaluator as the data changes (evaluate.py), so opening a
+        check page — or a library on it — shows it at once. When only the sources' findings changed (a Mirror Checks
+        compare), they're laid over the rest as kept (libhealth.with_sources): quick."""
         from . import libhealth
         key = str(key)
         sig = self._health_sig(key)
         with self._health_lock:
-            got = self._health.get(key)
+            got, base = self._health.get(key), self._health_base.get(key)
         if got and got[0] == sig:
             return got[1]
-        out = libhealth.library_health(self, key)
-        sig = self._health_sig(key) if sig[0] != self.libdata.data(key).stamp else sig  # (gathered just now for it: the new state's)
+        if not base or base[0] != _no_sources(sig):
+            base = libhealth.base_health(self, key)
+            sig = self._health_sig(key) if sig[0] != self.libdata.data(key).stamp else sig  # (gathered just now for it: the new state's)
+            base = (_no_sources(sig), base)
+            with self._health_lock:
+                self._health_base[key] = base
+        out = libhealth.with_sources(self, key, base[1])
+        out["rev"] = _rev(sig)  # (the page holds on to an answer until the state's count says a newer one is out)
         with self._health_lock:
             self._health[key] = (sig, out)
         self._store_health_counts(key, sig, out)
         return out
+
+    def forget_health(self, key: str) -> None:
+        """A library's Library Health answer dropped, to be worked out whole again (its stale period up: evaluate.py)."""
+        with self._health_lock:
+            self._health.pop(str(key), None)
+            self._health_base.pop(str(key), None)
+
+    def health_kept(self, key: str) -> dict | None:
+        """A library's Library Health answer as last worked out, whatever it was worked out from (None: none yet)."""
+        with self._health_lock:
+            got = self._health.get(str(key))
+        return got[1] if got else None
+
+    def _load_health_counts(self) -> None:
+        """The last health_counts, as saved (of no state now: not current until worked out again)."""
+        for k, v in (self._load_json(HEALTH_COUNTS) or {}).items():
+            if isinstance(v, dict):
+                self.health_counts[str(k)] = dict(v, sig=None)
 
     def _store_health_counts(self, key: str, sig: tuple, got: dict) -> None:
         """The counts the check pages' tabs, the Tools page's cards and the menu show: per category, the items a check
@@ -682,7 +756,7 @@ class App:
         of = {c["id"]: c.get("of") for cs in got["checks"].values() for c in cs}
         live_check = {i: bool(v) and (not of.get(i) or bool(on.get(of[i]))) for i, v in on.items()}
         cat_of = {c["id"]: cat for cat, cs in got["checks"].items() for c in cs}
-        counts: dict[str, int] = {"file": 0, "plex": 0, "tools": 0}
+        counts: dict[str, int] = dict.fromkeys(got["checks"], 0)  # (every category: file, plex, mirror, tools)
         ignored = 0
         for it in got["items"]:
             live = {r["id"] for r in it["results"] if not r.get("ignored") and live_check.get(r["id"], True)}
@@ -690,60 +764,28 @@ class App:
                 if cat in counts:
                     counts[cat] += 1  # (an item once per category, however many of its checks found something)
             ignored += any(r.get("ignored") for r in it["results"])
-        self.health_counts[key] = dict(counts, ignored=ignored, items=got["stats"]["items"], flagged=got["stats"]["flagged"], stamp=sig[0], sig=sig)
-
-    def _count_health(self, key: str, what) -> None:
-        """Library Health worked out for a library whose data changed (the data layer's listener), so its counts and
-        its check pages are ready before they're opened."""
-        if not self.libdata.data(key).ready or not (self.library_info(key) or {}).get("kind"):
-            return
+        # the categories whose last scan couldn't run a check that's switched on (Mirror Checks without the other site's
+        # files): their counts shown red, from the check's own row down to the tab, the Tools card and the menu
+        unchecked = sorted({cat for cat, us in (got.get("unchecked") or {}).items() for u in us for i in u.get("checks") or [] if live_check.get(i, True)})
+        self.health_counts[key] = dict(counts, ignored=ignored, items=got["stats"]["items"], flagged=got["stats"]["flagged"], unchecked=unchecked,
+                                       unread=int(got.get("unread") or 0), outdated=int(got.get("outdated") or 0), files=int(got.get("files") or 0),
+                                       stamp=sig[0], rev=_rev(sig), sig=sig)
         try:
-            self.library_health(key)
-        except Exception:  # noqa: BLE001 — said when the page asks
-            return
+            self._save_json(HEALTH_COUNTS, {k: {x: y for x, y in v.items() if x != "sig"} for k, v in list(self.health_counts.items())})
+        except Exception:  # noqa: BLE001 — (kept for the next start only)
+            log.debug("health counts not saved", exc_info=True)
 
     def _health_counts_now(self) -> dict:
-        """health_counts for the state: each library's, marked stale when what it was worked out from has changed since
-        (a check switched, an item ignored) — the tab turns while it's worked out again, in the background, once per change."""
-        out, todo = {}, []
+        """health_counts for the state — what's under the check pages' counts (the numbers shown are the state's "counts",
+        evaluate.py): each library's, marked stale when what it was worked out from has changed since (the evaluator works
+        it out again, in its turn)."""
+        out = {}
         for lib in self.libraries:
             key = str(lib["key"])
-            if not lib.get("kind") or lib.get("excluded") or not self.libdata.data(key).ready:
-                if key in self.health_counts:
-                    out[key] = {k: v for k, v in self.health_counts[key].items() if k != "sig"}
-                continue
-            sig, got = self._health_sig(key), self.health_counts.get(key)
+            got = self.health_counts.get(key)
             if got:
-                out[key] = dict({k: v for k, v in got.items() if k != "sig"}, stale=got.get("sig") != sig)
-            if not got or got.get("sig") != sig:
-                todo.append((key, sig))
-        if todo:
-            self._health_soon(todo)
+                out[key] = dict({k: v for k, v in got.items() if k != "sig"}, stale=not self.health_current(key))
         return out
-
-    def _health_soon(self, todo: list) -> None:
-        """Library Health worked out in a thread for the libraries _health_counts_now found stale: each change tried once,
-        one thread at a time."""
-        with self._health_lock:
-            todo = [(k, sig) for k, sig in todo if self._health_tried.get(k) != sig]
-            if not todo or self._health_busy:
-                return
-            self._health_busy = True
-            for k, sig in todo:
-                self._health_tried[k] = sig
-
-        def run():
-            try:
-                for k, _sig in todo:
-                    try:
-                        self.library_health(k)
-                    except Exception:  # noqa: BLE001
-                        pass
-            finally:
-                with self._health_lock:
-                    self._health_busy = False
-
-        threading.Thread(target=run, name="library-health", daemon=True).start()
 
     def check_prefetch_libraries(self, libs) -> None:
         """Prefetch choices must be for a library Plex has, of a kind Prefetch covers, and offered
@@ -1724,7 +1766,7 @@ class App:
             zinfo = dict(self.zfs)
             stats = self.stats.to_dict()
             libraries = list(self.libraries)
-        return {
+        out = {
             "version": self.version,
             "settings": self.settings.public(),
             "auth": {"enabled": self.auth.enabled, "user": self.auth.username if self.auth.enabled else ""},
@@ -1782,14 +1824,18 @@ class App:
             "benchmark": {"running": self.benchmarking, "last": self.benchmark, "progress": self.benchmark_progress},
             # The optimizer: per library how many files are optimized, the job, and the service itself
             "optimizer": dict(self._optimizer_state(), service=self.optimizing.client.status()),
-            "migration": dict(self.migration.snapshot(), candidates=self.migration.candidates()),
+            "migration": dict(self.migration.snapshot(), candidates=self.migration.candidates(), mirror=self.migration.mirror_view()),
             "conversions": self.conversions.snapshot(),
             "plex2": self.other.snapshot(),
             "sync": self.sync.snapshot(),
             "tools": {name: t.snapshot() for name, t in self.tools.items()},  # the Tools pages: each one's last scan, run, results
             "plex_backup": plexbackup.plan(self),  # what's done before Plex's records change: the backup of them, or none (plexbackup.py)
-            "tool_counts": {name: t.counts() for name, t in self.tools.items()},  # what each tool flags, per library and in all (from the data layer)
-            "health_counts": self._health_counts_now(),  # Library Health's findings per library and category, ignored apart (the check cards)
+            # every page of the Tools menu's count, per library and in all — done (a number), pending, na or failed: the only
+            # numbers the pages show for them, each evaluated before it's shown (evaluate.py; app.js countChip)
+            "counts": self.evaluator.counts(),
+            "evaluating": self.evaluator.snapshot(),  # what's being worked out now, and the page in focus
+            "tool_counts": {name: t.counts() for name, t in self.tools.items()},  # what's under each tool's count (its red: tools_red)
+            "health_counts": self._health_counts_now(),  # Library Health's findings per library and category, ignored apart (under the check pages' counts)
             "libdata": self.libdata.snapshot(),  # the data layer: what's gathered, what's being read
             "trash": self.trash.snapshot(),  # files the tools set aside, waiting to be purged
             "job": self.jobs.snapshot(),
@@ -1799,7 +1845,6 @@ class App:
             "settings_rev": self.settings.rev,
             # each library's optimizer choices and the converted kinds, by default: for their ↺ buttons
             "optimizer_defaults": {"library": dict(OPT_DEFAULTS)},
-            "sync_defaults": {"what": dict(config.DEFAULTS["sync"]["what"])},
             "library_health_defaults": {"checks": libhealth_defaults(), "subtitle_language": "en", "audio_quality": "poor"},
             "retries": self.optimizing.retrying(),  # failed files to try again, after the file in hand
             "playback": {"sessions": self.monitor.snapshot(), "error": self.monitor.last_error, "last_poll": self.monitor.last_poll},
@@ -1808,6 +1853,28 @@ class App:
             "mqtt": dict(self.ha.status),
             "updates": self.updates.status(),
             "peers": self.peers_summary,  # the other Plex Caches sharing library folders, and what fights (peers.py)
+            "peer": self.peerlink.snapshot(),  # the other Plex Cache at the mirror's site: System → Mirror Plex Cache (peerlink.py)
+            "health_scans": libhealth_scans(self),  # the checks that scan by themselves (Mirror Checks): what's running, when each library was checked
         }
+        out["tools_red"] = self._tools_red(out)  # each tool page's red, per library: its card on the Tools page, its tabs, the menu
+        return out
+
+    def _tools_red(self, st: dict) -> dict:
+        """Each tool page's red, per library — {page: [libraries]}: something red on the page that stops part of the tool
+        there — a row a red chip stops (Tool.mark_stops: tool_counts' "blocked"), the optimizer not set up while it has
+        files to do (the red box on every card) — or checks a check page couldn't run (health_counts' "unchecked"). The
+        page's library tab, its card on the Tools page and the menu show it red (app.js toolBad), the same for every tool:
+        a new tool's red goes here, and the tests hold every page of the Tools menu to it."""
+        from . import libhealth
+        out = {name: sorted(k for k, n in (c.get("blocked") or {}).items() if n) for name, c in st["tool_counts"].items()}
+        op = st["optimizer"]
+        out["optimizer"] = [] if op.get("configured") else sorted(k for k, sm in (op.get("libraries") or {}).items() if (sm or {}).get("todo"))
+        # (each step says what it waits for; red only for something wrong that stops it — a conversion of the library left
+        # partway at the other site, at the switch: migrating.py's checks of level "error")
+        mig = st.get("migration") or {}
+        out["dataset"] = [str(mig["state"]["library"])] if mig.get("state") and any(not c["ok"] and c.get("level") == "error" for c in mig.get("checks") or []) else []
+        for cat, page in libhealth.PAGES.items():
+            out[page] = sorted(k for k, h in st["health_counts"].items() if cat in (h.get("unchecked") or []))
+        return out
 
 

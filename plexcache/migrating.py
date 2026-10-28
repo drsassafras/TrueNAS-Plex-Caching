@@ -19,13 +19,34 @@ dataset's record size and compression. Plex keeps running; it's restarted once, 
 4. **Verify** — the folder is now the dataset, with its settings and every file; Plex shows as many
    items as before. Then the old copy is deleted, on your say.
 
-The state is kept in migration.json, so the page picks up at the same step after a restart. Only
-the optimizer writes media; the TrueNAS API is only read.
+The state is kept in migration.json, so the page picks up at the same step after a restart — and is
+checked against the disk (reconcile): a conversion left partway (the new dataset there, the old folder
+set aside) is found by what's on disk, even with migration.json gone or out of date, and picked up
+where it is. Only the optimizer writes media; the TrueNAS API is only read.
+
+**A mirrored folder.** A folder kept in step with another site (a folder sync, a mirror watched on the
+Mirror page) is converted so that nothing of it reaches the other site:
+
+* **The folder sync** — Syncthing's root (its .stfolder) is the library folder itself (setting the
+  folder aside stops Syncthing there, the copy carries .stfolder along), or one above it, whose
+  .stignore must then leave out ``<name>-new`` and ``.<name>.plexcache-old``; it's paused here from
+  the last pass until the dataset is in place, and resumed after. With a mirror watched and no
+  Syncthing found, you say nothing else syncs the folder.
+* **The other Plex Cache** (peerlink.py, or its marker: peers.py) — it must run TrueNAS; it's
+  converted too (both servers, one after the other: this one first) or not (this server only), as
+  its room for its own copy allows; a conversion of the library left partway there is a warning
+  until the switch here, and stops it from then on — completed or reverted there first; it holds
+  its own file jobs on the library while this side switches (mirrorhealth.converting); and once
+  switched, the dataset here holds the same files as the other site.
+
+Each side only tells the other where it is (public(), folders()); neither asks the other to do
+anything.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -40,6 +61,12 @@ RESTART_WAIT = 300  # seconds a restart asked for here is waited for before it's
 STEPS = ("create", "copy", "switch", "verify", "done")
 STATE = "migration.json"
 MARGIN = 1.05  # free space needed: the folder's size plus 5%
+KEEP_CLEAR = 1 << 30  # and 1 GB kept clear beyond it (safety.MARGIN): what the other side's room is told against
+UNDER_WAY = ("create", "copy", "switch", "verify")  # a conversion started and not finished
+HOLD_STEPS = ("switch", "verify")  # past the copy: the other side holds its file jobs on the library (mirrorhealth.converting)
+SYNC_MARK, SYNC_IGNORE = ".stfolder", ".stignore"  # Syncthing's folder marker, and its ignore patterns, at its folder's root
+RECENT = 3600  # a file changed this recently may still be syncing: not compared with the other site's
+FILES_EVERY = 600  # seconds between comparisons with the other site's files (Verify), but on Check Again
 
 
 class Migration:
@@ -142,6 +169,13 @@ class Migration:
                     c["why"] = M("not on a ZFS dataset here")
                 elif m["mountpoint"] == folder:
                     c["why"] = M("Dedicated dataset already")
+                    c["is_dataset"] = True
+                    if os.path.isdir(folder + "-new"):  # (a conversion's new dataset left beside the finished one)
+                        c["leftover"] = folder + "-new"
+                    old = _old_path(folder)
+                    if os.path.isdir(old):  # the switch done, the old copy still there: Verify is next
+                        c.update(partial={"step": "verify", "old_path": old}, dataset=m["source"].rsplit("/", 1)[0], child=m["source"],
+                                 temp=m["source"] + "-new", host_folder=host, temp_folder=folder + "-new", temp_host=host + "-new")
                 else:
                     ds_root = "/mnt/" + m["source"]
                     rel = host[len(ds_root) + 1:] if host.startswith(ds_root + "/") else ""
@@ -150,6 +184,14 @@ class Migration:
                     else:
                         c.update(dataset=m["source"], child=f"{m['source']}/{rel}", temp=f"{m['source']}/{rel}-new",
                                  host_folder=host, temp_folder=folder + "-new", temp_host=host + "-new")
+                        # left partway (found on disk, whatever migration.json says): the old folder set aside, the dataset
+                        # not yet renamed — Switch; or the new dataset made, the folder still there — Create (the copy skips
+                        # what's copied already)
+                        old = _old_path(folder)
+                        if os.path.isdir(old):
+                            c["partial"] = {"step": "switch", "old_path": old}
+                        elif os.path.isdir(folder + "-new"):
+                            c["partial"] = {"step": "create"}
                 c["suggested"] = bool(rec.get("status") == "warn")
                 # what to do: its dataset's record size is the one recommended for it, the second best, or neither
                 c["advice"] = {"ideal": "ideal", "pass": "sufficient", "warn": "split"}.get(rec.get("status"))
@@ -161,12 +203,52 @@ class Migration:
     # ------------------------------------------------------------ the steps
     def plan(self, library: str, folder: str) -> dict:
         c = next((x for x in self.candidates() if x["library"] == str(library) and x["folder"] == folder), None)
-        if not c or c.get("why") or not c.get("child"):
+        if not c or (c.get("why") and not c.get("partial")) or not c.get("child"):
             raise ValueError(str((c or {}).get("why") or "not a folder that can become a dataset"))
         if self.state and self.state.get("step") not in (None, "done"):
             raise ValueError("another folder is being moved")
+        part = c.get("partial") or {}
+        st = dict(c, step=part.get("step") or "create", started=time.time(), log=[], scope=self._default_scope())
+        st.pop("partial", None)
+        if part.get("old_path"):  # picked up past the set-aside: the old folder is where it was put
+            st["old_path"] = part["old_path"]
+            st["picked_up"] = part["step"]
+            if part["step"] == "switch":  # (compared again, the new dataset against the old folder: what Switch shows)
+                st["compare"] = self._folder("compare", path=part["old_path"], to=st["temp_folder"])
+                st["compare_at"] = time.time()
+        elif part:
+            st["picked_up"] = part["step"]
         with self.lock:
-            self.state = dict(c, step="create", started=time.time(), log=[])
+            self.state = st
+        self._save()
+        return self.refresh()
+
+    def _default_scope(self) -> str:
+        """Both servers where a mirror is watched (the files are the same, so the record size that suits them is too),
+        else this one."""
+        return "both" if self._mirror_watched() else "this"
+
+    def set_scope(self, scope: str) -> dict:
+        """Both servers, or this server only: chosen before the copy."""
+        st = self._moving()
+        if scope not in ("both", "this"):
+            raise ValueError("scope must be both or this")
+        if st.get("step") not in ("create", "copy"):
+            raise ValueError("chosen before the switch")
+        st["scope"] = scope
+        self._save()
+        return self.refresh()
+
+    def confirm(self, what: str) -> dict:
+        """What you say you've done where the app can't see it: the folder sync paused here before the set-aside
+        (sync_paused), resumed after the switch (sync_resumed), or, with no Syncthing found, nothing else syncing the folder
+        in a way that would carry the new dataset or the old folder away (sync_checked)."""
+        st = self._moving()
+        if what not in ("sync_paused", "sync_resumed", "sync_checked"):
+            raise ValueError("nothing to confirm")
+        if what == "sync_resumed" and st.get("step") != "verify":
+            raise ValueError("resumed once the dataset is in place")
+        st[what] = time.time()
         self._save()
         return self.refresh()
 
@@ -181,8 +263,9 @@ class Migration:
             self.state = None
         self._save()
 
-    def refresh(self) -> dict:
-        """Check the current step's conditions again. {"state", "checks"}."""
+    def refresh(self, force: bool = False) -> dict:
+        """Check the current step's conditions again (``force``: Check Again — the other site's files compared afresh too).
+        {"state", "checks"}."""
         st = self.state
         if not st:
             self.checks = []
@@ -190,10 +273,14 @@ class Migration:
         step = st.get("step")
         checks = []
 
-        def check(cid, ok, title, detail="", cmd="", action=""):
-            checks.append({"id": cid, "ok": ok, "title": title, "detail": detail, "cmd": cmd, "action": action})
+        def check(cid, ok, title, detail="", cmd="", action="", level="", gate=""):
+            # level: "" a step to do, "warn" said but stopping nothing, "error" something wrong that stops the step (red);
+            # gate: what it stops besides the step's own button ("aside": setting the old folder aside)
+            checks.append({"id": cid, "ok": ok, "title": title, "detail": detail, "cmd": cmd, "action": action, "level": level, "gate": gate})
             return ok
 
+        self._reconcile(st)
+        step = st.get("step")
         if step == "create":
             self._check_create(st, check)
         elif step == "copy":
@@ -202,10 +289,19 @@ class Migration:
             self._check_switch(st, check)
         elif step == "verify":
             self._check_verify(st, check)
+        if step in UNDER_WAY:
+            self._check_sync(st, check)
+            self._check_mirror(st, check, force)
         with self.lock:
             self.checks = checks
             self.checked_at = time.time()
         self._save()
+        told = (step, bool(st.get("old_path")))
+        if told != getattr(self, "_told", None):  # where it is, told to the other side (its marker) as it changes
+            self._told = told
+            pub = getattr(self.app, "publish_peers", None)
+            if pub:
+                threading.Thread(target=pub, name="peers", daemon=True).start()
         # Health says when a step waits on you: checked again whenever what's next changes
         waiting = (step, st.get("copying"), next((c["id"] for c in checks if not c["ok"]), None))
         if waiting != getattr(self, "_waiting", None):
@@ -378,6 +474,9 @@ class Migration:
         if named:
             st["step"] = "verify"
             self._released()  # the folder's path holds its files again: other file jobs carry on
+            libdata = getattr(self.app, "libdata", None)
+            if libdata is not None:  # (its files read again, as they are on the dataset: what's compared with the other site's)
+                libdata.refresh(str(st.get("library") or ""), ("files",))
 
     def _check_verify(self, st: dict, check) -> None:
         props = self._props(st["child"])
@@ -398,6 +497,316 @@ class Migration:
               M("Plex shows {now} items in {library}; before: {before}. Restart Plex, wait for it to scan, then check again.",
                 now=now_count, library=st.get("title"), before=before))
 
+    # ------------------------------------------------------------ the disk, the folder sync and the other site
+    def _reconcile(self, st: dict) -> None:
+        """migration.json checked against the disk: what's there wins, and the page says what was put right
+        (st["corrected"]). The old folder found set aside that the state doesn't know of: Switch, from there; the old folder
+        the state says is set aside back at its name (put back by hand): set aside no more; gone, with the dataset in its
+        place (deleted by hand): nothing left to compare it with."""
+        folder = st.get("folder") or ""
+        if not folder:
+            return
+        old, step, said = _old_path(folder), st.get("step"), None
+        if step in ("create", "copy", "switch") and not st.get("old_path") and os.path.isdir(old) and not st.get("copying"):
+            st.update(old_path=old, step="switch", copying=False, queued=False)
+            st.setdefault("compare", self._folder("compare", path=old, to=st.get("temp_folder") or folder + "-new"))
+            st.setdefault("compare_at", time.time())
+            said = M("The old folder was found set aside as {name}: picked up from there.", name=os.path.basename(old))
+        elif st.get("old_path") and not os.path.isdir(st["old_path"]):
+            if step == "switch" and os.path.isdir(st.get("temp_folder") or ""):
+                said = M("The old folder is back at its name: set it aside again when ready.")
+            else:
+                said = M("The old folder isn’t there any more: nothing is left to compare the dataset with.")
+            st.pop("old_path", None)
+        if said is not None:
+            st["corrected"] = said
+            self._released()
+
+    @staticmethod
+    def _collector(into: list):
+        def check(cid, ok, title, detail="", cmd="", action="", level="", gate=""):
+            into.append({"id": cid, "ok": ok, "title": title, "detail": detail, "cmd": cmd, "action": action, "level": level, "gate": gate})
+            return ok
+        return check
+
+    def _check_gate(self) -> None:
+        """What stops the set-aside looked at again by itself (the folder sync, the other site), the step's other checks as
+        they were."""
+        st, new = self.state or {}, []
+        check = self._collector(new)
+        self._check_sync(st, check)
+        self._check_mirror(st, check)
+        ids = {c["id"] for c in new}
+        with self.lock:
+            self.checks = [c for c in self.checks if c["id"] not in ids] + new
+
+    def blocking(self, gate: str | None = None) -> list[dict]:
+        """The checks not done that stop the step (a warning stops nothing) — or, with ``gate``, only those that stop it."""
+        with self.lock:
+            checks = list(self.checks)
+        return [c for c in checks if not c["ok"] and c.get("level") != "warn" and (gate is None or c.get("gate") == gate)]
+
+    def _check_sync(self, st: dict, check) -> None:
+        """The folder sync over the folder: Syncthing's root (.stfolder) the folder itself, or one above whose .stignore
+        leaves out the new dataset and the old folder; paused here before the set-aside, resumed after. With no Syncthing
+        found and a mirror watched, said by you. Nothing with neither."""
+        folder, step = st.get("folder") or "", st.get("step")
+        if not folder:
+            return
+        root, watched = sync_root(folder), self._mirror_watched()
+        if not root and not watched and not st.get("sync_paused"):  # (paused: said, even once the folder it was found in is set aside)
+            return
+        name = os.path.basename(folder)
+        temp, old = os.path.basename(st.get("temp_folder") or folder + "-new"), os.path.basename(_old_path(folder))
+        if step in ("create", "copy"):
+            if root == folder:
+                check("sync_root", True, M("Syncthing’s folder is the library folder itself"),
+                      M("Setting the folder aside stops Syncthing there instead of sending deletes, and the copy carries its .stfolder into the new dataset."))
+            elif root:
+                rel = os.path.relpath(os.path.dirname(folder), root)
+                lines = ["/" + (n if rel == "." else rel + "/" + n) for n in (temp, old)]
+                missing = [ln for ln in lines if not ignored(root, ln[1:])]
+                check("sync_ignore", not missing, M("Syncthing leaves out {temp} and {old}", temp=temp, old=old),
+                      "" if not missing else M("Syncthing’s folder is {root}, above the library folder: it would send the new dataset to the other site "
+                                               "as a second copy, and the set-aside as every file deleted. Add these lines to its ignore patterns on this server "
+                                               "(Syncthing → the folder → Edit → Ignore Patterns, kept in {file}), then check again:",
+                                               root=root, file=os.path.join(root, SYNC_IGNORE)), "\n".join(missing))
+            else:
+                done = bool(st.get("sync_checked"))
+                check("sync_checked", done, M("Nothing else syncs the folder in a way that would carry the new dataset or the old folder away"),
+                      "" if done else M("No Syncthing folder was found over {folder}, yet a mirror is watched. If something else keeps it in step with the "
+                                        "other site (another sync tool, a script), have it leave out {temp} and {old}, and pause it during the switch.",
+                                        folder=folder, temp=temp, old=old), action="" if done else "sync_checked")
+        elif step == "switch":
+            paused = bool(st.get("sync_paused"))
+            check("sync_paused", paused or bool(st.get("old_path")), M("The folder sync paused here"),
+                  "" if paused else M("Pause the folder in Syncthing on this server (Folders → {name} → Pause), or whatever else syncs it, before the old "
+                                      "folder is set aside, and leave it paused until the dataset is in place. What the other site changes meanwhile waits "
+                                      "there, and comes over once it’s resumed.", name=name),
+                  action="" if paused or st.get("old_path") else "sync_paused", gate="aside")
+        elif step == "verify" and (st.get("sync_paused") or root):
+            done = bool(st.get("sync_resumed"))
+            check("sync_resumed", done, M("The folder sync resumed here"),
+                  "" if done else M("Resume the folder in Syncthing on this server: it finds the same files where they were, and sends nothing."),
+                  action="" if done else "sync_resumed")
+
+    def _mirror_watched(self) -> bool:
+        link = getattr(self.app, "peerlink", None)
+        try:
+            return bool(link is not None and link.mirror_id())
+        except Exception:  # noqa: BLE001 — not set up: no mirror
+            return False
+
+    def _mirror(self, fresh: bool = False) -> dict | None:
+        """What the Plex Cache at the mirror's site says of itself (peerlink.facts): asked again first when ``fresh`` and the
+        last answer is over a minute old."""
+        link = getattr(self.app, "peerlink", None)
+        if link is None:
+            return None
+        try:
+            if fresh and link.talking() and time.time() - link.last_ok > 60:
+                link.talk()
+            return link.facts()
+        except Exception:  # noqa: BLE001 — not reachable: not known
+            return None
+
+    def _mirror_name(self, f: dict | None):
+        return (f or {}).get("name") or self.app.settings.section("plex2").get("name") or M("the other server")
+
+    def _check_mirror(self, st: dict, check, force: bool = False) -> None:
+        """With a mirror watched: the other side runs TrueNAS; both servers converted (one after the other), with room there
+        for its own copy, or this one only; no conversion of the library left partway there — a warning until the switch,
+        an error from then on, until it's completed or reverted there; the other side holding its file jobs while this one
+        switches; once switched, the same files here as there."""
+        if not self._mirror_watched():
+            return
+        step, key = st.get("step"), str(st.get("library") or "")
+        f = self._mirror(fresh=True)
+        name = self._mirror_name(f)
+        lib = ((f or {}).get("libraries") or {}).get(key) or {}
+        there = their_folder(lib.get("folders"), os.path.basename(st.get("folder") or ""))
+        conv = lib.get("converting")
+        partly = bool(conv and conv.get("step") in UNDER_WAY)
+        title = st.get("title") or os.path.basename(st.get("folder") or "")
+        when = time.strftime("%d %b", time.localtime(conv["since"])) if partly and conv.get("since") else "?"
+        partial_text = M("{name} has a partly finished conversion of {library} ({step}, since {when}): complete it or revert it there before this "
+                         "one can finish. To revert it there before its set-aside: Cancel, then delete {temp} in TrueNAS; after it: Put the Old "
+                         "Folder Back, Cancel, then delete {temp}.", name=name, library=title, step=step_name(conv.get("step")) if partly else "",
+                         when=when, temp=os.path.basename(st.get("temp_folder") or ""))
+        if step == "create":
+            self._check_truenas(f, name, check)
+            scope = st.get("scope") or "this"
+            if scope == "both":
+                done_there = (there or {}).get("state") == "dataset"
+                check("scope", True, M("Both servers: {name} converts its copy once this one is done", name=name),
+                      M("{name} has it as a child dataset already.", name=name) if done_there else
+                      M("The files are the same on both, so the record size that suits them is too. Or convert this server only."), action="scope")
+                room = (there or {}).get("room")
+                if done_there:
+                    pass
+                elif not room:
+                    check("mirror_room", False, M("Room on {name} for its own copy", name=name),
+                          M("Not known yet: {name} hasn’t said (an older Plex Cache, or not reached). It checks again when its turn comes.", name=name), level="warn")
+                else:
+                    check("mirror_room", bool(room.get("ok")), M("Room on {name} for its own copy", name=name),
+                          M("{free} free there; its copy needs {need}.", free=_gb(room.get("free")), need=_gb(room.get("needed"))) if room.get("ok") else
+                          M("{free} free there, and its copy needs {need}: make room there, or convert this server only.", free=_gb(room.get("free")),
+                            need=_gb(room.get("needed"))))
+                other = (f or {}).get("migration")
+                if other and other.get("step") in UNDER_WAY and not partly:
+                    check("mirror_busy", False, M("{name} is converting {library} to a child dataset", name=name, library=other.get("title") or other.get("folder")),
+                          M("One conversion at a time on each server: {name}’s turn here can’t start until that one is done.", name=name), level="warn")
+            else:
+                check("scope", True, M("This server only: {name} keeps its folder as it is", name=name),
+                      M("Or convert both servers: the files are the same on both, so the record size that suits them is too."), action="scope")
+            if there and there.get("state") == "dataset" and there.get("rs") and there["rs"] not in (st.get("rs"), st.get("alt")):
+                check("mirror_rs", False, M("{name} has it as a child dataset with record size {size}", name=name, size=_rs(there["rs"])),
+                      M("Use the same record size here, so both sides read alike."), level="warn")
+        if step in ("create", "copy"):
+            if partly:
+                check("mirror_partial", False, M("A conversion of {library} left partway on {name}", library=title, name=name), partial_text, level="warn")
+        elif step == "switch" and not st.get("old_path"):
+            check("mirror_partial", not partly, M("No conversion of {library} left partway on {name}", library=title, name=name),
+                  partial_text if partly else "", level="error" if partly else "", gate="aside")
+            holding = lib.get("holding")
+            if f and f.get("via") == "link" and holding is not None:
+                check("mirror_holding", bool(holding), M("{name} holds its file jobs on {library}", name=name, library=title),
+                      "" if holding else M("It looks every 5 minutes, and holds optimizing, the file tools and Sync Libraries there once it sees this side "
+                                           "switching (since the copy finished). This is checked again by itself."), gate="aside")
+            else:
+                check("mirror_holding", False, M("{name} holds its file jobs on {library}", name=name, library=title),
+                      M("Can’t be confirmed: the two Plex Caches aren’t talking (System → Mirror Plex Cache). Don’t run its file tools or the optimizer "
+                        "on {library} there until this one is done.", library=title), level="warn")
+        elif step == "verify":
+            self._check_mirror_files(st, check, f, name, lib, force)
+
+    def _check_truenas(self, f: dict | None, name, check) -> None:
+        """The other side runs TrueNAS — said for certain (its API, its kernel, its version file), not guessed from ZFS."""
+        link = self.app.peerlink
+        title = M("{name} runs TrueNAS", name=name)
+        if f is None:
+            check("mirror_truenas", False, title,
+                  M("Can’t tell what it runs on: System → Mirror Plex Cache says there’s no Plex Cache at the mirror’s site.") if not link.wanted() else
+                  M("Can’t tell what it runs on: pair the two Plex Caches (System → Mirror Plex Cache), or let the folder sync carry .plexcache, then check again."))
+            return
+        p = f.get("platform")
+        if not isinstance(p, dict):
+            check("mirror_truenas", False, title, M("{name} runs an older Plex Cache, which doesn’t say what it runs on: update it, then check again.", name=name))
+        elif p.get("truenas") is True:
+            check("mirror_truenas", True, M("{name} runs TrueNAS {version}", name=name, version=p.get("version") or ""), "")
+        else:
+            check("mirror_truenas", False, title,
+                  M("It says: {what}. A child dataset needs TrueNAS on both servers.", what=p.get("label") or p.get("name") or "?") if p.get("truenas") is False else
+                  M("TrueNAS isn’t detected there for certain ({what}): connect its TrueNAS API (System → TrueNAS there), then check again.", what=p.get("label") or "?"))
+
+    def _check_mirror_files(self, st: dict, check, f: dict | None, name, lib: dict, force: bool) -> None:
+        """Once switched: the files here, the same as the other site's (through the link), a file changed in the last hour
+        left out — it may still be syncing. Compared at most every FILES_EVERY, or on Check Again."""
+        title = M("The same files as on {name}", name=name)
+        if not f or f.get("via") != "link" or not lib.get("key"):
+            check("mirror_files", False, title, M("Not compared: the two Plex Caches aren’t talking (System → Mirror Plex Cache). Compare the folder on both "
+                                                  "sides by hand, or pair them and check again."), level="warn")
+            return
+        cached = getattr(self, "_mf", None)
+        if force or not cached or cached[0] != st["folder"] or cached[2].get("pending") or time.time() - cached[1] > FILES_EVERY:
+            try:
+                got = self._compare_with_mirror(st, lib)
+            except Exception as e:  # noqa: BLE001 — the link went quiet: said, compared next time
+                got = {"error": str(e)}
+            cached = self._mf = (st["folder"], time.time(), got)
+        got = cached[2]
+        if got.get("pending"):
+            check("mirror_files", False, title, M("Reading the files on both sides…"))
+        elif got.get("error"):
+            check("mirror_files", False, title, M("Not compared: {why}", why=got["error"]), level="warn")
+        else:
+            bad = got["missing"] + got["different"] + got["extra"]
+            check("mirror_files", not bad, title,
+                  M("{files} files, the same as there.", files=got["files"]) if not bad else
+                  M("Different: {list}. Let the folder sync finish (resume it here), then check again.", list=", ".join(bad[:5])))
+
+    def _compare_with_mirror(self, st: dict, lib: dict) -> dict:
+        from .mirrorhealth import _norm
+        key, folder = str(st["library"]), st["folder"].rstrip("/")
+        d = self.app.libdata.data(key)
+        if not d.ready:
+            self.app.libdata.fast_track(key)
+            return {"pending": True}
+        got = self.app.peerlink.files(lib["key"])
+        if not got.get("ready"):
+            return {"pending": True}
+        now = time.time()
+        theirs = {_norm(r[0]): (int(r[1] or 0), float(r[2] or 0)) for r in got.get("files") or [] if r}
+        ours = {}
+        for row in list(d.files) + list(d.unlisted):
+            local = row.get("local") or ""
+            if not row.get("missing") and local.startswith(folder + "/"):
+                ours[_norm(local[len(folder) + 1:])] = (int(row.get("size") or 0), float(row.get("mtime") or 0))
+        recent = lambda v: now - v[1] < RECENT  # noqa: E731
+        single = len((self.app.library_info(key) or {}).get("locations") or []) == 1 and len(lib.get("folders") or []) == 1
+        return {"files": len(ours),
+                "missing": sorted(r for r, v in ours.items() if r not in theirs and not recent(v))[:20],
+                "different": sorted(r for r, v in ours.items() if r in theirs and v[0] != theirs[r][0] and not (recent(v) or recent(theirs[r])))[:20],
+                "extra": sorted(r for r, v in theirs.items() if single and r not in ours and not recent(v))[:20]}
+
+    # ------------------------------------------------------------ what the other side is told
+    def public(self) -> dict | None:
+        """The conversion under way here, for the other side (the link's status, our marker): None when there's none."""
+        st = self.state
+        if not st or st.get("step") not in UNDER_WAY:
+            return None
+        return {"library": str(st.get("library") or ""), "title": st.get("title") or "", "folder": os.path.basename(st.get("folder") or ""),
+                "step": st["step"], "aside": bool(st.get("old_path")), "since": st.get("started"), "scope": st.get("scope") or "this"}
+
+    def folders(self, key: str) -> list[dict]:
+        """Each of a library's folders as it is here, for the other side: {"name", "state": "dataset" | "folder" | "converting"
+        | "partial" | "other", "step", "rs", "room": {"free", "needed", "ok"}} — room for a second copy (its size and 5%,
+        1 GB kept clear), where it's a folder that could become one."""
+        out, st = [], self.state or {}
+        for c in self.candidates():
+            if c["library"] != str(key):
+                continue
+            row = {"name": os.path.basename(c["folder"]), "state": "dataset" if c.get("is_dataset") else "folder" if c.get("child") else "other",
+                   "rs": c.get("now_rs")}
+            if st.get("step") in UNDER_WAY and st.get("folder") == c["folder"]:
+                row.update(state="converting", step=st["step"], aside=bool(st.get("old_path")), since=st.get("started"))
+            elif c.get("partial"):
+                row.update(state="partial", step=c["partial"]["step"], aside=bool(c["partial"].get("old_path")))
+            if row["state"] in ("folder", "partial", "converting"):
+                need = int(int(c.get("size") or 0) * MARGIN) + KEEP_CLEAR
+                try:
+                    vfs = os.statvfs(c["folder"] if os.path.isdir(c["folder"]) else os.path.dirname(c["folder"]))
+                    free = vfs.f_bavail * vfs.f_frsize
+                    row["room"] = {"free": free, "needed": need, "ok": free >= need}
+                except OSError:
+                    pass
+            out.append(row)
+        return out
+
+    def converting_info(self, key: str) -> dict | None:
+        """A conversion of one of the library's folders under way here, or left partway on disk: {"step", "aside", "folder",
+        "since", "title"} — what the other side warns of, and holds its file jobs for."""
+        for row in self.folders(key):
+            if row["state"] in ("converting", "partial"):
+                return {"step": row.get("step"), "aside": bool(row.get("aside")), "folder": row["name"], "since": row.get("since"),
+                        "title": (self.app.library_info(key) or {}).get("title") or row["name"]}
+        return None
+
+    def mirror_view(self) -> dict | None:
+        """For the page, with a mirror watched: the other side's name and page, and each candidate folder as it is there."""
+        if not self._mirror_watched():
+            return None
+        f = self._mirror()
+        link = self.app.peerlink
+        url = ((link.paired or {}).get("url") or "") if link.paired else ""
+        out = {"name": self._mirror_name(f), "via": (f or {}).get("via"), "url": url.rstrip("/") + "/dataset" if url else "", "folders": {}}
+        libs = (f or {}).get("libraries") or {}
+        for c in self.candidates():
+            lib = libs.get(c["library"])
+            if lib is not None:
+                out["folders"][c["folder"]] = their_folder(lib.get("folders"), os.path.basename(c["folder"]))
+        return out
+
     # ------------------------------------------------------------ actions
     def start_copy(self, mirror: bool = False) -> dict:
         st = self.state
@@ -405,7 +814,7 @@ class Migration:
             raise ValueError("not ready to copy")
         if st["step"] == "create":
             self.refresh()
-            if not all(c["ok"] for c in self.checks):
+            if self.blocking():
                 raise ValueError("the checks above aren't all done")
         if st.get("old_path"):
             raise ValueError("the folder has been renamed already")
@@ -430,6 +839,10 @@ class Migration:
         st = self._moving()
         if st.get("old_path"):
             raise ValueError("the folder has been moved already")
+        self.refresh()
+        stop = self.blocking("aside")
+        if stop:
+            raise ValueError(str(stop[0]["title"]))
         out = self.start_copy(mirror=True)
         with self.lock:
             st["move_after"] = True
@@ -448,6 +861,12 @@ class Migration:
             raise ValueError("compare both copies first (the last pass)")
         if not from_pass and time.time() - (st.get("compare_at") or 0) > FRESH_COMPARE:
             raise ValueError("compare both copies again first: the last pass runs just before the move")
+        # the folder sync paused, the other side holding, no conversion of it left partway there: looked at again now
+        # (it may have changed during the last pass)
+        self._check_gate()
+        stop = self.blocking("aside")
+        if stop:
+            raise ValueError(str(stop[0]["title"]))
         st.pop("move_error", None)
         name = "." + os.path.basename(st["folder"]) + ".plexcache-old"
         r = self._folder("rename", path=st["folder"], name=name)
@@ -473,11 +892,12 @@ class Migration:
         self._not_while_optimizing()
         st = self._moving()
         self.refresh()
-        if st.get("step") != "verify" or not all(c["ok"] for c in self.checks):
+        if st.get("step") != "verify" or self.blocking():
             raise ValueError("verify first: every check must pass")
-        r = self._folder("delete", path=st["old_path"])
-        if r.get("error"):
-            raise ValueError(r["error"])
+        if st.get("old_path"):  # (gone already: deleted by hand)
+            r = self._folder("delete", path=st["old_path"])
+            if r.get("error"):
+                raise ValueError(r["error"])
         # the copied files were written with the new dataset's settings: Optimal in the ZFS record
         props = self._props(st["child"])
         if isinstance(props, dict):
@@ -600,6 +1020,64 @@ class CopyJob(Job):
         if st and st.get("copying") and not st.get("queued"):  # (not the last pass, queued by the copy as it ended)
             st["copying"] = False
             self.mig._save()
+
+
+def step_name(step):
+    return {"create": M("Create"), "copy": M("Copy"), "switch": M("Switch"), "verify": M("Verify")}.get(step, step or "")
+
+
+def _old_path(folder: str) -> str:
+    """Where the old folder goes until it's deleted: .<name>.plexcache-old, beside it."""
+    folder = folder.rstrip("/")
+    return os.path.join(os.path.dirname(folder), "." + os.path.basename(folder) + ".plexcache-old")
+
+
+def sync_root(folder: str) -> str | None:
+    """The root of the Syncthing folder ``folder`` is in: the nearest of it and the folders above it that holds Syncthing's
+    marker (.stfolder). None: no Syncthing folder over it."""
+    p = folder.rstrip("/")
+    while p and p != "/":
+        if os.path.lexists(os.path.join(p, SYNC_MARK)):
+            return p
+        p = os.path.dirname(p)
+    return None
+
+
+def ignored(root: str, rel: str) -> bool:
+    """Whether the ignore patterns of the Syncthing folder at ``root`` (its .stignore) leave out ``rel`` (a path within it),
+    as Syncthing reads them: the first pattern that matches decides; "/a" anchored at the root, "a" at any level; *, ? and
+    ** wildcards; (?d) and (?i) prefixes; "!" lets a path back in; a folder left out leaves out what's in it. #include
+    lines aren't followed (their patterns don't count here)."""
+    try:
+        with open(os.path.join(root, SYNC_IGNORE), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    rel = rel.strip("/")
+    for line in lines:
+        pat = line.strip()
+        if not pat or pat.startswith("//") or pat.startswith("#"):
+            continue
+        neg = pat.startswith("!")
+        pat = pat[1:] if neg else pat
+        fold = False
+        while pat[:4] in ("(?d)", "(?i)"):
+            fold = fold or pat[:4] == "(?i)"
+            pat = pat[4:]
+        pat = pat.rstrip("/")
+        if not pat:
+            continue
+        body = re.escape(pat.lstrip("/")).replace(r"\*\*", "\0").replace(r"\*", "[^/]*").replace(r"\?", "[^/]").replace("\0", ".*")
+        rx = ("^" if pat.startswith("/") else "^(?:.*/)?") + body + "(?:/.*)?$"
+        if re.match(rx, rel, re.I if fold else 0):
+            return not neg
+    return False
+
+
+def their_folder(rows, name: str) -> dict | None:
+    """The other side's folder that is this one: the one of the same name, else the library's only folder there."""
+    rows = [r for r in rows or [] if isinstance(r, dict)]
+    return next((r for r in rows if r.get("name") == name), None) or (rows[0] if len(rows) == 1 else None)
 
 
 def _gb(n) -> str:

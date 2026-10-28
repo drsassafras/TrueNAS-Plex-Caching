@@ -75,6 +75,9 @@ class Job:
     def finished(self) -> None:
         """Called once the job ends, however it ends."""
 
+    def ended(self) -> None:
+        """Called after finished(), once the end is recorded (the job's state and the job log say so)."""
+
     # ---------------------------------------------------------- helpers
     @property
     def stopped(self) -> bool:
@@ -196,7 +199,10 @@ class Job:
                 s = self.state
                 self.log(type="job", event="cancelled" if self.stopped else "finished", done=s["done"], total=s["total"],
                          counts={k: s.get(k) for k in ("optimized", "rewritten", "skipped", "failed", "conflicts")})
-                threading.Thread(target=self.jobs.start_next, daemon=True).start()  # the next in the queue
+                try:
+                    self.ended()
+                finally:
+                    threading.Thread(target=self.jobs.start_next, daemon=True).start()  # the next in the queue
 
 
 class Jobs:

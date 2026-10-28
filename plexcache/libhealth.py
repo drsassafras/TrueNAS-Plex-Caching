@@ -13,8 +13,15 @@
 
 Each check says which libraries it applies to ("applies": movie, tv, audio) — the page shows a
 library only its own, and only those run — and can be turned off (settings "library_health.checks").
-The Plex checks also run on both servers' items in a Library Sync comparison, marking the items whose
+The Plex checks also run on both servers' items in Sync Libraries (tools/sync.py), marking the items whose
 data looks bad before anything would be copied.
+
+* **Mirror** checks (Mirror Checks) compare the two sites of a mirror: the files on each disk, what each Plex lists,
+  whether the synced .plexcache folder carries the claims — what Sync Libraries can't bring in line (it lists what it
+  can). That comparing is slow, so it's done in the background by a module of its own (SOURCES: mirrorhealth.py) and its
+  findings put on their items here — a file Plex doesn't list, or one only at the other site, an item of its own — with
+  what the page says above them (notes), a scan of its own (Scan Again: scan()), and an action on a finding (Scan
+  Folder: act()).
 """
 
 from __future__ import annotations
@@ -80,9 +87,39 @@ CHECKS = {
         {"id": "versions_differ_in_length", "name": M("Different length versions"), "applies": ALL,
          "help": M("Several files on one Plex item (versions) whose running times differ by more than a little — {leeway}% or {secs} seconds, whichever is more: two cuts of the same film can differ a little; two films do by far more.", leeway=LEEWAY_PCT, secs=LEEWAY_SECS)},
         {"id": "locked_empty", "name": M("Empty field locked"), "applies": ALL,
-         "help": M("A field you edited (Plex locks it) that holds nothing — so Plex’s agents can’t fill it in either. Read from an item’s own page: items a Library Sync comparison has read, or opened here.")},
+         "help": M("A field you edited (Plex locks it) that holds nothing — so Plex’s agents can’t fill it in either. Read from each item’s own page.")},
+    ],
+    # Mirror Checks' (mirrorhealth.py: one per kind of finding, "mirror_<kind>"), found in the background and kept
+    "mirror": [
+        {"id": "mirror_sync_files", "name": M(".plexcache folder not synced"), "applies": ALL,
+         "help": M("The markers and claims in the hidden .plexcache folder don’t reach the other site, or arrive hours late: the two Plex Caches could optimize the same file. "
+                   "Optimizing and the file tools are held in this library until the folder sync carries it (Syncthing: don’t ignore .plexcache), until you ignore the finding, or while this check is off.")},
+        {"id": "mirror_only_here", "name": M("Only on disk here"), "applies": ALL,
+         "help": M("On disk here and not at the other site: the folder sync hasn’t carried it there, or it was deleted there. Read through the Plex Cache at the other site: without the link to it, not checked.")},
+        {"id": "mirror_only_there", "name": M("Only on disk at the other site"), "applies": ALL,
+         "help": M("On disk at the other site and not here: the folder sync hasn’t carried it here, or it was deleted here. Read through the Plex Cache at the other site: without the link to it, not checked.")},
+        {"id": "mirror_size_differs", "name": M("A different size at each site"), "applies": ALL,
+         "help": M("The same file, a different size at each site: one side changed it and the sync hasn’t caught up, or it couldn’t. A file changed in the last hour is left out: it may still be syncing.")},
+        {"id": "mirror_not_listed_there", "name": M("Not in the mirror’s Plex"), "applies": ALL,
+         "help": M("On disk here and listed by Plex here, but the mirror’s Plex doesn’t list it. Scan Folder asks it to look. Not listed while Sync Libraries scans for it there: where this server’s edits win and its “Files the other side doesn’t list” is on.")},
+        {"id": "mirror_only_listed_there", "name": M("Only in the mirror’s Plex"), "applies": ALL,
+         "help": M("The mirror’s Plex lists it, and Plex here doesn’t — nor is it on disk here.")},
+        {"id": "mirror_unlisted_here", "name": M("On disk here, not in Plex here"), "applies": ALL,
+         "help": M("A media file in the library folder that Plex here doesn’t list. Scan Folder asks it to look. One the mirror’s Plex lists isn’t listed while Sync Libraries scans for it here: where the mirror’s edits win and its “Files the other side doesn’t list” is on.")},
+        {"id": "mirror_missing_here", "name": M("In Plex here, not on disk"), "applies": ALL,
+         "help": M("Plex here lists it, but it isn’t on disk: deleted or moved since Plex last looked.")},
+        {"id": "mirror_regroup", "name": M("Grouped differently on the mirror"), "applies": ALL,
+         "help": M("The same files make up the items another way on the two servers, in a way Sync Libraries can’t bring in line: several items on the side whose edits win are one item on the other (making them several again means splitting it and matching each part), "
+                   "or the files are shared out among items differently on both sides. Split or merge the items in Plex on one side until each side’s items hold the same files; Sync Libraries then brings the rest in line.")},
     ],
 }
+# the categories whose findings a module of its own works out in the background and keeps: the app's attribute that holds
+# it. Each has findings(key) -> [{"item", "label", "poster", "result"}], notes(key) -> [{"status", "text"}], unchecked(key)
+# -> [{"checks": [ids], "label", "why", "link"}] (the checks its last scan couldn't run: a red chip on top), stamp(key)
+# (what its findings were worked out from: part of the answer's key), check_async(key) (Scan Again), snapshot() (the
+# state: what's running, when each library was checked, those it can check) and act(key, item, check) (a finding's action)
+PAGES = {"file": "filechecks", "plex": "plexchecks", "mirror": "mirrorchecks"}  # each category's check page (app.js CHECK_PAGES)
+SOURCES = {"mirror": "mirror_health"}
 NO_SPEECH = ("zxx", "und")  # audio marked as having no linguistic content (and unknown: not flagged either way)
 UNKNOWN_LANGUAGE = ("und",)  # audio whose language isn't known (zxx — no linguistic content — is a statement, not an unknown)
 # what FLAC makes of a video's audio track, by codec: smaller (worth re-encoding), the same, or bigger
@@ -337,7 +374,7 @@ def _mins(ms: int) -> str:
 
 def plex_checks(item: dict, on: dict) -> list[dict]:
     """The Plex checks on one item: {"files": [paths], "locked": [field names], "fields": {name: value},
-    "tags": {name: [values]}} (a Library Sync side, or an item from the library listing)."""
+    "tags": {name: [values]}} (a side of a Sync Libraries row, or an item from the library listing)."""
     out = []
     files = item.get("files") or []
     if on.get("versions_named_differently") and len(files) > 1:
@@ -412,6 +449,66 @@ def duplicate_checks(groups: dict, on: dict) -> dict:
     return out
 
 
+def _source(app, cat: str):
+    attr = SOURCES.get(cat)
+    return getattr(app, attr, None) if attr else None
+
+
+def stamps(app, key: str) -> tuple:
+    """What the sources' findings for a library were worked out from (App._health_sig: a new check, a new answer)."""
+    return tuple(src.stamp(key) if src is not None else None for src in (_source(app, cat) for cat in SOURCES))
+
+
+def scans(app) -> dict:
+    """For the state: each source's scan — {category: {"running": library or None, "at": {library: when}, "libraries":
+    [those it can scan]}} — so a check page's Scan Again shows what's going on as it goes."""
+    out = {}
+    for cat in SOURCES:
+        src = _source(app, cat)
+        if src is not None:
+            snap = src.snapshot()
+            libs = [str(k) for k in snap.get("libraries") or []]
+            out[cat] = {"running": snap.get("running"), "at": snap.get("at") or {}, "libraries": libs,
+                        "busy": [k for k in libs if src.scanning(k)], "checks": [c["id"] for c in CHECKS.get(cat) or []]}
+    return out
+
+
+def scanning(app, key: str, ids) -> M | None:
+    """Why the findings ``ids`` can't be acted on now in library ``key`` (their action, Ignore, Bring Back): the source
+    whose checks they are is scanning it — what was found is being worked out again — else None. The page disables the
+    buttons the same way (the state's health_scans "busy")."""
+    for cat in SOURCES:
+        src = _source(app, cat)
+        if src is None or not any(x["id"] in set(ids or ()) for x in CHECKS.get(cat) or []):
+            continue
+        if src.scanning(str(key)):
+            return M("{page} is scanning this library: wait for it to finish, then try again.", page=src.TITLE)
+    return None
+
+
+def scan(app, key: str, cat: str) -> bool:
+    """Scan Again on a check page whose findings a source works out: started (False: one is running already)."""
+    src = _source(app, cat)
+    if src is None:
+        raise ValueError(M("These checks don’t scan by themselves."))
+    if str(key) not in (src.snapshot().get("libraries") or []):
+        raise ValueError(M("There’s nothing to scan in this library."))
+    return src.check_async(str(key))
+
+
+def act(app, key: str, item: str, check: str):
+    """A finding's action (its button, under its chip): done by the source whose check it is. What was done (M)."""
+    cat = next((c for c, cs in CHECKS.items() if any(x["id"] == check for x in cs)), None)
+    src = _source(app, cat) if cat else None
+    if src is None:
+        raise ValueError(M("That finding has nothing to do."))
+    busy = scanning(app, key, [check])
+    if busy:
+        raise ValueError(busy)
+    return src.act(str(key), str(item), check)
+
+
+STALE_AFTER = 24 * 3600  # a library's checks worked out again after this long, though nothing they read changed (evaluate.py)
 IGNORED = "health-ignored.json"  # {library key: {item key: [check ids ignored]}}
 
 
@@ -421,16 +518,22 @@ def ignored(app) -> dict:
     return app._lh_ignored
 
 
-def set_ignored(app, key: str, item: str, ids: list | None) -> None:
+def set_ignored(app, key: str, item: str, ids: list | None, restore: bool = False) -> None:
     """An item's issues ignored (``ids``: the check ids to grey out, added to any already ignored) or
-    brought back (None). Kept for good: it survives re-checks and restarts; a new kind of issue on the
-    item still shows as a warning."""
+    brought back (None: every one; ``restore``: those ``ids`` only — a red chip's Bring Back on a tool's
+    row). Kept for good: it survives re-checks and restarts; a new kind of issue on the item still shows
+    as a warning."""
     store = ignored(app)
     lib = store.setdefault(str(key), {})
     if ids is None:
         lib.pop(str(item), None)
     else:
-        lib[str(item)] = sorted(set(lib.get(str(item)) or []) | set(ids))
+        now = set(lib.get(str(item)) or [])
+        now = now - set(ids) if restore else now | set(ids)
+        if now:
+            lib[str(item)] = sorted(now)
+        else:
+            lib.pop(str(item), None)
     if not lib:
         store.pop(str(key), None)
     app._save_json(IGNORED, store)
@@ -438,9 +541,20 @@ def set_ignored(app, key: str, item: str, ids: list | None) -> None:
 
 def library_health(app, key: str) -> dict:
     """A library's items through the checks: {"checks": CHECKS with each one's switch, "counts":
-    {id: n}, "items": [{"label", "file", "results": [...]}], "checked", "unread" (files not inspected
-    yet)}. The Plex "locked field" check needs an item's own page: run for the items a Library Sync
-    comparison has read."""
+    {id: n}, "items": [{"label", "file", "results": [...]}], "checked", "files" (those on disk), "unread" (files not
+    inspected yet: File Checks' count waits for them), "outdated" (files inspected by an older version, filemap.MAP_VERSION:
+    an update reads more of each — a check added since — so the count waits for them too, what was read meanwhile
+    checked), "unreadable" (files the inspector couldn't read)}. The Plex "locked field" check needs an item's own page: run for the items the data layer has read
+    the page of (details). The sources' findings (Mirror Checks') are laid over the rest (with_sources),
+    so App.library_health keeps the rest (base_health) and lays a new scan's over it, without working
+    the library out again."""
+    return with_sources(app, key, base_health(app, key))
+
+
+def base_health(app, key: str) -> dict:
+    """Library Health's answer without the sources' findings: every item with a finding (none cut off), and "known",
+    each of Plex's items as an item of the answer would name it ({key: (label, poster, files)}), for a source's finding
+    on an item with nothing else."""
     lib = app.library_info(key) or {}
     kind = lib.get("kind")
     # every check that applies to this kind of library runs, switched on or not: the page keeps the findings
@@ -457,16 +571,11 @@ def library_health(app, key: str) -> dict:
     files = [f for f in data.files]
     counts: dict[str, int] = {}
     items: list[dict] = []
-    unread = 0
+    unread = unreadable = outdated = 0
+    ins = getattr(app, "inspector", None)
     by_item: dict[str, list] = {}
     for f in files:
         by_item.setdefault(f.get("rk") or f["path"], []).append(f)
-    sync_sides = {}
-    rep = (getattr(app, "sync", None) and app.sync.report) or {}
-    for row in ((rep.get("libraries") or {}).get(str(key)) or {}).get("items") or []:
-        for sd in [row.get("src")] + (row.get("src_items") or []) + [row.get("dst")] + (row.get("dst_items") or []):
-            if sd and sd.get("key") and sd.get("locked") is not None:
-                sync_sides[sd["key"]] = sd
     dup_groups = {}
     for rk, group in by_item.items():
         rows = []
@@ -490,13 +599,19 @@ def library_health(app, key: str) -> dict:
         except Exception as e:  # noqa: BLE001 — a tool's scan refusing this library (the wrong kind): no chips from it
             tool_flags[tid] = (tool, {})
             tool_checks[-1]["error"] = str(e)
+    known: dict[str, tuple] = {}
     for rk, group in by_item.items():
         results = list(dups.get(rk) or [])
         for f in group:
             path = f["local"]
             m = None if f.get("missing") else app.file_maps.get(path, data.stat_result(f))
-            if m is None:
-                unread += 1
+            if m is None and not f.get("missing"):  # (a file that isn't there has nothing to read)
+                if ins is not None and ins.couldnt_read(path, data.stat_result(f)):
+                    unreadable += 1
+                else:
+                    unread += 1
+            elif m is not None and app.file_maps.get(path, data.stat_result(f), full=True) is None:
+                outdated += 1
             for t in (m or {}).get("tracks") or []:
                 if t.get("type") in ("audio", "subtitles") and t.get("language"):
                     languages.add(str(t["language"]).lower().split("-")[0])
@@ -508,37 +623,88 @@ def library_health(app, key: str) -> dict:
         detail = data.details.get(str(rk))
         if detail:  # (the item's own page, as the data layer read it: the fields you locked)
             item.update(locked=detail.get("locked") or [], fields=detail.get("fields") or {}, tags=detail.get("tags") or {})
-        sd = sync_sides.get(rk)
-        if sd:
-            item.update(locked=sd.get("locked") or [], fields=sd.get("fields") or {}, tags=sd.get("tags") or {})
         results += plex_checks(item, on)
         for tid, (tool, fl) in tool_flags.items():
             rows = fl.get(str(rk))
             if rows:  # (several findings by one tool: one chip, its lines under it)
                 results.append({"id": tid, "category": "tools", "status": "warn", "count": len(rows), "link": tool.page,
                                 "text": M("{n} things {tool} would do about it", one="{tool} has something to do about it", n=len(rows), tool=tool.title), "lines": tool.flag_lines(rows)})
+        known[str(rk)] = (group[0].get("title") or os.path.basename(group[0]["path"]), group[0].get("poster") or "", [os.path.basename(f["path"]) for f in group])
         if results:
             muted = set(quiet.get(rk) or [])
             for r in results:
                 r["ignored"] = r["id"] in muted  # (greyed out, not counted: ignored on this item)
                 if not r["ignored"]:
                     counts[r["id"]] = counts.get(r["id"], 0) + 1
-            items.append({"key": rk, "label": group[0].get("title") or os.path.basename(group[0]["path"]), "poster": group[0].get("poster") or "",
-                          "files": [os.path.basename(f["path"]) for f in group], "results": results, "live": sum(1 for r in results if not r["ignored"])})
-    from .paging import sort_key
-    items.sort(key=lambda it: (it["live"] == 0, sort_key(it["label"])))  # (items with nothing live left at the bottom)
+            label, poster, names = known[str(rk)]
+            items.append({"key": rk, "label": label, "poster": poster, "files": names, "results": results, "live": sum(1 for r in results if not r["ignored"])})
+    _sort(items)
     langs = sorted(languages | {lang, DEFAULT_LANGUAGE}, key=lambda c: (language_name(c) or c).lower())
     checks_out = {cat: [dict(c, on=on_all[c["id"]]) for c in cs if not kind or kind in c.get("applies", ALL)] for cat, cs in CHECKS.items()}
     checks_out["tools"] = tool_checks
-    flagged = sum(1 for it in items if it["live"])
-    multi = sum(1 for it in items if len({r["id"] for r in it["results"] if not r["ignored"]}) > 1)
     # a folder of this library on its way to a dataset of its own (migrating.py): said at the top of the view
     mig = (getattr(app, "migration", None) and app.migration.state) or {}
     migration = {"step": mig.get("step"), "folder": mig.get("folder") or mig.get("source") or ""} if str(mig.get("library") or "") == str(key) and mig.get("step") else None
-    return {"checks": checks_out, "counts": counts, "kind": kind,
-            "items": items[:2000], "total": len(items), "checked": len(by_item), "unread": unread, "pages_read": len({*sync_sides, *data.details}),
-            "stats": {"items": len(by_item), "flagged": flagged, "clean": len(by_item) - flagged, "multi": multi,
-                      "clean_pct": round(100 * (len(by_item) - flagged) / len(by_item)) if by_item else None},
-            "migration": migration, "data_at": data.files_at,
+    return {"checks": checks_out, "counts": counts, "kind": kind, "items": items, "known": known, "checked": len(by_item), "unread": unread,
+            "outdated": outdated, "unreadable": unreadable, "files": sum(1 for f in files if not f.get("missing")),
+            "pages_read": len(data.details), "migration": migration, "data_at": data.files_at,
             "language": lang, "languages": [{"code": c, "name": language_name(c) or c} for c in langs if c not in NO_SPEECH],
             "audio_quality": level, "audio_levels": list(AUDIO_LEVELS)}
+
+
+def with_sources(app, key: str, base: dict) -> dict:
+    """The sources' findings (Mirror Checks') laid over base_health's answer, which is left as it is (App.library_health
+    keeps it for the next scan): each finding a chip on its item — one of Plex's records, else an item of its own (a file
+    Plex here doesn't list, one only at the other site, the folder sync) — ignored as any; what each source says above
+    them (notes), and the checks it couldn't run (unchecked)."""
+    quiet = ignored(app).get(str(key)) or {}
+    found: dict[str, dict] = {}
+    notes: dict[str, list] = {}
+    unchecked: dict[str, list] = {}
+    for cat in SOURCES:
+        src = _source(app, cat)
+        if src is None:
+            continue
+        try:
+            got, notes[cat], unchecked[cat] = src.findings(key), src.notes(key), src.unchecked(key)
+        except Exception as e:  # noqa: BLE001 — said above its findings
+            got, notes[cat], unchecked[cat] = [], [{"status": "warn", "text": M("{why}", why=str(e))}], []
+        for f in got:
+            at = found.setdefault(str(f["item"]), {"label": f.get("label") or str(f["item"]), "poster": f.get("poster") or "", "results": []})
+            at["results"].append(f["result"])
+    counts, items, own = dict(base["counts"]), base["items"], 0
+    if found:
+        def results(ik):
+            muted, out = set(quiet.get(ik) or []), []
+            for r in found.pop(ik)["results"]:
+                out.append(dict(r, ignored=r["id"] in muted))
+                if not out[-1]["ignored"]:
+                    counts[r["id"]] = counts.get(r["id"], 0) + 1
+            return out
+        items = []
+        for it in base["items"]:  # (a copy of each item it adds to: the base stays as it was)
+            if str(it["key"]) in found:
+                more = results(str(it["key"]))
+                it = dict(it, results=it["results"] + more, live=it["live"] + sum(1 for r in more if not r["ignored"]))
+            items.append(it)
+        for ik in list(found):
+            at, plex = found[ik], base["known"].get(ik)
+            label, poster, names = plex or (at["label"], at["poster"], None)
+            res = results(ik)
+            own += plex is None  # (an item of its own: one more checked)
+            items.append({"key": ik, "label": label, "poster": poster, "files": names if names is not None else sorted({r["file"] for r in res if r.get("file")}),
+                          "results": res, "live": sum(1 for r in res if not r["ignored"])})
+        _sort(items)
+    checked = base["checked"] + own
+    flagged = sum(1 for it in items if it["live"])
+    multi = sum(1 for it in items if len({r["id"] for r in it["results"] if not r["ignored"]}) > 1)
+    out = {k: v for k, v in base.items() if k not in ("known", "items")}
+    out.update(counts=counts, notes=notes, unchecked=unchecked, items=items[:2000], total=len(items), checked=checked,
+               stats={"items": checked, "flagged": flagged, "clean": checked - flagged, "multi": multi,
+                      "clean_pct": round(100 * (checked - flagged) / checked) if checked else None})
+    return out
+
+
+def _sort(items: list) -> None:
+    from .paging import sort_key
+    items.sort(key=lambda it: (it["live"] == 0, sort_key(it["label"])))  # (items with nothing live left at the bottom)

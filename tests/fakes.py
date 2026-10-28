@@ -315,10 +315,12 @@ class FakePlex:
                 items = [self._movie_xml(m) for m in movies]
             elif key == "2" and typ == "4":
                 items = [self._episode_xml(e) for e in self.cat["episodes"]]
+            elif key == "2" and typ == "2":  # (the show the episodes are of)
+                items = [f'<Directory type="show" ratingKey="500" title={quoteattr(self.show_name)}/>'] if self.cat["episodes"] else []
             elif key == "3" and typ == "10":
                 items = [f'<Track type="track" ratingKey="{t["key"]}" title="Chapter">{self._part(t)}</Track>' for t in self.cat["tracks"]]
-            elif key == "4" and typ == "10":
-                items = []
+            elif key in ("1", "2", "3", "4"):
+                items = []  # (a type the library holds none of — its seasons, its albums: an empty list, as Plex gives)
             else:
                 return None
             start = int(headers.get("X-Plex-Container-Start", 0))

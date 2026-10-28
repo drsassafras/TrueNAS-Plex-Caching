@@ -1,7 +1,8 @@
 // Renders a page of the web UI in node, from a state given on stdin — for the tests (test_plexcache.py,
 // PageStructureTests): the page as the browser would draw it from one /api/state answer, with no
 // browser. A small stand-in for the DOM is enough: app.js writes the page as HTML into #main and reads
-// little back. Usage: node tests/render.js <page> < state.json  → {"html": …, "text": …} on stdout,
+// little back. Usage: node tests/render.js <page> < state.json  → {"html", "text", "title", "info" (what's behind every ⓘ),
+// "blocks" (what every red chip that stops a row says), "menu"} on stdout,
 // where the state is the server's /api/state (settings included) and <page> a path such as "system".
 "use strict";
 const fs = require("fs"), path = require("path"), vm = require("vm");
@@ -75,5 +76,7 @@ setTimeout(() => {
   if (process.env.RENDER_DEBUG) console.error("render.js: locale " + (sandbox.PCI18N && sandbox.PCI18N.locale) + ", main drawn: " + !!(byId.main && byId.main.innerHTML));
   const html = byId.main ? byId.main.innerHTML : "";
   const text = html.replace(/<style[\s\S]*?<\/style>/g, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\s+/g, " ").trim();
-  process.stdout.write(JSON.stringify({ html, text, title: document.title, info: sandbox.PCINFO || {} }));
+  const mc = byId["count-tools"];  // (the count beside Tools in the menu)
+  const menu = mc ? { html: mc.innerHTML, hidden: !!mc.hidden, cls: Array.from(mc.classList._s), title: mc.getAttribute("title") } : null;
+  process.stdout.write(JSON.stringify({ html, text, title: document.title, info: sandbox.PCINFO || {}, blocks: sandbox.PCBLOCKS || {}, menu }));
 }, 300);

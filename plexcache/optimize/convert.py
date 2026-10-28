@@ -8,10 +8,11 @@
    audio track there with the same codec and the same number of packets, every subtitle track
    there, and closed captions in the video still in it.
 3. Optimized like any MKV (optimizer.optimize_file: the layout, cover art, tags, our tag).
-4. Given the original's owner, permissions and timestamps, and put next to it as ``<name>.mkv``
-   — or, where a file of that name is there already, ``<name> - MKV.mkv``, ``<name> - MKV 2.mkv``…
-   (targets_of): never over an existing file. The original stays: the app deletes it once Plex has
-   the MKV (converting.py), through delete_original() here.
+4. Given the original's owner, permissions and timestamps, and put next to it as
+   ``<name> MKV-<EXT>.mkv`` (``Film (2001) MKV-AVI.mkv``: what it was converted from), or where
+   that's taken, ``<name> MKV-<EXT> 2.mkv``… (targets_of): never over an existing file. The
+   original stays: the app deletes it once Plex has the MKV (converting.py), through
+   delete_original() here.
 """
 
 from __future__ import annotations
@@ -52,28 +53,44 @@ def type_of(path: str) -> str | None:
 
 
 def target_of(path: str) -> str:
-    return os.path.splitext(path)[0] + ".mkv"
+    """A file's MKV's name: ``<name> MKV-<EXT>.mkv`` (what it was converted from in its name)."""
+    return targets_of(path)[0]
 
 
 MAX_TARGETS = 50  # names tried for a file's MKV before giving up
 
 
 def targets_of(path: str) -> list[str]:
-    """The names a file's MKV can have, in the order they're tried: ``<name>.mkv``, then
-    ``<name> - MKV.mkv``, ``<name> - MKV 2.mkv``… (" - " and a word after the name: Plex still sees
-    the same title, and lists it as another version of the item)."""
+    """The names a file's MKV can have, in the order they're tried: ``<name> MKV-<EXT>.mkv`` (the
+    original's extension: ``Film (2001) MKV-AVI.mkv``), then ``<name> MKV-<EXT> 2.mkv``…. Plex still
+    sees the same title, and lists it as another version of the item."""
+    stem, ext = os.path.splitext(path)
+    base = f"{stem} MKV-{ext.lstrip('.').upper()}"
+    return [base + ".mkv"] + [f"{base} {n}.mkv" for n in range(2, MAX_TARGETS)]
+
+
+def earlier_targets(path: str) -> list[str]:
+    """The names MKVs were given before: ``<name>.mkv``, ``<name> - MKV.mkv``, ``<name> - MKV 2.mkv``…"""
     stem = os.path.splitext(path)[0]
     return [stem + ".mkv", stem + " - MKV.mkv"] + [f"{stem} - MKV {n}.mkv" for n in range(2, MAX_TARGETS)]
 
 
 def is_target_of(path: str, new: str) -> bool:
-    """Whether ``new`` is one of the names ``path``'s MKV can have."""
-    return new in targets_of(path)
+    """Whether ``new`` is one of the names ``path``'s MKV can have (or had, converted before)."""
+    return new in targets_of(path) or new in earlier_targets(path)
 
 
-def free_target(path: str) -> str | None:
-    """The first of a file's MKV names (targets_of) that no file has, or None when every one is."""
-    return next((t for t in targets_of(path) if not os.path.lexists(t)), None)
+def _in_order(path: str, name: str = "") -> list[str]:
+    """targets_of, with ``name`` (one of them, by its file name: the one the scan showed) first."""
+    names = targets_of(path)
+    want = os.path.join(os.path.dirname(path), os.path.basename(name)) if name else ""
+    return [want] + [t for t in names if t != want] if want in names else names
+
+
+def free_target(path: str, taken=()) -> str | None:
+    """The first of a file's MKV names (targets_of) that no file has and isn't in ``taken`` (names
+    other files' MKVs will have: a scan's), or None when every one is."""
+    return next((t for t in targets_of(path) if t not in taken and not os.path.lexists(t)), None)
 
 
 def _probe(path: str, count: bool = False) -> dict:
@@ -155,9 +172,10 @@ def verify(path: str, out: str, captions: bool) -> None:
 
 
 def convert_file(path: str, images: str = "compress", cover: bytes | None = None, tags_mode: str = "keep",
-                 log=lambda text: None, progress=lambda pct: None) -> dict:
-    """Convert ``path`` to ``<name>.mkv`` next to it (or the next free name: targets_of), optimized;
-    the original stays. Returns {"result": "converted", "new", ...}; raises Skipped (with what MKV wouldn't keep), VerifyError,
+                 log=lambda text: None, progress=lambda pct: None, name: str = "") -> dict:
+    """Convert ``path`` to ``<name> MKV-<EXT>.mkv`` next to it (or the next free name: targets_of),
+    optimized; ``name``: the one of those names to give it (the one the app showed), while it's free.
+    The original stays. Returns {"result": "converted", "new", ...}; raises Skipped (with what MKV wouldn't keep), VerifyError,
     ToolError or OSError (nothing is left behind then)."""
     started = time.time()
     kind = type_of(path)
@@ -188,7 +206,7 @@ def convert_file(path: str, images: str = "compress", cover: bytes | None = None
         if (now.st_size, now.st_mtime_ns, now.st_ino) != (st.st_size, st.st_mtime_ns, st.st_ino):
             raise Skipped("the file changed while it was being converted")
         _copy_meta(st, path, out, False)
-        for target in targets_of(path):  # the first free name (never over a file that appeared meanwhile: link refuses)
+        for target in _in_order(path, name):  # the first free name (never over a file that appeared meanwhile: link refuses)
             try:
                 os.link(out, target)
                 break

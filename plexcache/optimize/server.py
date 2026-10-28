@@ -25,7 +25,8 @@ one file at a time, and reads the result back.
                          "rename" {"path", "name"}; "delete" {"path"} — the last two only for the
                          wizard's own .<name>.plexcache-old folders
     POST /api/optimize   {"path", "images", "cover", "force", "tags"}: start optimizing it (one at a time).
-    POST /api/convert    {"path", "images", "cover", "tags"}: convert it to <name>.mkv, optimized (convert.py).
+    POST /api/convert    {"path", "images", "cover", "tags", "name"}: convert it to <name> MKV-<EXT>.mkv (or "name", the
+                         free one the app showed), optimized (convert.py).
                          "tags": "keep" (default), "excessive" or "strip" (optimizer.strips_tags).
                          "images": "compress" (default), "remove", "plex" or "keep" (see
                          optimizer.py); "cover": Plex's poster for "plex", base64; "force"
@@ -113,12 +114,12 @@ class Service:
                     "images": imgs.available()}
 
     def start(self, path: str, images: str = "compress", force: bool = False, cover: bytes | None = None,
-              action: str = "optimize", tags: str = "keep") -> dict:
+              action: str = "optimize", tags: str = "keep", name: str = "") -> dict:
         with self.lock:
             if self.current:
                 return {"started": False, "error": "busy", "current": self.current["path"]}
             self.current = {"path": path, "action": action, "images": images, "started": time.time(), "step": "starting"}
-        self.tags = tags  # (for the file in hand: one at a time)
+        self.tags, self.name = tags, name  # (for the file in hand: one at a time)
         threading.Thread(target=self._work, args=(path, images, force, cover, action), daemon=True).start()
         return {"started": True}
 
@@ -169,7 +170,8 @@ class Service:
                 res.update(resolve_conflict(path, cover, log=step))  # cover: the original's path here
             elif action == "convert":
                 from .convert import convert_file
-                res.update(convert_file(path, images, cover=cover, tags_mode=getattr(self, "tags", "keep"), log=step, progress=progress))
+                res.update(convert_file(path, images, cover=cover, tags_mode=getattr(self, "tags", "keep"), log=step, progress=progress,
+                                        name=getattr(self, "name", "")))
             else:
                 res.update(optimize_file(path, images, cover=cover, force=force, log=step, progress=progress,
                                          tags_mode=getattr(self, "tags", "keep")))
@@ -316,7 +318,8 @@ def make_handler(svc: Service):
             if self.path == "/api/optimize":
                 return self._send(200, svc.start(path, images, force, cover, tags=tags))
             if self.path == "/api/convert":
-                return self._send(200, svc.start(path, images, False, cover, action="convert", tags=tags))
+                name = os.path.basename(str(body.get("name") or ""))  # (the MKV's name, as the app showed it)
+                return self._send(200, svc.start(path, images, False, cover, action="convert", tags=tags, name=name))
             if self.path == "/api/rewrite":
                 return self._send(200, svc.start(path, action="rewrite"))
             if self.path == "/api/conflict":
