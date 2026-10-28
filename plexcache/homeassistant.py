@@ -114,13 +114,25 @@ def _health_text(health: dict):
 
 
 def update_info(app, lang: str = "en") -> dict:
-    """For Home Assistant's update entity: the installed version and the newest one."""
-    latest = (getattr(app, "updates", None) and app.updates.latest) or app.version
+    """For Home Assistant's update entity: the installed version, the newest one, and whether an
+    install (Update Now, asked from Home Assistant) is under way."""
+    updates = getattr(app, "updates", None)
+    latest = (updates and updates.latest) or app.version
     info = {"installed_version": app.version, "latest_version": latest, "title": "Plex Cache",
             "release_url": REPO_URL}
+    # (TrueNAS restarts the app, which starts afresh; one that never came back stops saying so)
+    since = getattr(updates, "updating", None)
+    info["in_progress"] = bool(since and time.time() - since < INSTALL_TIMEOUT)
     if latest != app.version:
-        info["release_summary"] = render(M("A newer version is on GitHub. Update the app in TrueNAS so it pulls the latest image."), lang)
+        if app.settings.section("mqtt").get("allow_control"):
+            info["release_summary"] = render(M("A newer version is on GitHub. Install has TrueNAS pull the newer image and restart Plex Cache "
+                                               "(it needs the TrueNAS API, with a key allowed to manage apps)."), lang)
+        else:
+            info["release_summary"] = render(M("A newer version is on GitHub. Update the app in TrueNAS so it pulls the latest image."), lang)
     return info
+
+
+INSTALL_TIMEOUT = 15 * 60  # how long Home Assistant shows an install as under way
 
 
 def build_state(app, period: str = "week", lang: str = "en") -> dict:
@@ -287,7 +299,8 @@ DESCRIPTIONS = {
     "checking": M("On while the health checks are running."),
     "benchmarking": M("On while the disk benchmark is measuring each dataset’s uncached read speed."),
     "version": M("The version of Plex Cache that’s running."),
-    "update": M("Whether a newer Plex Cache is on GitHub (checked every 6 hours, if switched on in System). Update the app in TrueNAS."),
+    "update": M("Whether a newer Plex Cache is on GitHub (checked every 6 hours, if switched on in System). With Allow control on, Install "
+                "has TrueNAS pull the newer image and restart the app, as Update Now does; otherwise update the app in TrueNAS."),
     # Activity
     "report_verdict": M("The Metrics page’s verdict for the chosen period (System → MQTT): what could be better, or that all went well."),
     "report_streams": M("Streams played in the report period."),
@@ -511,9 +524,13 @@ def entities(state: dict, allow_control: bool, lang: str = "en") -> list[tuple[s
         sensor("main", f"dataset_{slug}_cache", M("{name} cache settings", name=d["name"]), f"datasets.{slug}.cache_settings",
                icon="mdi:database-cog-outline", cat=D)
     # The installed version, and the newest one on GitHub (when checking is on)
-    # (Its own topic, <base>/update, holds just the JSON Home Assistant's update entity reads.)
-    E.append(("update", "update", {"_device": "main", "name": M("Update"), "device_class": "firmware",
-                                   "title": "Plex Cache", "release_url": REPO_URL, "entity_category": "diagnostic"}))
+    # (Its own topic, <base>/update, holds just the JSON Home Assistant's update entity reads.) With
+    # control allowed it can be installed from Home Assistant: Update Now, through the TrueNAS API.
+    upd = {"_device": "main", "name": M("Update"), "device_class": "firmware",
+           "title": "Plex Cache", "release_url": REPO_URL, "entity_category": "diagnostic"}
+    if allow_control:
+        upd["payload_install"] = "install"
+    E.append(("update", "update", upd))
 
     # ---- Metrics: the Metrics page's report, plus totals that only go up
     sensor("activity", "report_verdict", M("Report ({period})", period=period), "report_verdict", icon="mdi:chart-box-outline")
@@ -822,7 +839,7 @@ class HomeAssistantBridge:
                 conf["state_topic"] = f"{base}/update"
             elif component != "button":
                 conf["state_topic"] = state_topic
-            if component in ("switch", "button", "number", "select"):
+            if component in ("switch", "button", "number", "select") or "payload_install" in conf:
                 conf["command_topic"] = f"{set_topic}/{oid}"
             # Its description, shown under Attributes when the entity is opened in Home Assistant
             conf["json_attributes_topic"] = f"{base}/info"
@@ -889,6 +906,8 @@ class HomeAssistantBridge:
                 app.run_checks_async(rescan=True)
             elif name == "benchmark":
                 app.run_benchmark()
+            elif name == "update":  # Install, on the update entity: the same as Update Now
+                app.update_now()
             elif name in ("nowplaying_ram_percent", "nextepisode_ram_percent", "warmup_pacing_percent", "ram_reserve_gb"):
                 sec = {"nowplaying_ram_percent": "nowplaying", "nextepisode_ram_percent": "nextepisode",
                        "warmup_pacing_percent": "warmup", "ram_reserve_gb": "general"}[name]

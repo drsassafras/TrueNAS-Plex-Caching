@@ -11041,6 +11041,12 @@ class UpdateCheckTests(unittest.TestCase):
         info = update_info(app)
         self.assertEqual((info["installed_version"], info["latest_version"]), (app.version, "9.0.0"))
         self.assertIn("release_summary", info)
+        self.assertFalse(info["in_progress"])
+        u.updating = time.time()                                                         # Install asked: under way until the restart
+        self.assertTrue(update_info(app)["in_progress"])
+        u.updating = time.time() - 3600                                                  # (one that never came back stops saying so)
+        self.assertFalse(update_info(app)["in_progress"])
+        u.updating = None
         self.assertEqual(app.state()["updates"]["latest"], "9.0.0")
         # Same version as running: up to date
         self.body = f'__version__ = "{app.version}"\n'
@@ -11297,6 +11303,8 @@ class MQTTTests(unittest.TestCase):
         self.assertEqual(st["update"]["installed_version"], self.app.version)
         upd = next(v for t, v in disc.items() if t.startswith("homeassistant/update/"))
         self.assertEqual(upd["release_url"], "https://github.com/drsassafras/TrueNAS-Plex-Caching")
+        # ...and it can be installed from Home Assistant (control allowed): Install sends to its command topic
+        self.assertEqual((upd["command_topic"], upd["payload_install"]), ("plexcache/set/update", "install"))
         # Home Assistant reads the versions straight from their own topic (no template)
         self.assertEqual(upd["state_topic"], "plexcache/update")
         self.assertNotIn("value_template", upd)
@@ -11373,6 +11381,13 @@ class MQTTTests(unittest.TestCase):
         finally:
             for n, f in saved.items():
                 setattr(self.app, n, f)
+        # Install, on the update entity: Update Now; refused (with the reason) when there's nothing newer
+        with mock.patch.object(self.app, "update_now", lambda: calls.append("update")):
+            self.broker.inject("plexcache/set/update", "install")
+            self.assertTrue(wait_for(lambda: "update" in calls))
+        self.broker.inject("plexcache/set/update", "install")
+        self.assertTrue(wait_for(lambda: any("couldn’t do update" in e["message"] and "No update is available" in e["message"]
+                                             for e in self.app.activity.snapshot()["events"])))
         # Out of range, not a whole number, or not a number: refused by the same rules as the web UI
         for name, value in (("nowplaying_ram_percent", "95"), ("warmup_pacing_percent", "2"), ("ram_reserve_gb", "6.5"),
                             ("ram_reserve_gb", "nan"), ("poll_seconds", "7")):
@@ -11436,6 +11451,8 @@ class MQTTTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.state() is not None))
         comps = {t.split("/")[1] for t in self.broker.retained if t.startswith("homeassistant/")}
         self.assertEqual(comps, {"sensor", "binary_sensor", "update"})
+        upd = json.loads(next(v for t, v in self.broker.retained.items() if t.startswith("homeassistant/update/") and v))
+        self.assertNotIn("command_topic", upd)                                          # (not installable: watch only)
         self.broker.inject("plexcache/set/nowplaying_enabled", "OFF")
         time.sleep(0.5)
         self.assertTrue(self.app.settings.section("nowplaying")["enabled"])
