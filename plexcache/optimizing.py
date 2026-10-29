@@ -73,6 +73,30 @@ def not_set_up(error) -> bool:
     return any(x in str(error).lower() for x in NOT_THERE)
 
 
+class ServiceError(urllib.error.HTTPError):
+    """The service's HTTP error as closed_error makes it: the response read and closed, its body kept."""
+    body: bytes = b""
+
+
+def closed_error(e: urllib.error.HTTPError) -> urllib.error.HTTPError:
+    """The service's HTTP error with its response read and closed — an error left open warns when it's dropped, and most
+    callers only want the code — its body kept on ``.body`` for those that read it (error_body)."""
+    with e:
+        body = e.read()
+    err = ServiceError(e.url, e.code, e.msg, e.hdrs, None)
+    err.body = body
+    return err
+
+
+def error_body(e: urllib.error.HTTPError) -> bytes:
+    """An HTTP error's body: as closed_error kept it, or — another client's error — read now, the response closed."""
+    body = getattr(e, "body", None)
+    if body is None:
+        with e:
+            body = e.read()
+    return body or b""
+
+
 class OptimizerClient:
     """Talks to the optimizer service: at PLEXCACHE_OPTIMIZER_URL (the second service's name in
     the YAML by default), with the token the app made (PLEXCACHE_OPTIMIZER_TOKEN overrides it)."""
@@ -93,8 +117,11 @@ class OptimizerClient:
     def _call(self, path: str, body: dict | None = None, timeout: float = 5) -> dict:
         req = urllib.request.Request(self.url + path, data=json.dumps(body).encode() if body is not None else None,
                                      headers={"X-Plexcache-Token": self.token, "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read() or b"{}")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            raise closed_error(e) from None
 
     def status(self, fresh: bool = False) -> dict:
         """The service's status, or {"error": why}. Kept for a few seconds."""
@@ -114,6 +141,9 @@ class OptimizerClient:
         try:
             with urllib.request.urlopen(urllib.request.Request(self.url + "/healthz"), timeout=5) as r:
                 return json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            with e:  # (its response closed)
+                return {"error": str(e)}
         except (OSError, ValueError, urllib.error.URLError) as e:
             return {"error": str(getattr(e, "reason", e))}
 
@@ -324,7 +354,7 @@ class Optimizing:
                                 file=hz.get("token_file") or "/config/optimizer-token"),
                    "unreadable": M("It can’t read {file}: it runs as user {uid}, which can’t read files in the app’s "
                                    "settings folder.", file=hz.get("token_file") or "", uid=hz.get("uid")),
-                   }.get(problem, M("The token file is empty."))
+                   }.get(problem or "", M("The token file is empty."))
             fix = (M("In Apps → {app} → Edit, run the optimizer as user 568 (apps), or add it to that group "
                      "(group_add: [\"568\"]).", app=appname) if problem == "unreadable" else
                    M("In Apps → {app} → Edit, add the app’s settings folder to the optimizer’s volumes, read-only:", app=appname))
@@ -682,7 +712,7 @@ class Optimizing:
         if not self.client.ready():
             return None
         title = (self.app.library_info(str(library_key)) or {}).get("title")
-        args = {"library": str(library_key), "mode": mode}
+        args: dict = {"library": str(library_key), "mode": mode}
         if files is not None:
             args["files"] = sorted({str(f) for f in files})
         item = self.app.jobs.enqueue("optimize", args,
@@ -971,7 +1001,7 @@ class Optimizing:
         compression before and after, whether it was laid out again, and its cover art."""
         res = r.get("result")
         wrote = res in ("optimized", "rewritten", "converted")
-        written = r.get("new") if res == "converted" else path  # (a converted file: what's said after is its MKV's)
+        written = str(r.get("new") or path) if res == "converted" else path  # (a converted file: what's said after is its MKV's)
         try:
             st = os.stat(written)
             after = {"size": st.st_size, "rs": st.st_blksize if st.st_size > st.st_blksize else None}
@@ -1107,7 +1137,7 @@ class Optimizing:
                 send = lambda: self.client.optimize(path, item["cover"], True, cover, opts["tags"])
             elif any(p not in SYNC_PROBLEMS for p in problems):
                 info = self._mkv_info(path, st)
-                images = self.images_mode(opts["images"], poster, item.get("matched"), info.get("ours"))
+                images = self.images_mode(opts["images"], poster, item.get("matched"), info.get("ours") or {})
                 cover = None
                 if images == "plex":
                     try:
@@ -1290,14 +1320,14 @@ class Claims:
         self.peers: dict[str, bool] = {}
         self.me = op.instance()
 
-    def _key(self, plex_path: str, root_plex: str) -> str:
+    def _key(self, plex_path: str, root_plex: str | None) -> str:
         rel = os.path.relpath(plex_path, root_plex)
         return hashlib.sha1(rel.encode()).hexdigest()[:24]
 
     def _call(self, path: str, release: bool = False) -> dict | None:
         plex = dict(self.items).get(path)
         root = self.op.library_root(plex) if plex else None
-        if not root:
+        if not plex or not root:
             return None
         root_plex = next((loc.rstrip("/") for lib in getattr(self.op.app, "libraries", []) or [] for loc in lib.get("locations") or []
                           if plex.startswith(loc.rstrip("/") + "/")), None)

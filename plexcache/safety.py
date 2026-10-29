@@ -124,6 +124,8 @@ def newest_snapshot(app, key: str) -> tuple[float | None, str]:
                         for snap in snap_call(app, tn, "query", [[["dataset", "=", ds]], {"select": ["name", "properties"]}]) or []:
                             raw = ((snap.get("properties") or {}).get("creation") or {})
                             at = raw.get("rawvalue") if isinstance(raw, dict) else raw
+                            if at is None:
+                                continue
                             try:
                                 at = float(at)
                             except (TypeError, ValueError):

@@ -123,7 +123,10 @@ def project(m: dict, record: int, images: str, strip_tags: bool, cover_size: int
         front = [(k, b - a) for a, b, k in spans if k != "video" and a < head]
         tail = [(k, b - a) for a, b, k in spans if k != "video" and a >= head]
     else:
-        front, tail = layout_after(m, images, strip_tags, cover_size)
+        after = layout_after(m, images, strip_tags, cover_size)
+        if after is None:
+            return None
+        front, tail = after
         video = max(0, (m.get("video_end") or m.get("size") or 0) - (m.get("video_start") or 0))
         for kind, n in front:
             spans.append((at, at + n, kind))
@@ -135,7 +138,7 @@ def project(m: dict, record: int, images: str, strip_tags: bool, cover_size: int
             spans.append((at, at + n, kind))
             at += n
         size = at
-    out = dict.fromkeys(MIX_KEYS, 0)
+    out: dict = dict.fromkeys(MIX_KEYS, 0)
     out.update(blocks=0, record=record)
     first = max(1, -(-layout.min_head(head, record, size) // record))
     last = -(-size // record)
@@ -265,7 +268,7 @@ def views(m: dict, pr: dict | None, before: dict | None = None, comp_now: str = 
     mix = existing(m.get("mix") or {}, comp_now)
     out = (pr or {}).get("removed") or {}
     now = view(mix, (mix.get("kinds") and {k: v[0] for k, v in mix["kinds"].items()}) or {}, tail_video(m), out, (pr or {}).get("removed_disk", 0))
-    got = {"now": now}
+    got: dict = {"now": now}
     if pr:
         got["after"] = view(pr["mix"], pr.get("kinds") or {}, pr["mix"].get("video_tail", 0), out, pr.get("removed_disk", 0), gone=True)
         got["rewrite"] = bool(pr.get("rewrite"))  # (already laid out right: only written again, for its dataset's settings)

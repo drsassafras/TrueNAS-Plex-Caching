@@ -244,7 +244,7 @@ def _dataset_row(app, d: dict, pools: dict, tn_ok: bool) -> dict:
     note = _files_note(d.get("blocks"), rs) if rs else ""
     row["file_rs"] = (cell("info", M("Not checked")) if st == "info" or not note else
                       cell("pass", note, badge=M("All files match")) if st == "pass" else
-                      cell("warn", note, badge=M("None match") if _none_match(d.get("blocks"), rs) else M("Some don’t match")))
+                      cell("warn", note, badge=M("None match") if _none_match(d.get("blocks"), int(rs or 0)) else M("Some don’t match")))
 
     # --- compression: always the same advice (ZSTD-3), whatever is on the dataset
     comp = (props or {}).get("compression") if tn_ok else None
@@ -386,12 +386,14 @@ def _files_note(blocks: dict | None, rs: int):
     other = {int(bs): n for bs, n in (blocks.get("sizes") or {}).items() if int(bs) != rs and n}
     if not other:
         return M("{n} files in {size}", n=multi, size=_fmt_rs(rs))
-    common = max(other, key=other.get)
+    common = max(other, key=other.__getitem__)
     return M("{old} of {n} files in {size}", old=sum(other.values()), n=multi, size=_fmt_rs(common))
 
 
 def _none_match(blocks: dict | None, rs: int) -> bool:
     """Whether every file bigger than a record is written in another block size."""
+    if not blocks:
+        return False
     multi = blocks["checked"] - blocks.get("single", 0)
     return multi > 0 and sum(n for bs, n in (blocks.get("sizes") or {}).items() if int(bs) != rs) >= multi
 
@@ -410,7 +412,7 @@ def compression_cell(comp: str | None) -> dict | None:
     if g is None:
         return cell("info", M("Not checked"))
     if g == "good":
-        level = int(comp.split("-")[1]) if "-" in comp else 3
+        level = int(comp.split("-")[1]) if comp and "-" in comp else 3
         return cell("pass", M("Recommended") if level == 3 else
                     M("Marginally smaller files than ZSTD-3, more CPU when writing"), badge=comp)
     if g == "low":
@@ -766,7 +768,7 @@ def _migration_items(app) -> list[dict]:
     st = (mig.state or {}) if mig else {}
     if st.get("step") not in ("create", "switch", "verify") or st.get("copying") or st.get("queued"):
         return []
-    failing = [c for c in mig.checks if not c.get("ok")]
+    failing = [c for c in (mig.checks if mig else []) if not c.get("ok")]
     todo = next((c for c in failing if c.get("level") == "error"), None) or \
         next((c for c in failing if c.get("level") != "warn"), None) or \
         next(iter(failing), None)  # (something wrong first, then a step to do; a warning when nothing else is left)

@@ -227,7 +227,8 @@ class OtherServer:
     def paths_there(self, key: str, plex_path: str, there: Library) -> list[str]:
         """Where a file of library ``key`` (its path as this Plex has it) may be on the other server."""
         lib = next((x for x in getattr(self.app, "libraries", []) or [] if str(x["key"]) == str(key)), None) or {}
-        for loc in sorted(lib.get("locations") or [], key=len, reverse=True):
+        locations: list[str] = list(lib.get("locations") or [])
+        for loc in sorted(locations, key=len, reverse=True):
             loc = loc.rstrip("/")
             if plex_path.startswith(loc + "/"):
                 rel = plex_path[len(loc) + 1:]

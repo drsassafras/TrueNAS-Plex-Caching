@@ -185,7 +185,7 @@ class Tool:
         (merge_first) for every other tool."""
         return () if self.name == "merge" else ("merge",)
 
-    def not_applicable(self, library: str):
+    def not_applicable(self, library: str) -> M | None:
         """Why the tool has nothing to work out in a library of a kind it works on (an M: its count "na"), or None."""
         return None
 
@@ -582,10 +582,9 @@ class Tool:
         try:
             return client.file_action(action, path, to=to, root=root)
         except urllib.error.HTTPError as e:
-            with e:  # (its response: read, then closed)
-                body = e.read()
+            from ..optimizing import error_body
             try:
-                why = json.loads(body or b"{}").get("error") or str(e)
+                why = json.loads(error_body(e) or b"{}").get("error") or str(e)
             except ValueError:
                 why = str(e)
             raise ValueError(M("The optimizer service refused: {why}", why=why)) from None

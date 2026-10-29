@@ -82,7 +82,7 @@ class Trash:
         there = None
         try:
             lib_there = other.mirror_for(str(e["library"])) if other is not None else None
-            if lib_there is not None:
+            if other is not None and lib_there is not None:
                 idx = other.index(lib_there, fresh=True)
                 cands = other.paths_there(e["library"], e["plex_path"], lib_there)
                 there = not any(c in idx for c in cands)

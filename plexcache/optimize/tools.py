@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+from typing import Literal, overload
 import threading
 
 NAMES = ("mkvmerge", "mkvextract", "ffmpeg", "ffprobe")
@@ -54,7 +55,13 @@ def version(name: str) -> str | None:
     return (out.splitlines() or [""])[0].strip() or None
 
 
-def run(name: str, *args: str, timeout: float | None = None, binary: bool = False, lines=None):
+@overload
+def run(name: str, *args: str, timeout: float | None = None, binary: Literal[False] = False, lines=None) -> str: ...
+@overload
+def run(name: str, *args: str, timeout: float | None = None, binary: Literal[True], lines=None) -> bytes: ...
+
+
+def run(name: str, *args: str, timeout: float | None = None, binary: bool = False, lines=None) -> str | bytes:
     """Run a tool; its stdout (text unless ``binary``). Raises ToolError with its message on failure.
     mkvmerge and mkvpropedit exit with 1 for warnings, which still means success. ``lines(text)``:
     each line of the tool's progress as it comes (mkvmerge's on stdout, ffmpeg's on stderr)."""
@@ -84,7 +91,10 @@ def _watched(cmd: list[str], on_stdout: bool, lines, timeout: float | None) -> t
     None when it took too long, stdout, stderr). The other stream is read alongside (no deadlock).
     The time limit counts from the start, so a tool that hangs without a word is stopped too."""
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
-    watched, other = (p.stdout, p.stderr) if on_stdout else (p.stderr, p.stdout)
+    stdout, stderr = p.stdout, p.stderr
+    if stdout is None or stderr is None:  # (never: both are pipes)
+        raise ToolError("no pipes to the tool")
+    watched, other = (stdout, stderr) if on_stdout else (stderr, stdout)
     got: dict[str, bytes] = {}
     reader = threading.Thread(target=lambda: got.update(other=other.read()), daemon=True)
     reader.start()
@@ -112,7 +122,7 @@ def _watched(cmd: list[str], on_stdout: bool, lines, timeout: float | None) -> t
         timer.cancel()
     code = None if expired.is_set() else p.returncode
     reader.join()
-    p.stdout.close()
-    p.stderr.close()
+    stdout.close()
+    stderr.close()
     mine = b"".join(seen)
     return (code, mine, got.get("other", b"")) if on_stdout else (code, got.get("other", b""), mine)

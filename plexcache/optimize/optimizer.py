@@ -83,7 +83,7 @@ class _Hasher(threading.Thread):
         self.join()
         if self.error:
             raise self.error
-        return self.digest
+        return self.digest or ""
 
 
 def _identity(path: str) -> dict:
@@ -105,13 +105,14 @@ def stream_hashes(path: str, done=None, duration_ns: int = 0) -> str:
     """ffmpeg's hash of every video, audio and subtitle stream's packets (attachments and cover
     pictures left out). Compression inside the file doesn't change it: packets are compared as
     the player gets them. ``done(fraction)``: how far through the file it is (needs its duration)."""
-    watch = None
+    lines = None
     if done and duration_ns:
-        def watch(line):
+        def watch(line: str) -> None:
             if line.startswith("out_time_us="):
                 done(min(1.0, int(line.split("=", 1)[1]) * 1000 / duration_ns))
-    return run("ffmpeg", "-v", "error", *(("-nostats", "-progress", "pipe:2") if watch else ()), "-i", path,
-               "-map", "0:V?", "-map", "0:a?", "-map", "0:s?", "-c", "copy", "-f", "streamhash", "-hash", "sha256", "-", lines=watch)
+        lines = watch
+    return run("ffmpeg", "-v", "error", *(("-nostats", "-progress", "pipe:2") if lines else ()), "-i", path,
+               "-map", "0:V?", "-map", "0:a?", "-map", "0:s?", "-c", "copy", "-f", "streamhash", "-hash", "sha256", "-", lines=lines)
 
 
 def _stages(progress, *weights: float):
@@ -292,7 +293,7 @@ def optimize_file(path: str, images: str = "compress", cover: bytes | None = Non
         old_cover = (before.get("ours") or {}).get("PLEXCACHE_COVER")
         cover_hash = None
         if images == "plex":
-            cover_hash = hashlib.sha256(cover).hexdigest()
+            cover_hash = hashlib.sha256(cover or b"").hexdigest()
             tags["PLEXCACHE_COVER"] = COVER_PREFIX + cover_hash
         elif images in ("keep", "compress") and old_cover:
             tags["PLEXCACHE_COVER"] = old_cover  # still the same Plex poster

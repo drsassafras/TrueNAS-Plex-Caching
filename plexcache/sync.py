@@ -213,7 +213,7 @@ def compare_library(src: _Side, dst: _Side, what: dict, checks_on: dict | None =
                     votes[up] = votes.get(up, 0) + 1
         if not votes:
             continue
-        other = dst.items.get(max(votes, key=votes.get))
+        other = dst.items.get(max(votes, key=votes.__getitem__))
         if other:
             pairs[key] = other["key"]
             r = row("pair", [it], [other], src, dst)

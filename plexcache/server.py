@@ -65,7 +65,7 @@ def local_address(address: str) -> bool:
         ip = ipaddress.ip_address(address.split("%", 1)[0])
     except ValueError:
         return False
-    if ip.version == 6 and ip.ipv4_mapped:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
     return any(ip in n for n in LOCAL_NETS)
 
@@ -103,8 +103,8 @@ def make_handler(app):
         sys_version = ""
         timeout = 30  # drop connections that go quiet, so idle sockets can't pile up
 
-        def log_message(self, fmt, *args):  # quiet access log unless debugging
-            log.debug("%s - %s", self.address_string(), fmt % args)
+        def log_message(self, format, *args):  # quiet access log unless debugging
+            log.debug("%s - %s", self.address_string(), format % args)
 
         # ------------------------------------------------------------ utils
         def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None):
@@ -550,7 +550,7 @@ def make_handler(app):
                         started = tool.scan_async(str(body.get("library") or ""), body.get("options") if isinstance(body.get("options"), dict) else {},
                                                   refresh=bool(body.get("refresh", True)))  # (Scan Again gathers the data again; the page's own first scan takes it as it is)
                     elif action == "apply":
-                        choices = body.get("choices") if isinstance(body.get("choices"), dict) else {}
+                        choices = c if isinstance(c := body.get("choices"), dict) else {}
                         try:
                             started = tool.apply_async([str(i) for i in body.get("ids") or []], {str(k): v for k, v in choices.items() if isinstance(v, dict)})
                         except ValueError as e:

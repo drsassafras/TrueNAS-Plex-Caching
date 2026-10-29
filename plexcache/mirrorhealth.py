@@ -119,7 +119,7 @@ class MirrorHealth:
         watched = other is not None and other.any_mirror()
         if watched and not here:  # (this Plex's libraries not read yet: what's paired with them isn't known)
             waiting = ("pending", None)
-        elif watched:
+        elif watched and other is not None:
             from .plex2 import LIBS_TTL
             with other.lock:
                 theirs, err, at = other.libs, other.error, other.libs_at

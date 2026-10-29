@@ -35,6 +35,7 @@ read what it read) is steered the same way, in its own thread: the page's librar
 
 import threading
 import time
+from typing import cast
 
 from .i18n import M
 
@@ -113,7 +114,7 @@ def data_waiting(app, key: str, kinds) -> dict | None:
         with ld.lock:
             progress = dict(ld.progress) if ld.progress else None
         if progress and progress.get("library") == str(key):
-            return pending(READING.get(progress.get("what"), READING[w]), progress)
+            return pending(READING.get(progress.get("what") or "", READING[w]), progress)
         return pending(M("Waiting its turn to be read: {what}", what=DATA_NAMES[w]))
     return None
 
@@ -131,7 +132,7 @@ class Unit:
     def __init__(self, app):
         self.app = app
 
-    def applies(self, key: str):
+    def applies(self, key: str) -> M | None:
         """None when it applies to the library (or may: see waiting), else why not (M)."""
         return None
 
@@ -158,7 +159,7 @@ class Unit:
         """Worked out again though it's current (its stale period up): what it keeps of the last time dropped first."""
         self.evaluate(key)
 
-    def busy(self, key: str):
+    def busy(self, key: str) -> dict | bool | None:
         """Being evaluated elsewhere (in a thread of its own: the optimizer's scan): how far ({done, total}) or True; the
         evaluator leaves it meanwhile and is told when it's done (Evaluator.kick)."""
         return None
@@ -179,7 +180,7 @@ class ToolUnit(Unit):
         self.title = tool.title
         self.stale_after = tool.stale_after
 
-    def applies(self, key):
+    def applies(self, key: str):
         if not self.tool.works_on(key):
             return M("{tool} doesn’t work on this kind of library.", tool=self.tool.title)
         return self.tool.not_applicable(key)
@@ -206,7 +207,7 @@ class MirrorUnit(Unit):
     needs = ("records", "files")
     title = M("Mirror Checks")
 
-    def applies(self, key):
+    def applies(self, key: str):
         return self.app.mirror_health.not_applicable(key)
 
     def waiting(self, key):
@@ -217,7 +218,7 @@ class MirrorUnit(Unit):
             return failed(M("The mirror’s Plex couldn’t be reached: {why}", why=w[1]))
         return pending(M("Reading the mirror’s libraries…"))
 
-    def busy(self, key):
+    def busy(self, key: str):
         return True if getattr(self.app.mirror_health, "reading", False) else None
 
     def sig(self, key):
@@ -246,7 +247,7 @@ class HealthUnit(Unit):
     needs = ("records", "files")
     title = M("the checks")
 
-    def applies(self, key):
+    def applies(self, key: str):
         lib = self.app.library_info(key) or {}
         return None if lib.get("kind") and not lib.get("excluded") else M("This library isn’t checked.")
 
@@ -276,7 +277,7 @@ class OptimizerUnit(Unit):
     needs = ("records", "files")
     title = M("the optimizer’s scan")
 
-    def applies(self, key):
+    def applies(self, key: str):
         return self.app.optimizing.not_applicable(key)
 
     def sig(self, key):
@@ -290,7 +291,7 @@ class OptimizerUnit(Unit):
     def current(self, key):
         return self.app.optimizing.current(key)
 
-    def busy(self, key):
+    def busy(self, key: str):
         op = self.app.optimizing
         return (dict(op.survey_progress or {}) or True) if op.surveying else None
 
@@ -650,7 +651,7 @@ class Evaluator:
             return c
         if page == "optimizer":
             return done(((app.optimizing.summary or {}).get(key) or {}).get("todo") or 0)
-        return done(units[page].tool.count_live(key))
+        return done(cast(ToolUnit, units[page]).tool.count_live(key))
 
     def _last_known(self, c: dict, key: str, cat: str) -> dict:
         """A check page's count while it's worked out again (pending): what was found last time beside the wheel (partial,
@@ -668,7 +669,7 @@ class Evaluator:
         check page reads as it comes is still being read — the items' pages (``kinds``: the data layer's), the files' insides
         (the inspector: those not read yet, or read by an older version) — or failed when it couldn't be. None once it's in."""
         app = self.app
-        part = int(got.get("flagged") if cat == "flagged" else got.get(cat) or 0)
+        part = int((got.get("flagged") if cat == "flagged" else got.get(cat)) or 0)
         if kinds:
             w = data_waiting(app, key, kinds)
             if w:

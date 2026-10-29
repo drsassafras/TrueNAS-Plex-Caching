@@ -5,6 +5,7 @@ import os
 import random
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 MiB = 1024 * 1024
@@ -44,7 +45,7 @@ class Pacer:
         self.disk_mb_s: float | None = None  # uncached disk speed, to tell cache hits apart
         self.stop = stop or threading.Event()
         self.pause = pause  # callable -> bool: True while we should hold off
-        self.before_wait = None  # optional callable: an idle gap is about to start
+        self.before_wait: Callable[[], None] | None = None  # an idle gap is about to start
 
     def check(self) -> None:
         if self.stop.is_set():

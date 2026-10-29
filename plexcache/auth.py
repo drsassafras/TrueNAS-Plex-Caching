@@ -138,7 +138,7 @@ class Auth:
 
     def _load_revoked(self) -> dict:
         try:
-            with open(self._revoked_path, encoding="utf-8") as fh:
+            with open(self._revoked_path or "", encoding="utf-8") as fh:
                 data = json.load(fh)
             return {str(k): int(v) for k, v in data.items() if int(v) > time.time()}
         except (OSError, ValueError, TypeError, AttributeError):

@@ -121,11 +121,10 @@ class Migration:
         try:
             return self.client._call("/api/folder", dict(kw, action=action), timeout=600)
         except urllib.error.HTTPError as e:
-            with e:  # (its response: read, then closed)
-                body = e.read()
+            from .optimizing import error_body
             try:
                 import json
-                return {"error": json.loads(body or b"{}").get("error") or str(e)}
+                return {"error": json.loads(error_body(e) or b"{}").get("error") or str(e)}
             except ValueError:
                 return {"error": str(e)}
         except (OSError, ValueError, urllib.error.URLError) as e:
@@ -194,7 +193,7 @@ class Migration:
                             c["partial"] = {"step": "create"}
                 c["suggested"] = bool(rec.get("status") == "warn")
                 # what to do: its dataset's record size is the one recommended for it, the second best, or neither
-                c["advice"] = {"ideal": "ideal", "pass": "sufficient", "warn": "split"}.get(rec.get("status"))
+                c["advice"] = {"ideal": "ideal", "pass": "sufficient", "warn": "split"}.get(rec.get("status") or "")
                 c["now_rs"] = rec.get("rs")
                 out.append(c)
         self._cand = (time.time(), out)
@@ -208,7 +207,7 @@ class Migration:
         if self.state and self.state.get("step") not in (None, "done"):
             raise ValueError("another folder is being moved")
         part = c.get("partial") or {}
-        st = dict(c, step=part.get("step") or "create", started=time.time(), log=[], scope=self._default_scope())
+        st: dict = dict(c, step=part.get("step") or "create", started=time.time(), log=[], scope=self._default_scope())
         st.pop("partial", None)
         if part.get("old_path"):  # picked up past the set-aside: the old folder is where it was put
             st["old_path"] = part["old_path"]
@@ -330,7 +329,7 @@ class Migration:
                   M("It’s how the new dataset’s record size and compression are checked: System → TrueNAS."))
             return
         if not check("dataset", props is not None, M("The new dataset {name} is there", name=st["temp"]),
-                     "" if props else M("Create it as below, then check again.")):
+                     "" if props else M("Create it as below, then check again.")) or not isinstance(props, dict):
             return
         rs = props.get("recordsize")
         good = rs in (st.get("rs"), st.get("alt"))
@@ -617,7 +616,7 @@ class Migration:
         try:
             if not (link is not None and link.mirror_id()):
                 return False
-            return other.state_of(str(library)) == "mirror" if library else True
+            return (other is not None and other.state_of(str(library)) == "mirror") if library else True
         except Exception:  # noqa: BLE001 — not set up: no mirror
             return False
 
@@ -655,10 +654,10 @@ class Migration:
         conv = lib.get("converting")
         partly = bool(conv and conv.get("step") in UNDER_WAY)
         title = st.get("title") or os.path.basename(st.get("folder") or "")
-        when = time.strftime("%d %b", time.localtime(conv["since"])) if partly and conv.get("since") else "?"
+        when = time.strftime("%d %b", time.localtime(conv["since"])) if conv and partly and conv.get("since") else "?"
         partial_text = M("{name} has a partly finished conversion of {library} ({step}, since {when}): complete it or revert it there before this "
                          "one can finish. To revert it there before its set-aside: Cancel, then delete {temp} in TrueNAS; after it: Put the Old "
-                         "Folder Back, Cancel, then delete {temp}.", name=name, library=title, step=step_name(conv.get("step")) if partly else "",
+                         "Folder Back, Cancel, then delete {temp}.", name=name, library=title, step=step_name(conv.get("step")) if conv and partly else "",
                          when=when, temp=os.path.basename(st.get("temp_folder") or ""))
         if step == "create":
             self._check_truenas(f, name, check)

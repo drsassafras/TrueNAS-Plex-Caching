@@ -103,7 +103,7 @@ class ZfsLog:
             entry = self.files.get(path)
             if not entry or entry.get("ino") != ino:
                 # new here (or replaced): written with the current settings if they'd settled already
-                assumed = current is not None and self.settled(dataset)
+                assumed = current is not None and self.settled(dataset or "")
                 entry = {"ino": ino, "dataset": dataset, "compression": current if assumed else None,
                          "basis": "assumed" if assumed else None}
                 self.files[path] = entry

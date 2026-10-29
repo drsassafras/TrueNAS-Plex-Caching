@@ -19,7 +19,7 @@ def compare(file_version) -> str:
     """How a file's tag compares with this optimizer, by what decides the output (major.minor):
     "none" (no tag, or one we can't read), "older" (to be done again), "same", or "newer" (done
     by a newer optimizer: leave it alone)."""
-    theirs, ours = parse(file_version), parse(VERSION)
+    theirs, ours = parse(file_version), parse(VERSION) or (0, 0, 0)
     if not theirs:
         return "none"
     if theirs[:2] < ours[:2]:

@@ -18,6 +18,7 @@ import dataclasses
 import os
 import threading
 import time
+from typing import Any
 from dataclasses import dataclass, field
 
 from . import cachemode, prefetch, zfs
@@ -25,7 +26,7 @@ from .layout import min_head, tail_ranges
 from .i18n import M, duration_text, join, msg, size_text
 from .pauses import L2arcPauses, busy_percent
 from .plex import PlexClient, PlexError
-from .reader import MiB, Pacer, Stopped, is_probe_hit, read_range
+from .reader import MiB, Pacer, ReadResult, Stopped, is_probe_hit, read_range
 from .warmup import align_ranges, library_seconds, preload_bytes
 
 GiB = 1024 ** 3
@@ -240,7 +241,7 @@ class PlaybackMonitor:
         self._bg_running = False
         self._bg_pauses: L2arcPauses | None = None  # shared by Prefetch's L2ARC-only reads
         self.background_paused = None  # why they're waiting right now, if they are
-        self._plex_cache: dict[tuple, tuple[float, object]] = {}  # album/artist lookups, briefly
+        self._plex_cache: dict[tuple, tuple[float, Any]] = {}  # album/artist lookups, briefly
         self._retention: list[tuple[float, Job]] = []  # (when to check, job) still-cached checks
         self._disk_mark: tuple[float, dict] | None = None
         self.thread = threading.Thread(target=self._loop, name="playback", daemon=True)
@@ -450,7 +451,7 @@ class PlaybackMonitor:
         # p: how likely it really came from cache, from how long ago that part was cached and how
         # long cached data lasts in this library (just read by Now Playing Cache: nearly certain)
         p = 0.0
-        if cached:
+        if cached and job:
             p = self.app.cachelog.still_cached(self.app.cache_route(job.ram), s.library_key, time.time() - job.started)
             p = 1.0 if p is None else p
         if not cached and s.files:
@@ -589,7 +590,7 @@ class PlaybackMonitor:
         kbps = s.kbps or DEFAULT_KBPS
         want = size or int(kbps * 125 * 3600)  # unknown size: an hour of playback
         budget = self.app.ram_budget()
-        mine = old.length if restart else 0  # the old read is being replaced
+        mine = old.length if restart and old else 0  # the old read is being replaced
         room = budget["nowplaying"] - (budget["in_use"]["nowplaying"] - mine)
         base = plan_ranges(size, pos, want, room, wrap=True)
         ranges = with_index(path, size, base, room, self.app.record_for(s.library_key))
@@ -600,7 +601,7 @@ class PlaybackMonitor:
                 self.app.activity.record("limit", label=s.label, feature="nowplaying", pct=0)
             return
         self._seen[key]["now"] = True
-        if restart:
+        if restart and old:
             old.cancel = True
             self._seen[key]["restarted"] = time.time()
         job = Job("nowplaying", s.label, path, ranges, size, rating_key=s.rating_key,
@@ -865,7 +866,7 @@ class PlaybackMonitor:
                     self._bg_running = False
         threading.Thread(target=run, name="prefetch-l2arc", daemon=True).start()
 
-    def _cached(self, kind: str, rk: str, fetch):
+    def _cached(self, kind: str, rk: str, fetch) -> Any:
         hit = self._plex_cache.get((kind, rk))
         if hit and time.time() - hit[0] < PLEX_CACHE_TTL:
             return hit[1]
@@ -956,6 +957,8 @@ class PlaybackMonitor:
                 return
             took = time.monotonic() - started
             job.finished = time.time()
+            if res is None:  # (no ranges: nothing to read)
+                res = ReadResult(0, 0.0)
             if res.error:
                 job.state = "failed"
                 job.message = res.error

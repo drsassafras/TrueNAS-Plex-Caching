@@ -6,6 +6,8 @@ bitrates are kbps, so bytes = kbps * 125 * seconds everywhere.
 """
 
 import math
+from collections.abc import Callable
+from typing import Any
 import random
 import time
 from dataclasses import dataclass, field
@@ -320,7 +322,7 @@ def _cut_sec(sec: float, cut: float) -> float:
 class WarmupRun:
     """One warm-up pass over the library."""
 
-    def __init__(self, files, seconds: dict, pacing_percent: float, hdd_mb_per_sec,
+    def __init__(self, files, seconds: dict, pacing_percent: float, hdd_mb_per_sec: float | Callable[[Any], float],
                  stop, pause=None, arcstats=None, cache_index: bool = True, skip=None, note=None, rate=None,
                  record=None):
         """``seconds``: per library key (or, failing that, per kind). ``hdd_mb_per_sec`` is the
@@ -335,7 +337,7 @@ class WarmupRun:
         random.shuffle(self.files)  # spread reads across the disks
         self.seconds = seconds
         self.pacer = Pacer(pacing_percent, stop, pause, rate=rate)
-        self.hdd = hdd_mb_per_sec if callable(hdd_mb_per_sec) else (lambda f, v=hdd_mb_per_sec: v)
+        self.hdd: Callable[[Any], float] = hdd_mb_per_sec if callable(hdd_mb_per_sec) else (lambda f, v=hdd_mb_per_sec: v)
         self.arcstats = arcstats or (lambda: None)
         self.done = 0
         self.skipped = 0  # lead-ins still in their cooldown
@@ -454,6 +456,7 @@ class WarmupRun:
         errors = sum(v["errors"] for v in self.by_kind.values())
         if self.result == "ok" and errors and errors >= max(1, self.done // 2):
             self.result = "errors"
+        l2_before, l2_after = before.get("l2_asize"), after.get("l2_asize")
         return {
             "index": self.index if self.cache_index else None,
             "started": self.started,
@@ -469,9 +472,7 @@ class WarmupRun:
             "seconds": self.seconds,
             "l2_before": before.get("l2_asize"),
             "l2_after": after.get("l2_asize"),
-            "l2_growth": (after.get("l2_asize") - before.get("l2_asize"))
-            if before.get("l2_asize") is not None and after.get("l2_asize") is not None
-            else None,
+            "l2_growth": l2_after - l2_before if l2_before is not None and l2_after is not None else None,
             "result": self.result,
             "sample": list(self.sample),  # checked a day later (next_day_check), then dropped
         }

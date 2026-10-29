@@ -100,7 +100,7 @@ def _kind(s: dict) -> str | None:
     """A stream's kind as MKVToolNix names them, or None for one that isn't a track."""
     if (s.get("disposition") or {}).get("attached_pic"):
         return None  # cover art (MP4's covr): counted apart
-    return {"video": "video", "audio": "audio", "subtitle": "subtitles"}.get(s.get("codec_type"))
+    return {"video": "video", "audio": "audio", "subtitle": "subtitles"}.get(s.get("codec_type") or "")
 
 
 def inspect(path: str) -> dict:

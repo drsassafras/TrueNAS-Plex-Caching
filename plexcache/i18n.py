@@ -23,6 +23,7 @@ import json
 import os
 import re
 import threading
+from typing import Any
 
 I18N_DIR = os.path.join(os.path.dirname(__file__), "web", "i18n")
 
@@ -45,6 +46,10 @@ class M(str):
     ``M("{n} files", n=3, one="{n} file")`` is a plural: ``one`` is the English
     singular, and ``n`` picks the form in each language.
     """
+
+    tmpl: str
+    one: str | None
+    params: dict
 
     def __new__(cls, tmpl: str = "", one: str | None = None, **params):
         n = params.get("n")
@@ -71,6 +76,8 @@ def _rebuild(tmpl, one, params):
 
 class Fixed(float):
     """A number shown with a fixed count of decimals: Fixed(2.0, 1) is "2.0" (or "2,0")."""
+
+    places: int
 
     def __new__(cls, value: float, places: int = 1):
         self = super().__new__(cls, round(value, places))
@@ -108,7 +115,7 @@ def msg(error: BaseException) -> str:
     return first if isinstance(first, M) else str(error)
 
 
-def jsonable(v):
+def jsonable(v) -> Any:
     """``v`` with every ``M`` inside turned into its JSON form (for the browser)."""
     if isinstance(v, M):
         return v.json()
@@ -243,7 +250,7 @@ def render(m, lang: str = "en") -> str:
     if m.one is not None:
         cat = plural_category(lang, m.params.get("n"))
         if isinstance(entry, dict) and (entry.get(cat) or entry.get("other")):
-            text = entry.get(cat) or entry.get("other")
+            text = entry.get(cat) or entry.get("other") or ""
         elif isinstance(entry, str):
             text = entry
         else:  # not translated yet: English

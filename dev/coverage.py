@@ -91,7 +91,7 @@ def _ranges(nums: list[int]) -> str:
     for n in nums + [None]:
         if start is None:
             start = prev = n
-        elif n is not None and n == prev + 1:
+        elif n is not None and prev is not None and n == prev + 1:
             prev = n
         else:
             out.append(f"{start}-{prev}" if prev != start else str(start))

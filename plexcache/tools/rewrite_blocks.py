@@ -214,7 +214,7 @@ def rewrite(path: str, st: os.stat_result, dir_st: os.stat_result, pacer: Pacer,
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("target", help="dataset name (tank/plexfiles) or folder (/mnt/tank/plexfiles/Movies)")
     ap.add_argument("--apply", action="store_true", help="rewrite the files (without it, only reports)")
     ap.add_argument("--block", help="block size to aim for, e.g. 1M (default: the dataset's recordsize)")

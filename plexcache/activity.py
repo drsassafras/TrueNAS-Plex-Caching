@@ -57,7 +57,7 @@ class Activity:
                 self.totals.update({k: int(v) for k, v in data["totals"].items() if k in TOTALS})
             else:  # history from before totals were kept: start from what's still there
                 for m in self.metrics:
-                    _count_total(self.totals, m.get("what"), m)
+                    _count_total(self.totals, str(m.get("what") or ""), m)
             for e in data.get("events", [])[-max_events:]:
                 self.events.append(dict(e, message=from_json(e.get("message"))))
         except (OSError, ValueError):

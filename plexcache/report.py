@@ -36,7 +36,7 @@ COUNTERS = ("streams", "skips", "skips_cached", "next", "next_ready", "next_full
 
 
 def empty() -> dict:
-    out = {k: 0 for k in COUNTERS}
+    out: dict = {k: 0 for k in COUNTERS}
     out.update(busy_peak=None, miss={}, late=[], skips_by={})  # skips_by: library key -> [skips, expected from cache]
     return out
 
@@ -150,7 +150,9 @@ def _buckets(period: str, now: float) -> list[tuple[float, float, str]]:
 
 def _sum_between(raw: list[dict], daily: dict, start: float, end: float) -> dict:
     # raw is in time order (appended as things happen), so slice it rather than scan it
-    times = [r["t"] for r in raw] if not hasattr(raw, "times") else raw.times
+    times = getattr(raw, "times", None)
+    if times is None:
+        times = [r["t"] for r in raw]
     s = summarize(raw[bisect.bisect_left(times, start):bisect.bisect_left(times, end)])
     for day, summ in daily.items():
         ts = dt.datetime.strptime(day, "%Y-%m-%d").timestamp()

@@ -80,7 +80,7 @@ class L2arcPauses:
                     if scan.get("state") == "SCANNING":
                         self._scrub = {"SCRUB": M("a scrub is running on {pool}", pool=name),
                                        "RESILVER": M("a resilver is running on {pool}", pool=name)}.get(
-                            scan.get("function"), M("a scan is running on {pool}", pool=name))
+                            scan.get("function") or "", M("a scan is running on {pool}", pool=name))
                         break
             self.scrub_error = None
         except (TrueNASError, OSError) as e:

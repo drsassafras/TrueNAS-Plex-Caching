@@ -41,9 +41,9 @@ def snapshot(m: dict | None, comp: str | None = None) -> dict | None:
     row (projection.view) — its size and space on the pool, and ``comp``: the compression it's stored
     with (projection.family; None: as the mix has it, ZSTD). None without a mix."""
     from .projection import tail_video
-    mix = (m or {}).get("mix")
-    if not mix:
+    if not m or not m.get("mix"):
         return None
+    mix = m["mix"]
     out = {"mix": {k: v for k, v in mix.items() if k in KEEP}, "tail": tail_video(m), "size": m.get("size"), "disk": m.get("disk")}
     if comp:
         out["comp"] = comp

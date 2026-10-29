@@ -1,0 +1,24 @@
+{
+  // Type checking (pyright: npm install -g pyright; pyright). Errors are what would fail at run time — a name that isn't
+  // defined, a variable read before it's set; those gate the build. The rest is a warning: an annotation that says less than
+  // the code does, kept at zero (dev/README.md).
+  "include": ["plexcache", "dev"],
+  "pythonVersion": "3.15",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "basic",
+  "reportUndefinedVariable": "error",
+  "reportPossiblyUnboundVariable": "error",
+  "reportArgumentType": "warning",
+  "reportAttributeAccessIssue": "warning",
+  "reportOptionalMemberAccess": "warning",
+  "reportOptionalSubscript": "warning",
+  "reportOptionalOperand": "warning",
+  "reportOptionalIterable": "warning",
+  "reportCallIssue": "warning",
+  "reportReturnType": "warning",
+  "reportAssignmentType": "warning",
+  "reportGeneralTypeIssues": "warning",
+  "reportIncompatibleMethodOverride": "warning",
+  "reportIndexIssue": "warning",
+  "reportOperatorIssue": "warning"
+}

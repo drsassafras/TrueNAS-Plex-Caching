@@ -122,7 +122,7 @@ def check_file(app, f, path: str, m: dict | None, rec: dict, opts: dict, info: d
         worst = "ideal"
         for a in images:
             st = "ideal" if optimized or a.get("jpeg_tables") in ("optimized", "progressive") else "warn" if a.get("jpeg_tables") == "standard" else "pass"
-            worst = max(worst, st, key=ORDER.get)
+            worst = max(worst, st, key=ORDER.__getitem__)
         if worst == "warn" and not mkv:
             # (the optimizer doesn't rewrite this kind of file: a pass, with what would make it smaller)
             add("cover", "pass", M("Not compressed losslessly: a JPEG with the standard tables. The optimizer only rewrites MKV files; "
@@ -183,7 +183,7 @@ def _container(app, add, path: str, library: str) -> None:
 
 
 def worst(checks: list[dict]) -> str | None:
-    return max((c["status"] for c in checks), key=ORDER.get) if checks else None
+    return max((c["status"] for c in checks), key=ORDER.__getitem__) if checks else None
 
 
 def counts(checks: list[dict]) -> dict:

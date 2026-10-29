@@ -84,7 +84,7 @@ def _vint(buf: bytes, pos: int, keep_marker: bool) -> tuple[int | None, int]:
     return value, length
 
 
-def _element(buf: bytes, pos: int) -> tuple[int, int | None, int]:
+def _element(buf: bytes, pos: int) -> tuple[int | None, int | None, int]:
     """(id, size, header length) of the element at ``pos``."""
     eid, n1 = _vint(buf, pos, keep_marker=True)
     size, n2 = _vint(buf, pos + n1, keep_marker=False)
@@ -325,6 +325,7 @@ def tail_ranges(path: str, size: int, head_bytes: int) -> tuple[list[tuple[int, 
         fd = os.open(path, os.O_RDONLY)
     except OSError as e:
         return [], {"format": "unreadable", "note": str(e)}
+    info: dict
     try:
         magic = _pread(fd, 0, 12)
         if magic[:4] == b"\x1a\x45\xdf\xa3":

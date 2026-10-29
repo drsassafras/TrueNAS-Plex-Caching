@@ -347,8 +347,12 @@ class PeerLink:
 
     def _get(self, url: str, timeout: float = PROBE_TIMEOUT) -> dict:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            got = json.loads(resp.read(1024 * 1024) or b"{}")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                got = json.loads(resp.read(1024 * 1024) or b"{}")
+        except urllib.error.HTTPError as e:  # (its response closed: an error left open warns when it's dropped)
+            e.close()
+            raise
         if not isinstance(got, dict):
             raise PeerError("not an object")
         return got
@@ -490,9 +494,9 @@ class PeerLink:
                 return json.loads(resp.read(1024 * 1024) or b"{}")
         except urllib.error.HTTPError as e:
             with e:  # (its response: read, then closed)
-                body = e.read()
+                answer = e.read()
             try:
-                return json.loads(body or b"{}")
+                return json.loads(answer or b"{}")
             except ValueError:
                 raise PeerError(f"HTTP {e.code}") from None
 
@@ -552,9 +556,9 @@ class PeerLink:
                 got = json.loads(resp.read(64 * 1024 * 1024) or b"{}")
         except urllib.error.HTTPError as e:
             with e:
-                body = e.read()
+                answer = e.read()
             try:
-                why = json.loads(body or b"{}").get("error")
+                why = json.loads(answer or b"{}").get("error")
             except ValueError:
                 why = None
             raise PeerError(why or f"HTTP {e.code}") from None
@@ -665,7 +669,7 @@ class PeerLink:
         libs = {}
         for key, there in pairs.items():
             t = theirs.get(str(there.key)) if there is not None else None
-            if t is not None:
+            if there is not None and t is not None:
                 libs[str(key)] = {"key": str(there.key), "folders": t.get("folders"), "converting": t.get("converting"), "holding": t.get("holding")}
         return {"via": "link", "at": self.last_ok, "name": st.get("name") or (self.paired or {}).get("name") or "", "version": st.get("version"),
                 "platform": st.get("platform"), "truenas_api": st.get("truenas_api"), "migration": st.get("migration"), "libraries": libs}

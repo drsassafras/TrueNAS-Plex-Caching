@@ -204,7 +204,7 @@ def _walk(fd: int, start: int, size: int, stop_at_video: bool) -> list[dict]:
             eid, esize, hl = _element(_pread(fd, p, 16), 0)
         except ValueError:
             break
-        name = NAMES.get(eid, "other")
+        name = NAMES.get(eid, "other") if eid is not None else "other"
         if eid == layout.CLUSTER and stop_at_video:
             break
         if esize is None:
@@ -443,7 +443,7 @@ def describe(path: str) -> dict:
     return out
 
 
-MIX_KEYS = ("video", "meta", "unused", "video_disk", "meta_disk", "unused_disk", "round_disk")
+MIX_KEYS: tuple[str, ...] = ("video", "meta", "unused", "video_disk", "meta_disk", "unused_disk", "round_disk")
 HEAD_KINDS = ("header", "segment", "seekhead", "info", "tracks", "checksum", "id3", "flac")  # what a player reads first
 
 
@@ -519,7 +519,7 @@ def cache_mix(path: str, m: dict, record: int) -> dict | None:
     if not bm:
         return None
     parts = pieces(m)
-    out = dict.fromkeys(MIX_KEYS, 0)
+    out: dict = dict.fromkeys(MIX_KEYS, 0)
     out.update(blocks=0, record=record)
     lz4 = dict.fromkeys(MIX_KEYS, 0)
     kinds: dict[str, list[int]] = {}
@@ -869,14 +869,14 @@ class Inspector:
             with self.lock:  # (what to do next, and whether to stop, decided together with start())
                 key = self.current
                 st = self.libs.get(key) if key else None
-                if not st or st["paused"]:
+                if not key or not st or st["paused"]:
                     self.working = False
                     break
                 if not st["todo"]:
                     st["finished"] = time.time()
                     finished, self.current, self.working = (key, st["read"]), None, False
                     self._revs[key] = self._revs.get(key, 0) + 1
-                    path = None
+                    path = ""  # (nothing left to read)
                 else:
                     path = st["todo"][0]  # (left in the list while it's read: the job counts as running until it's in)
             if finished:

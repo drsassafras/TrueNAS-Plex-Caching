@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import time
+import urllib.error
 
 from .i18n import M
 from .plex import PlexError
@@ -144,7 +145,7 @@ class Conversions:
                 there = other.where(e, now) if other is not None else None
             except PlexError as err:
                 there = ""
-                e["note"] = M("{server}: {why}", server=other.settings().get("name") or M("the other server"), why=str(err))
+                e["note"] = M("{server}: {why}", server=(other.settings().get("name") if other is not None else None) or M("the other server"), why=str(err))
             else:
                 e.pop("note", None)
             e["servers"] = {"here": where or "waiting", **({"there": there or "waiting"} if there is not None else {})}
@@ -173,8 +174,9 @@ class Conversions:
             reason = getattr(err, "reason", None) or str(err)
             try:
                 import json
-                with err:  # (an HTTP error's own reason; its response closed)
-                    reason = json.loads(err.read() or b"{}").get("error") or reason
+                from .optimizing import error_body
+                if isinstance(err, urllib.error.HTTPError):
+                    reason = json.loads(error_body(err) or b"{}").get("error") or reason  # (an HTTP error's own reason)
             except Exception:  # noqa: BLE001
                 pass
             e.update(failed=time.time(), error=str(reason))

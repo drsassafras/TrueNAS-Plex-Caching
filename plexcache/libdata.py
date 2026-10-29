@@ -316,6 +316,7 @@ class Gatherer:
 
     def _work(self) -> None:
         while True:
+            key, what = "", ()
             with self.lock:
                 idle = not self.queue
                 if idle:

@@ -200,7 +200,7 @@ class JobLog:
                 if e.get("result") in ("reverted", "revert_failed") and e.get("file") in latest:  # (the undoing: its result and reason on the file's own entry)
                     latest[e["file"]] = dict(latest[e["file"]], result=e["result"], reason=e.get("reason"), reverted_at=e.get("at"))
                     continue
-                latest[e.get("file")] = e  # (a dict keeps the first one's place)
+                latest[e["file"]] = e  # (a dict keeps the first one's place)
             elif e.get("type") == "plan":
                 planned.update(dict.fromkeys(e.get("files") or []))
         rows = [dict(e, disk_after=disk.get((job, e.get("file")))) for e in latest.values()]

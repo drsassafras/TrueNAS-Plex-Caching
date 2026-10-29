@@ -825,7 +825,7 @@ class PrefetchPlanTests(unittest.TestCase):
         # meaningful default (where your servers are, secrets, which libraries, mappings, speeds,
         # and the big feature switches). Checked in the page's code, so a new field can't miss it.
         import re
-        js = open(os.path.join(ROOT, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(ROOT, "plexcache", "web", "app.js"), encoding="utf-8")
         no_default = {"plex.url", "truenas.url", "mqtt.host", "mqtt.username", "mqtt.enabled"}
 
         def body(name):  # a field builder's source
@@ -1047,7 +1047,7 @@ class LayoutTests(unittest.TestCase):
         size = os.path.getsize(p)
         with mock.patch.object(layout, "CACHE_IMAGES", False):                    # cover art left out
             ranges, info = layout.tail_ranges(p, size, 0)
-        data = open(p, "rb").read()
+        data = _read(p, "rb")
         font_at = data.index(FONT[2])                                          # (its data; its entry starts just before)
         cover_at = data.index(poster[2])
         tail = [(o, n) for o, n in ranges if o >= info["video_start"]]
@@ -1159,7 +1159,7 @@ class LayoutTests(unittest.TestCase):
         header = 'constexpr auto MKV_S_HDMV_PGS = "S_HDMV/PGS";'
         self.assertEqual(tool.parse(cpp, header), [("AAC", "mp4a|aac.|A_AAC.*"), ("HDMV PGS", "S_HDMV/PGS"), ("Dots", "a\\.b")])
         # the image build: without mkvmerge, or offline, the committed names stay as they are
-        before = open(tool.OUT, encoding="utf-8").read()
+        before = _read(tool.OUT, encoding="utf-8")
         said = io.StringIO()  # (what the build log says: kept here, not in the test run's output)
         with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
             with mock.patch.object(tool.subprocess if hasattr(tool, "subprocess") else __import__("subprocess"), "run",
@@ -1169,7 +1169,7 @@ class LayoutTests(unittest.TestCase):
                 self.assertEqual(tool.main(["codecs.py", "102.0"]), 0)
         self.assertIn("mkvmerge isn't installed", said.getvalue())
         self.assertIn("offline", said.getvalue())
-        self.assertEqual(open(tool.OUT, encoding="utf-8").read(), before)
+        self.assertEqual(_read(tool.OUT, encoding="utf-8"), before)
 
     def test_cover_art_compression_is_told_apart(self):
         """A JPEG still using the standard Huffman tables hasn't been compressed losslessly; one with its
@@ -1877,7 +1877,7 @@ class AppTests(unittest.TestCase):
         """Library Health shows each check beside what it's about (a part's line, or a block's heading):
         a new check with no place there would never be seen, so each one must have one."""
         from plexcache import filechecks
-        js = open(os.path.join(ROOT, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(ROOT, "plexcache", "web", "app.js"), encoding="utf-8")
         start = js.index("  var CHECK_PARTS = ")
         placed = js[start:js.index("\n  }\n", js.index("  function blockChecks(", start))]
         for cid in filechecks.NAMES:
@@ -3331,8 +3331,9 @@ class BlockSizeTests(unittest.TestCase):
         httpd = serve(srv_app, "127.0.0.1", 0)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         try:  # no longer served by the app (it runs as root: fetched over HTTPS from the release instead)
-            with self.assertRaises(urllib.error.HTTPError):
-                urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/tools/rewrite_blocks.py", timeout=5).read()
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                _fetch(f"http://127.0.0.1:{httpd.server_address[1]}/tools/rewrite_blocks.py", timeout=5)
+            cm.exception.close()
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -3572,11 +3573,13 @@ class BlockSizeTests(unittest.TestCase):
         self.assertEqual(os.listdir(private), ["ep.mkv"])
         with open(secret, "rb") as fh:
             self.assertEqual(fh.read(), b"secret" * 1000)
-        # A different file of the same name, same folder: also skipped
+        # A different file of the same name, same folder: also skipped. (Another size: on Linux a new file can get the freed
+        # inode back, and file times are coarse, so one of the same size written within a few milliseconds of the scan
+        # would look like the scanned one — the script's check is identity, size and time, as a scan can know them.)
         os.remove(media)
         os.rename(moved, media)
         with open(f, "wb") as fh:
-            fh.write(b"y" * 6000)
+            fh.write(b"y" * 6001)
         self.assertIn("changed since the scan", rb.rewrite(f, st, dir_st, pacer, True))
 
 
@@ -4409,7 +4412,9 @@ class TrueNASWatchTests(unittest.TestCase):
         d = tempfile.mkdtemp(dir=TMP)
         os.makedirs(os.path.join(d, "plugins", "pool_"))
         os.makedirs(os.path.join(d, "service"))
-        w = lambda rel, text: open(os.path.join(d, rel), "w", encoding="utf-8").write(text)
+        def w(rel, text):
+            with open(os.path.join(d, rel), "w", encoding="utf-8") as fh:
+                fh.write(text)
         w("plugins/pool_/snapshot.py", "class PoolSnapshotService(CRUDService):\n\n    class Config:\n        namespace = 'pool.snapshot'\n\n"
           "    @api_method(A, B)\n    def do_create(self, data):\n        pass\n\n    async def do_delete(self, id_):\n        pass\n\n    def rollback(self, id_, options):\n        pass\n")
         w("plugins/pool_/pool.py", "class PoolService(CRUDService):\n    def do_update(self, id_, data):\n        pass\n")
@@ -4433,7 +4438,7 @@ class TrueNASWatchTests(unittest.TestCase):
         found, missing = truenas_api.check(d)
         self.assertEqual(sorted(missing), ["an update: pulling the image", "an update: restarting the app", "the apps and their containers"])
         # the workflow runs it every week against the branch that becomes the next release
-        wf = open(os.path.join(root, ".github", "workflows", "truenas-api.yml"), encoding="utf-8").read()
+        wf = _read(os.path.join(root, ".github", "workflows", "truenas-api.yml"), encoding="utf-8")
         self.assertIn("schedule:", wf)
         self.assertIn("dev/truenas_api.py", wf)
 
@@ -4448,7 +4453,7 @@ class TrueNASWatchTests(unittest.TestCase):
         for base, _dirs, files in os.walk(root):
             for fn in files:
                 if fn.endswith(".py"):
-                    src = open(os.path.join(base, fn), encoding="utf-8").read()
+                    src = _read(os.path.join(base, fn), encoding="utf-8")
                     called |= set(re.findall(r'\.call\(\s*"([a-z_]+(?:\.[a-z_]+)+)"', src))
                     called |= set(re.findall(r'"method":\s*"([a-z_]+(?:\.[a-z_]+)+)"', src))
                     called |= set(re.findall(r'\(\s*"([a-z_]+(?:\.[a-z_]+)+)",\s*\[', src))  # (a (name, params) pair tried in turn: dataset_cache_props)
@@ -4492,7 +4497,7 @@ class DataLayerTests(unittest.TestCase):
         files = [os.path.join(root, "tools", n) for n in sorted(os.listdir(os.path.join(root, "tools"))) if n.endswith(".py")] + [os.path.join(root, "libhealth.py")]
         checked = 0
         for path in files:
-            src = open(path, encoding="utf-8").read()
+            src = _read(path, encoding="utf-8")
             if "(Tool)" not in src and not path.endswith(("__init__.py", "libhealth.py")):
                 continue  # (rewrite_blocks.py: the shell script the README gives, not a tool of the pages)
             checked += 1
@@ -4501,7 +4506,7 @@ class DataLayerTests(unittest.TestCase):
         self.assertGreaterEqual(checked, 6)  # (the base, the four tools, Library Health)
         # the page: what a row says comes through chips (chips(): a badge that opens to its explanation), never a bare
         # badge, nor an ⓘ in a row — the one style, the Sync and Health views' — so every tool reads alike
-        js = open(os.path.join(root, "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(root, "web", "app.js"), encoding="utf-8")
         for fn in ("mergeCard", "versionsCard", "syncCard") + tuple("page" + n.capitalize() for n in ("folders", "unlink", "convert")):
             body = re.search(r"\n  function " + fn + r"\(.*?\{(.*?)(?=\n  function |\n  var )", js, re.S)
             self.assertIsNotNone(body, fn)
@@ -4517,7 +4522,7 @@ class DataLayerTests(unittest.TestCase):
                 self.assertNotRegex(rows, r"\bbadge\(|\binfo\(", f"{fn} draws a bare badge or ⓘ: use chips()")
         self.assertNotIn("function fact(", js)
         # and the data layer itself is where those reads live
-        self.assertIn("os.walk(", open(os.path.join(root, "libdata.py"), encoding="utf-8").read())
+        self.assertIn("os.walk(", _read(os.path.join(root, "libdata.py"), encoding="utf-8"))
 
     def test_every_tool_declares_itself(self):
         """Each tool says what it is to the Tools page and Library Health: a title, its page, what its chip means, the
@@ -4525,7 +4530,7 @@ class DataLayerTests(unittest.TestCase):
         from plexcache import server
         from plexcache.app import App
         app = App(tempfile.mkdtemp(dir=TMP))
-        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
         self.assertGreaterEqual(len(app.tools), 4)
         for name, tool in app.tools.items():
             with self.subTest(tool=name):
@@ -4785,8 +4790,8 @@ class PageStructureTests(unittest.TestCase):
         """Every ⓘ in a row of checks is the row's first thing, and no style indents such a row: a
         sub-option indents its box and name (the label), so the ⓘ of every row sit in one column."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
-        css = open(os.path.join(root, "plexcache", "web", "app.css"), encoding="utf-8").read()
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
+        css = _read(os.path.join(root, "plexcache", "web", "app.css"), encoding="utf-8")
         rows = list(re.finditer(r"<div class=\"(chk|convtype)(?: [^\"]*)?\"[^>]*>", js))
         self.assertGreater(len(rows), 5)
         for m in rows:
@@ -4814,7 +4819,7 @@ class PageStructureTests(unittest.TestCase):
     # of them, a new check tool's included
     def _check_pages(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         got = re.findall(r'(\w+): \["(\w+)", "([^"]+)"\]', re.search(r"var CHECK_PAGES = \{([^}]*)\}", js).group(1))
         self.assertGreaterEqual(len(got), 3)
         return got
@@ -4871,7 +4876,7 @@ class PageStructureTests(unittest.TestCase):
         No page is let off this test, nor is the test loosened for one, without the maintainer's express permission,
         asked for and given first (CLAUDE.md). A page that doesn't fit is built on the shared code, extended if need be."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         tt = ToolsTests()
         app, plex, client, cat, _ = tt._app(mirror=True)                                               # (Sync Libraries: a mirror to compare with)
         from plexcache import server
@@ -5082,7 +5087,7 @@ class PageStructureTests(unittest.TestCase):
         Sync Libraries: the side brought in line as it is now / after syncing, fixed.
         Each card lists its files under it, numbered as its File n chips — grey, each opening to what happens to the file."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         app, tt = self._tools_library(mirror=True)
         # the source: the tools pass a card; only cmpRow draws one (its frames, its arrow); toolPage and the optimizer call it
         for name in app.tools:
@@ -5219,7 +5224,7 @@ class PageStructureTests(unittest.TestCase):
         fn = self._js_fn("recordId")
         got = self._node(fn + "\nconsole.log(JSON.stringify([recordId('1', '190'), recordId(2, 'a/b'), recordLink('plexchecks', '1', 190)]));")
         self.assertEqual(got, ["rec-1-190", "rec-2-a_b", "/plexchecks#rec-1-190"])
-        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
         self.assertIn('var rid = recordId(key, it.key);', js)                                   # (each health item: its anchor)
         self.assertIn('recordLink(bt.page, key, x.key)', js)                                   # (a blocking check's link to it)
 
@@ -5250,7 +5255,7 @@ class PageStructureTests(unittest.TestCase):
                                [True, False, False, False],      # its pair on the other side: the first of the pair only
                                [False, True, False, False],
                                [False, False, False, False]])    # no pair: nothing opens with it
-        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
         handler = js[js.index('act === "tool-chip"'):js.index('act === "tool-history"')]
         self.assertIn('TOOL_OPEN[ck] = cur && cur.id === el.dataset.id ? null : { id: el.dataset.id', handler)  # (one per card: replaced, never added to)
         shown = self._js_fn("pathsShown")
@@ -5322,7 +5327,7 @@ class PageStructureTests(unittest.TestCase):
         self.assertIn("Entries per Tools page", system)
         self.assertIn("Entries per Library page", system)
         self.assertIn('data-act="tool-pagesel" data-tool="convert"', html)
-        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
         handler = js[js.index('act === "tool-all"'):js.index('act === "tool-scan"')]
         self.assertIn("tu.can", handler)                                                                 # (every row that can be ticked: every page's)
         # the optimizer's files, a page at a time, from the last survey
@@ -5393,7 +5398,7 @@ class PageStructureTests(unittest.TestCase):
         A tool page draws only the rows with a yellow or a red check; the Library page shows every item. A row on a record
         Merge Duplicates would merge is red (merge first), on the page and on the server."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         fn = self._js_fn("rowSeverity")
         cases = [[], ["warn"], ["fail"], ["warn", "fail"], ["info", "grey", "off", "pass"], ["warn", "info"], ["fail", "info"]]
         got = self._node(fn + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(rowSeverity)));")
@@ -5444,7 +5449,7 @@ class PageStructureTests(unittest.TestCase):
         function on the page reads it (toolBad): the library's tab, the tool's card on the Tools page and the menu's count
         turn red with it. With nothing red, a count is yellow with something to do and green at 0."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         menu = js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES")]
         pages = re.findall(r'^    \["(\w+)", N\(', menu, re.M)
         self.assertGreaterEqual(len(pages), 10)
@@ -5537,7 +5542,7 @@ class PageStructureTests(unittest.TestCase):
         self.assertNotIn("tooltop", lib)
         # the tabs, drawn by the one function every tool's page draws them with (libTabs), each with its count — the
         # page's checks' findings there, ignored items left out — or the turning wheel while it's being counted
-        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
         for fn in ("toolLibs", "optLibTabs", "checksPage"):
             body = js[js.index("  function " + fn + "("):]
             body = body[:body.index("\n  }\n")]
@@ -5604,7 +5609,7 @@ class PageStructureTests(unittest.TestCase):
         self.assertEqual(issues + passing, read)
         self.assertLessEqual(int(chip(lib_off, "issues? found").group(1)), issues)
         # the Caching view says its the same way: chips (libStats), the numbers in them
-        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
         for fn, gone in (("libSummary", "{n} files checked:"),):
             body = js[js.index("  function " + fn + "("):]
             body = body[:body.index("\n  }\n")]
@@ -5661,6 +5666,8 @@ class PageStructureTests(unittest.TestCase):
         from the server goes through richText, which keeps the few marks help is written with. Every page is drawn, with
         a library holding something for every tool and check, and every ⓘ's text searched for markup escaped into text."""
         from plexcache.libhealth import library_health
+        if not shutil.which("node"):
+            self.skipTest("node isn't installed")
         app, tt = self._tools_library()
         st = app.state()
         st["_health"] = jsonable(library_health(app, "1"))
@@ -5708,7 +5715,7 @@ class PageStructureTests(unittest.TestCase):
         mirror's win, or not at all for a mirror that isn't watched."""
         from plexcache import safety
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         tt = ToolsTests()
         app, plex, client, cat, _ = tt._app(mirror=True)                                               # (Sync Libraries: a mirror to compare with)
         for name in app.tools:
@@ -5791,7 +5798,7 @@ class PageStructureTests(unittest.TestCase):
         and End only when pages lie beyond the spans shown. No list draws Next/Previous of its own."""
         from plexcache.paging import page_ranges
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         body = js[js.index("  function pager("):]
         body = body[:body.index("\n  function ", 10)]
         self.assertNotRegex(js.replace(body, ""), r'H\("(Next|Previous)"\)', "a list pages with Next/Previous of its own: use pager()")
@@ -5827,11 +5834,11 @@ class PageStructureTests(unittest.TestCase):
         # every list sorts so (the server's lists through sort_key; the page's pages come from the server)
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         for mod in ("app.py", "libhealth.py", "joblog.py", "sync.py", "tools/merge.py", "tools/versions.py", "tools/folders.py", "tools/unlink.py"):
-            src = open(os.path.join(root, "plexcache", mod), encoding="utf-8").read()
+            src = _read(os.path.join(root, "plexcache", mod), encoding="utf-8")
             self.assertIn("sort_key(", src, f"{mod} sorts titles without sort_key")
             self.assertNotRegex(src, r'\["(title|label)"\]\.lower\(\)\)', f"{mod} sorts titles by .lower() alone")
         # the pager: one look for every page, the open one framed (no size of its own)
-        css = open(os.path.join(root, "plexcache", "web", "app.css"), encoding="utf-8").read()
+        css = _read(os.path.join(root, "plexcache", "web", "app.css"), encoding="utf-8")
         cur = re.search(r"\.pager \.pg\.cur\{([^}]*)\}", css).group(1)
         self.assertNotRegex(cur, r"padding|font-weight|font-size|line-height|min-height", "the open page's chip is sized differently from the others")
         self.assertRegex(css, r"\.pager button\.link\.pg\{[^}]*min-height", "the page links keep .link's own height: taller than the open page's chip")
@@ -5844,7 +5851,7 @@ class PageStructureTests(unittest.TestCase):
         and in the menu."""
         from plexcache import server
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        read = lambda *p: open(os.path.join(root, *p), encoding="utf-8").read()
+        read = lambda *p: _read(os.path.join(root, *p), encoding="utf-8")
         js, html = read("plexcache", "web", "app.js"), read("plexcache", "web", "index.html")
         py = "".join(read("plexcache", n) for n in os.listdir(os.path.join(root, "plexcache")) if n.endswith(".py"))
         py += "".join(read("plexcache", "tools", n) for n in os.listdir(os.path.join(root, "plexcache", "tools")) if n.endswith(".py"))
@@ -5872,7 +5879,7 @@ class PageStructureTests(unittest.TestCase):
         """Every page opens with its title and a short description under it (top()'s second argument):
         what the page is for, in a sentence or two, before anything else."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        src = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        src = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         pages = re.findall(r"\n  function (page[A-Z]\w*)\(\) \{(.*?)(?=\n  function |\n  var |\Z)", src, re.S)
         self.assertGreater(len(pages), 10)
         for name, body in pages:
@@ -5890,7 +5897,7 @@ class PageStructureTests(unittest.TestCase):
         The standard tool page (toolPage) and the check pages (checksPage) take it themselves; a page of its own passes
         toolBlurb("<page>") to top()."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         tools = re.findall(r'\n    \["(\w+)", N\("((?:[^"\\]|\\.)*)"\), N\("((?:[^"\\]|\\.)*)"\)', js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES = ")])
         nav = set(re.findall(r"(\w+): 1", re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)))
         self.assertEqual({t[0] for t in tools}, nav, "every page under the Tools nav has a card (name and text) on the Tools page")
@@ -5920,7 +5927,7 @@ class PageStructureTests(unittest.TestCase):
     def _js_fn(self, name):
         """A pure function marked "// @testable: <name>" in app.js, as its source."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        src = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        src = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         m = re.search(r"// @testable: " + re.escape(name) + r"\b.*?\n(  function .*?)\n  // @end", src, re.S)
         self.assertIsNotNone(m, name)
         return m.group(1)
@@ -6415,6 +6422,17 @@ def _sha256(path):
     with open(path, "rb") as fh:
         return hashlib.sha256(fh.read()).hexdigest()
 
+
+def _read(path, *args, **kw):
+    """A file's content, the file closed again."""
+    with open(path, *args, **kw) as fh:
+        return fh.read()
+
+
+def _fetch(*args, **kw):
+    """A URL's response body, the response closed again."""
+    with urllib.request.urlopen(*args, **kw) as resp:
+        return resp.read()
 
 def _json_file(path):
     """A JSON file's content, the file closed again."""
@@ -8004,6 +8022,7 @@ class OptimizerTests(unittest.TestCase):
         svc = osrv.Service([d], "a-long-test-token-123456")
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), osrv.make_handler(svc))
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
 
@@ -8014,7 +8033,8 @@ class OptimizerTests(unittest.TestCase):
                 with urllib.request.urlopen(req, timeout=5) as r:
                     return r.status, json.loads(r.read())
             except urllib.error.HTTPError as e:
-                return e.code, json.loads(e.read())
+                with e:
+                    return e.code, json.loads(e.read())
         code, hz = call("/healthz", token="")                                   # no token needed, and none shown
         self.assertEqual((code, hz["ok"], hz["service"], hz["token"], hz["roots"]), (200, True, "optimizer", True, 1))
         self.assertNotIn("a-long-test-token-123456", json.dumps(hz))
@@ -8536,12 +8556,12 @@ class OptimizerTests(unittest.TestCase):
         app, op, client, d, state = self._app(names=("a.mkv", "b.mkv"))
         app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "sync": False}}}})
         client.result = "failed"
-        before = open(os.path.join(d, "a.mkv"), "rb").read()
+        before = _read(os.path.join(d, "a.mkv"), "rb")
         job = run_job(op)["job"]
         self.assertEqual((job["failed"], len(job["errors"])), (2, 2))
         self.assertEqual(job["errors"][0]["reason"], "the streams in the new file differ from the original")
         self.assertTrue(job["errors"][0]["file"].endswith(".mkv"))
-        self.assertEqual(open(os.path.join(d, "a.mkv"), "rb").read(), before)        # untouched
+        self.assertEqual(_read(os.path.join(d, "a.mkv"), "rb"), before)        # untouched
         # kept after the job and across a restart, until dismissed
         self.assertEqual(len(jobs.Jobs(app).snapshot()["errors"]), 2)
         self.assertEqual([en(i["title"]) for i in checks._job_failures(app)], ["2 files weren’t optimized"])
@@ -11642,7 +11662,7 @@ class MQTTTests(unittest.TestCase):
         """Every setting Home Assistant can change is one the web UI offers, under the same conditions."""
         import re
         from plexcache import homeassistant as ha
-        js = open(os.path.join(ROOT, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(ROOT, "plexcache", "web", "app.js"), encoding="utf-8")
 
         def offered(sec, key):  # the page has a field (or switch) for it
             return (re.search(r'\b(?:range|ramSlider|select|number|checkbox|textInput)\("%s", "%s"' % (sec, key), js) is not None
@@ -12213,7 +12233,7 @@ class TranslationTests(unittest.TestCase):
         small = {"a", "an", "the", "and", "but", "or", "nor", "for", "so", "yet", "as", "at", "by", "in", "of", "on", "to",
                  "up", "via", "from", "with", "into", "per", "vs"}
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        src = open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        src = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         lit = r'"((?:[^"\\]|\\.)+)"'
         names = set(re.findall(r"<h2[^>]*>' \+ H\(" + lit, src)) | set(re.findall(r"heading\(esc\(T\(" + lit, src))
         names |= set(re.findall(r'\bbtn\("[a-z_]+", H\(' + lit, src))
@@ -12221,7 +12241,7 @@ class TranslationTests(unittest.TestCase):
             ends = [e for e in (src.find("</button>", m.end()), src.find("</a>", m.end())) if 0 <= e - m.end() < 600]
             seg = re.sub(r'(title|aria-label)="\' \+ [HT]\(' + lit + r"\)", "", src[m.end():min(ends)] if ends else "")
             names |= set(re.findall(r"\b[HT]\(" + lit, seg))
-        checks_src = open(os.path.join(root, "plexcache", "checks.py"), encoding="utf-8").read()
+        checks_src = _read(os.path.join(root, "plexcache", "checks.py"), encoding="utf-8")
         names |= set(re.findall(r'"title": M\(' + lit, checks_src))  # the Health page's cards
         self.assertGreater(len(names), 40)
         for name in names:
@@ -12364,6 +12384,23 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual((i18n.chain("en"), i18n.chain("xx")), ([], []))
         with mock.patch.object(i18n, "I18N_DIR", "/nonexistent"), mock.patch.dict(i18n._catalogs, {}, clear=True):
             self.assertEqual(i18n._load("fr"), {})                                  # a missing catalog: English
+
+
+
+class UpkeepTests(unittest.TestCase):
+    """The dependencies kept current (dev/upkeep.py): looked up when the suite runs by hand, never on GitHub."""
+
+    @unittest.skipIf(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"), "by hand only: GitHub isn't asked to look upstream")
+    def test_dependencies_are_current(self):
+        from dev import upkeep
+        try:
+            r = upkeep.check(apply=os.path.isdir(os.path.join(ROOT, ".git")))  # (a pin moved in the checkout only, not a copy)
+        except upkeep.Offline as e:
+            self.skipTest(f"upstream not reached: {e}")
+        for line in r.bumped:
+            print(f"\nupkeep: {line} — a pin moved: see the diff", file=sys.stderr)
+        if r.prompts:
+            self.fail("behind upstream — move it, or hold it by choice (dev/upkeep.py):\n  " + "\n  ".join(r.prompts))
 
 
 if __name__ == "__main__":
@@ -12863,7 +12900,7 @@ class ToolsTests(unittest.TestCase):
         self.assertIn(">File 1<", html)
         self.assertIn(">File 2<", html)
         self.assertIn('<span class="ssfn">2</span>', html)                                         # (the files listed under the cards)
-        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
         self.assertIn("can’t be ticked until Merge Duplicates", re.search(r"var VERSIONS_HELP = N\((.*?)\);\n", js).group(1))  # (said in How it works)
         # merged there: both files versions of one record — nothing said of a record there
         other.cat["movies"].pop()
@@ -13142,7 +13179,7 @@ class ToolsTests(unittest.TestCase):
         self.assertIn("may be mirrored (Starlit)", en(cm3.exception.args[0]))
         app.settings.update({"plex2": {"libraries": {"1": {"state": "none"}}}})
         self.assertIsNone(tool.mirrored("1"))                                                       # (said: no mirror)
-        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
         self.assertIn("doesn’t carry a hard link", js)
         self.assertIn("removing the extra paths</strong> is the clean way", js)
         self.assertEqual([o["id"] for o in tool.options if o.get("choices")], ["remove"])             # (the way: a choice among the options)
@@ -13265,7 +13302,7 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual(safety.snapshot_path(app, "1", link2, "tank/media@plexcache-x"), os.path.join(cat["root"], ".zfs", "snapshot", "plexcache-x", "Movies", "Film 2 (2012) link.mkv"))
         self.assertIsNone(safety.snapshot_path(app, "1", "/elsewhere/x.mkv", "tank/media@plexcache-x"))
         # the page: every tool that changes files passes the gate; Apply says what the process does first; no choice on the page
-        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8").read()
+        js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
         from plexcache import peers
         for name in peers.FILE_TOOLS:
             self.assertRegex(js, r"var FILE_TOOLS = .*\b" + name + r": function", f"{name} isn't among the page's FILE_TOOLS: its Apply wouldn't wait for the lights")
@@ -13481,13 +13518,15 @@ class ToolsTests(unittest.TestCase):
         got = post("/api/tools/merge", {"action": "scan", "library": "1"})
         self.assertTrue(got["started"])
         self._run(app.tools["merge"], True)
-        st = json.loads(urllib.request.urlopen(base + "/api/state", timeout=10).read())
+        st = json.loads(_fetch(base + "/api/state", timeout=10))
         self.assertEqual(sorted(st["tools"]), ["convert", "folders", "merge", "sync", "unlink", "versions"])
         self.assertEqual((st["tools"]["merge"]["scan"]["library"], st["trash"]["items"], st["trash"]["hold_days"]), ("1", [], 30))  # (the hold: the backup length)
-        with self.assertRaises(urllib.error.HTTPError):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
             post("/api/tools/nothing", {"action": "scan", "library": "1"})
-        with self.assertRaises(urllib.error.HTTPError):
+        cm.exception.close()
+        with self.assertRaises(urllib.error.HTTPError) as cm:
             post("/api/trash", {"path": "/nowhere", "action": "keep"})
+        cm.exception.close()
         self.assertFalse(post("/api/tools/merge", {"action": "apply", "ids": []})["started"])
 
     def test_sync_libraries_apply_and_revert(self):
@@ -13678,7 +13717,8 @@ class MirrorLinkTests(unittest.TestCase):
                 with urllib.request.urlopen(req, timeout=10) as r:
                     return r.status, json.loads(r.read())
             except urllib.error.HTTPError as e:
-                return e.code, json.loads(e.read())
+                with e:
+                    return e.code, json.loads(e.read())
         now = int(time.time())
         self.assertEqual(send(now, "n1", "00")[0], 403)
         good = pl.signature(a.peerlink._key(), "GET", "/peer/v1/status", str(now), "n2", b"")
@@ -13955,7 +13995,8 @@ class MirrorLinkTests(unittest.TestCase):
                 with urllib.request.urlopen(req, timeout=20) as r:
                     return r.status, json.loads(r.read())
             except urllib.error.HTTPError as e:
-                return e.code, json.loads(e.read())
+                with e:
+                    return e.code, json.loads(e.read())
         code, got = post("/api/optimize/library", {"library": "1", "mode": "optimize"})
         self.assertEqual(code, 400)
         self.assertIn(".plexcache", en(got["error"]))
@@ -14132,7 +14173,7 @@ class CountStandardTests(unittest.TestCase):
     @staticmethod
     def _js():
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return open(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8").read()
+        return _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
 
     def _tool_pages(self):
         """Every page of the Tools menu (app.js TOOLS)."""

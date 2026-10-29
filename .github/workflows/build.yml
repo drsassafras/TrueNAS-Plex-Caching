@@ -5,6 +5,9 @@ on:
     branches: [main, dev]
     tags: ["v*"]
   pull_request:
+  schedule:
+    - cron: "41 5 * * 1"  # weekly: the image built again on the release branch, so it carries the newest Python 3.15.x and Debian packages
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,20 +15,18 @@ permissions:
 
 jobs:
   test:
-    # the Python the image runs (3.15), with every deprecation an error, so what a later Python removes shows up here
-    # first; and the next Python's prerelease (3.16-dev), allowed to fail: an early warning, not a gate
+    # The Python the image runs — 3.15, its newest patch release — with every deprecation an error, so what a later Python
+    # removes shows up here first. The next Python is tried locally, not here: dev/future.py (dev/README.md).
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.15", "3.16-dev"]
-    continue-on-error: ${{ matrix.python-version == '3.16-dev' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.15"
       - run: python -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest tests.test_plexcache -v
+      # the type check (pyrightconfig.json): an error is a fault — an undefined name, a variable read before it's set — and
+      # a warning an annotation that says less than the code does; both at zero, and kept there (--warnings)
+      - run: npx --yes pyright@1.1.414 --warnings
 
   image:
     needs: test
@@ -61,8 +62,11 @@ jobs:
           build-args: |
             PLEXCACHE_CHANNEL=${{ github.ref == 'refs/heads/dev' && 'dev' || 'stable' }}
             PLEXCACHE_COMMIT=${{ github.sha }}
+          pull: true  # (the newest python:3.15-slim-trixie, not a cached one)
       - name: The image's Python has what the code needs (ZSTD, for the block estimates)
         run: docker run --rm --entrypoint python plex-cache:test -c "import compression.zstd as z; print('zstd', z.zstd_version)"
+      - name: What this image carries (dev/README.md, Python and the other dependencies)
+        run: docker run --rm -v "$PWD:/src:ro" -w /src --entrypoint python plex-cache:test dev/versions.py
       - name: Optimizer tests inside the image
         run: >
           docker run --rm -v "$PWD:/src:ro" -w /src --entrypoint python plex-cache:test

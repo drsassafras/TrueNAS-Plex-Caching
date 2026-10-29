@@ -156,8 +156,11 @@ class MQTTClient:
         if not self.verify_tls:
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
+        sock = self.sock
+        if sock is None:
+            raise MQTTError(M("not connected"))
         try:
-            self.sock = ctx.wrap_socket(self.sock, server_hostname=self.host)
+            self.sock = ctx.wrap_socket(sock, server_hostname=self.host)
         except ssl.SSLCertVerificationError as e:
             self._drop()
             raise MQTTError(M("the broker’s certificate wasn’t accepted ({why}) — untick “Verify”, "
@@ -315,10 +318,13 @@ class MQTTClient:
     def _fill(self, n: int, timeout: float) -> None:
         """Make sure at least ``n`` bytes are buffered (without using them up)."""
         deadline = time.monotonic() + timeout
+        sock = self.sock
+        if sock is None:
+            raise MQTTError(M("not connected"))
         while len(self._buf) < n:
-            self.sock.settimeout(max(0.01, deadline - time.monotonic()))
+            sock.settimeout(max(0.01, deadline - time.monotonic()))
             try:
-                chunk = self.sock.recv(65536)
+                chunk = sock.recv(65536)
             except socket.timeout:
                 raise
             except OSError as e:

@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import time
+from typing import Any
 
 from . import CHANNEL, REPO_URL, __version__
 from . import prefetch
@@ -47,7 +48,7 @@ def _choice(choices: dict, value: str, lang: str = "en") -> str:
     return next(k for k, label in choices.items() if v in (str(label).lower(), render(label, lang).lower()))
 
 
-def localize(obj, lang: str):
+def localize(obj: Any, lang: str) -> Any:
     """``obj`` with every message rendered in ``lang`` (MQTT has no browser to do it)."""
     if isinstance(obj, M):
         return render(obj, lang)
@@ -205,7 +206,7 @@ def build_state(app, period: str = "week", lang: str = "en") -> dict:
         "version": st["version"],
         # Health
         "health": "checking" if st.get("checking") and not summary else
-                  {"ok": "ok", "warn": "warning", "fail": "problem"}.get(summary, "checking"),
+                  {"ok": "ok", "warn": "warning", "fail": "problem"}.get(summary or "", "checking"),
         "health_text": _health_text(health),
         "health_passed": counts.get("pass", 0),
         "health_warnings": counts.get("warn", 0),
@@ -241,7 +242,7 @@ def build_state(app, period: str = "week", lang: str = "en") -> dict:
         "warmup_pause_reason": prog.get("paused") or ("" if wu.get("running") else None),
         "warmup_next_run": _iso(wu.get("next_run")),
         "warmup_last_run": _iso(last.get("started")),
-        "warmup_last_result": WARMUP_RESULT.get(last.get("result"), last.get("result")),
+        "warmup_last_result": WARMUP_RESULT.get(last.get("result") or "", last.get("result")),
         "warmup_last_cached": round(last["hit_rate"] * 100, 1) if last.get("hit_rate") is not None else None,
         "warmup_last_l2arc_growth": _gb(last.get("l2_growth")),
         "warmup_last_files": last.get("files"),
@@ -812,7 +813,7 @@ class HomeAssistantBridge:
 
     def _disconnect(self):
         c, self._client = self._client, None
-        if c:
+        if c and c.will:
             try:
                 c.publish(c.will[0], "offline", retain=True)
             except (MQTTError, OSError):
@@ -849,7 +850,7 @@ class HomeAssistantBridge:
             if self.stop.is_set() or self.retry_now.is_set():
                 return  # shutting down or reconnecting: the rest is sent next time
             conf = dict(conf)
-            conf = dict(conf, unique_id=f"{node}_{oid}", device=devices[conf.pop("_device")], origin=origin)
+            conf.update(unique_id=f"{node}_{oid}", device=devices[conf.pop("_device")], origin=origin)
             if oid in AVAILABLE_WHEN:
                 # available while Plex Cache is online AND the control applies now (from the state message)
                 conf["availability"] = [{"topic": avail},

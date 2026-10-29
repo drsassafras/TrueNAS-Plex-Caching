@@ -427,7 +427,7 @@ def reorder_tail(path: str, order=("Attachments", "Chapters", "Cues", "Tags"), a
                     sid = _uint(old[ds:ds + dsz])
                 elif did == SEEK_POS:
                     spos = _uint(old[ds:ds + dsz])
-            name = NAMES.get(sid)
+            name = NAMES.get(sid) if sid is not None else None
             if name in new_pos:
                 spos = new_pos[name] - data
             seeks.append((sid, spos))

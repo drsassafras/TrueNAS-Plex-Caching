@@ -14,6 +14,7 @@ import os
 import re
 import threading
 import time
+import urllib.error
 import urllib.request
 
 from . import CHANNEL, COMMIT, REPO_URL, __version__
@@ -104,8 +105,12 @@ class UpdateChecker:
 
     def _fetch(self, url: str) -> bytes:
         req = urllib.request.Request(url, headers={"User-Agent": f"plex-cache/{self.app.version}", "Accept": "application/vnd.github+json, text/plain;q=0.9, */*;q=0.8"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.read(256 * 1024)
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.read(256 * 1024)
+        except urllib.error.HTTPError as e:  # (its response closed: an error left open warns when it's dropped)
+            e.close()
+            raise
 
     def check(self) -> bool:
         try:
@@ -132,7 +137,7 @@ class UpdateChecker:
             if self.latest != mine:
                 self.app.activity.event("update", M("Plex Cache {latest} is available (this is {current})", latest=self.latest, current=self.app.version))
             else:
-                self.app.activity.event("update", M("A newer dev build is available: dev is at {head} (this is {mine})", head=head[:7], mine=(self.commit or "?")[:7]))
+                self.app.activity.event("update", M("A newer dev build is available: dev is at {head} (this is {mine})", head=(head or "?")[:7], mine=(self.commit or "?")[:7]))
         if getattr(self.app, "ha", None):
             self.app.ha.wake.set()
         return True

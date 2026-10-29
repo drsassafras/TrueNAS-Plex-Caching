@@ -1,6 +1,7 @@
 """Minimal Plex Media Server client (standard library only)."""
 
 import json
+from collections.abc import Callable
 import ssl
 import time
 import urllib.error
@@ -97,6 +98,14 @@ def _int(value, default=0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _opt_int(value) -> int | None:
+    """An attribute as a number, or None when it's missing or not one."""
+    try:
+        return int(float(value)) if value else None
+    except (TypeError, ValueError):
+        return None
 
 
 def media_kbps(media: ET.Element, part: ET.Element) -> int:
@@ -196,7 +205,7 @@ def stream_summary(st: ET.Element, file: str) -> dict:
 class PlexClient:
     # asked before each change to Plex's records, with (client, op, rating keys): the backup of them (plexbackup.guard;
     # set by App.plex() and OtherServer.client())
-    before_change = None
+    before_change: Callable[..., None] | None = None
 
     def __init__(self, url: str, token: str, timeout: float = 30):
         if not url:
@@ -265,7 +274,7 @@ class PlexClient:
         self._changing("edit", [rating_key])
         self._request(f"/library/sections/{section_key}/all", dict({"type": type_no, "id": rating_key}, **values), method="PUT")
 
-    def set_tags(self, section_key: str, type_no: int, rating_key: str, field: str, tags: list[str], remove: list[str] = (), locked: bool | None = None) -> None:
+    def set_tags(self, section_key: str, type_no: int, rating_key: str, field: str, tags: list[str], remove: list[str] | tuple[str, ...] = (), locked: bool | None = None) -> None:
         """A tag field (genre, director, collection, label…) given ``tags`` (added) and ``remove`` taken off."""
         values: dict = {f"{field}[{i}].tag.tag": t for i, t in enumerate(tags)}
         for t in remove:
@@ -319,7 +328,7 @@ class PlexClient:
             if "404" in str(e):
                 return None
             raise
-        return [p.get("file") for item in root for m in item.findall("Media") for p in m.findall("Part") if p.get("file")]
+        return [p.get("file") or "" for item in root for m in item.findall("Media") for p in m.findall("Part") if p.get("file")]
 
     def library_count(self, section_key: str) -> int:
         """How many items a library has (its movies, shows, artists…), as Plex counts them."""
@@ -472,7 +481,7 @@ class PlexClient:
                 # transcode one without a file; keep the ones with files.
                 for part in media.findall("Part"):
                     if part.get("file"):
-                        files.append((part.get("file"), _int(part.get("size"))))
+                        files.append((part.get("file") or "", _int(part.get("size"))))
                         kbps = kbps or media_kbps(media, part)
             player = item.find("Player")
             sess = item.find("Session")
@@ -490,8 +499,8 @@ class PlexClient:
                     title=item.get("title", ""),
                     grandparent_title=item.get("grandparentTitle", ""),
                     grandparent_rating_key=item.get("grandparentRatingKey", ""),
-                    season=_int(item.get("parentIndex"), None) if item.get("parentIndex") else None,
-                    episode=_int(item.get("index"), None) if item.get("index") else None,
+                    season=_opt_int(item.get("parentIndex")),
+                    episode=_opt_int(item.get("index")),
                     view_offset_ms=_int(item.get("viewOffset")),
                     duration_ms=_int(item.get("duration")),
                     kbps=kbps,

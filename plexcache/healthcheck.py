@@ -3,6 +3,7 @@ the web app answers on PLEXCACHE_PORT (8642), the optimizer on PLEXCACHE_OPTIMIZ
 
 import os
 import sys
+import urllib.error
 import urllib.request
 
 
@@ -12,6 +13,9 @@ def main() -> int:
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=4).close()
             return 0
+        except urllib.error.HTTPError as e:  # (an error answer: closed, like a good one)
+            e.close()
+            continue
         except OSError:
             continue
     return 1

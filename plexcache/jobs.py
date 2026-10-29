@@ -16,6 +16,7 @@ with one banner.
 """
 
 import threading
+from collections.abc import Callable
 import time
 import uuid
 
@@ -133,7 +134,7 @@ class Job:
             self.stop_event.wait(self.POLL if by != "resilver" else self.POLL * 6)
         return False
 
-    def file_done(self, size: int, result: str, seconds: float | None = None, error: str | None = None) -> None:
+    def file_done(self, size: int, result: str, seconds: float | None = None, error: str | tuple[str, str] | None = None) -> None:
         """A file finished: the progress, the estimate (from files really written), and saved."""
         with self.jobs.lock:
             s = self.state
@@ -210,9 +211,9 @@ class Jobs:
         self.app = app
         self.lock = threading.RLock()
         self.job: Job | None = None
-        self.kinds: dict[str, callable] = {}  # kind -> make(args, saved) -> Job: queued work, or a job carried on after a restart
+        self.kinds: dict[str, Callable[..., Job]] = {}  # kind -> make(args, saved) -> Job: queued work, or a job carried on after a restart
         self.waiting: dict | None = None  # after a restart: the job that carries on once the optimizer is ready
-        self.removed: dict[str, callable] = {}  # kind -> removed(item)
+        self.removed: dict[str, Callable[[dict], None]] = {}  # kind -> removed(item)
         self.queue: list[dict] = (app._load_json(QUEUE_FILE) or {}).get("items") or []  # work waiting its turn
         # hold(kind) -> why queued work of that kind can't start now, or None (a folder mid-switch, say)
         self.holds: list = []
@@ -322,7 +323,7 @@ class Jobs:
         res = result.get("result")
         if res == "cancelled":
             return  # not tried after all: the failure stands
-        kind = {"already": "optimized"}.get(res, res if res in ("optimized", "rewritten", "skipped") else "failed")
+        kind = {"already": "optimized"}.get(res or "", res if res in ("optimized", "rewritten", "skipped") else "failed")
         with self.lock:
             running = self.job.state if self.job and self.job.state.get("running") and self.job.state.get("id") == job_id else None
             for st in (running, self.last if self.last and self.last.get("id") == job_id else None):
@@ -336,7 +337,7 @@ class Jobs:
                 st[kind] = (st.get(kind) or 0) + 1
                 if kind == "failed":
                     st["errors"].append({"file": path, "reason": str(result.get("reason") or "failed"), "at": time.time()})
-        if running:
+        if running and self.job:
             self.job.save()
         elif self.last and self.last.get("id") == job_id:
             self.app._save_json(LAST_FILE, self.last)
@@ -365,7 +366,7 @@ class Jobs:
     def resume_saved(self, ready=lambda: True, wait: float = 600) -> None:
         """After a restart: start the job that was running again, where it was, once ``ready()``."""
         saved = self.app._load_json(JOB_FILE) or {}
-        make = self.kinds.get(saved.get("kind"))
+        make = self.kinds.get(saved.get("kind") or "")
         if not make and not self.queue:
             return
 

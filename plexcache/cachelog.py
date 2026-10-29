@@ -107,7 +107,7 @@ class CacheLog:
     # ----------------------------------------------------------- storage
     def _load(self) -> None:
         try:
-            with open(self.path, encoding="utf-8") as fh:
+            with open(self.path or "", encoding="utf-8") as fh:
                 data = json.load(fh)
             self._files = {p: e for p, e in (data.get("files") or {}).items() if isinstance(e, dict)}
             stats = data.get("stats") or {}

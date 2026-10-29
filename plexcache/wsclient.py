@@ -62,7 +62,7 @@ class WebSocket:
         self.sock = raw
         self._buf = b""
         key = base64.b64encode(os.urandom(16)).decode()
-        host = u.hostname + (f":{u.port}" if u.port else "")
+        host = (u.hostname or "") + (f":{u.port}" if u.port else "")
         req = (
             f"GET {u.path or '/'}{'?' + u.query if u.query else ''} HTTP/1.1\r\n"
             f"Host: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"

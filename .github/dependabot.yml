@@ -1,0 +1,14 @@
+# What the build depends on, kept current by pull requests: the GitHub Actions the workflows use, and the image's base
+# (python:3.15-slim-trixie — a new Python minor shows up here as a PR to look at, not to merge blindly: the code's floor
+# is 3.15, and the next Python is tried first with dev/future.py). MKVToolNix, ffmpeg, oxipng and libjpeg-turbo are
+# pinned in the Dockerfile and moved by dev/upkeep.py, the check the suite runs by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

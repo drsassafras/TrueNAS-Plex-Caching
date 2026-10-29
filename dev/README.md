@@ -5,13 +5,16 @@ This folder holds what you need to try changes on a real TrueNAS before pushing 
 | File | What it is |
 |------|------------|
 | `compose.dev.yaml` | A **test copy** of the app (`plex-cache-dev`, port 8643) that runs the published image but with its code replaced by whatever you last copied to the NAS. It has its own settings, so it never touches the real `plex-cache` app. |
-| `tnsync` | A small script that **copies your code to the NAS, restarts the test app and runs the tests** — in one command, from your Mac. |
+| `tnsync` | A small script that **copies your code to the NAS, restarts the test app and runs the tests** — in one command, from your computer. |
+| `future.py` | Builds the image on the **next** Python's prerelease (3.16 while the image runs 3.15) and runs the suite inside it, every warning an error; `--local` uses an interpreter on your computer instead. The "future" track, local only (below). |
+| `upkeep.py` | The dependency check: everything the app depends on against upstream's newest release, pins a minor behind moved, a major behind a prompt. The suite runs it by hand (below). |
+| `versions.py` | Prints what an image carries (its OS, Python, MKVToolNix, ffmpeg…); each build logs it. |
 | `coverage.py` | Runs the tests and shows how much of the code they reach, per file. No installs needed (Python 3.12+). |
 | `codecs.py` | Codec names as MKVToolNix shows them, for Library Health (`plexcache/codec_names.py`). The image build runs it for the MKVToolNix release it installs; run it by hand to refresh the committed copy. |
 | `screenshots.js` | Makes the README screenshots from the demo (see below). |
 | `make_fixtures.py` | Makes the optimizer's test files (`tests/fixtures/*.mkv`: many real-world features, a few hundred KB) and the snapshot of what optimizing them gives. Run it with `--snapshot` after checking a change the tests caught (needs ffmpeg and MKVToolNix). |
 
-The loop is: edit on your Mac → `tnsync local -y` → refresh `http://<nas-ip>:8643`. Nothing reaches GitHub (or the real app) until you commit and push.
+The loop is: edit on your computer → `tnsync local -y` → refresh `http://<nas-ip>:8643`. Nothing reaches GitHub (or the real app) until you commit and push.
 
 ## What tnsync does
 
@@ -47,7 +50,7 @@ tnsync isn't specific to this project — any project with a `.tnsync` file in i
 ### 1. On TrueNAS
 
 1. **SSH:** System → Services → SSH: turn it on (and tick "Start automatically").
-2. **Your key:** Credentials → Users → `truenas_admin` → Edit → paste your Mac's public key (`cat ~/.ssh/id_ed25519.pub`; make one with `ssh-keygen -t ed25519` if you don't have it) into **Authorized Keys**. Check it works: `ssh truenas_admin@<nas-ip>`.
+2. **Your key:** Credentials → Users → `truenas_admin` → Edit → paste your computer's public key (`cat ~/.ssh/id_ed25519.pub`; make one with `ssh-keygen -t ed25519` if you don't have it) into **Authorized Keys**. Check it works: `ssh truenas_admin@<nas-ip>`.
 3. **Permission to restart apps:** on the same user, add `/usr/bin/midclt` to **Allowed sudo commands with no password**. (tnsync tries `midclt` directly first and falls back to `sudo -n midclt`.)
 4. **Folders for the test app** — in the TrueNAS shell (change the paths if your apps live elsewhere):
    ```sh
@@ -56,7 +59,7 @@ tnsync isn't specific to this project — any project with a `.tnsync` file in i
    sudo chown 568:568 /mnt/ssd/AppConfigs/plex-cache-dev/config
    ```
 
-### 2. On your Mac
+### 2. On your computer
 
 1. **Put tnsync on your PATH:**
    ```sh
@@ -111,9 +114,17 @@ NODE_PATH=$(npm root -g) node dev/screenshots.js
 
 `DEMO_SHOWCASE=1` sets the demo up as a mostly healthy system with one warning left to show. The script swaps the demo's 127.0.0.1 addresses for a typical home one (192.168.1.10) in the pictures.
 
+## Python and the other dependencies
+
+The code needs Python 3.15 or later. The image is built on `python:3.15-slim-trixie` (`PYTHON_TAG` in the Dockerfile), whatever 3.15.x is newest at the build, and the build workflow rebuilds the release weekly so a new patch release or Debian package reaches the image within a week. MKVToolNix comes from its own repository (mkvtoolnix.download, which is why the image is Debian), ffmpeg built from its release with no external libraries (the optimizer only copies streams, hashes them and reads cover art; the static builds around carry every codec library, and Debian's package 500 MB of dependencies), oxipng from its releases and jpegtran built from libjpeg-turbo's, each pinned in the Dockerfile. GitHub runs the tests on 3.15 with every deprecation warning an error, and `pyright` after them (`pyrightconfig.json`: an error is a fault that would fail at run time; the annotation warnings are kept at zero).
+
+**Kept current by a check, not by memory.** `test_dependencies_are_current` runs when the suite runs by hand (not on GitHub): once a day it asks upstream for the newest release of everything the app depends on — the Python and the Debian the image is built on, MKVToolNix, ffmpeg, oxipng, libjpeg-turbo, pyright — against what the project pins. A pin a patch or minor release behind is moved there and then (the Dockerfile or workflow edited, said in the output; MKVToolNix's every release counts as minor, since each carries fixes); a major release, or a new Debian or Python, fails the test naming it, until it's moved or held by choice. `python3 dev/upkeep.py` is the same check as a report (`--report` moves nothing, `--fresh` asks again). The GitHub Actions are Dependabot's. `python3 dev/versions.py` prints what an image carries; each build logs it.
+
+**The future track.** `python3 dev/future.py` builds the image on the next Python's prerelease tag (`python:3.16-rc-slim-trixie` while the image runs 3.15) and runs the whole suite inside it with every warning an error (node added for the page tests); `--tag 3.15-slim-forky` will try the next Debian the same way. It needs Docker with a running engine; `--local` uses a `python3.16` of your own (or `uv`, which fetches prerelease builds). It is local on purpose: GitHub shows how the app runs; this shows where it is going. When the next Python is released and the suite is clean on it, moving the image is `PYTHON_TAG` in the Dockerfile and `python-version` in `build.yml`.
+
 ## Troubleshooting
 
 - **"can't SSH to …"** — SSH isn't running on TrueNAS, or your key isn't on `truenas_admin` (step 1.2).
 - **Copied, but the restart failed** — `/usr/bin/midclt` isn't in the user's no-password sudo commands (step 1.3).
 - **The test app won't start after installing** — the code folder was empty: run `tnsync local -y`.
-- **Tests fail only on the Mac** — the suite has to pass on the Mac's Python as well as the 3.15 in the image (the code needs 3.15 or later; CI also tries the next Python's prerelease), and macOS has no `/proc` and lacks some Linux-only calls (such as `os.posix_fadvise`): tests that touch those need to fake them or work without them.
+- **Tests fail only on your computer** — the suite has to pass on your own Python as well as the 3.15 in the image (the code needs 3.15 or later; `dev/future.py` tries the next Python's prerelease), and a system other than Linux (macOS, say) has no `/proc` and lacks some Linux-only calls (such as `os.posix_fadvise`): tests that touch those need to fake them or work without them.

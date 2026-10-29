@@ -182,7 +182,7 @@ class MergeDuplicates(Tool):
     flag_help = M("The same film or show on several Plex records (the same match, or files named for the same title and year): twice in every list, two posters, watched on one but not the other. Merge Duplicates makes them one record with versions, keeping its edits, poster and watched state.")
 
     def flag_lines(self, rows):
-        return [M("{n} records of {title}: {why}", n=len(r.get("others") or []) + 1, title=r.get("title") or "", why={"identical": M("the very same file"), "matched": M("the same match"), "named": M("named for the same title and year")}.get(r.get("why"), r.get("why") or "")) for r in rows]
+        return [M("{n} records of {title}: {why}", n=len(r.get("others") or []) + 1, title=r.get("title") or "", why={"identical": M("the very same file"), "matched": M("the same match"), "named": M("named for the same title and year")}.get(r.get("why") or "", r.get("why") or "")) for r in rows]
 
     def scan(self, data) -> dict:
         library = data.key
@@ -219,7 +219,7 @@ class MergeDuplicates(Tool):
         chosen = str(row.get("keep_key") or (row.get("keep") or {}).get("key") or "")
         kept = next((r for r in [row.get("keep")] + list(row.get("others") or []) if r and str(r.get("key")) == chosen), row.get("keep") or {})
         return {"merged": int(outcome.get("merged") or 0) + 1, "kept": kept.get("label") or kept.get("title") or chosen,
-                "why": {"identical": M("the very same file"), "matched": M("the same match"), "named": M("named for the same title and year")}.get(row.get("why"), row.get("why") or "")}
+                "why": {"identical": M("the very same file"), "matched": M("the same match"), "named": M("named for the same title and year")}.get(row.get("why") or "", row.get("why") or "")}
 
     def plex_keys(self, rows: list[dict]) -> list[str]:
         return [str(k) for r in rows for k in r.get("rks") or []]

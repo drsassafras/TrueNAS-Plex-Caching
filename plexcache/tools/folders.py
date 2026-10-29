@@ -249,7 +249,7 @@ class OrganizeFolders(Tool):
                         continue
                 if now - e["scanned"] >= MIRROR_SCAN_EVERY:
                     e["scanned"] = now
-                    other.run(lambda c: c.scan(there.key, next(iter(other.paths_there(e["library"], e["new"][0], there)), "").rsplit("/", 1)[0]))
+                    other.run(lambda c, there=there: c.scan(there.key, next(iter(other.paths_there(e["library"], e["new"][0], there)), "").rsplit("/", 1)[0]))
                     changed = True
                 if now - e["at"] > MIRROR_GIVE_UP and not e.get("stuck"):
                     e["stuck"] = True

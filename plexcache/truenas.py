@@ -207,7 +207,7 @@ def _prop_value(v):
 def extract_props(row: dict, names) -> dict:
     """Find properties at the top level or under "properties" (zfs.dataset.query)."""
     out = {}
-    nested = row.get("properties") if isinstance(row.get("properties"), dict) else {}
+    nested = p if isinstance(p := row.get("properties"), dict) else {}
     for n in names:
         v = _prop_value(row.get(n)) if n in row else None
         if v is None and n in nested:

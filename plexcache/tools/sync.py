@@ -71,7 +71,7 @@ class SyncLibraries(Tool):
     def evaluated_after(self) -> tuple[str, ...]:
         return ("mirrorchecks", "merge")
 
-    def not_applicable(self, library: str):
+    def not_applicable(self, library: str) -> M | None:
         """No mirror watched, or the library not paired with one there: read so by the data layer (libdata's mirror side)."""
         d = self.app.libdata.data(str(library))
         if d.mirror_at and d.mirror is None and not d.errors.get("mirror"):

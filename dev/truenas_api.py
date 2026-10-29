@@ -46,7 +46,8 @@ def services(root: str) -> dict[str, set[str]]:
             if not fn.endswith(".py"):
                 continue
             try:
-                src = open(os.path.join(base, fn), encoding="utf-8", errors="replace").read()
+                with open(os.path.join(base, fn), encoding="utf-8", errors="replace") as fh:
+                    src = fh.read()
             except OSError:
                 continue
             heads = list(_CLASS.finditer(src))
@@ -58,7 +59,7 @@ def services(root: str) -> dict[str, set[str]]:
                 body = src[m.end():nxt.start() if nxt else len(src)]
                 ns = _NAMESPACE.search(body)
                 namespace = ns.group(1) if ns else re.sub(r"Service.*$", "", name).lower()
-                methods = {_DO.get(d, d) for d in _DEF.findall(body)}
+                methods = {str(_DO.get(d, d)) for d in _DEF.findall(body)}
                 if "CRUDService" in bases or "ConfigService" in bases:
                     methods |= {"query"} if "CRUDService" in bases else {"config", "update"}
                 out.setdefault(namespace, set()).update(methods)
@@ -81,7 +82,7 @@ def clone(ref: str) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--ref", default="master", help="the middleware branch or tag to read (default: master, the next release)")
     ap.add_argument("--checkout", help="an existing checkout of truenas/middleware, instead of cloning")
     args = ap.parse_args()

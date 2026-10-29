@@ -112,13 +112,13 @@ class Service:
                     "images": imgs.available()}
 
     def start(self, path: str, images: str = "compress", force: bool = False, cover: bytes | None = None,
-              action: str = "optimize", tags: str = "keep", name: str = "") -> dict:
+              action: str = "optimize", tags: str = "keep", name: str = "", original: str = "") -> dict:
         with self.lock:
             if self.current:
                 return {"started": False, "error": "busy", "current": self.current["path"]}
             self.current = {"path": path, "action": action, "images": images, "started": time.time(), "step": "starting"}
         self.tags, self.name = tags, name  # (for the file in hand: one at a time)
-        threading.Thread(target=self._work, args=(path, images, force, cover, action), daemon=True).start()
+        threading.Thread(target=self._work, args=(path, images, force, cover, action, original), daemon=True).start()
         return {"started": True}
 
     def start_copy(self, src: str, dst: str, mirror: bool) -> dict:
@@ -150,7 +150,7 @@ class Service:
         threading.Thread(target=work, daemon=True).start()
         return {"started": True}
 
-    def _work(self, path: str, images: str, force: bool, cover: bytes | None, action: str = "optimize") -> None:
+    def _work(self, path: str, images: str, force: bool, cover: bytes | None, action: str = "optimize", original: str = "") -> None:
         def step(text):
             with self.lock:
                 if self.current:
@@ -165,7 +165,7 @@ class Service:
             if action == "rewrite":
                 res.update(rewrite_file(path, log=step, progress=progress))
             elif action == "conflict":
-                res.update(resolve_conflict(path, cover, log=step))  # cover: the original's path here
+                res.update(resolve_conflict(path, original, log=step))
             elif action == "convert":
                 from .convert import convert_file
                 res.update(convert_file(path, images, cover=cover, tags_mode=getattr(self, "tags", "keep"), log=step, progress=progress,
@@ -212,19 +212,21 @@ def folder_action(svc: Service, body: dict) -> tuple[int, dict]:
             return 200, files.make_real(path)
         if action in ("set_aside", "restore", "purge", "link", "unlink", "copy_from"):  # the tools' file actions (files.py)
             from . import files
-            if action in ("set_aside", "restore", "purge") and not root:
-                return 400, {"error": "root is needed"}
-            if action in ("link", "unlink", "copy_from") and not to:
+            if action in ("set_aside", "restore", "purge"):
+                if not root:
+                    return 400, {"error": "root is needed"}
+                return 200, {"set_aside": lambda: files.set_aside(root, path), "restore": lambda: files.put_back(root, path),
+                             "purge": lambda: files.purge(root, path)}[action]()
+            if not to:
                 return 400, {"error": "to is needed"}
-            return 200, {"set_aside": lambda: files.set_aside(root, path), "restore": lambda: files.put_back(root, path),
-                         "purge": lambda: files.purge(root, path), "link": lambda: files.link(path, to), "unlink": lambda: files.unlink(path, to),
+            return 200, {"link": lambda: files.link(path, to), "unlink": lambda: files.unlink(path, to),
                          "copy_from": lambda: files.copy_from(path, to)}[action]()
         if action == "probe":
             return 200, migrate.probe(path)
-        if action == "copy":
-            return 200, svc.start_copy(path, to, bool(body.get("mirror")))
-        if action == "compare":
-            return 200, migrate.compare(path, to)
+        if action in ("copy", "compare"):
+            if not to:
+                return 400, {"error": "to is needed"}
+            return 200, svc.start_copy(path, to, bool(body.get("mirror"))) if action == "copy" else migrate.compare(path, to)
         if action == "rename":
             return 200, {"path": migrate.rename_folder(path, str(body.get("name") or ""))}
         if action == "delete":
@@ -252,7 +254,7 @@ def make_handler(svc: Service):
     class Handler(BaseHTTPRequestHandler):
         server_version = "plexcache-optimizer"
 
-        def log_message(self, *a):  # quiet: the app keeps the history
+        def log_message(self, format, *args):  # quiet: the app keeps the history
             pass
 
         def _send(self, code: int, body: dict) -> None:
@@ -324,7 +326,7 @@ def make_handler(svc: Service):
                 original = svc.allowed(str(body.get("original") or ""))
                 if not original:
                     return self._send(403, {"error": "path is outside the media folders"})
-                return self._send(200, svc.start(path, cover=original, action="conflict"))
+                return self._send(200, svc.start(path, action="conflict", original=original))
             self._send(404, {"error": "not found"})
 
     return Handler

@@ -3,12 +3,16 @@
 import datetime as dt
 import hashlib
 import ipaddress
+import contextlib
 import json
 import logging
 import os
 import random
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 from . import cachemode, checks, config, mapping, prefetch, report, version_label, zfs
 from .activity import Activity
@@ -153,6 +157,17 @@ def file_block(m: dict | None, size: int, record: int | None) -> int | None:
     if record and 0 < size <= record:
         return -(-size // 4096) * 4096
     return record
+
+
+
+@contextlib.contextmanager
+def _closing_errors():
+    """An HTTP error's response closed before it's raised on: left open, it warns when it's dropped."""
+    try:
+        yield
+    except urllib.error.HTTPError as e:
+        e.close()
+        raise
 
 
 class App:
@@ -636,7 +651,7 @@ class App:
             req = urllib.request.Request("https://metadata.provider.plex.tv/library/metadata/" + m.group(2) + "?includeGuids=1")
             req.add_header("Accept", "application/json")
             req.add_header("X-Plex-Token", self.settings.section("plex")["token"])
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with _closing_errors(), urllib.request.urlopen(req, timeout=15) as resp:
                 md = ((json.loads(resp.read() or b"{}").get("MediaContainer") or {}).get("Metadata") or [{}])[0]
             kind = md.get("type") or m.group(1)
             slug = md.get("slug")
@@ -653,7 +668,7 @@ class App:
         if not got["thumb"].startswith("https://"):
             raise OSError("no poster")
         req = urllib.request.Request(got["thumb"])
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _closing_errors(), urllib.request.urlopen(req, timeout=15) as resp:
             return resp.read(4 * 1024 * 1024)
 
     @staticmethod
@@ -877,7 +892,7 @@ class App:
         arc = zfs.arc_summary(zfs.arcstats())
         source = "arc"
         cache_max = (arc or {}).get("arc_max") or 0
-        if cache_max:
+        if arc and cache_max:
             # What the ZFS cache can actually use right now: what it holds plus free
             # RAM, never more than its maximum. RAM used by apps and services isn't
             # available, however high the maximum is set.
@@ -1312,7 +1327,7 @@ class App:
             skip = None if manual else (lambda f: self.cachelog.last(f.path, False) > since
                                         and self.recently_cached(f.path, whole=False))
             run = WarmupRun(files, p["seconds"], 100 if manual else w["pacing_percent"],
-                            lambda f: speeds.get(f.library_key, g["hdd_mb_per_sec"]),
+                            lambda f: speeds.get(f.library_key) or g["hdd_mb_per_sec"],
                             self.warmup_stop, pause, zfs.arcstats, skip=skip,
                             note=lambda f, hit: self.cachelog.note(f.path, whole=False, route="ssd", hit=hit,
                                                                    library=f.library_key),
@@ -1462,10 +1477,9 @@ class App:
                 continue
             ctx = filechecks.context(self, path, m, key, lrec)
             results.append(filechecks.check_file(self, f, path, m, lrec, *ctx))
-            got = (m or {}).get("mix")
-            if not got:
+            if not m or not m.get("mix"):
                 continue
-            got = projection.existing(got, self.compression_of(path))  # (as it's stored now: its compression)
+            got = projection.existing(m["mix"], self.compression_of(path))  # (as it's stored now: its compression)
             pr = self._projection(f, m, lrec, ctx, missing=posters)
             t = projection.tail_video(m)
             kinds = {k: v[0] for k, v in (got.get("kinds") or {}).items()}
@@ -1521,17 +1535,22 @@ class App:
             blocks = bool(rs) and (m.get("size") or 0) > (m.get("blksize") or 0) and m.get("blksize") and m["blksize"] != rs
             if not opts.get("sync") or not (zstate in zfslog.NEEDS_WORK or blocks):
                 return None  # done already: nothing to gain
-            return projection.project(m, rs or (m.get("mix") or {}).get("record"), "keep", False, comp=comp, rewrite=True,
+            record = rs or (m.get("mix") or {}).get("record")
+            if not record:
+                return None  # (no record size known: nothing to project)
+            return projection.project(m, record, "keep", False, comp=comp, rewrite=True,
                                       comp_now=self.compression_of(self.map_path(f.path)))
         poster = getattr(f, "poster", "")
         images = self.optimizing.images_mode(opts["images"], poster, getattr(f, "matched", None), ours)
         record = (lrec.get("rs") if opts.get("sync") else None) or (m.get("mix") or {}).get("record")
+        if not record:
+            return None  # (no record size known: nothing to project)
         cover = None
         if images == "plex":  # (Plex's poster in place of its cover art: its size, as Plex has it)
             cover = self.optimizing.poster_size(poster, fetch=fetch)
             if cover is None and missing is not None:
                 missing.append(poster)
-        return projection.project(m, record, images, strips_tags(opts["tags"], info), cover, comp=comp,
+        return projection.project(m, record, images, strips_tags(opts["tags"], info or {}), cover, comp=comp,
                                   comp_now=self.compression_of(self.map_path(f.path)))
 
     def file_view(self, path: str) -> dict | None:

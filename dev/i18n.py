@@ -158,7 +158,8 @@ def _skip_arg(toks, k):
 
 def from_js(path: str, problems: list | None = None):
     """{key: None | one-form}, plus the token indexes of the literals that were used."""
-    src = open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
     toks = js_tokens(src)
     keys: dict[str, str | None] = {}
     used: set[int] = set()
@@ -198,7 +199,7 @@ class _HTMLTexts(HTMLParser):
         a = dict(attrs)
         for name, val in attrs:
             if name.startswith("data-i18n-") and name not in ("data-i18n-html",):
-                self.keys.setdefault(a.get(name[len("data-i18n-"):], ""), None)
+                self.keys.setdefault(a.get(name[len("data-i18n-"):]) or "", None)
         if self.stack:
             self.stack[-1][2].append(self.get_starttag_text())
         if "data-i18n" in a or "data-i18n-html" in a:
@@ -231,20 +232,22 @@ class _HTMLTexts(HTMLParser):
 
 def from_html(path: str) -> dict:
     p = _HTMLTexts()
-    p.feed(open(path, encoding="utf-8").read())
+    with open(path, encoding="utf-8") as fh:
+        p.feed(fh.read())
     p.keys.pop("", None)
     return p.keys
 
 
 # ---------------------------------------------------------------------- Python
 def from_py(path: str, problems: list | None = None) -> dict:
-    tree = ast.parse(open(path, encoding="utf-8").read(), path)
+    with open(path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read(), path)
     keys: dict[str, str | None] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "M":
             if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
                 one = next((kw.value.value for kw in node.keywords if kw.arg == "one"
-                            and isinstance(kw.value, ast.Constant)), None)
+                            and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str)), None)
                 if keys.get(node.args[0].value) is None:
                     keys[node.args[0].value] = one
             elif problems is not None and os.path.basename(path) != "i18n.py":
