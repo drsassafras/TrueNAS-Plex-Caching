@@ -3421,7 +3421,7 @@
  "{what}: {value}": "{what}: {value}",
  "{what}: {why}": null,
  "{why}": null,
- "{why} Tried: {urls}. If it runs on another port or address, enter it below.": null,
+ "{why} Tried: {tried}. Runs on another port, or at another address? Enter host:port below — or press Pair Now on that Plex Cache first: its request tells this side where it is.": null,
  "{why}.": "{why}.",
  "{why}. Mount it, or untick it to stop caching it.": "{why}. Змонтуйте її або зніміть позначку, щоб не кешувати.",
  "{why}. Use your NAS’s IP, not 127.0.0.1 — inside this app that means the app itself.": "{why}. Використовуйте IP вашого NAS, а не 127.0.0.1 — всередині цього застосунку це сам застосунок.",

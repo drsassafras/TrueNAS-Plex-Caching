@@ -15969,6 +15969,16 @@ class PeerLinkEdgeTests(unittest.TestCase):
             c = link.candidates()
         self.assertEqual(c[:3], ["http://10.0.0.3:8642", "http://10.0.0.5:9001", "http://[fd00::1]:9001"])
         self.assertIn("http://127.0.0.1:9001", c)
+        # the mirror's hosts on the advertised ports, then the port this one uses, then 8642–8649: a Plex Cache on another
+        # port is found without its marker, and two sides deployed alike (dev and dev, say) find each other on theirs
+        for port in (8642, 8649):
+            self.assertIn(f"http://127.0.0.1:{port}", c)
+        self.assertNotIn("http://127.0.0.1:8650", c)
+        a.settings.update({"peer": {"port": 8700}})
+        with mock.patch.object(link, "_markers", return_value={"i": {"peer": {"port": 9001, "addresses": ["10.0.0.5"]}}}):
+            c = link.candidates()
+        self.assertEqual([u for u in c if u.startswith("http://127.0.0.1:")][:3], ["http://127.0.0.1:9001", "http://127.0.0.1:8700", "http://127.0.0.1:8642"])
+        a.settings.update({"peer": {"port": 0}})
         link.paired = None
         with mock.patch("plexcache.peers.read", side_effect=RuntimeError("no")):
             self.assertEqual(link._markers(), {})
@@ -16002,6 +16012,11 @@ class PeerLinkEdgeTests(unittest.TestCase):
             a.settings.update({"peer": {"servers": {"plexB": {"url": "http://127.0.0.1:1"}}}})
             self.assertIsNone(link.find())
             self.assertEqual((link.tried, "Nothing answered" in en(jsonable(link.find_error))), (["http://127.0.0.1:1"], True))
+            # the light names each host tried with its ports, and the way out when it's on another port
+            self.assertIn("Tried: 127.0.0.1: 1. Runs on another port, or at another address? Enter host:port below — or press Pair Now on that Plex Cache first", en(jsonable(link.lights()["found"]["detail"])))
+            link.tried = [f"http://10.0.0.9:{p}" for p in (8642, 8643, 8644, 9001, 8646)] + ["http://[fd00::1]:8642", "https://x.example"]
+            self.assertEqual(link.tried_summary(), "10.0.0.9: 8642–8644, 8646, 9001; [fd00::1]: 8642; x.example: 443")
+            self.assertEqual(pl._spans([]), "")
         # pairing with what was found: nothing found; the other side can't be asked, says no, or answers with another key
         self.assertFalse(link.try_pair())
         link.found = {"url": "http://127.0.0.1:1", "hello": {"instance": "x", "public": link.public(), "name": "X"}, "at": time.time()}

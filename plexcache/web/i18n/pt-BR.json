@@ -3327,7 +3327,7 @@
  "{what}: {value}": "{what}: {value}",
  "{what}: {why}": null,
  "{why}": null,
- "{why} Tried: {urls}. If it runs on another port or address, enter it below.": null,
+ "{why} Tried: {tried}. Runs on another port, or at another address? Enter host:port below — or press Pair Now on that Plex Cache first: its request tells this side where it is.": null,
  "{why}.": "{why}.",
  "{why}. Mount it, or untick it to stop caching it.": "{why}. Monte-a ou desmarque para parar de colocá-la em cache.",
  "{why}. Use your NAS’s IP, not 127.0.0.1 — inside this app that means the app itself.": "{why}. Use o IP do NAS, não 127.0.0.1 — dentro deste app isso é o próprio app.",

@@ -4,10 +4,11 @@ on they ask each other directly — what each side's folder sync carries, what f
 of only leaving notes in the shared folders (peers.py).
 
 * **Finding it** — the other Plex Cache usually runs on the mirror's NAS: its Plex's addresses (the
-  one that answers from here, and the LAN ones plex.tv lists) on port 8642, and whatever addresses and
-  port the other side advertises in its marker. Each is asked for ``/peer/v1/hello`` (open: public
-  facts only); the one whose own Plex is that mirror is it. An address set by hand (setting
-  peer.servers[<the mirror's id>].url) is tried first.
+  one that answers from here, and the LAN ones plex.tv lists) on the port this one uses and on
+  8642–8649, and whatever addresses and port the other side advertises in its marker. Each is asked
+  for ``/peer/v1/hello`` (open: public facts only); the one whose own Plex is that mirror is it. An
+  address set by hand (setting peer.servers[<the mirror's id>].url) is tried first. The side that
+  isn't found can say where it is: its Pair Now request carries its addresses and port.
 * **Pairing** — this side has one key pair (Diffie-Hellman, RFC 3526's 2048-bit group: Python's own
   ``pow``, no library) kept in the config folder; the public half goes in its marker and its hello.
   Each pairing works out its own shared key from it and the other side's, which never travels. Pairing
@@ -48,6 +49,7 @@ log = logging.getLogger("plexcache")
 
 API = 1
 PORT = 8642               # Plex Cache's own port, as compose.yaml publishes it
+PORTS = range(PORT, PORT + 8)  # the ports looked on besides the advertised ones and our own: one picked by hand is usually near the default
 TICK_EVERY = 300          # seconds between looks at the other side (found, paired, talking)
 FIND_EVERY = 3600         # while nothing is found: how often the addresses are tried again
 PAIR_WINDOW = 600         # seconds after Pair Now during which the other side's Pair Now pairs the two
@@ -114,6 +116,18 @@ def base_url(url: str) -> str:
         return ""
     host = f"[{u.hostname}]" if ":" in u.hostname else u.hostname
     return f"{u.scheme}://{host}:{u.port or (PORT if u.scheme == 'http' else 443)}"
+
+
+def _spans(ports: list[int]) -> str:
+    """Ports as "8642–8649, 9001": each run of consecutive ports as a span."""
+    out, run = [], []
+    for p in sorted(set(ports)) + [None]:
+        if run and (p is None or p != run[-1] + 1):
+            out.append(str(run[0]) if len(run) == 1 else f"{run[0]}–{run[-1]}")
+            run = []
+        if p is not None:
+            run.append(p)
+    return ", ".join(out)
 
 
 def _host_of(url: str) -> str:
@@ -577,7 +591,7 @@ class PeerLink:
 
     def candidates(self) -> list[str]:
         """The addresses to try, in order: the one set by hand; the other side's own advert (its marker); the mirror Plex's
-        hosts on the advertised ports and on 8642."""
+        hosts on the advertised ports, the port this one uses (two sides deployed alike share it) and 8642–8649."""
         out: list[str] = []
 
         from .plex import direct_uri
@@ -598,11 +612,23 @@ class PeerLink:
             for h in ad.get("addresses") or []:
                 if isinstance(h, str):
                     add(f"{h}:{port or PORT}" if ":" not in h else f"[{h}]:{port or PORT}")
+        for port in [self.links.own_port(), *PORTS]:
+            if port not in ports:
+                ports.append(port)
         for h in self._mirror_hosts():
             host = f"[{h}]" if ":" in h else h
-            for port in ports + [PORT]:
+            for port in ports:
                 add(f"{host}:{port}")
-        return out[:24]
+        return out[:40]
+
+    def tried_summary(self) -> str:
+        """The addresses tried last, each host once with its ports (8642–8649 as a span): for the light. "" when none."""
+        hosts: dict[str, list[int]] = {}
+        for url in self.tried:
+            u = urllib.parse.urlsplit(url)
+            h = u.hostname or url
+            hosts.setdefault(f"[{h}]" if ":" in h else h, []).append(u.port or (PORT if u.scheme == "http" else 443))
+        return "; ".join(f"{h}: {_spans(ps)}" for h, ps in hosts.items())
 
     def _get(self, url: str, timeout: float = PROBE_TIMEOUT) -> dict:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -1004,8 +1030,8 @@ class PeerLink:
             out["found"] = {"status": "testing", "text": M("Looking for the Plex Cache at {name}’s site…", name=name), "detail": ""}
         else:
             out["found"] = {"status": "warn", "text": M("No Plex Cache found at {name}’s site", name=name),
-                            "detail": M("{why} Tried: {urls}. If it runs on another port or address, enter it below.",
-                                        why=self.find_error or "", urls=", ".join(self.tried[:6]) or "—")}
+                            "detail": M("{why} Tried: {tried}. Runs on another port, or at another address? Enter host:port below — or press Pair Now on that Plex Cache first: its request tells this side where it is.",
+                                        why=self.find_error or "", tried=self.tried_summary() or "—")}
         if p:
             out["paired"] = {"status": "ok", "text": M("Paired with {name}", name=p.get("name") or p.get("instance")),
                              "detail": M("Fingerprint {fp} · {how} {when}", fp=fingerprint(self.public(), p.get("public") or ""),
