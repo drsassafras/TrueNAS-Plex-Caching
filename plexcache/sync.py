@@ -2,10 +2,11 @@
 how its libraries are compared with this server's.
 
 * Mirrors: whether a library here is mirrored is a choice per library (plex2.py: not decided, none, or a library of
-  the server watched, the Mirror page's Mirrored Libraries). Until it's made, Health asks, and what would act on it
-  (deleting converted originals) waits. discover() looks for mirrors among the account's servers: for each of its
-  libraries, a sample of its files looked up here by path, scored against each library here of the kind — so the
-  page can say, per library here, which library where looks like its mirror (by_library, suspected).
+  one of the account's servers, the Mirror page's Mirrored Libraries). Until it's made, Health asks, and what would act
+  on it (deleting converted originals) waits. discover() looks for mirrors among the account's servers: a sample of
+  each library's files here looked for, by path, on each of their libraries of the kind (counted as plex2.match_rate
+  counts a mirror chosen) — so the page can say, per library here, which library where looks like its mirror
+  (by_library, suspected), and which libraries were looked at (compared).
 * Another Plex Cache: a system sharing the library folders marks itself there (optimize/claims.py): seen by peers(),
   so a Plex Cache at the other site is known without any setup.
 * compare_library(): a library on two servers — read by the data layer (libdata.py: the mirror's side) — items matched
@@ -29,7 +30,7 @@ from .paging import sort_key
 
 STORE = "sync-report.json"  # (the servers found: named from when a compare's report was kept in it too)
 MAX_ITEMS = 1000  # differences listed per library by default (the counts are whole)
-SAMPLE = 300  # of a candidate mirror's files looked up here, per library
+SAMPLE = 300  # of a library's files here looked for on each candidate mirror, per library
 MIRROR_RATE = 0.9  # the share of the sample found here for a library to look like a mirror
 KINDS = ("missing", "extra", "grouping", "match", "edits", "art", "collections", "labels", "editions")
 LEAVES = {"movie": (1,), "show": (2, 3, 4), "artist": (8, 9, 10)}
@@ -261,14 +262,18 @@ class Sync:
         self.app = app
         self.lock = threading.Lock()
         saved = app._load_json(STORE) or {}
-        self.candidates: list[dict] = saved.get("candidates") or []
+        cands = saved.get("candidates") or []
+        if any(not isinstance(m, dict) for c in cands for lib in c.get("libraries") or [] for m in (lib.get("matches") or {}).values()):
+            cands, saved = [], {}  # (a look from before the counts went this way — the mirror's files looked up here: looked again)
+        self.candidates: list[dict] = cands
         self.discovered_at: float = saved.get("discovered_at") or 0.0
+        self.compared: list[str] = [str(k) for k in saved.get("compared") or []]  # the libraries here the last look scored
         self.running = False  # looking for mirrors
         self.error: str | None = None
 
     def save(self) -> None:
         with self.lock:
-            data = {"candidates": self.candidates, "discovered_at": self.discovered_at}
+            data = {"candidates": self.candidates, "discovered_at": self.discovered_at, "compared": self.compared}
         self.app._save_json(STORE, data)
 
     def settings(self) -> dict:
@@ -277,12 +282,12 @@ class Sync:
     # ------------------------------------------------------------ mirrors
     def by_library(self) -> dict[str, dict]:
         """What discovery found for each library here: the library found that looks most like its mirror — {our key: {"id",
-        "name", "url", "their_key", "their_title", "found", "of", "rate"}} — from every server found (the one watched too)."""
+        "name", "url", "their_key", "their_title", "found", "of", "rate"}} — from every server found."""
         out: dict[str, dict] = {}
         for c in self.candidates:
             for lib in c.get("libraries") or []:
-                for key, found in (lib.get("matches") or {}).items():
-                    of = int(lib.get("of") or 0)
+                for key, m in (lib.get("matches") or {}).items():
+                    found, of = int(m.get("found") or 0), int(m.get("of") or 0)
                     rate = found / of if of else 0.0
                     got = {"id": c.get("id") or "", "name": c.get("name") or "", "url": c.get("url") or "", "their_key": lib.get("key") or "",
                            "their_title": lib.get("title") or "", "found": found, "of": of, "rate": rate}
@@ -291,10 +296,10 @@ class Sync:
         return out
 
     def suspected(self, key: str) -> dict | None:
-        """A library found that looks like the mirror of library ``key`` (nearly all of a sample of its files here), while
+        """A library found that looks like the mirror of library ``key`` (nearly all of a sample of its files there), while
         the library's state isn't chosen — what Health, every tool and converting a folder to a child dataset go by. None
         once a state is chosen, or nothing looks like one."""
-        if self.app.other.state_of(str(key)) != "unset":
+        if self.app.mirrors.state_of(str(key)) != "unset":
             return None
         got = self.by_library().get(str(key))
         return got if got and got["rate"] >= MIRROR_RATE else None
@@ -320,15 +325,16 @@ class Sync:
         return sorted(found)
 
     def discover(self) -> list[dict]:
-        """The account's other servers, each with how many of a sample of its files are here, by library — scored
-        against each library here of the kind: [{"id", "name", "url", "libraries": [{"key", "title", "kind", "found" (the best
-        library here), "of", "matches": {our key: found}}], "rate"}]."""
+        """The account's other servers, each library of theirs scored against each library here of the kind: of a sample of
+        this library's files, how many it has where their paths say (counted the way plex2.match_rate does, so the list
+        and a chosen mirror's check agree) — [{"id", "name", "url", "libraries": [{"key", "title", "kind", "found" (the best
+        library here), "of", "matches": {our key: {"found", "of"}}}], "rate"}]; and which libraries here were scored (compared)."""
         token = self.app.settings.section("plex2").get("account_token") or self.app.settings.section("plex").get("token")
         if not token:
             raise ValueError(M("Sign in with Plex first (System → Plex)."))
-        mine_id = self.app.other._main_id()
-        mine = {self.app.map_path(f.path) for f in list(self.app.files)}
-        libs = {str(lib["key"]): lib for lib in getattr(self.app, "libraries", []) or []}
+        mine_id = self.app.mirrors._main_id()
+        libs = {str(lib["key"]): lib for lib in getattr(self.app, "libraries", []) or [] if lib.get("kind")}
+        samples = {key: [f.path for f in list(self.app.files) if str(f.library_key) == key][:SAMPLE] for key in libs}
         out = []
         for sv in servers(self.app.settings.section("general")["client_id"], token):
             if sv["id"] == mine_id:
@@ -336,31 +342,36 @@ class Sync:
             url = reachable(sv)
             cand = {"id": sv["id"], "name": sv["name"], "url": url or "", "libraries": [], "rate": None}
             if url:
+                # a server in use is read the way everything else reads it (its kept address, reconnect), and a failure is
+                # its light's to say; one not in use, at the address plex.tv lists, its failure said under the look
+                used = sv["id"] in self.app.mirrors.used() and self.app.mirrors.configured(sv["id"])
+                if not used:
+                    self.app.mirrors.remember(sv, url)  # (reached: its address and token kept, so choosing a library of it is instant)
+                read = (lambda fn, sid=sv["id"]: self.app.mirrors.run(sid, fn, timeout=120)) if used else (lambda fn, c=PlexClient(url, sv["token"], timeout=120): fn(c))
                 try:
-                    client = PlexClient(url, sv["token"], timeout=60)
                     found = of = 0
-                    for there in client.libraries():
+                    for there in read(lambda c: c.libraries()):
                         if not there.kind:
                             continue
                         ours = [lib for lib in libs.values() if lib.get("kind") == there.kind]
-                        files = client.library_files(there, limit=SAMPLE)
-                        matches = {str(lib["key"]): 0 for lib in ours}
-                        for f in files:
-                            rel = next((f.path[len(loc.rstrip("/")) + 1:] for loc in there.locations if f.path.startswith(loc.rstrip("/") + "/")), None)
-                            if rel is None:
-                                continue
-                            for lib in ours:
-                                if any(self.app.map_path(loc.rstrip("/") + "/" + rel) in mine for loc in lib.get("locations") or []):
-                                    matches[str(lib["key"])] += 1
-                        hit = max(matches.values()) if matches else 0
-                        cand["libraries"].append({"key": there.key, "title": there.title, "kind": there.kind, "found": hit, "of": len(files), "matches": matches})
-                        found, of = found + hit, of + len(files)
+                        idx = {f.path for f in read(lambda c, t=there: c.library_files(t))} if ours else set()  # (a kind no library here has: not read)
+                        matches = {}
+                        for lib in ours:
+                            key = str(lib["key"])
+                            paths = samples.get(key) or []
+                            hit = sum(1 for p in paths if any(c in idx for c in self.app.mirrors.paths_there(key, p, there)))
+                            matches[key] = {"found": hit, "of": len(paths)}
+                        best = max(matches.values(), key=lambda m: ((m["found"] / m["of"]) if m["of"] else 0.0, m["found"]), default={"found": 0, "of": 0})
+                        cand["libraries"].append({"key": there.key, "title": there.title, "kind": there.kind, "found": best["found"], "of": best["of"], "matches": matches})
+                        found, of = found + best["found"], of + best["of"]
                     cand["rate"] = found / of if of else 0.0
                 except PlexError as e:
                     cand["error"] = str(e)
+                    if used:
+                        self.app.mirrors.note_error(sv["id"], str(e))
             out.append(cand)
         with self.lock:
-            self.candidates, self.discovered_at = out, time.time()
+            self.candidates, self.discovered_at, self.compared = out, time.time(), sorted(libs)
         self.save()
         self.app.run_checks_async()
         return out
@@ -374,6 +385,7 @@ class Sync:
         def work():
             try:
                 self.discover()
+                self.app.mirrors.refresh()  # (and each mirror chosen compared over all of the library's files: one look does both)
             except Exception as e:  # noqa: BLE001 — said on the page
                 self.error = str(e)
             finally:
@@ -384,4 +396,4 @@ class Sync:
     def snapshot(self) -> dict:
         with self.lock:
             return {"running": self.running, "error": self.error, "candidates": list(self.candidates), "discovered_at": self.discovered_at,
-                    "peers": self.peers(), "libraries": self.by_library()}
+                    "compared": list(self.compared), "peers": self.peers(), "libraries": self.by_library()}

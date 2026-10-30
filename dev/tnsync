@@ -15,11 +15,16 @@
 #   -N, --no-restart don't restart (and don't ask)
 #   --tests-first    run the tests BEFORE copying, and copy nothing unless they pass
 #   --skip-tests     don't run the project's tests at all
+#   --skip-future    run the current tests only, not the future ones (TN_FUTURE)
 #   -h, --help       this help
 #
 # If the project's .tnsync has TN_TEST, that command runs in the code being
 # copied: by default after the copy and restart (so the app is ready sooner),
-# or first with --tests-first. Failures end in a red banner either way.
+# or first with --tests-first. With TN_FUTURE too (the suite on the next
+# Python, say), that runs straight after — only once the current tests pass.
+# The run ends in one big box: green when every test run passed, red when
+# the current tests failed, green above and red below when only the future
+# ones did — each run (current, future) on its own line.
 # TNSYNC_MODE (local, master, dev, release, beta) tells the tests which was asked for.
 #
 # If the NAS already has exactly these files, nothing is copied or restarted.
@@ -28,14 +33,14 @@
 #
 # Settings come from two files (KEY=value lines):
 #   ~/.config/tnsync/config   shared:      TN_HOST, TN_USER, TN_PORT
-#   <project>/.tnsync         per project: TN_APP, TN_DEST, TN_PATHS, TN_EXCLUDE, TN_TEST
+#   <project>/.tnsync         per project: TN_APP, TN_DEST, TN_PATHS, TN_EXCLUDE, TN_TEST, TN_FUTURE
 #                              (and may override any shared setting)
 #
 # Written for the bash 3.2 that ships with macOS.
 
 set -eo pipefail
 
-TNSYNC_VERSION="1.4.0"
+TNSYNC_VERSION="1.5.0"
 GLOBAL_CONF="${TNSYNC_CONFIG:-$HOME/.config/tnsync/config}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tnsync"   # last test result per app
 
@@ -55,7 +60,7 @@ warn() { printf '%sWarning:%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
 die()  { printf '%stnsync:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 
 usage() {
-    sed -n '3,32p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -70,6 +75,17 @@ banner() {   # banner <colour> <line>...
     printf '\n'
 }
 red_banner()    { banner "$C_BAD" "$@" >&2; }
+split_banner() {   # split_banner <green line>... -- <red line>...: one box, green above the separator, red below it
+    local line colour="$C_GOOD"
+    printf '\n'
+    printf '%s  %-66s  %s\n' "$colour" "" "$C_OFF"
+    for line in "$@"; do
+        if [ "$line" = "--" ]; then colour="$C_BAD"; continue; fi
+        printf '%s  %-66s  %s\n' "$colour" "$line" "$C_OFF"
+    done
+    printf '%s  %-66s  %s\n' "$colour" "" "$C_OFF"
+    printf '\n'
+}
 green_banner()  { banner "$C_GOOD" "$@"; }
 yellow_banner() { banner "$C_MEH" "$@"; }
 fail() { red_banner "$@"; exit 1; }   # a red block, then stop
@@ -79,6 +95,7 @@ MODE=""
 DRY_RUN=0
 RESTART="ask"   # ask | yes | no
 SKIP_TESTS=0
+SKIP_FUTURE=0
 TESTS_FIRST=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -86,6 +103,7 @@ while [ $# -gt 0 ]; do
         -y|--yes)        RESTART="yes" ;;
         -N|--no-restart) RESTART="no" ;;
         --skip-tests)    SKIP_TESTS=1 ;;
+        --skip-future)   SKIP_FUTURE=1 ;;
         --tests-first)   TESTS_FIRST=1 ;;
         -h|--help)       usage 0 ;;
         --version)       say "tnsync $TNSYNC_VERSION"; exit 0 ;;
@@ -104,7 +122,7 @@ esac
 
 # ----------------------------------------------------------------- config
 TN_HOST=""; TN_USER="truenas_admin"; TN_PORT="22"
-TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""
+TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""; TN_FUTURE=""
 
 # Read KEY=value lines. The file is parsed, never executed.
 load_conf() {
@@ -125,7 +143,7 @@ load_conf() {
             \'*\') val="${val#\'}"; val="${val%\'}" ;;
         esac
         case "$key" in
-            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST) printf -v "$key" '%s' "$val" ;;
+            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST|TN_FUTURE) printf -v "$key" '%s' "$val" ;;
             *) warn "$file line $n: unknown setting $key" ;;
         esac
     done < "$file"
@@ -177,6 +195,9 @@ TN_EXCLUDE=.git .DS_Store __pycache__ *.pyc
 # Command that must pass before anything is copied (run in the project folder).
 # e.g. TN_TEST=python3 -m unittest   or   TN_TEST=npm test
 TN_TEST=
+# A second test run, only once TN_TEST passes: the suite on the next Python, say.
+# e.g. TN_FUTURE=python3 dev/future.py
+TN_FUTURE=
 EOF
     ok "wrote $root/.tnsync"
 }
@@ -289,9 +310,12 @@ state_clear() { rm -f "$STATE_FILE"; }
 record_tests() {   # record_tests pass|fail — only if the tests actually ran
     if [ "$TESTS_RAN" != 1 ]; then state_clear; return 0; fi
     mkdir -p "$STATE_DIR" 2>/dev/null || return 0
-    printf 'result=%s\nmode=%s\nwhen=%s\ntest=%s\n' "$1" "$MODE" "$(date '+%Y-%m-%d %H:%M')" "$TN_TEST" \
+    printf 'result=%s\nmode=%s\nwhen=%s\ntest=%s\nfuture=%s\nfuture_test=%s\n' "$1" "$MODE" "$(date '+%Y-%m-%d %H:%M')" "$TN_TEST" "$FUTURE_RESULT" "$FUTURE_CMD" \
         > "$STATE_FILE" 2>/dev/null || true
 }
+# The future tests asked for this run: TN_FUTURE, or nothing with --skip-future (or no tests at all).
+FUTURE_CMD=""
+[ "$SKIP_TESTS" = 1 ] || [ "$SKIP_FUTURE" = 1 ] || FUTURE_CMD="$TN_FUTURE"
 # Prints why the last result doesn't count for this run; prints nothing if it passed.
 last_tests_not_passed() {
     local result when
@@ -304,15 +328,26 @@ last_tests_not_passed() {
         say "TN_TEST has changed since the last test run."
     elif [ "$(state_get mode)" != "$MODE" ]; then
         say "The last tests ran for 'tnsync $(state_get mode)', not 'tnsync $MODE'."
+    elif [ "$(state_get future_test)" != "$FUTURE_CMD" ]; then
+        say "TN_FUTURE has changed since the last test run."
     fi
 }
 
 # ----------------------------------------------------------------- tests
-# run_tests before|after|insync — runs TN_TEST in the code being copied. Returns
-# non-zero (after a red banner) if it fails. Sets TESTS_RAN=1 if it ran them.
+# run_tests before|after|insync — runs TN_TEST in the code being copied, then
+# TN_FUTURE once it passes. Ends in one big box: green when every run passed,
+# red when the current tests failed, green over red when only the future ones
+# did (each run on its own line, and what that means for the NAS). Returns
+# non-zero when a run failed. Sets TESTS_RAN=1 if it ran them.
 TESTS_RAN=0
+FUTURE_RESULT="none"   # pass | fail | none — what the state file keeps of the future tests
+run_in_src() {   # run_in_src <command> — in the code being copied (for master/dev/release/beta
+    # that's the exported copy, not your folder). Python's bytecode cache is kept out of the
+    # project. Straight to the terminal (not through a pipe), so a test runner can draw a progress bar.
+    ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$1" )
+}
 run_tests() {
-    local when="$1"
+    local when="$1" current future future_cmd title
     if [ "$SKIP_TESTS" = 1 ]; then
         warn "--skip-tests: the tests weren't run"
         return 0
@@ -321,33 +356,70 @@ run_tests() {
         say "  ${C_DIM}No TN_TEST in .tnsync, so no tests were run.${C_OFF}"
         return 0
     fi
-    info "Running tests: $TN_TEST"
+    info "Running the current tests: $TN_TEST"
     TESTS_RAN=1
-    # Run in the code being copied (for master/dev/release/beta that's the exported
-    # copy, not your folder). Python's bytecode cache is kept out of the project.
-    # Straight to the terminal (not through a pipe), so a test runner can draw a progress bar.
-    if ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$TN_TEST" ); then
-        ok "Tests passed"
+    if run_in_src "$TN_TEST"; then
+        ok "Current tests passed"
+        current="passed"
+    else
+        current="FAILED"
+    fi
+    FUTURE_RESULT="none"
+    future_cmd=""   # (shown beside the result only when they ran)
+    if [ -z "$TN_FUTURE" ]; then
+        future="not set up (TN_FUTURE in .tnsync)"
+    elif [ "$SKIP_FUTURE" = 1 ]; then
+        future="not run (--skip-future)"
+    elif [ "$current" != "passed" ]; then
+        future="not run: the current tests failed"
+    else
+        future_cmd="$TN_FUTURE"
+        info "Running the future tests: $TN_FUTURE"
+        if run_in_src "$TN_FUTURE"; then
+            ok "Future tests passed"
+            future="passed"; FUTURE_RESULT="pass"
+        else
+            future="FAILED"; FUTURE_RESULT="fail"
+        fi
+    fi
+    # The one box that says it all: both runs, then where that leaves the NAS.
+    if [ "$current" = "passed" ] && [ "$future" != "FAILED" ]; then
+        green_banner "ALL TESTS PASSED" \
+                     "" \
+                     "$(printf 'Current  %-10s %s' "$current" "$TN_TEST")" \
+                     "$(printf 'Future   %-10s %s' "$future" "$future_cmd")"
         return 0
     fi
+    # what that leaves: the title's tail, and the lines under the two runs
+    local tail="" after=()
     if [ "$when" = "insync" ]; then
-        red_banner "TESTS FAILED  -  THE FILES WERE ALREADY IN SYNC" \
-                   "" \
-                   "$TN_APP is running this code (nothing was copied)." \
-                   "Fix the failures above, then run 'tnsync $MODE' again."
+        tail="  -  THE FILES WERE ALREADY IN SYNC"
+        after=("$TN_APP is running this code (nothing was copied)." "Fix the failures above, then run 'tnsync $MODE' again.")
     elif [ "$when" = "before" ]; then
-        red_banner "TESTS FAILED  -  NOTHING WAS COPIED TO $TN_HOST" \
-                   "" \
-                   "$TN_APP is still running the code it had before." \
-                   "Fix the failures above, then run 'tnsync $MODE' again."
+        tail="  -  NOTHING WAS COPIED TO $TN_HOST"
+        after=("$TN_APP is still running the code it had before." "Fix the failures above, then run 'tnsync $MODE' again.")
     elif [ "$DRY_RUN" = 1 ]; then
-        red_banner "TESTS FAILED  (dry run: nothing was copied)"
+        tail="  (dry run: nothing was copied)"
     else
-        red_banner "TESTS FAILED  -  BUT THE CODE IS ALREADY ON $TN_HOST" \
+        tail="  -  BUT THE CODE IS ALREADY ON $TN_HOST"
+        after=("$TN_APP has this code$( [ "$RESTART" = "yes" ] && printf ' and was restarted' )." \
+               "Fix the failures above, then run 'tnsync $MODE' again." "(--tests-first copies only code whose tests pass.)")
+    fi
+    [ "${#after[@]}" -gt 0 ] && after=("" "${after[@]}")
+    if [ "$current" = "passed" ]; then
+        # the current tests passed and the future ones didn't: green over red, so a glance says which half is which
+        split_banner "CURRENT TESTS PASSED" \
+                     "$(printf 'Current  %-10s %s' "$current" "$TN_TEST")" \
+                     -- \
+                     "FUTURE TESTS FAILED$tail" \
+                     "$(printf 'Future   %-10s %s' "$future" "$future_cmd")" \
+                     "${after[@]}" >&2
+    else
+        red_banner "CURRENT TESTS FAILED$tail" \
                    "" \
-                   "$TN_APP has this code$( [ "$RESTART" = "yes" ] && printf ' and was restarted' )." \
-                   "Fix the failures above, then run 'tnsync $MODE' again." \
-                   "(--tests-first copies only code whose tests pass.)"
+                   "$(printf 'Current  %-10s %s' "$current" "$TN_TEST")" \
+                   "$(printf 'Future   %-10s %s' "$future" "$future_cmd")" \
+                   "${after[@]}"
     fi
     return 1
 }
@@ -416,11 +488,12 @@ if [ -z "$CHANGES" ]; then
     fi
     why="$(last_tests_not_passed)"
     if [ -z "$why" ]; then
-        green_banner "ALREADY IN SYNC  -  TESTS ALREADY PASSED" \
-                     "" \
-                     "$TN_HOST already has exactly these files, and the" \
-                     "last tests tnsync ran on them passed ($(state_get when))." \
-                     "Nothing was copied and $TN_APP wasn't restarted."
+        lines=("ALREADY IN SYNC  -  TESTS ALREADY PASSED" "" \
+               "$TN_HOST already has exactly these files, and the" \
+               "last tests tnsync ran on them passed ($(state_get when)).")
+        [ "$(state_get future)" = pass ] && lines+=("The future tests passed on them too.")
+        lines+=("Nothing was copied and $TN_APP wasn't restarted.")
+        green_banner "${lines[@]}"
         exit 0
     fi
     yellow_banner "ALL FILES ARE IN SYNC  -  RE-RUNNING TESTS" \

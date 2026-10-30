@@ -7,7 +7,7 @@ folder the user named, with the title and year in it, is left as it is).
 Plex never loses anything: each file is given its new path first (a hard link: the same file, no
 copying), Plex asked to scan the new folder, and — once it lists the new path — the record it made for
 it merged into the original (keeping its edits, poster, watched state), then the old path removed and
-Plex asked to scan again. Sidecar files (subtitles, artwork) move along. With a mirrored server, the
+Plex asked to scan again. Sidecar files (subtitles, artwork) move along. With a mirror, the
 synced folder carries the change there, and the same merge is done there once its Plex has the new
 path (tick: followed until it has).
 """
@@ -125,7 +125,7 @@ class OrganizeFolders(Tool):
         rows.sort(key=lambda x: (x["kind"] != "loose", sort_key(x["title"])))
         there = self.mirror(library)
         return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(recs),
-                "folders": len(folder_recs), "mirror": {"name": self.mirror_name()} if there is not None else None}
+                "folders": len(folder_recs), "mirror": {"name": self.mirror_name(library)} if there is not None else None}
 
     def _sidecars(self, data, root: str, media_name: str) -> list[str]:
         """Files next to a loose film that belong to it (its subtitles, artwork): the same stem (from the folder tree as gathered)."""
@@ -203,7 +203,7 @@ class OrganizeFolders(Tool):
             with self.lock:
                 self.extra.setdefault("pending", []).append({"library": library, "title": row["title"], "folder": row["folder"], "at": time.time(), "scanned": 0.0,
                                                             "old": [mv["from"] for mv in moves if mv["media"]], "new": sorted(media)})
-            log(M("{name}: followed until its Plex has the new path (its synced folder brings the files)", name=self.mirror_name()))
+            log(M("{name}: followed until its Plex has the new path (its synced folder brings the files)", name=self.mirror_name(library)))
         return {"result": "done", "moved": len(moves), "merged": bool(new_keys)}
 
     def _wait_for(self, plex, library: str, title: str, paths: set) -> dict:
@@ -226,7 +226,7 @@ class OrganizeFolders(Tool):
         return bool(self.extra.get("pending"))
 
     def tick(self) -> None:
-        other, now, changed = self.app.other, time.time(), False
+        other, now, changed = self.app.mirrors, time.time(), False
         for e in list(self.extra.get("pending") or []):
             there = self.mirror(e["library"])
             if there is None:
@@ -240,16 +240,16 @@ class OrganizeFolders(Tool):
                     extra = {idx[c] for c in new} - keep
                     if keep and extra:
                         k = sorted(keep)[0]
-                        other.run(lambda c: c.merge(k, sorted(extra)))
-                        self.app.activity.event("tools", M("{title}: its new record on {name} merged into the old one", title=e["title"], name=self.mirror_name()))
+                        other.run(there.server, lambda c: c.merge(k, sorted(extra)))
+                        self.app.activity.event("tools", M("{title}: its new record on {name} merged into the old one", title=e["title"], name=self.mirror_name(e["library"])))
                     if not old:
-                        self._done(e, M("{name} has it at its new path", name=self.mirror_name()) if keep or not extra else
-                                   M("{name} has it at its new path, as a new record (the old one had gone first)", name=self.mirror_name()))
+                        self._done(e, M("{name} has it at its new path", name=self.mirror_name(e["library"])) if keep or not extra else
+                                   M("{name} has it at its new path, as a new record (the old one had gone first)", name=self.mirror_name(e["library"])))
                         changed = True
                         continue
                 if now - e["scanned"] >= MIRROR_SCAN_EVERY:
                     e["scanned"] = now
-                    other.run(lambda c, there=there: c.scan(there.key, next(iter(other.paths_there(e["library"], e["new"][0], there)), "").rsplit("/", 1)[0]))
+                    other.run(there.server, lambda c, there=there: c.scan(there.key, next(iter(other.paths_there(e["library"], e["new"][0], there)), "").rsplit("/", 1)[0]))
                     changed = True
                 if now - e["at"] > MIRROR_GIVE_UP and not e.get("stuck"):
                     e["stuck"] = True

@@ -1,6 +1,6 @@
 """The tools (the Tools pages): each scans a library for what it could do, shows the plan, and does
 the rows you tick — in the background, one row at a time, with the result of each kept. Nothing
-happens until you press Apply. A tool knows about the mirrored server (plex2.py) where that matters:
+happens until you press Apply. A tool knows about a library's mirror (plex2.py) where that matters:
 what the same step does there, or what to wait for there.
 
 A scan is a function over the library's data as the data layer has it (libdata.LibraryData: Plex's
@@ -565,14 +565,14 @@ class Tool:
 
     # ------------------------------------------------------------ what the tools share
     def mirror(self, library: str):
-        """The mirrored server's library paired with ``library``, or None (no mirror, or not paired)."""
+        """The library of ``library``'s mirror paired with it, or None (no mirror, or not paired)."""
         return mirror(self.app, library)
 
     def mirrored(self, library: str) -> dict | None:
         return mirrored(self.app, library)
 
-    def mirror_name(self) -> str:
-        return mirror_name(self.app)
+    def mirror_name(self, library: str) -> str:
+        return mirror_name(self.app, library)
 
     def file_action(self, action: str, path: str, to: str = "", root: str = "") -> dict:
         """A file action through the optimizer service, its refusal said in words."""
@@ -607,8 +607,8 @@ class Tool:
 
 
 def mirror(app, library: str):
-    """The mirrored server's library that mirrors ``library``, or None (not mirrored, or the server not watched)."""
-    other = getattr(app, "other", None)
+    """The library that mirrors ``library``, or None (not mirrored, or its server not reached)."""
+    other = getattr(app, "mirrors", None)
     return other.mirror_for(str(library)) if other is not None else None
 
 
@@ -618,8 +618,8 @@ def mirrored(app, library: str) -> dict | None:
     files are here too (a mirror until you say otherwise); another Plex Cache sharing the folders. None when you've said
     the library has no mirror, or none is seen. What every tool goes by, and converting a folder to a child dataset too."""
     if mirror(app, library) is not None:
-        return {"name": mirror_name(app), "how": "watched"}
-    other, sync = getattr(app, "other", None), getattr(app, "sync", None)
+        return {"name": mirror_name(app, library), "how": "watched"}
+    other, sync = getattr(app, "mirrors", None), getattr(app, "sync", None)
     if other is None or sync is None or other.state_of(str(library)) != "unset":
         return None
     c = sync.suspected(str(library))
@@ -632,8 +632,10 @@ def mirrored(app, library: str) -> dict | None:
     return None
 
 
-def mirror_name(app) -> str:
-    return app.other.settings().get("name") or M("the mirrored server")
+def mirror_name(app, library: str) -> str:
+    """The name of the library's mirror (its server), or "the mirror" with none chosen."""
+    sid = app.mirrors.server_of(str(library))
+    return (app.mirrors.name_of(sid) if sid else "") or M("the mirror")
 
 
 class ToolJob(Job):

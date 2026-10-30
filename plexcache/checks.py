@@ -632,19 +632,20 @@ def _sync_items(app) -> list[dict]:
     if sync is None:
         return []
     out = []
-    other = app.other
+    other = app.mirrors
     titles = {str(lib["key"]): lib.get("title") or str(lib["key"]) for lib in getattr(app, "libraries", []) or []}
     undecided = other.undecided()
     if undecided:
         out.append(dict(item("warn", M("Is {libraries} mirrored?", one="Is {libraries} mirrored?", libraries=[titles[k] for k in undecided], n=len(undecided)),
                              M("Whether another Plex server has the same files (another site, kept in step by syncing the folders) hasn’t been chosen for "
-                               "{n} libraries. Until it is, their converted files’ originals aren’t deleted: a mirror that isn’t watched could lose its item.",
+                               "{n} libraries. Until it is, their converted files’ originals aren’t deleted: a mirror not checked could lose its item.",
                                one="Whether another Plex server has the same files (another site, kept in step by syncing the folders) hasn’t been chosen for "
-                               "this library. Until it is, its converted files’ originals aren’t deleted: a mirror that isn’t watched could lose its item.", n=len(undecided)),
+                               "this library. Until it is, its converted files’ originals aren’t deleted: a mirror not checked could lose its item.", n=len(undecided)),
                              M("On the [Mirror page](/mirrors), mark each library as mirrored, or as having no mirror."))))
-    if any(other.state_of(k) == "mirror" for k in titles) and not other.configured():
-        out.append(dict(item("warn", M("The mirrored Plex server isn’t set up"), M("A library is marked as mirrored, but no server is watched yet."),
-                             M("On the [Mirror page](/mirrors), choose the server."))))
+    unreached = [titles[k] for k in titles if other.state_of(k) == "mirror" and not other.configured(other.server_of(k))]
+    if unreached:
+        out.append(dict(item("warn", M("A mirror isn’t reached: {libraries}", libraries=unreached), M("The library is marked as mirrored, but its server hasn’t answered from here yet."),
+                             M("On the [Mirror page](/mirrors), choose the library’s mirror again, or enter an address this NAS can reach."))))
     seen = [(titles[k], c) for k in undecided for c in [sync.suspected(k)] if c]
     if seen:
         out.append(dict(item("info", M("A library that looks mirrored: {names}", names=[f"{t} ({c['name']}: {c['their_title']})" for t, c in seen]),
@@ -663,13 +664,13 @@ def _tool_items(app) -> list[dict]:
     stuck = trash.stuck() if trash else []
     if stuck:
         out.append(dict(item("warn", M("{n} set-aside files can’t be deleted yet", one="{n} set-aside file can’t be deleted yet", n=len(stuck)),
-                             M("Plex here, or the mirrored server’s, still lists them after {days} days: {files}.", days=14, files=[os.path.basename(e["path"]) for e in stuck[:3]]),
+                             M("Plex here, or the mirror’s, still lists them after {days} days: {files}.", days=14, files=[os.path.basename(e["path"]) for e in stuck[:3]]),
                              M("On the Duplicate Versions page: delete it now, put it back, or keep it set aside.")),
                         link={"href": "/versions", "text": M("Open Duplicate Versions")}))
     folders = (getattr(app, "tools", None) or {}).get("folders")
     late = folders.stuck() if folders else []
     if late:
-        out.append(dict(item("warn", M("{n} moved films the mirrored server hasn’t picked up", one="{n} moved film the mirrored server hasn’t picked up", n=len(late)),
+        out.append(dict(item("warn", M("{n} moved films the mirror hasn’t picked up", one="{n} moved film the mirror hasn’t picked up", n=len(late)),
                              M("Its Plex doesn’t list the new folder after {days} days: {titles}. Is the folder synced there?", days=3, titles=[e["title"] for e in late[:3]])),
                         link={"href": "/folders", "text": M("Open Organize Folders")}))
     return out
@@ -731,14 +732,14 @@ def _peer_items(app) -> list[dict]:
 def _mirror_items(app) -> list[dict]:
     """The Plex Cache at the mirror's site (peerlink.py) and Mirror Checks (mirrorhealth.py): the link not healthy, a
     library held because .plexcache doesn't reach the other site, findings waiting."""
-    link, health = getattr(app, "peerlink", None), getattr(app, "mirror_health", None)
-    if link is None or health is None:
+    links, health = getattr(app, "peerlinks", None), getattr(app, "mirror_health", None)
+    if links is None or health is None:
         return []
     out = []
-    state = link.health()
+    state = links.health()
     if state in ("warn", "fail"):
-        bad = [v for v in link.lights().values() if v["status"] in ("warn", "fail")]
-        out.append(dict(item(state, M("The link to the Plex Cache at the mirror’s site needs attention"),
+        bad = [v for lk in links.used() if lk.wanted() for v in lk.lights().values() if v["status"] in ("warn", "fail")]
+        out.append(dict(item(state, M("The link to the Plex Cache at a mirror’s site needs attention"),
                              M("{lights}. Mirror Checks rely on it: some of its checks are left out meanwhile.", lights=[b["text"] for b in bad]),
                              M("See [System → Mirror Plex Cache](/system#peer).")), link={"href": "/system#peer", "text": M("Open System")}))
     names = {str(lib["key"]): lib.get("title") or lib["key"] for lib in getattr(app, "libraries", []) or []}

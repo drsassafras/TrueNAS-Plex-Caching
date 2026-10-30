@@ -121,7 +121,7 @@ class Conversions:
             return False
         # whether the library is mirrored is a choice to make (the Mirror page): until it's made, the original stays —
         # a mirror not watched could lose its item
-        other = getattr(self.app, "other", None)
+        other = getattr(self.app, "mirrors", None)
         if other is not None and other.state_of(str(e["library"])) == "unset":
             if e.get("note") != str(M("Waiting: whether this library is mirrored isn’t chosen yet (Mirror page).")):
                 e["note"] = str(M("Waiting: whether this library is mirrored isn’t chosen yet (Mirror page)."))
@@ -140,12 +140,12 @@ class Conversions:
                 e["note"] = str(err)
                 return True
             # the second server, if there's one for this library (plex2.py)
-            other = getattr(self.app, "other", None)
+            other = getattr(self.app, "mirrors", None)
             try:
                 there = other.where(e, now) if other is not None else None
             except PlexError as err:
                 there = ""
-                e["note"] = M("{server}: {why}", server=(other.settings().get("name") if other is not None else None) or M("the other server"), why=str(err))
+                e["note"] = M("{server}: {why}", server=(other.name_of(other.server_of(str(e["library"]))) if other is not None else None) or M("the other server"), why=str(err))
             else:
                 e.pop("note", None)
             e["servers"] = {"here": where or "waiting", **({"there": there or "waiting"} if there is not None else {})}

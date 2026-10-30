@@ -24,13 +24,13 @@ checked against the disk (reconcile): a conversion left partway (the new dataset
 set aside) is found by what's on disk, even with migration.json gone or out of date, and picked up
 where it is. Only the optimizer writes media; the TrueNAS API is only read.
 
-**A mirrored folder.** A folder kept in step with another site (a folder sync, a mirror watched on the
+**A mirrored folder.** A folder kept in step with another site (a folder sync, a mirror chosen on the
 Mirror page) is converted so that nothing of it reaches the other site:
 
 * **The folder sync** — Syncthing's root (its .stfolder) is the library folder itself (setting the
   folder aside stops Syncthing there, the copy carries .stfolder along), or one above it, whose
   .stignore must then leave out ``<name>-new`` and ``.<name>.plexcache-old``; it's paused here from
-  the last pass until the dataset is in place, and resumed after. With a mirror watched and no
+  the last pass until the dataset is in place, and resumed after. With a mirror chosen and no
   Syncthing found, you say nothing else syncs the folder.
 * **The other Plex Cache** (peerlink.py, or its marker: peers.py) — it must run TrueNAS; it's
   converted too (both servers, one after the other: this one first) or not (this server only), as
@@ -548,7 +548,7 @@ class Migration:
     def _check_sync(self, st: dict, check) -> None:
         """The folder sync over the folder: Syncthing's root (.stfolder) the folder itself, or one above whose .stignore
         leaves out the new dataset and the old folder; paused here before the set-aside, resumed after. With no Syncthing
-        found and a mirror watched, said by you. Nothing with neither."""
+        found and a mirror chosen, said by you. Nothing with neither."""
         folder, step = st.get("folder") or "", st.get("step")
         if not folder:
             return
@@ -610,20 +610,20 @@ class Migration:
               "with it. On the [Mirror page](/mirrors), choose its Plex server and mark the library as mirrored, or say it has no mirror.", name=seen.get("name") or "?")
 
     def _mirror_watched(self, library=None) -> bool:
-        """Whether the library (or, with none named, any library) is marked as mirrored, with a mirror watched — the Plex Cache
-        link's mirror."""
-        link, other = getattr(self.app, "peerlink", None), getattr(self.app, "other", None)
+        """Whether the library (or, with none named, any library) is marked as mirrored, by a server reached."""
+        other = getattr(self.app, "mirrors", None)
         try:
-            if not (link is not None and link.mirror_id()):
+            if other is None or not other.any_mirror():
                 return False
-            return (other is not None and other.state_of(str(library)) == "mirror") if library else True
+            return (other.state_of(str(library)) == "mirror" and other.configured(other.server_of(str(library)))) if library else True
         except Exception:  # noqa: BLE001 — not set up: no mirror
             return False
 
-    def _mirror(self, fresh: bool = False) -> dict | None:
-        """What the Plex Cache at the mirror's site says of itself (peerlink.facts): asked again first when ``fresh`` and the
-        last answer is over a minute old."""
-        link = getattr(self.app, "peerlink", None)
+    def _mirror(self, fresh: bool = False, library: str = "") -> dict | None:
+        """What the Plex Cache at the site of the library's mirror says of itself (peerlink.facts): asked again first when
+        ``fresh`` and the last answer is over a minute old. The library: the one named, else the conversion's."""
+        links = getattr(self.app, "peerlinks", None)
+        link = links.for_library(str(library or (self.state or {}).get("library") or "")) if links is not None else None
         if link is None:
             return None
         try:
@@ -633,11 +633,13 @@ class Migration:
         except Exception:  # noqa: BLE001 — not reachable: not known
             return None
 
-    def _mirror_name(self, f: dict | None):
-        return (f or {}).get("name") or self.app.settings.section("plex2").get("name") or M("the other server")
+    def _mirror_name(self, f: dict | None, library: str = ""):
+        other = getattr(self.app, "mirrors", None)
+        sid = other.server_of(str(library or (self.state or {}).get("library") or "")) if other is not None else ""
+        return (f or {}).get("name") or (other.name_of(sid) if other is not None and sid else "") or M("the other server")
 
     def _check_mirror(self, st: dict, check, force: bool = False) -> None:
-        """With a mirror watched: the other side runs TrueNAS; both servers converted (one after the other), with room there
+        """With a mirror chosen: the other side runs TrueNAS; both servers converted (one after the other), with room there
         for its own copy, or this one only; no conversion of the library left partway there — a warning until the switch,
         an error from then on, until it's completed or reverted there; the other side holding its file jobs while this one
         switches; once switched, the same files here as there."""
@@ -647,8 +649,8 @@ class Migration:
                 check("mirror_chosen", False, M("The library’s mirror chosen"), self._seen_text(seen))
             return
         step, key = st.get("step"), str(st.get("library") or "")
-        f = self._mirror(fresh=True)
-        name = self._mirror_name(f)
+        f = self._mirror(fresh=True, library=key)
+        name = self._mirror_name(f, key)
         lib = ((f or {}).get("libraries") or {}).get(key) or {}
         there = their_folder(lib.get("folders"), os.path.basename(st.get("folder") or ""))
         conv = lib.get("converting")
@@ -708,11 +710,11 @@ class Migration:
 
     def _check_truenas(self, f: dict | None, name, check) -> None:
         """The other side runs TrueNAS — said for certain (its API, its kernel, its version file), not guessed from ZFS."""
-        link = self.app.peerlink
+        links = self.app.peerlinks
         title = M("{name} runs TrueNAS", name=name)
         if f is None:
             check("mirror_truenas", False, title,
-                  M("Can’t tell what it runs on: System → Mirror Plex Cache says there’s no Plex Cache at the mirror’s site.") if not link.wanted() else
+                  M("Can’t tell what it runs on: System → Mirror Plex Cache says there’s no Plex Cache at the mirror’s site.") if not links.wanted() else
                   M("Can’t tell what it runs on: pair the two Plex Caches (System → Mirror Plex Cache), or let the folder sync carry .plexcache, then check again."))
             return
         p = f.get("platform")
@@ -758,7 +760,10 @@ class Migration:
         if not d.ready:
             self.app.libdata.fast_track(key)
             return {"pending": True}
-        got = self.app.peerlink.files(lib["key"])
+        link = self.app.peerlinks.for_library(key)
+        if link is None:
+            return {"error": str(M("the two Plex Caches aren’t talking"))}
+        got = link.files(lib["key"])
         if not got.get("ready"):
             return {"pending": True}
         now = time.time()
@@ -832,7 +837,7 @@ class Migration:
                 return {"watched": False, "status": "warn", "title": M("Mirror: {name}, not chosen yet", name=m.get("name") or "?"),
                         "detail": self._seen_text(m), "name": m.get("name") or "", "how": m.get("how"), "id": m.get("id") or "",
                         "library": str(key), "their_key": m.get("their_key") or ""}
-            undecided = [k for k in libs if k and self.app.other.state_of(str(k)) == "unset"]
+            undecided = [k for k in libs if k and self.app.mirrors.state_of(str(k)) == "unset"]
             return {"watched": False, "status": "off", "title": M("No mirror"),
                     "detail": M("No library here is marked as mirrored ([Mirror page](/mirrors)), so the conversion is this server’s alone. "
                                 "Anything else that syncs the folder is still looked at: Syncthing has to leave the new dataset and the "
@@ -840,10 +845,11 @@ class Migration:
                     M("Whether this library is mirrored isn’t chosen yet ([Mirror page](/mirrors)): until it is, the conversion is this server’s alone. "
                       "Anything else that syncs the folder is still looked at: Syncthing has to leave the new dataset and the set-aside folder out."),
                     "library": str(undecided[0]) if undecided else ""}
-        f = self._mirror()
-        link = self.app.peerlink
-        url = ((link.paired or {}).get("url") or "") if link.paired else ""
-        name, via = self._mirror_name(f), (f or {}).get("via")
+        key = next((str(k) for k in libs if k and self._mirror_watched(k)), "")
+        f = self._mirror(library=key)
+        link = self.app.peerlinks.for_library(key)
+        url = ((link.paired or {}).get("url") or "") if link is not None and link.paired else ""
+        name, via = self._mirror_name(f, key), (f or {}).get("via")
         how = M("This server goes first, then {name} (or this one only: chosen before the copy). Before the copy, {name} must run "
                 "TrueNAS, with room for its own copy, and nothing left partway there. While this one switches, the folder sync is "
                 "paused here and {name} holds its file jobs on the library; after, the files here are compared with {name}’s.", name=name)

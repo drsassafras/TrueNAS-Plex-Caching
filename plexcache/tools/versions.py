@@ -5,7 +5,7 @@ second path to a listed file (a hard link), or an identical copy of one (the sam
 both ends) — Plex's scanner skips a file it already has under another path, so these never show in
 Plex, only on disk. The extras go to the library's trash
 (.plexcache-trash, on the same dataset) and Plex is asked to scan; they're deleted for good by
-trash.py once Plex here — and the mirrored server's Plex, whose synced folder carries the change —
+trash.py once Plex here — and the mirror's Plex, whose synced folder carries the change —
 no longer list them, and the hold is over. Until then they can be put back.
 """
 
@@ -109,9 +109,9 @@ class DuplicateVersions(Tool):
             for x in r["extras"]:
                 x["ends_record"] = x["path"] in r["ending"][r["keep"]["path"]]["here"]
         there = self.mirror(library)
-        if there is not None:  # each extra copy on the mirrored server: listed there too (then its synced folder carries the deletion there)
+        if there is not None:  # each extra copy on the mirror: listed there too (then its synced folder carries the deletion there)
             try:
-                idx = self.app.other.index(there)
+                idx = self.app.mirrors.index(there)
                 held_there = _held(idx)
                 for r in rows:
                     self._there(library, there, idx, held_there, r)
@@ -121,12 +121,12 @@ class DuplicateVersions(Tool):
         for r in rows:  # (red: a record here destroyed. A record destroyed on the mirror is said, grey, and doesn't stop it)
             r["blocked"] = any(x.get("ends_record") for x in r["extras"])
         return {"library": str(library), "rows": rows[:MAX_ROWS], "total": len(rows), "records": len(data.records), "items": sum(1 for g in by_item.values() if len(g) > 1), "frees": sum(r["frees"] for r in rows),
-                "mirror": {"name": self.mirror_name()} if there is not None else None, "hold_days": self.app.trash.hold_days()}
+                "mirror": {"name": self.mirror_name(library)} if there is not None else None, "hold_days": self.app.trash.hold_days()}
 
     def _there(self, library: str, there, idx: dict, held: dict, row: dict) -> None:
-        """Each extra copy of ``row`` on the mirrored server (``idx``: its files, {path: rating key}): listed there too, and
+        """Each extra copy of ``row`` on the mirror (``idx``: its files, {path: rating key}): listed there too, and
         whether it's the only file of its record there — the synced folder carries the deletion, so that record would go."""
-        where = lambda p: self.app.other.paths_there(library, p, there)  # noqa: E731
+        where = lambda p: self.app.mirrors.paths_there(library, p, there)  # noqa: E731
         for x in _copies(row):
             x["there"] = any(c in idx for c in where(x["path"]))
         for k in _copies(row):  # (for each copy kept: the arrow on the page can keep another)
@@ -209,7 +209,7 @@ class DuplicateVersions(Tool):
         library, folders = row["library"], []
         there = self.mirror(library)
         if there is not None:  # (the mirror as it is now: a record there left with no file is refused, as the page does)
-            idx = self.app.other.index(there)
+            idx = self.app.mirrors.index(there)
             self._there(library, there, idx, _held(idx), row)
         if any(x.get("ends_record") for x in row["extras"]):  # (one on the mirror isn't refused: the page says it, grey)
             raise ValueError(M("Deleting it would destroy a Plex record: merge the records with Merge Duplicates first."))

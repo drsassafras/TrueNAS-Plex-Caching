@@ -45,13 +45,11 @@ def _folders(app) -> list[tuple[str, str, str]]:
 
 def info(app, key: str) -> dict:
     """What this system tells the other systems sharing a library folder (its marker's body)."""
-    s = app.settings.get()
-    sy, p2 = s.get("sync") or {}, s.get("plex2") or {}
     opts = app.optimizing.options(key)
     tools = (getattr(app, "tool_runs", None) or {}).get(str(key)) or {}
-    link = getattr(app, "peerlink", None)
+    link = getattr(app, "peerlinks", None)
     return {"name": getattr(app, "plex_name", "") or "", "version": app.version, "at": time.time(),
-            "sync": {"source": _source(app, key), "mirror": p2.get("machine_id") or "", "mirrors": app.other.state_of(str(key))},  # (the library's state here: unset, none or mirror)
+            "sync": {"source": _source(app, key), "mirror": app.mirrors.server_of(str(key)), "mirrors": app.mirrors.state_of(str(key))},  # (the library's mirror (its server) and state here: unset, none or mirror)
             "optimizer": {k: opts.get(k) for k in CONTENT},
             "tools": {name: at for name, at in tools.items() if time.time() - at < 7 * 86400},
             **({"peer": link.advert(), "plex": link.own_plex_id()} if link is not None else {}),  # (how the other Plex Cache finds and pairs with this one: peerlink.py)

@@ -11,7 +11,7 @@ different frame rate or cut of the credits; two films that merely share a title 
 more) — and they're the same edition (a Director's Cut and the theatrical cut are two records on
 purpose), unless their files are the very same file. The record kept is the one with the most edited
 fields, then the most files, then the oldest. Only this server's records: a merge changes nothing on
-a mirrored server (no file is touched), so its own duplicates are its own matter — or Sync Libraries', which
+the library's mirror (no file is touched), so its own duplicates are its own matter — or Sync Libraries', which
 merges them there when this server's edits win (tools/sync.py: one item here, several there).
 """
 

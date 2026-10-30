@@ -204,7 +204,7 @@ def stream_summary(st: ET.Element, file: str) -> dict:
 
 class PlexClient:
     # asked before each change to Plex's records, with (client, op, rating keys): the backup of them (plexbackup.guard;
-    # set by App.plex() and OtherServer.client())
+    # set by App.plex() and Mirrors.client())
     before_change: Callable[..., None] | None = None
 
     def __init__(self, url: str, token: str, timeout: float = 30):
@@ -649,19 +649,67 @@ def servers(client_id: str, token: str) -> list[dict]:
     return out
 
 
+def direct_address(host: str) -> str | None:
+    """The address a plex.direct name stands for (192-168-1-20.<hash>.plex.direct → 192.168.1.20; an IPv6's colons as
+    dashes), or None for any other name. The name is how Plex gives a server a certificate for a bare address: it resolves
+    to that address and nothing else, through plex.tv's DNS — so the address itself is the same place, reached without
+    the lookup (and the certificate isn't checked either way: PlexClient)."""
+    import ipaddress
+    parts = (host or "").lower().split(".")
+    if len(parts) != 4 or parts[-2:] != ["plex", "direct"]:
+        return None
+    for sep in (".", ":"):
+        try:
+            return str(ipaddress.ip_address(parts[0].replace("-", sep)))
+        except ValueError:
+            continue
+    return None
+
+
+def local_ip(host: str) -> bool:
+    """Whether an address is on a local network: a private one (this NAS's), or a VPN's (Tailscale's 100.64/10, say) —
+    the ones that last; False for a public address, or a name."""
+    import ipaddress
+    try:
+        return not ipaddress.ip_address(host).is_global
+    except ValueError:
+        return False
+
+
+def direct_uri(uri: str, lan_only: bool = False) -> str:
+    """A plex.direct address as the address it stands for, the scheme and port kept; as given when it isn't one — or,
+    with lan_only, when that address isn't a local one (a public plex.direct name may be Plex's relay, which routes by
+    the name: known from plex.tv's list, not from the name)."""
+    import urllib.parse as up
+    u = up.urlsplit(uri or "")
+    ip = direct_address(u.hostname or "")
+    if not ip or (lan_only and not local_ip(ip)):
+        return uri
+    host = f"[{ip}]" if ":" in ip else ip
+    return up.urlunsplit((u.scheme, host + (f":{u.port}" if u.port else ""), u.path, u.query, u.fragment))
+
+
+def is_relay(server: dict, url: str) -> bool:
+    """Whether an address of a server (plex.tv's entry) is Plex's relay: a Plex-run proxy at a plex.direct name, for a
+    server with no address that can be reached — slow, limited, and apt to drop."""
+    return any(c.get("relay") and c.get("uri") == url for c in server.get("connections") or [])
+
+
 def rank_connections(connections: list[dict]) -> list[dict]:
     """A server's addresses in the order to try them: the ones that last — addresses on a local network
-    (private IPs: this NAS's, or over a VPN) first, then names (plex.direct's and your own: they follow
-    the server when its public address changes), then other IPs (a public address that may change),
-    Plex's relay last (slow, and limited); within each, https before http, IPv4 before IPv6."""
+    (private IPs: this NAS's, or over a VPN) first, then names (your own: they follow the server when its
+    public address changes), then other IPs (a public address that may change), Plex's relay last (slow,
+    and limited); within each, https before http, IPv4 before IPv6. A plex.direct name counts as the
+    address it stands for."""
     import ipaddress
     import urllib.parse as up
 
     def key(c):
         host = up.urlsplit(c["uri"]).hostname or c.get("address") or ""
+        host = direct_address(host) or host
         try:
             ip = ipaddress.ip_address(host)
-            kind = 0 if ip.is_private or ip.is_loopback or ip.is_link_local else 2
+            kind = 0 if local_ip(host) else 2
             v6 = ip.version == 6
         except ValueError:
             kind, v6 = 1, False  # a name
@@ -670,13 +718,15 @@ def rank_connections(connections: list[dict]) -> list[dict]:
 
 
 def reachable(server: dict, timeout: float = 6) -> str | None:
-    """The first of a server's addresses, in rank_connections' order, that answers as that server."""
+    """The first of a server's addresses, in rank_connections' order, that answers as that server — a plex.direct name
+    tried, and kept, as the address it stands for (the relay's name as it is: the relay routes by it)."""
     order = rank_connections(server.get("connections") or [])
     for c in order:
+        uri = c["uri"] if c.get("relay") else direct_uri(c["uri"])
         try:
-            got = PlexClient(c["uri"], server.get("token") or "", timeout=timeout).identity()
+            got = PlexClient(uri, server.get("token") or "", timeout=timeout).identity()
         except PlexError:
             continue
         if got.get("machine_id") == server.get("id"):
-            return c["uri"]
+            return uri
     return None

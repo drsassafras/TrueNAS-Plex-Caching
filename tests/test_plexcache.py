@@ -56,7 +56,7 @@ def en(v) -> str:
 REAL_BLOCK_SIZES = zfs.block_sizes
 zfs.block_sizes = lambda paths: (lambda n: {"checked": n, "single": n, "sizes": {}})(len(list(paths)))
 from plexcache.app import App  # noqa: E402
-from plexcache.i18n import from_json, jsonable  # noqa: E402
+from plexcache.i18n import M, from_json, jsonable  # noqa: E402
 from plexcache.plex import PlexClient, PlexError  # noqa: E402
 from plexcache.reader import MiB, ReadResult, is_cache_hit, read_range  # noqa: E402
 from plexcache.truenas import TrueNASClient, TrueNASError, describe_pool, ws_url  # noqa: E402
@@ -4648,7 +4648,7 @@ class DataLayerTests(unittest.TestCase):
         self.assertEqual(st.section("tools")["sync"], {"*": {"source": "mirror", "scan": False, "grouping": False, "art": False, "edits": True},
                                                        "2": dict.fromkeys(("scan", "grouping", "matches", "edits", "art", "collections", "editions"), False)})
         self.assertEqual(set(st.section("sync")), {"discover", "watched", "users"})
-        self.assertEqual((st.section("plex2")["libraries"], st.section("sync")["watched"]), ({"*": {"state": "mirror", "key": ""}}, "both"))  # (the one choice, for every library)
+        self.assertEqual((st.section("plex2")["libraries"], st.section("sync")["watched"]), ({"*": {"state": "mirror", "server": "", "key": ""}}, "both"))  # (the one choice, for every library)
         with open(os.path.join(d, "settings.json"), "w") as fh:                                      # (already moved: what's there stays)
             json.dump({"sync": {"source": "this"}, "tools": {"sync": {"*": {"source": "mirror"}}}}, fh)
         self.assertEqual(Settings(d).section("tools")["sync"], {"*": {"source": "mirror"}})
@@ -4756,35 +4756,126 @@ class DataLayerTests(unittest.TestCase):
 
 class PageStructureTests(unittest.TestCase):
     def test_mirror_page_lists_each_library_with_its_state(self):
-        """The Mirror page: the server watched, the servers found, and one row per library with what was found for it, its
-        state (not decided, no mirror, mirrored by which library there) and the ways to set it — Mark as Mirror (the library
-        found, its server connected first when it isn't the one watched), No Mirror, Undo. No server-level Watch or Ignore."""
+        """The Mirror page: one card, Mirrored Libraries — one row per library, its mirror chosen from a list: not decided, no
+        mirror, or a library of one of the account's servers (the ones in use first, then those found by looking, each with
+        how many of a sample of its files are here), each named with its server — with what looking found for it beside, and
+        ↺ back to not decided; above, a light per server in use (whether it answers, its libraries read) and one for the
+        Plex Cache at its site. No mirrored server: any server for any library, so no card of servers, nothing to watch."""
         tt = ToolsTests()
         app, plex, client, cat, other = tt._app(mirror=True)
-        app.settings.update({"plex2": {"libraries": {"1": {"state": "mirror"}, "2": {"state": "none"}}}})
+        app.settings.update({"plex2": {"libraries": {"1": {"state": "mirror", "server": "xyz", "key": ""}, "2": {"state": "none"}}}})
         app.sync.candidates = [{"id": "zzz", "name": "Cabin", "url": "http://c", "rate": 0.9,
-                                "libraries": [{"key": "7", "title": "Books", "kind": "audio", "found": 9, "of": 10, "matches": {"3": 9, "4": 0}}]}]
-        app.other.libraries()
+                                "libraries": [{"key": "7", "title": "Books", "kind": "audio", "found": 9, "of": 10, "matches": {"3": {"found": 9, "of": 10}, "4": {"found": 0, "of": 10}}}]},
+                               {"id": "far", "name": "Far", "url": "", "rate": None, "libraries": []}]
+        app.sync.discovered_at, app.sync.compared = time.time() - 3600, ["1", "2", "3", "4"]
+        app.mirrors.read_all()
         got = self._render(app.state(), "mirrors")
         html, text = got["html"], got["text"]
-        for word in ("Mirrored Server", "Servers Found", "Mirrored Libraries", "Mark as Mirror", "No Mirror", "Not decided", "Looks like a mirror", "9 of 10 files here"):
+        for word in ("Mirrored Libraries", "Starlit answers", "Looking for the Plex Cache at Starlit’s site", "Mirrored by", "Not decided", "No mirror", "Looks like a mirror",
+                     "9 of 10 files there", "Look for Mirrors", "Far: can’t be reached", "Movies on Starlit", "files not compared yet"):
             self.assertIn(word, text, word)
-        self.assertNotIn("Watch It", text)
-        self.assertNotIn("Ignore", text)
+        for word in ("Mirrored Server", "Stop Watching", "server watched", "Servers Found", "Mark as Mirror", "Use as the Mirrored Server", "Undo", "Choose the Server", "Watch It", "Ignore",
+                     "Look Now", "Check Again", "Compare Files", "found there", "Files differ", "Not looked for yet", "asks to pair"):
+            self.assertNotIn(word, text, word)
         rows = re.findall(r"<tr>(.*?)</tr>", html[html.index('id="mirrorlibs"'):], re.S)
-        by = {t: r for r in rows for t in ("Movies", "TV Shows", "Audiobooks", "Music") if t in re.sub(r"<[^>]+>", " ", r).split("  ")[0] or r.find(">" + t + "<") >= 0}
-        self.assertIn("Mirrored", re.sub(r"<[^>]+>", " ", by["Movies"]))
-        self.assertIn("Starlit: Movies", re.sub(r"<[^>]+>", " ", by["Movies"]))
-        self.assertIn('data-p2lib="1"', by["Movies"])                                               # (its library there, a choice)
-        self.assertIn("No mirror", re.sub(r"<[^>]+>", " ", by["TV Shows"]))
-        self.assertNotIn('data-state="none"', by["TV Shows"])                                       # (no No Mirror button on a row that has none)
-        self.assertIn('data-state="unset"', by["TV Shows"])                                         # (Undo)
-        self.assertIn("Not decided", re.sub(r"<[^>]+>", " ", by["Audiobooks"]))
-        self.assertIn('data-act="mirror-set" data-key="3" data-state="mirror" data-server="zzz" data-their="7"', by["Audiobooks"])  # (the library found, its server)
-        self.assertIn("btn sm pri", by["Audiobooks"])                                               # (looks like a mirror: the primary way)
-        self.assertNotIn('data-state="unset"', by["Audiobooks"])
-        self.assertIn("Not a mirror", re.sub(r"<[^>]+>", " ", by["Music"]))                        # (found, with none of its files here)
-        self.assertNotIn("btn sm pri", by["Music"])
+        by = {t: r for r in rows for t in ("Movies", "TV Shows", "Audiobooks", "Music") if re.sub(r"<[^>]+>", "", r.split("</td>")[0]).strip() == t}
+        self.assertEqual(set(by), {"Movies", "TV Shows", "Audiobooks", "Music"})
+        plain = lambda r: re.sub(r"<[^>]+>", " ", r)  # noqa: E731
+        self.assertIn("Mirrored", plain(by["Movies"]))
+        self.assertIn('data-p2lib="1"', by["Movies"])                                               # (its mirror: the list)
+        self.assertRegex(by["Movies"], r'<option value="xyz:\d+" selected>Movies \(Starlit\)</option>')  # (Starlit's Movies, by key, named with its server)
+        self.assertIn('<optgroup label="Starlit">', by["Movies"])
+        self.assertIn('data-p2lib-revert="1"', by["Movies"])                                        # (↺: back to not decided)
+        self.assertIn('<option value="none" selected>', by["TV Shows"])
+        self.assertIn("No mirror", plain(by["TV Shows"]))
+        self.assertIn('<option value="unset" selected>', by["Audiobooks"])
+        self.assertIn("Not decided", plain(by["Audiobooks"]))
+        self.assertIn("Looks like a mirror", plain(by["Audiobooks"]))
+        self.assertIn("Cabin: Books", plain(by["Audiobooks"]))
+        self.assertIn('<optgroup label="Cabin"><option value="zzz:7">Books (Cabin) · 9 of 10 files there</option>', by["Audiobooks"])  # (the library found, its server: one choice)
+        self.assertNotIn("data-p2lib-revert", by["Audiobooks"])                                     # (not decided already: nothing to go back to)
+        self.assertIn("Nothing found that looks like one", plain(by["Music"]))                     # (looked at, with none of its files found)
+        self.assertNotIn("zzz:7", by["Movies"])                                                     # (a library of another kind isn't offered)
+        for r in rows:
+            self.assertNotIn('data-act="mirror-set"', r)
+        # a library the last look didn't score (added since, say) isn't told nothing was found; looking, said so
+        app.sync.compared = ["1", "2", "3"]
+        text = self._render(app.state(), "mirrors")["text"]
+        self.assertIn("Not looked for yet", text)
+        self.assertNotIn("Nothing found that looks like one", text)
+        app.sync.running = True
+        self.assertIn("Looking…", self._render(app.state(), "mirrors")["text"])
+        app.sync.running = False
+        # the mirror chosen: its files compared over all of them — the count in the list, Mirrored while they line up, a
+        # warning once they don't (the wrong library, or a folder sync behind), the rate never repeated beside
+        app.mirrors.rates["1"], app.mirrors.counts["1"] = 0.95, (19, 20)
+        html = self._render(app.state(), "mirrors")["html"]
+        row = [r for r in re.findall(r"<tr>(.*?)</tr>", html[html.index('id="mirrorlibs"'):], re.S) if 'data-p2lib="1"' in r][0]
+        self.assertRegex(row, r'<option value="xyz:\d+" selected>Movies \(Starlit\) · 19 of 20 files there</option>')
+        self.assertIn("Mirrored", plain(row))
+        self.assertNotIn("Files differ", plain(row))
+        self.assertNotIn("%", plain(row))
+        app.mirrors.rates["1"], app.mirrors.counts["1"] = 0.1, (2, 20)
+        html = self._render(app.state(), "mirrors")["html"]
+        row = [r for r in re.findall(r"<tr>(.*?)</tr>", html[html.index('id="mirrorlibs"'):], re.S) if 'data-p2lib="1"' in r][0]
+        self.assertIn("2 of 20 files there", plain(row))
+        self.assertIn("Files differ", plain(row))
+        self.assertIn("doesn’t have most of this library’s files", plain(row))
+        self.assertNotIn("Mirrored", plain(row).replace("Mirrored by", ""))
+        app.mirrors.rates.pop("1"), app.mirrors.counts.pop("1")
+        # a pair whose mirror's files couldn't be read: said on its row, not left as "not compared yet"; a server the look
+        # couldn't read: its light says it answered, then stopped (the look's own line is for servers not in use)
+        app.mirrors.compare_errors["1"] = "Can’t reach Plex at http://s: timed out"
+        app.mirrors.libs["xyz"] = (app.mirrors.libs["xyz"][0], time.time(), "Connection reset by peer")
+        app.sync.candidates.append({"id": "xyz", "name": "Starlit", "url": other.url, "rate": None, "libraries": [], "error": "Connection reset by peer"})
+        text = self._render(app.state(), "mirrors")["text"]
+        self.assertIn("Movies on Starlit: its files couldn’t be compared — Can’t reach Plex at http://s: timed out", text)
+        self.assertNotIn("files not compared yet", text.split("TV Shows")[0])
+        self.assertIn("Starlit answered, then stopped", text)
+        self.assertEqual(text.count("Connection reset by peer"), 1)                                  # (the light's; not the look's line too)
+        app.sync.candidates.pop()
+        app.mirrors.compare_errors.clear()
+        app.mirrors.libs["xyz"] = (app.mirrors.libs["xyz"][0], time.time(), None)
+        # Pair Now pressed on the Plex Cache at a mirror's site: every page here says it asks and where to press — or that no
+        # library here is mirrored by that server yet; and pressed here, the note links to the other one's Pair Now
+        st = copy.deepcopy(app.state())
+        st["peer"]["asked"] = {"xyz": {"name": "Cabin box", "server": "Starlit", "why": "Pairing by itself is off", "left": 540, "wanted": True}}
+        got = self._render(st, "health")
+        self.assertIn("The Plex Cache on Cabin box asks to pair: press Pair Now on System → Mirror Plex Cache within 9 minutes.", got["text"])
+        self.assertIn('<a href="/system#peer" data-nav>', got["html"])
+        st["peer"]["asked"]["xyz"].update(wanted=False)
+        self.assertIn("asks to pair, but no library here is mirrored by Starlit: choose one on the Mirror page", self._render(st, "tools")["text"])
+        lk = app.peerlinks.link("xyz")
+        lk.window, lk.found = time.time() + 600, {"url": "http://10.0.0.9:8642", "hello": {"instance": "i", "name": "Cabin box", "public": "0", "version": "1"}, "at": time.time()}
+        got = self._render(app.state(), "system")
+        self.assertIn("Pairing is open for 10 more minutes", got["text"])
+        self.assertIn('<a href="http://10.0.0.9:8642/system#peer" target="_blank" rel="noopener">', got["html"])
+        lk.window, lk.found = 0.0, None
+        # two servers, Audiobooks mirrored by Cabin's Books: a light for each (Cabin not answering), an address field for it
+        app.settings.update({"plex2": {"servers": {"xyz": {"name": "Starlit", "url": other.url, "token": "other-token"}, "zzz": {"name": "Cabin", "url": "http://127.0.0.1:1", "token": "t"}},
+                                       "libraries": {"1": {"state": "mirror", "server": "xyz", "key": ""}, "3": {"state": "mirror", "server": "zzz", "key": "7"}}}})
+        app.mirrors.libs["zzz"] = (None, time.time(), "Connection refused")                          # (its libraries couldn't be read: not asked again at once)
+        text = self._render(app.state(), "mirrors")["text"]
+        for word in ("Starlit answers", "Cabin isn’t answering", "Connection refused", "Address for Cabin", "Use This Address", "Movies on Starlit"):
+            self.assertIn(word, text, word)
+        # a server reached through Plex's relay only: its light says so, with the way out, and the address field is there
+        app.settings.update({"plex2": {"servers": {"zzz": {"name": "Cabin", "url": "https://1-2-3-4.abc.plex.direct:8443", "token": "t", "relay": True}}}})
+        app.mirrors.libs["zzz"] = ([], time.time(), None)
+        text = self._render(app.state(), "mirrors")["text"]
+        for word in ("Cabin answers through Plex’s relay", "Only Plex’s relay reaches Cabin from here", "Address for Cabin"):
+            self.assertIn(word, text, word)
+        app.mirrors.libs["zzz"] = ([], time.time(), "EOF occurred in violation of protocol")
+        self.assertIn("Cabin answered through Plex’s relay, then stopped", self._render(app.state(), "mirrors")["text"])
+        app.mirrors.libs["zzz"] = (None, time.time(), "EOF occurred in violation of protocol")
+        self.assertIn("Plex’s relay to Cabin isn’t answering", self._render(app.state(), "mirrors")["text"])
+        app.settings.update({"plex2": {"servers": {"xyz": {"name": "Starlit", "url": other.url, "token": "other-token"}}}})
+        # a server forgotten while a library still names it: not reached, said so
+        app.mirrors.forget("xyz")
+        app.settings.update({"plex2": {"libraries": {"1": {"state": "mirror", "server": "xyz", "key": ""}}}})
+        text = self._render(app.state(), "mirrors")["text"]
+        self.assertIn("xyz isn’t reached", text)
+        app.mirrors.forget()
+        self.assertIn("No mirror yet", self._render(app.state(), "mirrors")["text"])
 
     def test_info_buttons_line_up(self):
         """Every ⓘ in a row of checks is the row's first thing, and no style indents such a row: a
@@ -5012,7 +5103,7 @@ class PageStructureTests(unittest.TestCase):
         app3, _p3, _c3, _cat3, _ = tt._app()
         tt._run(app3.tools["sync"], app3.tools["sync"].scan_async("1"))
         text = self._render(app3.state(), "sync")["text"]
-        self.assertIn("Doesn’t apply This library isn’t paired with one on a mirrored server", text)    # (its count: na, a grey dash on its tab)
+        self.assertIn("Doesn’t apply This library isn’t paired with one on its mirror", text)    # (its count: na, a grey dash on its tab)
         self.assertNotIn("Nothing found", text)
         # a run, and its card at the bottom of the tool's page: the one card the Processes page lists too, with the ways back
         self.assertIn("toolHistory(name)", js[js.index("  function toolPage("):js.index("  function toolKind(")])
@@ -5789,7 +5880,7 @@ class PageStructureTests(unittest.TestCase):
         app.peers_summary = {"systems": [{"name": "Cabin", "libraries": ["1"]}]}
         tt._run(app.tools["merge"], app.tools["merge"].scan_async("1"))
         said = merge_box(app.state())
-        self.assertIn("Cabin looks like a mirror of these files, but it isn’t watched", said)
+        self.assertIn("Cabin looks like a mirror of these files, but it isn’t chosen as this library’s mirror", said)
         self.assertIn("Run Merge Duplicates there too", said)
 
     def test_paged_lists_use_the_pager(self):
@@ -6597,12 +6688,12 @@ class OptimizerTests(unittest.TestCase):
 
             def identity(self):
                 return {"machine_id": "abc"}
-        app.other.client = lambda timeout=30: Other()
-        app.settings.update({"plex2": {"url": "http://10.9.0.2:32400", "token": "tok", "name": "Cabin", "libraries": {"*": {"state": "mirror"}}}})
-        self.assertEqual({k: (v.key if v else None) for k, v in app.other.pairs().items()}, {"1": "7"})     # by name and kind
-        self.assertEqual(app.other.paths_there("1", avi, app.other.pairs()["1"]), [there_dir + "/old.avi"])
-        app.other.refresh()
-        self.assertEqual(app.other.snapshot()["rates"], {"1": 1.0})
+        app.mirrors.client = lambda server, timeout=30: Other()
+        app.settings.update({"plex2": {"servers": {"abc": {"name": "Cabin", "url": "http://10.9.0.2:32400", "token": "tok"}}, "libraries": {"*": {"state": "mirror", "server": "abc", "key": ""}}}})
+        self.assertEqual({k: (v.key if v else None) for k, v in app.mirrors.pairs().items()}, {"1": "7"})     # by name and kind
+        self.assertEqual(app.mirrors.paths_there("1", avi, app.mirrors.pairs()["1"]), [there_dir + "/old.avi"])
+        app.mirrors.refresh()
+        self.assertEqual(app.mirrors.snapshot()["rates"], {"1": 1.0})
         with open(os.path.join(d, "old.mkv"), "wb") as fh:                                       # (converted by the tool)
             fh.write(b"m" * 100)
         app.conversions.add("1", avi, avi, os.path.join(d, "old.mkv"), "r-old.avi", "old.avi")
@@ -6618,15 +6709,15 @@ class OptimizerTests(unittest.TestCase):
         # the other server doesn't have a file at all: nothing there to lose (its paths line up)
         b = os.path.join(d, "b.avi")
         del theirs[there_dir + "/b.avi"]
-        app.other.indexes.clear()
+        app.mirrors.indexes.clear()
         e = {"library": "1", "plex_original": b}
-        self.assertEqual(app.other.where(e, time.time()), "absent")
+        self.assertEqual(app.mirrors.where(e, time.time()), "absent")
         # …but when they don't line up, it's never taken for absent
-        app.other.rates["1"] = 0.4
-        self.assertEqual(app.other.where({"library": "1", "plex_original": b}, time.time()), "unpaired")
+        app.mirrors.rates["1"] = 0.4
+        self.assertEqual(app.mirrors.where({"library": "1", "plex_original": b}, time.time()), "unpaired")
         # unpaired by choice: not watched there
         app.settings.update({"plex2": {"libraries": {"1": ""}}})
-        self.assertIsNone(app.other.where({"library": "1", "plex_original": b}, time.time()))
+        self.assertIsNone(app.mirrors.where({"library": "1", "plex_original": b}, time.time()))
         # plex.tv's list of servers, and the first address that answers as that server
         got = [{"provides": "server", "clientIdentifier": "abc", "name": "Cabin", "owned": True, "accessToken": "srv",
                 "connections": [{"uri": "https://relay", "relay": True, "local": False}, {"uri": "http://192.168.9.2:32400", "relay": False, "local": True},
@@ -6651,10 +6742,25 @@ class OptimizerTests(unittest.TestCase):
                  {"uri": "https://104-195-227-86.abc.plex.direct:32400", "relay": False}, {"uri": "http://10.0.0.5:32400", "relay": False},
                  {"uri": "https://10.0.0.5:32400", "relay": False}, {"uri": "https://[fd00::5]:32400", "relay": False}, {"uri": "https://plex.example.org", "relay": False}]
         self.assertEqual([c["uri"] for c in plexmod.rank_connections(conns)],
-                         ["https://10.0.0.5:32400", "https://[fd00::5]:32400", "http://10.0.0.5:32400", "https://104-195-227-86.abc.plex.direct:32400",
-                          "https://plex.example.org", "https://93.184.216.34:32400", "http://93.184.216.34:32400", "https://relay.plex"])
+                         ["https://10.0.0.5:32400", "https://[fd00::5]:32400", "http://10.0.0.5:32400", "https://plex.example.org",
+                          "https://93.184.216.34:32400", "https://104-195-227-86.abc.plex.direct:32400", "http://93.184.216.34:32400", "https://relay.plex"])
+        # a plex.direct name stands for an address (it resolves to that and nothing else, through plex.tv's DNS): ranked as it,
+        # and reached at the address itself — a LAN one even when it was kept as the name; the relay's name kept (it routes by it)
+        self.assertEqual([plexmod.direct_address(h) for h in ("192-168-1-20.abc.plex.direct", "2001-db8--1.abc.plex.direct", "plex.example.org", "abc.plex.direct", "")],
+                         ["192.168.1.20", "2001:db8::1", None, None, None])
+        self.assertEqual(plexmod.direct_uri("https://192-168-1-20.abc.plex.direct:32400/x?y"), "https://192.168.1.20:32400/x?y")
+        self.assertEqual(plexmod.direct_uri("https://2001-db8--1.abc.plex.direct:32400"), "https://[2001:db8::1]:32400")
+        self.assertEqual(plexmod.direct_uri("https://104-195-227-86.abc.plex.direct:8443", lan_only=True), "https://104-195-227-86.abc.plex.direct:8443")
+        self.assertEqual(plexmod.direct_uri("https://100-100-1-2.abc.plex.direct:32400", lan_only=True), "https://100.100.1.2:32400")  # (a VPN's)
+        self.assertEqual([c["uri"] for c in plexmod.rank_connections([{"uri": "https://93.184.216.34:32400"}, {"uri": "https://192-168-1-20.abc.plex.direct:32400"}])],
+                         ["https://192-168-1-20.abc.plex.direct:32400", "https://93.184.216.34:32400"])
+        relay = {"uri": "https://93-184-216-34.abc.plex.direct:8443", "relay": True}
+        self.assertTrue(plexmod.is_relay({"connections": [relay]}, relay["uri"]))
+        self.assertFalse(plexmod.is_relay({"connections": [relay]}, "https://93.184.216.34:8443"))
+        app.settings.update({"plex2": {"servers": {"abc": {"name": "Cabin", "url": "https://192-168-9-2.abc.plex.direct:32400", "token": "srv"}}}})
+        self.assertEqual(app.mirrors.servers()["abc"]["url"], "https://192.168.9.2:32400")
         # the saved address stops answering (a public address changed): the server is reached at another
-        app.settings.update({"plex2": {"url": "https://93.184.216.34:32400", "token": "srv", "machine_id": "abc", "account_token": "acct"}})
+        app.settings.update({"plex2": {"servers": {"abc": {"name": "Cabin", "url": "https://93.184.216.34:32400", "token": "srv"}}, "account_token": "acct"}})
         calls = {"n": 0}
 
         def flaky(self):
@@ -6663,22 +6769,23 @@ class OptimizerTests(unittest.TestCase):
                 raise plexmod.PlexError("gone")
             return {"machine_id": "abc"}
         got[0]["connections"] = [{"uri": "https://93.184.216.34:32400", "relay": False, "local": False}, {"uri": "https://104-195-227-86.abc.plex.direct:32400", "relay": False, "local": False}]
-        app.other._reconnected = 0
-        del app.other.client                                                                     # (the real client again, at the saved address)
+        app.mirrors._reconnected = {}
+        del app.mirrors.client                                                                   # (the real client again, at the saved address)
         with mock.patch.object(plexmod, "_plextv", lambda *a, **kw: got), mock.patch.object(plexmod.PlexClient, "identity", flaky):
-            self.assertEqual(app.other.run(lambda c: c.identity()), {"machine_id": "abc"})
-        self.assertEqual(app.settings.section("plex2")["url"], "https://104-195-227-86.abc.plex.direct:32400")
-        self.assertFalse(app.other.reconnect())                                                 # not again within RECONNECT_EVERY
+            self.assertEqual(app.mirrors.run("abc", lambda c: c.identity()), {"machine_id": "abc"})
+        self.assertEqual(app.settings.section("plex2")["servers"]["abc"]["url"], "https://104.195.227.86:32400")
+        self.assertFalse(app.settings.section("plex2")["servers"]["abc"]["relay"])
+        self.assertFalse(app.mirrors.reconnect("abc"))                                           # not again within RECONNECT_EVERY
         # the account's servers are listed with this server's own sign-in: no second sign-in needed
         from plexcache import plex2 as plex2mod
         seen = []
         app.settings.update({"plex": {"token": "this-servers-token"}, "plex2": {"account_token": ""}})
-        with mock.patch.object(plex2mod, "servers", lambda cid, tok: seen.append(tok) or []), mock.patch.object(app.other, "_main_id", lambda: ""):
-            self.assertEqual(app.other.list_servers(), [])
+        with mock.patch.object(plex2mod, "servers", lambda cid, tok: seen.append(tok) or []), mock.patch.object(app.mirrors, "_main_id", lambda: ""):
+            self.assertEqual(app.mirrors.list_servers(), [])
         self.assertEqual(seen, ["this-servers-token"])
-        self.assertTrue(app.other.snapshot()["signed_in"])
-        app.other.forget()
-        self.assertFalse(app.other.configured())
+        self.assertTrue(app.mirrors.snapshot()["signed_in"])
+        app.mirrors.forget()
+        self.assertFalse(app.mirrors.configured("abc"))
 
     def test_library_sync_compare(self):
         """Sync Libraries, what it finds: items matched across the two servers by their files' place in the library folder
@@ -6714,7 +6821,7 @@ class OptimizerTests(unittest.TestCase):
                                                 identity=lambda: {"machine_id": "abc"},
                                                 item_detail=lambda key: next((it for its in data.values() for it in its if it["key"] == str(key)), None))
         app.plex = lambda timeout=30: mk(here)
-        app.other.client = lambda timeout=30: mk(there)
+        app.mirrors.client = lambda server, timeout=30: mk(there)
         app.run_checks_async = lambda **kw: None
         tool = app.tools["sync"]
         scan = lambda key="1": tool.analysis(app.libdata.gather(key, wait=True, refresh=True))
@@ -6725,8 +6832,8 @@ class OptimizerTests(unittest.TestCase):
         app.conversions.items = [{"original": "/x.avi", "new": "/x.mkv", "state": "waiting", "library": "1", "plex_original": "/x.avi", "plex_new": "/x.mkv", "title": "x", "rating_key": "r", "checked": 0, "scanned": 0, "converted": 0}]
         app.conversions.tick()
         self.assertIn("isn’t chosen yet", app.conversions.items[0]["note"])
-        app.settings.update({"plex2": {"url": "http://10.9.0.2:32400", "token": "tok", "name": "Cabin", "machine_id": "abc", "libraries": {"*": {"state": "mirror"}}}})
-        self.assertEqual(app.other.state_of("1"), "mirror")
+        app.settings.update({"plex2": {"servers": {"abc": {"name": "Cabin", "url": "http://10.9.0.2:32400", "token": "tok"}}, "libraries": {"*": {"state": "mirror", "server": "abc", "key": ""}}}})
+        self.assertEqual(app.mirrors.state_of("1"), "mirror")
         m = scan()
         self.assertEqual((m["matched"], m["records"], m["source"], m["mirror"], m["names"]["mirror"]), (3, 3, "this", "Movies", "Cabin"))
         rows = {it["title"]: it for it in m["rows"]}
@@ -6759,11 +6866,11 @@ class OptimizerTests(unittest.TestCase):
         detail_there = dict(there[("7", 1)][1], locked=["studio"], fields={})
         mk_there = mk(there)
         mk_there.item_detail = lambda key: detail_there if str(key) == "71" else next((it for its in there.values() for it in its if it["key"] == str(key)), None)
-        app.other.client = lambda timeout=30: mk_there
+        app.mirrors.client = lambda server, timeout=30: mk_there
         b_row = next(it for it in scan()["rows"] if it["title"] == "B")
         self.assertIn("studio", en(next(c["to"] for c in b_row["changes"] if c["kind"] == "edits")))
         self.assertEqual(b_row["dst"]["locked"], ["studio"])
-        app.other.client = lambda timeout=30: mk(there)
+        app.mirrors.client = lambda server, timeout=30: mk(there)
         # a field edited the same on both: not a difference
         here[("1", 1)][1]["locked"] = there[("7", 1)][1]["locked"] = ["title", "genre"]
         here[("1", 1)][1]["fields"] = there[("7", 1)][1]["fields"] = {"title": "B"}
@@ -6779,7 +6886,7 @@ class OptimizerTests(unittest.TestCase):
         stamp = data.stamp
         app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}})
         m2 = tool.analysis(data)
-        self.assertEqual((data.stamp, m2["source"], tool.plex_server("1"), tool.plex_server("2")), (stamp, "mirror", "here", "mirror"))
+        self.assertEqual((data.stamp, m2["source"], tool.plex_server("1"), tool.plex_server("2")), (stamp, "mirror", "here", "mirror:abc"))
         rows2 = {it["title"]: it for it in m2["rows"]}
         self.assertEqual(sorted(rows2["A"]["kinds"]), ["collections", "editions", "edits"])   # (this server's A has a file more: it stays — no row for that)
         self.assertTrue(rows2["A"]["id"].startswith("mirror:") and rows2["A"]["rks"] == ["10"])      # (the side changed is this one)
@@ -6791,12 +6898,12 @@ class OptimizerTests(unittest.TestCase):
         app.settings.update({"tools": {"sync": {"1": {}}}})
         # another Plex Cache, seen by its marker in a library folder
         sdir = os.path.join(d, ".plexcache", "systems")
-        os.makedirs(sdir)
+        os.makedirs(sdir, exist_ok=True)
         with open(os.path.join(sdir, "otherbox1.json"), "w") as fh:
             fh.write("{}")
         app.libraries[0]["locations"] = [d]
         self.assertEqual(app.sync.peers(), ["otherbox1"])
-        # discovery: a sample of each account server's files looked up here by path
+        # discovery: a sample of this library's files looked for on each account server's libraries, by path
         from plexcache import plex as plexmod
         found = [{"id": "zzz", "name": "Cabin", "owned": True, "token": "t", "connections": [{"uri": "http://c", "local": False, "relay": False}]}]
         sample = [types.SimpleNamespace(path="/srv/Movies/A/a.mkv"), types.SimpleNamespace(path="/srv/Movies/Z/z.mkv")]
@@ -6804,11 +6911,16 @@ class OptimizerTests(unittest.TestCase):
         with mock.patch.object(sync, "servers", lambda cid, tok: found), mock.patch.object(sync, "reachable", lambda sv: "http://c"), \
                 mock.patch.object(sync, "PlexClient", lambda url, tok, timeout=30: types.SimpleNamespace(
                     libraries=lambda: [Library("7", "Movies", "movie", "movie", ["/srv/Movies"])], library_files=lambda lib, limit=None: sample)), \
-                mock.patch.object(app.other, "_main_id", lambda: "me"):
+                mock.patch.object(app.mirrors, "_main_id", lambda: "me"):
             (c,) = app.sync.discover()
-        self.assertEqual((c["name"], c["rate"], c["libraries"][0]["found"], c["libraries"][0]["of"]), ("Cabin", 0.5, 1, 2))
+        self.assertEqual((c["name"], c["rate"], c["libraries"][0]["found"], c["libraries"][0]["of"]), ("Cabin", 1.0, 1, 1))  # (this library's one file: there)
         self.assertEqual(app.sync.snapshot()["candidates"][0]["id"], "zzz")
         self.assertEqual(sync.Sync(app).candidates[0]["id"], "zzz")                              # (kept)
+        # one look does both: the servers looked at, then each mirror chosen compared over all of the library's files
+        with mock.patch.object(app.sync, "discover", return_value=[]) as dv, mock.patch.object(app.mirrors, "refresh") as rf:
+            app.sync.discover_async()
+            wait_for(lambda: rf.called)
+        self.assertTrue(dv.called)
 
     def test_library_sync_grouping_shapes(self):
         """Versions grouped differently on the two servers, in every shape: one item here split into
@@ -9467,11 +9579,11 @@ class MirrorMigrationTests(unittest.TestCase):
                 return {"ok": True}
         app.optimizing.client = Client()
         self.facts = {"v": None}
-        if mirror:
-            app.peerlink.mirror_id = lambda: "plexB"
-            app.peerlink.wanted = lambda: True
-            app.peerlink.facts = lambda: self.facts["v"]
-            app.settings.update({"plex2": {"name": "Cabin", "libraries": {"*": {"state": "mirror"}}}})  # (every library mirrored by it)
+        if mirror:  # (every library mirrored by Cabin — not answering, and plex.tv not asked for another address — the Plex Cache at its site as said)
+            app.settings.update({"plex2": {"servers": {"plexB": {"name": "Cabin", "url": "http://127.0.0.1:1", "token": "t"}},
+                                           "libraries": {"*": {"state": "mirror", "server": "plexB", "key": ""}}}})
+            app.mirrors._reconnected = {"plexB": time.time() + 1e9}
+            app.peerlinks.link("plexB").facts = lambda: self.facts["v"]
         record = lambda app, key, rs=None: {"status": "warn", "rs": 1024 * self.K, "best": 512 * self.K, "alt": 128 * self.K}
         self.enterContext(mock.patch.object(zfs, "mounts", lambda: self.ml))
         self.enterContext(mock.patch.object(checks, "library_record", record))
@@ -9595,8 +9707,9 @@ class MirrorMigrationTests(unittest.TestCase):
         mig.confirm("sync_checked")
         check = lambda: self._by_id(mig.refresh())["mirror_truenas"]  # noqa: E731
         self.assertIn("pair the two Plex Caches", en(check()["detail"]))
-        app.peerlink.wanted = lambda: False
+        app.peerlinks.link("plexB").wanted = lambda: False
         self.assertIn("there’s no Plex Cache at the mirror’s site", en(check()["detail"]))
+        del app.peerlinks.link("plexB").wanted
         f = self._facts()
         self.facts["v"] = dict(f, platform=None)
         self.assertIn("older Plex Cache", en(check()["detail"]))
@@ -9785,16 +9898,15 @@ class MirrorMigrationTests(unittest.TestCase):
         body = peers.info(app, "9")
         self.assertEqual((body["migration"]["folder"], body["converting"]["step"]), ("Books", "switch"))
         # the other side's facts, from the link: its keys turned into ours
-        link = app.peerlink
+        link = app.peerlinks.link("plexB")
         link.paired, link.last_ok = {"instance": "b", "name": "Cabin"}, time.time()
         link.status = {"name": "Cabin", "platform": own["platform"], "truenas_api": True, "migration": None,
                        "libraries": {"3": {"folders": [{"name": "Books", "state": "dataset"}], "converting": None, "holding": True}}}
-        app.other.pairs = lambda: {"9": SimpleNamespace(key="3")}
+        app.mirrors.pairs = lambda: {"9": SimpleNamespace(key="3", server="plexB")}
         f = link.facts()
         self.assertEqual((f["via"], f["libraries"]["9"]["key"], f["libraries"]["9"]["holding"]), ("link", "3", True))
         # not talking: the marker, the one next to the mirror's Plex
         link.paired, link._facts = None, None
-        link.mirror_id = lambda: "plexB"
         with mock.patch.object(peers, "read", lambda app: {"x": {"marker": {"plex": "plexC", "name": "Other"}, "by_library": {}},
                                                            "y": {"marker": {"plex": "plexB", "name": "Cabin", "at": 5, "platform": {"truenas": True}},
                                                                  "by_library": {"9": {"converting": {"step": "verify"}, "folders": []}}}}):
@@ -9811,9 +9923,10 @@ class MirrorMigrationTests(unittest.TestCase):
         from plexcache import checks
         app = _new_app()
         app.libraries = [{"key": "9", "title": "Books", "kind": "audio", "type": "artist", "locations": ["/data/Books"]}]
-        app.peerlink.mirror_id = lambda: "plexA"
+        app.settings.update({"plex2": {"servers": {"plexA": {"name": "Home", "url": "http://127.0.0.1:1", "token": "t"}}, "libraries": {"*": {"state": "mirror", "server": "plexA", "key": ""}}}})
+        app.mirrors._reconnected = {"plexA": time.time() + 1e9}
         facts = {"v": None}
-        app.peerlink.facts = lambda: facts["v"]
+        app.peerlinks.link("plexA").facts = lambda: facts["v"]
         health = app.mirror_health
         health.paired = lambda: (["9"], None)
         conv = lambda step: {"name": "Home", "libraries": {"9": {"converting": {"step": step, "folder": "Books"}}}}  # noqa: E731
@@ -9844,7 +9957,7 @@ class MirrorMigrationTests(unittest.TestCase):
                 {"local": folder + "/new.m4b", "size": 5, "mtime": time.time()}]
         app.libdata.data = lambda key: SimpleNamespace(ready=True, files=rows, unlisted=[])
         theirs = {"ready": True, "files": [["a.m4b", 10, old], ["b.m4b", 20, old]]}
-        app.peerlink.files = lambda key: theirs
+        app.peerlinks.link("plexB").files = lambda key: theirs
         st = {"folder": folder, "library": "9", "step": "verify", "title": "Books"}
         lib = {"key": "3", "folders": [{"name": "Books"}]}
         got = mig._compare_with_mirror(st, lib)
@@ -12387,6 +12500,79 @@ class TranslationTests(unittest.TestCase):
 
 
 
+class FutureTests(unittest.TestCase):
+    """The future run's channels (dev/future.py): each dependency's newest pre-release when it's ahead of the stable release,
+    else that release — chosen from what upstream lists, with no network here."""
+
+    def test_channels_pick_a_prerelease_only_when_ahead(self):
+        from dev import future
+        # Python: Docker Hub's tags on the image's Debian — the newest prerelease stage and number; the release once it's out
+        tags = ["3.16.0a1-slim-trixie", "3.16.0a1-slim", "3.16.0a2-slim-trixie", "3.16.0a2-alpine", "3.16.0b1-slim-bookworm", "3.16.0a1-slim-trixie"]
+        p = future.pick_python(tags, "3.16", "trixie")
+        self.assertEqual((p.version, p.channel, p.why, p.value), ("3.16.0a2", "alpha", "alpha 2", "python:3.16.0a2-slim-trixie"))
+        p = future.pick_python(tags + ["3.16.0rc1-slim-trixie", "3.16.0b3-slim-trixie"], "3.16", "trixie")
+        self.assertEqual((p.version, p.channel), ("3.16.0rc1", "rc"))
+        p = future.pick_python(tags + ["3.16.0-slim-trixie", "3.16.1-slim-trixie"], "3.16", "trixie")
+        self.assertEqual((p.version, p.channel, p.value), ("3.16.1", "stable", "python:3.16.1-slim-trixie"))
+        p = future.pick_python(tags + ["3.16.0-slim-trixie", "3.16.1a1-slim-trixie"], "3.16", "trixie")
+        self.assertEqual((p.version, p.channel), ("3.16.1a1", "alpha"))                         # (a prerelease past the release: ahead)
+        with self.assertRaisesRegex(ValueError, "no python:3.17"):
+            future.pick_python(tags, "3.17", "trixie")
+        # Node: a nightly or rc ahead of the newest release, with a build for the architecture; else the release
+        nightly = [{"version": "v27.0.0-nightly20261029abc", "files": ["linux-x64", "linux-arm64"]}]
+        rc = [{"version": "v26.4.0-rc.0", "files": ["linux-x64"]}]
+        dist = [{"version": "v27.0.0-alpha.0", "files": ["headers"]}, {"version": "v26.13.0", "files": ["linux-x64", "linux-arm64"]}]
+        p = future.pick_node(nightly, rc, dist, "arm64")
+        self.assertEqual((p.version, p.channel, p.why), ("27.0.0-nightly20261029abc", "nightly", "ahead of 26.13.0"))
+        self.assertEqual(p.value, "https://nodejs.org/download/nightly/v27.0.0-nightly20261029abc/node-v27.0.0-nightly20261029abc-linux-arm64.tar.xz")
+        p = future.pick_node([], rc, dist, "x64")
+        self.assertEqual((p.version, p.channel, p.value), ("26.13.0", "stable", "https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-x64.tar.xz"))
+        p = future.pick_node([], [{"version": "v27.0.0-rc.1", "files": ["linux-x64"]}], dist, "x64")
+        self.assertEqual((p.version, p.channel), ("27.0.0-rc.1", "rc"))
+        with self.assertRaisesRegex(ValueError, "no Node build"):
+            future.pick_node([], [], [{"version": "v26.13.0", "files": ["win-x64"]}], "x64")
+        # GitHub: a pre-release ahead of the newest release, with the asset the image fetches; else the release
+        rel = [{"tag_name": "3.2.1", "prerelease": False}, {"tag_name": "3.1.90", "prerelease": True}, {"tag_name": "3.2.0", "prerelease": False}]
+        p = future.pick_github("libjpeg-turbo", rel, lambda v: f"u/{v}", lambda u: True)
+        self.assertEqual((p.version, p.channel, p.why), ("3.2.1", "stable", "3.1.90 (pre-release) is behind"))
+        rel2 = [{"tag_name": "3.2.90", "prerelease": True}] + rel
+        p = future.pick_github("libjpeg-turbo", rel2, lambda v: f"u/{v}", lambda u: True)
+        self.assertEqual((p.version, p.channel, p.why, p.value), ("3.2.90", "pre-release", "ahead of 3.2.1", "3.2.90"))
+        p = future.pick_github("libjpeg-turbo", rel2, lambda v: f"u/{v}", lambda u: u != "u/3.2.90")
+        self.assertEqual((p.version, p.channel, p.why), ("3.2.1", "stable", "3.2.90 has no build for the image"))
+        p = future.pick_github("oxipng", [{"tag_name": "v10.2.1", "prerelease": False, "draft": False}, {"tag_name": "v11.0.0", "prerelease": False, "draft": True}], lambda v: v, lambda u: True)
+        self.assertEqual((p.version, p.channel, p.why), ("10.2.1", "stable", "no pre-release upstream"))
+        # ffmpeg: the git snapshot, stamped by the week; the release when it isn't there
+        p = future.pick_ffmpeg("9.0.2", True)
+        self.assertEqual((p.channel, p.value, p.version.startswith("git snapshot (")), ("snapshot", future.FFMPEG_SNAPSHOT, True))
+        self.assertEqual((future.pick_ffmpeg("9.0.2", False).version, future.pick_ffmpeg("9.0.2", False).channel), ("9.0.2", "stable"))
+        # what the choices become: the build's arguments (the Python's tag goes apart), and the table
+        picks = [future.Pick("Python", "3.16.0a2", "alpha", "", "python:3.16.0a2-slim-trixie"), future.pick_ffmpeg("9.0.2", True),
+                 future.Pick("MKVToolNix", "103.0", "stable", "", "103.0"), future.Pick("oxipng", "10.2.1", "stable", "", "10.2.1"),
+                 future.Pick("libjpeg-turbo", "3.2.90", "pre-release", "", "3.2.90"), future.Pick("Node", "27.0.0", "nightly", "", "https://x/node.tar.xz")]
+        args = future.build_args(picks)
+        self.assertEqual(args[:2], ["--build-arg", "PYTHON_TAG=3.16.0a2-slim-trixie"])
+        self.assertIn(f"FFMPEG_SOURCE={future.FFMPEG_SNAPSHOT}", args)
+        self.assertTrue(any(a.startswith("FFMPEG_STAMP=git snapshot (") for a in args))
+        self.assertEqual([a for a in args if a.startswith(("MKVTOOLNIX=", "OXIPNG=", "LIBJPEG_TURBO="))], ["MKVTOOLNIX=103.0", "OXIPNG=10.2.1", "LIBJPEG_TURBO=3.2.90"])
+        self.assertNotIn("FFMPEG=9.0.2", args)                                                     # (the snapshot in its place)
+        self.assertFalse(any("node" in a for a in args))                                            # (node isn't the image's: mounted into the run)
+        self.assertIn("libjpeg-turbo  3.2.90", future.table(picks))
+        # the Dockerfile takes the snapshot: FFMPEG_SOURCE in place of the release's URL, FFMPEG_STAMP in the layer
+        df = _read(os.path.join(ROOT, "Dockerfile"), encoding="utf-8")
+        for word in ('ARG FFMPEG_SOURCE=""', 'ARG FFMPEG_STAMP=""', "${FFMPEG_SOURCE:-https://ffmpeg.org/releases/ffmpeg-${FFMPEG}.tar.xz}", "${FFMPEG_STAMP}", "bzip2"):
+            self.assertIn(word, df, word)
+        stage = df[df.index("AS ffmpeg"):df.index("FROM python:${PYTHON_TAG}\n")]
+        self.assertTrue("ARG FFMPEG_SOURCE" in stage and "ARG FFMPEG_STAMP" in stage)              # (declared in the stage that uses them)
+        # the day's choices, as upkeep reports them
+        from dev import upkeep
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(upkeep, "FUTURE", os.path.join(d, "future.json")):
+            self.assertIsNone(upkeep.future_track())
+            with open(os.path.join(d, "future.json"), "w", encoding="utf-8") as fh:
+                json.dump({"at": time.time(), "key": "3.16 trixie arm64", "picks": [vars(p) for p in picks[:2]]}, fh)
+            self.assertEqual(upkeep.future_track(), "Python 3.16.0a2 (alpha), ffmpeg " + picks[1].version + " (snapshot)")
+
+
 class UpkeepTests(unittest.TestCase):
     """The dependencies kept current (dev/upkeep.py): looked up when the suite runs by hand, never on GitHub."""
 
@@ -12429,7 +12615,7 @@ class ToolsTests(unittest.TestCase):
             cat2 = {"movies": [dict(m) for m in cat["movies"]], "episodes": [], "tracks": [], "tracks_b": [], "root": d}
             other = fakes.FakePlex(cat2, token="other-token")
             self.addCleanup(other.close)
-            app.settings.update({"plex2": {"url": other.url, "token": "other-token", "name": "Starlit", "machine_id": "xyz", "libraries": {"*": {"state": "mirror"}}}})
+            app.settings.update({"plex2": {"servers": {"xyz": {"name": "Starlit", "url": other.url, "token": "other-token"}}, "libraries": {"*": {"state": "mirror", "server": "xyz", "key": ""}}}})
         app.scan_library()
         app.settings.update({"general": {"backup": "manual"}})  # (the file tools' process backs up first, per the preference: here you do)
         return app, plex, client, cat, other
@@ -12609,7 +12795,7 @@ class ToolsTests(unittest.TestCase):
 
     def test_mirror_is_a_choice_per_library(self):
         """Whether a library is mirrored is a choice per library (plex2.libraries): not decided (nothing assumed), no mirror, or
-        mirrored by a library of the server watched — "*" standing for every library not listed. What every reader goes by:
+        mirrored by a library of one of the account's servers — "*" standing for every library not listed. What every reader goes by:
         the pairs, the tools' mirrored(), converting's wait, Health's question; discovery scores each library here against each
         library found, so a server that mirrors some libraries and not others is told apart; the old settings (one choice for
         every library, an ignore list, string pairs) become states on load."""
@@ -12618,9 +12804,9 @@ class ToolsTests(unittest.TestCase):
         from plexcache.plex import Library
         from plexcache.tools import mirrored
         app, plex, client, cat, other = self._app(mirror=True)                                      # ("*": every library mirrored)
-        o = app.other
+        o = app.mirrors
         self.assertEqual((o.state_of("1"), o.state_of("4")), ("mirror", "mirror"))
-        app.settings.update({"plex2": {"libraries": {"1": {"state": "mirror", "key": ""}, "2": {"state": "none"}}}})  # (3 and 4: not decided)
+        app.settings.update({"plex2": {"libraries": {"1": {"state": "mirror", "server": "xyz", "key": ""}, "2": {"state": "none"}}}})  # (3 and 4: not decided)
         self.assertEqual((o.state_of("1"), o.state_of("2"), o.state_of("3"), o.undecided(), o.any_mirror()), ("mirror", "none", "unset", ["3", "4"], True))
         self.assertEqual((o.mirror_for("1").title, o.mirror_for("2"), o.mirror_for("3")), ("Movies", None, None))
         self.assertEqual({k: (v.title if v else None) for k, v in o.pairs().items()}, {"1": "Movies", "2": None, "3": None, "4": None, "5": None})
@@ -12648,9 +12834,12 @@ class ToolsTests(unittest.TestCase):
                 mock.patch.object(syncmod, "PlexClient", lambda url, tok, timeout=30: types.SimpleNamespace(
                     libraries=lambda: [Library("7", "Films", "movie", "movie", ["/srv/Movies"]), Library("8", "Series", "show", "tv", ["/srv/TV"])],
                     library_files=lambda lib, limit=None: sample if lib.key == "7" else series)), \
-                mock.patch.object(app.other, "_main_id", lambda: "me"):
+                mock.patch.object(app.mirrors, "_main_id", lambda: "me"):
             (c,) = app.sync.discover()
-        self.assertEqual([(lb["key"], lb["title"], lb["found"], lb["of"], lb["matches"]) for lb in c["libraries"]], [("7", "Films", 4, 4, {"1": 4}), ("8", "Series", 0, 1, {"2": 0})])
+        n2 = len([f for f in app.files if str(f.library_key) == "2"])                             # (a sample of this library's files, looked for there)
+        self.assertEqual([(lb["key"], lb["title"], lb["found"], lb["of"], lb["matches"]) for lb in c["libraries"]],
+                         [("7", "Films", 4, 4, {"1": {"found": 4, "of": 4}}), ("8", "Series", 0, n2, {"2": {"found": 0, "of": n2}})])
+        self.assertEqual(app.sync.compared, ["1", "2", "3", "4"])                                    # (every library here scored: the page says nothing of one that wasn't)
         by = app.sync.by_library()
         self.assertEqual((by["1"]["name"], by["1"]["their_title"], by["1"]["rate"], by["2"]["rate"]), ("Cabin", "Films", 1.0, 0.0))
         self.assertIsNone(app.sync.suspected("1"))                                                  # (decided already: nothing to suggest)
@@ -12661,8 +12850,8 @@ class ToolsTests(unittest.TestCase):
         self.assertIn("Movies (Cabin: Films)", en(seen["title"]))
         self.assertEqual(app.state()["sync"]["libraries"]["1"]["their_title"], "Films")
         # set_state, and "*" for every library not listed
-        o.set_state("1", "mirror", "7")
-        self.assertEqual(o.entry("1"), {"state": "mirror", "key": "7"})
+        o.set_state("1", "mirror", "xyz", "7")
+        self.assertEqual(o.entry("1"), {"state": "mirror", "server": "xyz", "key": "7"})
         o.set_state("1", "unset")
         self.assertEqual(o.state_of("1"), "unset")
         app.settings.update({"plex2": {"libraries": {"*": {"state": "none"}}}})
@@ -12675,8 +12864,47 @@ class ToolsTests(unittest.TestCase):
         with open(os.path.join(d, "settings.json"), "w") as fh:
             json.dump({"sync": {"mirrors": "none", "ignored": ["x"]}, "plex2": {"libraries": {"1": "7", "2": ""}}}, fh)
         st2 = Settings(d)
-        self.assertEqual(st2.section("plex2")["libraries"], {"*": {"state": "none", "key": ""}, "1": {"state": "mirror", "key": "7"}, "2": {"state": "none", "key": ""}})
+        self.assertEqual(st2.section("plex2")["libraries"], {"*": {"state": "none", "server": "", "key": ""}, "1": {"state": "mirror", "server": "", "key": "7"}, "2": {"state": "none", "server": "", "key": ""}})
         self.assertTrue("mirrors" not in st2.section("sync") and "ignored" not in st2.section("sync"))
+
+    def test_mirror_chosen_from_the_list(self):
+        """A library's mirror chosen on the Mirror page (plex2.choose, /api/plex2/choose): not decided or no mirror set as such;
+        a library of a server in use, paired by its key; a library of another of the account's servers reaches that server
+        first — any server for any library, so two libraries may be mirrored by two servers — a server forgotten leaves its
+        libraries' mirrors not decided, and a library of no server, or of one not the account's, is refused."""
+        from plexcache import plex2 as plex2mod
+        app, plex, client, cat, other = self._app(mirror=True)
+        o = app.mirrors
+        app.settings.update({"plex2": {"libraries": {"1": {"state": "mirror", "server": "xyz", "key": ""}, "2": {"state": "none"}}}})
+        o.choose("2", "unset")
+        o.choose("3", "none")
+        self.assertEqual((o.state_of("2"), o.state_of("3")), ("unset", "none"))
+        movies = o.mirror_for("1")
+        self.assertEqual(en(o.choose("1", "mirror", "xyz", movies.key)), "Movies: mirrored by Starlit: Movies")
+        self.assertEqual(o.entry("1"), {"state": "mirror", "server": "xyz", "key": movies.key})
+        self.assertEqual(o.states()["1"]["there"], "Movies")
+        # a second server, reached when a library of it is chosen: both in use, each library by its own
+        found = [{"id": "zzz", "name": "Cabin", "owned": True, "token": "other-token", "connections": [{"uri": other.url, "local": True, "relay": False}]}]
+        with mock.patch.object(plex2mod, "servers", lambda cid, tok: found), mock.patch.object(plex2mod, "reachable", lambda sv: other.url), \
+                mock.patch.object(o, "_main_id", lambda: "me"):
+            o.choose("3", "mirror", "zzz", movies.key)
+        s2 = app.settings.section("plex2")
+        self.assertEqual((s2["servers"]["zzz"]["name"], s2["servers"]["zzz"]["url"], o.entry("3")), ("Cabin", other.url, {"state": "mirror", "server": "zzz", "key": movies.key}))
+        self.assertEqual((o.used(), o.entry("1")["server"], o.name_of("zzz"), o.states()["3"]["name"]), (["xyz", "zzz"], "xyz", "Cabin", "Cabin"))
+        self.assertEqual([s["id"] for s in o.snapshot()["servers"]], ["xyz", "zzz"])
+        # one server forgotten: its libraries not decided again, the other's kept
+        o.forget("zzz")
+        self.assertEqual((o.state_of("3"), o.state_of("1"), o.used(), "zzz" in o.servers()), ("unset", "mirror", ["xyz"], False))
+        with self.assertRaises(ValueError) as cm2:
+            o.choose("1", "mirror")
+        self.assertIn("Choose a library of one of your account’s servers", en(cm2.exception.args[0]))
+        with mock.patch.object(plex2mod, "servers", lambda cid, tok: []), self.assertRaises(ValueError) as cm3:
+            o.choose("1", "mirror", "nope", "")
+        self.assertIn("isn’t among your account’s", en(cm3.exception.args[0]))
+        with self.assertRaises(ValueError):
+            o.choose("1", "sideways")
+        o.forget()
+        self.assertEqual((o.used(), o.servers(), o.state_of("1")), ([], {}, "unset"))
 
     def test_merge_duplicates(self):
         """The same film on two records (the same match; or unmatched, files named for the same title
@@ -12905,7 +13133,7 @@ class ToolsTests(unittest.TestCase):
         # merged there: both files versions of one record — nothing said of a record there
         other.cat["movies"].pop()
         other.cat["movies"][0]["more"] = [loose]
-        app.other.indexes.clear()
+        app.mirrors.indexes.clear()
         snap = self._run(tool, tool.scan_async("1"))
         (row,) = snap["scan"]["rows"]
         self.assertEqual((row["extras"][0]["there"], row["extras"][0]["ends_record_there"], row["blocked"]), (True, False, False))
@@ -12914,7 +13142,7 @@ class ToolsTests(unittest.TestCase):
         # a copy on disk Plex doesn't list here: no record, so a grey poster on its card
         m.pop("more")
         other.cat["movies"][0].pop("more")
-        app.other.indexes.clear()
+        app.mirrors.indexes.clear()
         app.scan_library()
         snap = self._run(tool, tool.scan_async("1"))
         (row,) = snap["scan"]["rows"]
@@ -13172,7 +13400,7 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual(t2.enabled("1")["remove"], "copy")
         # a server of the account whose files are here too counts as a mirror until you say there's none
         app.settings.update({"plex2": {"libraries": {}}})
-        app.sync.candidates = [{"id": "zzz", "name": "Starlit", "url": "http://s", "libraries": [{"key": "9", "title": "Movies", "kind": "movie", "found": 95, "of": 100, "matches": {"1": 95}}], "rate": 0.95}]
+        app.sync.candidates = [{"id": "zzz", "name": "Starlit", "url": "http://s", "libraries": [{"key": "9", "title": "Movies", "kind": "movie", "found": 95, "of": 100, "matches": {"1": {"found": 95, "of": 100}}}], "rate": 0.95}]
         self.assertEqual(tool.mirrored("1"), {"name": "Starlit", "how": "suspected", "id": "zzz", "their_key": "9", "their_title": "Movies"})
         with self.assertRaises(ValueError) as cm3:
             tool.apply_async([snap["scan"]["rows"][0]["id"]])
@@ -13628,24 +13856,25 @@ class MirrorLinkTests(unittest.TestCase):
     Tools → Mirror Checks)."""
 
     def _side(self, me, mirror):
-        """A Plex Cache with a web server of its own, its Plex ``me``, watching ``mirror`` as the mirrored server."""
+        """A Plex Cache with a web server of its own, its Plex ``me``, every library mirrored by ``mirror``."""
         from plexcache.server import serve
         app = App(tempfile.mkdtemp(dir=TMP))
         httpd = serve(app, "127.0.0.1", 0)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
-        app.settings.update({"plex2": {"url": "http://127.0.0.1:1", "token": "t", "machine_id": mirror, "libraries": {"*": {"state": "mirror"}}}})
-        app.peerlink._own_plex = (time.time() + 1e9, me)   # (no Plex here: which one it sits next to, said)
-        app.peerlink._hosts = (time.time() + 1e9, [])        # (nor plex.tv: the mirror's addresses are its one url)
+        app.settings.update({"plex2": {"servers": {mirror: {"name": mirror, "url": "http://127.0.0.1:1", "token": "t"}}, "libraries": {"*": {"state": "mirror", "server": mirror, "key": ""}}}})
+        app.peerlinks._own_plex = (time.time() + 1e9, me)   # (no Plex here: which one it sits next to, said)
+        app.mirror_link = app.peerlinks.link(mirror)         # (the link under test: to the Plex Cache at that mirror's site)
+        app.mirror_link._hosts = (time.time() + 1e9, [])     # (nor plex.tv: the mirror's addresses are its one url)
         app.plex_name = me
         return app, f"http://127.0.0.1:{httpd.server_address[1]}"
 
     def _pair(self):
         a, ua = self._side("plexA", "plexB")
         b, ub = self._side("plexB", "plexA")
-        a.settings.update({"peer": {"url": ub}})
-        b.settings.update({"peer": {"url": ua}})
+        a.settings.update({"peer": {"servers": {"plexB": {"url": ub}}}})
+        b.settings.update({"peer": {"servers": {"plexA": {"url": ua}}}})
         return a, ua, b, ub
 
     def test_keys_signatures_and_addresses(self):
@@ -13670,9 +13899,9 @@ class MirrorLinkTests(unittest.TestCase):
             self.assertEqual(pl.base_url(typed), want)
         # the setting: an address typed as on the other fields, filled in; a port in range
         app = _new_app()
-        app.settings.update({"peer": {"url": "192.168.1.20"}})
-        self.assertEqual(app.settings.section("peer")["url"], "http://192.168.1.20:8642")
-        for bad in ({"port": 70000}, {"port": -1}, {"url": "ftp://x"}, {"auto_pair": "yes"}):
+        app.settings.update({"peer": {"servers": {"abc": {"url": "192.168.1.20"}}}})
+        self.assertEqual(app.settings.section("peer")["servers"], {"abc": {"url": "http://192.168.1.20:8642"}})
+        for bad in ({"port": 70000}, {"port": -1}, {"servers": {"abc": {"url": "ftp://x"}}}, {"servers": {"a b": {"url": ""}}}, {"servers": []}, {"auto_pair": "yes"}):
             with self.assertRaises(config.SettingsError):
                 app.settings.update({"peer": bad})
 
@@ -13683,35 +13912,35 @@ class MirrorLinkTests(unittest.TestCase):
         itself — Pair Now on both does."""
         from plexcache import peerlink as pl
         a, ua, b, ub = self._pair()
-        a.peerlink.tick(force=True)
-        self.assertEqual(a.peerlink.found["url"], pl.base_url(ub))
-        self.assertIsNone(a.peerlink.paired)
-        self.assertIn("marker hasn’t reached", en(jsonable(a.peerlink.pair_error)))
-        lights = a.peerlink.lights()
+        a.mirror_link.tick(force=True)
+        self.assertEqual(a.mirror_link.found["url"], pl.base_url(ub))
+        self.assertIsNone(a.mirror_link.paired)
+        self.assertIn("marker hasn’t reached", en(jsonable(a.mirror_link.pair_error)))
+        lights = a.mirror_link.lights()
         self.assertEqual((lights["found"]["status"], lights["paired"]["status"], lights["talking"]["status"]), ("ok", "warn", "off"))
         # who may pair by itself: the mirror's Plex, at the mirror's address (or the one set), with the marker's key
-        hello = b.peerlink.hello()
-        a.peerlink._marker_public = lambda inst: b.peerlink.public()
-        self.assertIsNone(a.peerlink.may_pair(hello, ub))
-        self.assertIn("isn’t an address of the mirror’s Plex", en(jsonable(a.peerlink.may_pair(hello, "http://10.9.9.9:8642"))))
-        self.assertIn("isn’t the mirror", en(jsonable(a.peerlink.may_pair(dict(hello, plex="plexC"), ub))))
-        self.assertIn("doesn’t match", en(jsonable(a.peerlink.may_pair(dict(hello, public=a.peerlink.public()), ub))))
+        hello = b.peerlinks.hello()
+        a.mirror_link._marker_public = lambda inst: b.mirror_link.public()
+        self.assertIsNone(a.mirror_link.may_pair(hello, ub))
+        self.assertIn("isn’t an address of plexB", en(jsonable(a.mirror_link.may_pair(hello, "http://10.9.9.9:8642"))))
+        self.assertIn("isn’t plexB", en(jsonable(a.mirror_link.may_pair(dict(hello, plex="plexC"), ub))))
+        self.assertIn("doesn’t match", en(jsonable(a.mirror_link.may_pair(dict(hello, public=a.mirror_link.public()), ub))))
         a.settings.update({"peer": {"auto_pair": False}})
-        self.assertIn("Pairing by itself is off", en(jsonable(a.peerlink.may_pair(hello, ub))))
+        self.assertIn("Pairing by itself is off", en(jsonable(a.mirror_link.may_pair(hello, ub))))
         a.settings.update({"peer": {"auto_pair": True}})
         # the markers seen both ways: paired by itself, on both sides, and talking
-        b.peerlink._marker_public = lambda inst: a.peerlink.public()
-        a.peerlink.tick(force=True)
-        self.assertEqual((a.peerlink.paired["instance"], a.peerlink.paired["how"]), (b.peerlink.instance(), "auto"))
-        self.assertEqual(b.peerlink.paired["instance"], a.peerlink.instance())
-        self.assertTrue(a.peerlink.talking())
-        self.assertEqual(a.peerlink.snapshot()["fingerprint"], b.peerlink.snapshot()["fingerprint"])
-        self.assertTrue(b.peerlink.talk())
-        self.assertEqual({k: v["status"] for k, v in a.peerlink.lights().items()}["paired"], "ok")
-        self.assertEqual(a.peerlink.files("1"), {"ready": False, "files": []})            # (a signed request: no such library there)
+        b.mirror_link._marker_public = lambda inst: a.mirror_link.public()
+        a.mirror_link.tick(force=True)
+        self.assertEqual((a.mirror_link.paired["instance"], a.mirror_link.paired["how"]), (b.mirror_link.instance(), "auto"))
+        self.assertEqual(b.mirror_link.paired["instance"], a.mirror_link.instance())
+        self.assertTrue(a.mirror_link.talking())
+        self.assertEqual(a.mirror_link.snapshot()["fingerprint"], b.mirror_link.snapshot()["fingerprint"])
+        self.assertTrue(b.mirror_link.talk())
+        self.assertEqual({k: v["status"] for k, v in a.mirror_link.lights().items()}["paired"], "ok")
+        self.assertEqual(a.mirror_link.files("1"), {"ready": False, "files": []})            # (a signed request: no such library there)
         # signed requests: a forged signature, the same request twice, one from too long ago — refused
         def send(at, nonce, sig):
-            req = urllib.request.Request(ub + "/peer/v1/status", headers={"X-Plexcache-Peer": a.peerlink.instance(), "X-Plexcache-Time": str(at),
+            req = urllib.request.Request(ub + "/peer/v1/status", headers={"X-Plexcache-Peer": a.mirror_link.instance(), "X-Plexcache-Time": str(at),
                                                                          "X-Plexcache-Nonce": nonce, "X-Plexcache-Signature": sig})
             try:
                 with urllib.request.urlopen(req, timeout=10) as r:
@@ -13721,56 +13950,53 @@ class MirrorLinkTests(unittest.TestCase):
                     return e.code, json.loads(e.read())
         now = int(time.time())
         self.assertEqual(send(now, "n1", "00")[0], 403)
-        good = pl.signature(a.peerlink._key(), "GET", "/peer/v1/status", str(now), "n2", b"")
+        good = pl.signature(a.mirror_link._key(), "GET", "/peer/v1/status", str(now), "n2", b"")
         self.assertEqual(send(now, "n2", good)[0], 200)
         self.assertEqual(send(now, "n2", good), (403, {"error": "seen before"}))
         old = now - pl.MAX_AGE - 60
-        self.assertEqual(send(old, "n3", pl.signature(a.peerlink._key(), "GET", "/peer/v1/status", str(old), "n3", b""))[0], 403)
+        self.assertEqual(send(old, "n3", pl.signature(a.mirror_link._key(), "GET", "/peer/v1/status", str(old), "n3", b""))[0], 403)
         with urllib.request.urlopen(ub + "/peer/v1/hello", timeout=10) as r:                    # (the hello is open: public facts only)
             self.assertEqual(set(json.loads(r.read())), {"app", "api", "instance", "name", "version", "plex", "public", "time"})
-        # Unpair: both sides; a new key here; not paired again by itself
-        before = a.peerlink.public()
-        a.peerlink.unpair()
-        self.assertIsNone(a.peerlink.paired)
-        self.assertIsNone(b.peerlink.paired)
-        self.assertNotEqual(a.peerlink.public(), before)
+        # Unpair: both sides; not paired again by itself (the key pair stays: it's this side's, for every link)
+        a.mirror_link.unpair()
+        self.assertIsNone(a.mirror_link.paired)
+        self.assertIsNone(b.mirror_link.paired)
         self.assertEqual(os.stat(os.path.join(a.config_dir, "peer-key.json")).st_mode & 0o777, 0o600)          # (the private half: the app's alone)
-        self.assertEqual((a.peerlink.declined, b.peerlink.declined), ([b.peerlink.instance()], [a.peerlink.instance()]))
-        a.peerlink._marker_public = lambda inst: b.peerlink.public()
-        b.peerlink._marker_public = lambda inst: a.peerlink.public()
-        a.peerlink.tick(force=True)
-        self.assertIsNone(a.peerlink.paired)
-        self.assertIn("unpaired here by hand", en(jsonable(a.peerlink.pair_error)))
+        self.assertEqual((a.mirror_link.declined, b.mirror_link.declined), ([b.mirror_link.instance()], [a.mirror_link.instance()]))
+        a.mirror_link._marker_public = lambda inst: b.mirror_link.public()
+        b.mirror_link._marker_public = lambda inst: a.mirror_link.public()
+        a.mirror_link.tick(force=True)
+        self.assertIsNone(a.mirror_link.paired)
+        self.assertIn("unpaired here by hand", en(jsonable(a.mirror_link.pair_error)))
         # Pair Now on both: paired again, by hand
-        b.peerlink.pair_now()
-        a.peerlink.window = time.time() + pl.PAIR_WINDOW
-        a.peerlink.declined = []
-        a.peerlink.tick(force=True)
-        self.assertEqual((a.peerlink.paired or {}).get("how"), "manual")
-        self.assertEqual(a.peerlink.snapshot()["fingerprint"], pl.fingerprint(a.peerlink.public(), b.peerlink.public()))
-        # with no mirror watched, a pairing request isn't even looked into
+        b.mirror_link.pair_now()
+        a.mirror_link.window = time.time() + pl.PAIR_WINDOW
+        a.mirror_link.declined = []
+        a.mirror_link.tick(force=True)
+        self.assertEqual((a.mirror_link.paired or {}).get("how"), "manual")
+        self.assertEqual(a.mirror_link.snapshot()["fingerprint"], pl.fingerprint(a.mirror_link.public(), b.mirror_link.public()))
+        # with no library mirrored by that server, a pairing request isn't even looked into
         c, uc = self._side("plexC", "plexA")
         c.settings.update({"plex2": {"libraries": {"*": {"state": "none"}}}})
-        self.assertEqual(c.peerlink.handle_pair({"instance": "x", "public": a.peerlink.public()}, "127.0.0.1")["paired"], False)
+        self.assertEqual(c.mirror_link.handle_pair({"instance": "x", "public": a.mirror_link.public()}, "127.0.0.1")["paired"], False)
 
     def test_port_and_addresses_advertised(self):
         app = _new_app()
-        self.assertEqual(app.peerlink.own_port(), 8642)
+        self.assertEqual(app.peerlinks.own_port(), 8642)
         app.web_url = "http://192.168.1.10:30042"
-        self.assertEqual(app.peerlink.own_port(), 30042)                                       # (the port this page is open on)
-        app.peerlink._tn_port = (time.time() + 1e9, 31000)
-        self.assertEqual(app.peerlink.own_port(), 31000)                                       # (TrueNAS's published port first)
+        self.assertEqual(app.peerlinks.own_port(), 30042)                                       # (the port this page is open on)
+        app.peerlinks._tn_port = (time.time() + 1e9, 31000)
+        self.assertEqual(app.peerlinks.own_port(), 31000)                                       # (TrueNAS's published port first)
         app.settings.update({"peer": {"port": 9000}})
-        self.assertEqual(app.peerlink.own_port(), 9000)                                        # (and the one set, before both)
-        self.assertIn("192.168.1.10", app.peerlink.own_addresses())
-        ad = app.peerlink.advert()
-        self.assertEqual((ad["api"], ad["port"], ad["public"]), (1, 9000, app.peerlink.public()))
-        # with no mirror chosen, the lights say so and nothing is looked for
-        lights = app.peerlink.lights()
+        self.assertEqual(app.peerlinks.own_port(), 9000)                                        # (and the one set, before both)
+        self.assertIn("192.168.1.10", app.peerlinks.own_addresses())
+        ad = app.peerlinks.advert()
+        self.assertEqual((ad["api"], ad["port"], ad["public"]), (1, 9000, app.peerlinks.public()))
+        # with no library mirrored, nothing is looked for (no link); a server's link says so, and where to choose one
+        self.assertEqual((app.peerlinks.used(), app.peerlinks.wanted(), app.peerlinks.health(), app.peerlinks.snapshot()["links"]), ([], False, "off", {}))
+        lights = app.peerlinks.link("x").lights()
         self.assertEqual({v["status"] for v in lights.values()}, {"off"})
         self.assertIn("Mirror page", en(jsonable(lights["found"]["detail"])))
-        self.assertFalse(app.peerlink.wanted())
-        self.assertEqual(app.peerlink.health(), "off")
 
     def _mirror(self):
         app, plex, _client, cat, other = ToolsTests()._app(mirror=True)
@@ -13820,7 +14046,7 @@ class MirrorLinkTests(unittest.TestCase):
         app.settings.update({"peer": {"enabled": True}})
         # one found there, the link not working: the checks that need the other site's files said not to have run, and
         # why — the page's red chip and red counts
-        app.peerlink.found = {"url": "http://cottage:8642", "hello": {"name": "Cottage", "instance": "cottage"}, "at": time.time()}
+        app.peerlinks.link("xyz").found = {"url": "http://cottage:8642", "hello": {"name": "Cottage", "instance": "cottage"}, "at": time.time()}
         got = app.mirror_health.check("1")
         self.assertEqual([(u["checks"], u["link"]) for u in got["unchecked"]],
                          [(["mirror_only_here", "mirror_only_there", "mirror_size_differs", "mirror_sync_files"], "/system#peer")])
@@ -13831,7 +14057,7 @@ class MirrorLinkTests(unittest.TestCase):
         theirs = [[r, s, old] for r, (s, _m) in here.items() if r != "Loose (2019)/Loose.mkv"]
         first = sorted(r for r in here if r != "Loose (2019)/Loose.mkv")[0]
         theirs = [[r, s + 1 if r == first else s, m] for r, s, m in theirs] + [["Only There (2001)/x.mkv", 5, old], ["New (2026)/y.mkv", 5, time.time()]]
-        link = app.peerlink
+        link = app.peerlinks.link("xyz")
         link.talking = lambda: True
         link.files = lambda key: {"ready": True, "files": theirs}
         link.folder_sync = lambda: {"1": {"status": "fail", "out": None, "in": None}}
@@ -13967,7 +14193,7 @@ class MirrorLinkTests(unittest.TestCase):
         tool's Apply are refused while .plexcache doesn't reach the other site; the page's routes answer."""
         from plexcache.server import serve
         app, _plex, _cat, _other = self._mirror()
-        link = app.peerlink
+        link = app.peerlinks.link("xyz")
         link.lights = lambda: {"found": {"status": "ok", "text": "x", "detail": ""}, "paired": {"status": "ok", "text": "x", "detail": ""},
                                "talking": {"status": "fail", "text": "Not answering", "detail": ""}, "folders": {"status": "off", "text": "f", "detail": ""},
                                "version": {"status": "off", "text": "v", "detail": ""}}
@@ -13976,7 +14202,7 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertIn("Not answering", en(jsonable(conn["text"])))
         self.assertEqual(link.health(), "fail")
         self.assertEqual(en(jsonable(next(i for i in __import__("plexcache.checks", fromlist=["x"])._mirror_items(app))["title"])),
-                         "The link to the Plex Cache at the mirror’s site needs attention")
+                         "The link to the Plex Cache at a mirror’s site needs attention")
         app.settings.update({"peer": {"enabled": False}})
         self.assertEqual(app.mirror_health.connection()["status"], "ok")                       # (none there: nothing to warn about)
         app.settings.update({"peer": {"enabled": True}})
@@ -14025,7 +14251,7 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertIsNone(app.mirror_health.running)
         self.assertTrue((app.mirror_health.results.get("1") or {}).get("at"))
         code, got = post("/api/peer/test", {})
-        self.assertEqual((code, set(got) >= {"lights", "paired", "fingerprint", "own"}), (200, True))
+        self.assertEqual((code, set(got) >= {"links", "own", "health"}, set(got["links"]["xyz"]) >= {"lights", "paired", "fingerprint"}), (200, True, True))
         for path in ("/mirrorchecks", "/mirror"):                                                 # (and where Mirror Health was)
             with urllib.request.urlopen(base + path, timeout=20) as r:
                 self.assertEqual(r.status, 200)
@@ -14037,7 +14263,7 @@ class MirrorLinkTests(unittest.TestCase):
         from plexcache import mirrorhealth as mh
         from plexcache.i18n import M
         app, _plex, _cat, _other = self._mirror()
-        app.peerlink.lights = lambda: {"talking": {"status": "fail", "text": "Not answering", "detail": ""}}
+        app.peerlinks.link("xyz").lights = lambda: {"talking": {"status": "fail", "text": "Not answering", "detail": ""}}
         old = {"at": time.time(), "rows": [], "counts": dict.fromkeys(mh.KINDS, 0), "error": None, "disk": False, "mirror": "Movies",
                "notes": [M("The other site’s disk isn’t compared: the link to its Plex Cache isn’t working ([System → Mirror Plex Cache](/system#peer)).")]}
         with app.mirror_health.lock:
@@ -14046,7 +14272,7 @@ class MirrorLinkTests(unittest.TestCase):
         app.mirror_health._snap = None
         self.assertTrue(app.mirror_health.due_for("1"))                                           # (done again at once, though just checked)
         self.assertEqual(app.mirror_health.unchecked("1"), [])                                    # (no Plex Cache known there: not red)
-        app.peerlink.paired = {"instance": "cottage", "name": "Cottage", "url": "http://cottage:8642", "public": "ab", "at": time.time(), "how": "auto"}
+        app.peerlinks.link("xyz").paired = {"instance": "cottage", "name": "Cottage", "url": "http://cottage:8642", "public": "ab", "at": time.time(), "how": "auto"}
         app.mirror_health._snap = None
         un = app.mirror_health.unchecked("1")
         self.assertEqual(un[0]["checks"][:3], ["mirror_only_here", "mirror_only_there", "mirror_size_differs"])
@@ -14060,7 +14286,7 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertNotIn(">Other site’s files not compared</a>", html)
         self.assertRegex(html, r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count busy')
         # done again (the evaluator's turn) records it: its red, and not due again until hours from now
-        app.peerlink.talking = lambda: False
+        app.peerlinks.link("xyz").talking = lambda: False
         self._compared(app)
         self.assertEqual(app.mirror_health.results["1"]["v"], mh.FORMAT)
         self.assertFalse(app.mirror_health.due_for("1"))
@@ -14107,7 +14333,7 @@ class MirrorLinkTests(unittest.TestCase):
         # a library not compared: its stamp the same whatever the scan or the link does
         stamp = app.mirror_health.stamp("9")
         app.mirror_health.running = "1"
-        app.peerlink.lights = lambda: {"talking": {"status": "fail", "text": "Not answering", "detail": ""}}
+        app.peerlinks.link("xyz").lights = lambda: {"talking": {"status": "fail", "text": "Not answering", "detail": ""}}
         app.mirror_health._snap = None
         self.assertEqual(app.mirror_health.stamp("9"), stamp)
         app.mirror_health.running = None
@@ -14119,8 +14345,8 @@ class MirrorLinkTests(unittest.TestCase):
         app, _plex, _cat, other = self._mirror()
         app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}})                    # (the mirror's edits win: a file its Plex doesn't list is Mirror Checks's)
         other.cat["movies"].pop(0)
-        link = app.peerlink
-        link.lights = lambda: {"found": {"status": "ok", "text": "Plex Cache found on Cottage", "detail": ""}, "paired": {"status": "warn", "text": "Not paired", "detail": ""},
+        link = app.peerlinks.link("xyz")
+        link.lights = lambda: {"found": {"status": "ok", "text": "Plex Cache found on Cottage", "detail": ""}, "paired": {"status": "warn", "text": "Plex Cache found, but not paired", "detail": ""},
                                "talking": {"status": "off", "text": "Not talking", "detail": ""}, "folders": {"status": "off", "text": "Folder sync", "detail": ""},
                                "version": {"status": "off", "text": "Version and clock", "detail": ""}}
         # no Plex Cache known at the mirror's site yet: its files not compared, and nothing red anywhere
@@ -14139,7 +14365,7 @@ class MirrorLinkTests(unittest.TestCase):
         pages = PageStructureTests()
         text = pages._render(st, "system")["text"]
         card = text[text.index("Mirror Plex Cache"):text.index("Media Mappings")]
-        for said in ("Plex Cache found on Cottage", "Not paired", "Not talking", "Pair by itself", "Its address", "Pair Now", "Test Again"):
+        for said in ("Plex Cache found on Cottage", "Plex Cache found, but not paired", "Not talking", "Pair by itself", "Its address", "Pair Now", "Test Again"):
             self.assertIn(said, card)
         self.assertNotIn("Unpair", card)                                                          # (nothing paired)
         drawn = pages._render(st, "mirrorchecks")
@@ -14426,8 +14652,8 @@ class CountStandardTests(unittest.TestCase):
         self.assertIn('mirror_size_differs: mirrorBlock(', self._js())
         # held while .plexcache doesn't reach the other site
         self.assertTrue(tool.held_by_folder_sync)
-        app.peerlink.talking = lambda: True
-        app.peerlink.folder_sync = lambda: {"1": {"status": "fail"}}
+        app.peerlinks.link("xyz").talking = lambda: True
+        app.peerlinks.link("xyz").folder_sync = lambda: {"1": {"status": "fail"}}
         self.assertIsNotNone(app.mirror_health.hold("1"))
         got = dict(tool.analysis(data), library="1")
         with tool.lock:
@@ -14624,11 +14850,9 @@ class CountStandardTests(unittest.TestCase):
         app, _plex, _client, _cat, other = ToolsTests()._app(mirror=True)
         mh, ev = app.mirror_health, app.evaluator
         app.libdata.gather("1", wait=True)
-        real = app.other.client
-
         def unknown():
-            with app.other.lock:
-                app.other.libs, app.other.libs_at, app.other.error = None, 0.0, None
+            with app.mirrors.lock:
+                app.mirrors.libs.pop("xyz", None)
             mh._libs = mh._snap = None
 
         def said(key="1"):
@@ -14642,7 +14866,7 @@ class CountStandardTests(unittest.TestCase):
             self.assertEqual(c["s"], "pending")
             self.assertIn("Reading the mirror’s libraries", en(jsonable(c["why"])))
             self.assertIsNone(mh.not_applicable("1"))
-            self.assertNotIn("No mirror is watched", said())
+            self.assertNotIn("No library is mirrored", said())
             self.assertIn("Reading the mirror’s libraries", said())
             self.assertNotEqual(ev.count("sync", "1")["s"], "na")
             self.assertTrue(ev.units()["mirrorchecks"].busy("1"))
@@ -14650,18 +14874,18 @@ class CountStandardTests(unittest.TestCase):
             ev.started, mh.reading = started, False
         # not reached: failed, said why — never "no mirror"
 
-        def down(timeout=30):
+        def down(server, timeout=30):
             raise PlexError("Connection refused")
-        app.other.client = down
+        app.mirrors.client = down
         unknown()
         c = ev.count("mirrorchecks", "1")
         self.assertEqual(c["s"], "failed")
         self.assertIn("Connection refused", en(jsonable(c["why"])))
-        self.assertNotIn("No mirror is watched", said())
+        self.assertNotIn("No library is mirrored", said())
         self.assertIn("Connection refused", said())
         self.assertTrue(ev.settled("mirrorchecks", "1"))                                            # (what waits for it goes on)
         # reached: the library paired is compared
-        app.other.client = real
+        del app.mirrors.client
         unknown()
         self.assertIn("1", mh.libraries())
         self.assertIsNone(mh.waiting())
@@ -14674,7 +14898,7 @@ class CountStandardTests(unittest.TestCase):
         libs, app.libraries = app.libraries, []
         mh._snap = None
         self.assertEqual(mh.waiting(), ("pending", None))
-        self.assertNotIn("No mirror is watched", said())
+        self.assertNotIn("No library is mirrored", said())
         app.libraries = libs
         mh._snap = None
         self.assertIn("1", mh.libraries())
@@ -14694,7 +14918,7 @@ class CountStandardTests(unittest.TestCase):
         app.settings.update({"plex2": {"libraries": {"*": {"state": "none"}}}})
         unknown()
         self.assertEqual(ev.count("mirrorchecks", "1")["s"], "na")
-        self.assertIn("No mirror is watched", said())
+        self.assertIn("No library is mirrored", said())
 
     def test_a_count_so_far_has_the_colour_of_what_it_holds(self):
         """What's been found so far (partial) is coloured as a finished count would be, so its number never reads as the
@@ -14776,11 +15000,11 @@ class CountStandardTests(unittest.TestCase):
         self.assertIsNotNone(d.mirror)
         stamp, mirror = d.stamp, d.mirror
 
-        def down(timeout=30):
+        def down(server, timeout=30):
             raise PlexError("Connection refused")
-        app.other.client = down
-        with app.other.lock:
-            app.other.libs, app.other.libs_at, app.other.error = None, 0.0, None
+        app.mirrors.client = down
+        with app.mirrors.lock:
+            app.mirrors.libs.pop("xyz", None)
         self.assertEqual(app.libdata.mirror_of("1"), (None, None))
         app.libdata.gather("1", ("mirror",), wait=True)
         self.assertIs(d.mirror, mirror)
@@ -14868,3 +15092,2536 @@ class BlockStandardTests(unittest.TestCase):
         libhealth.set_ignored(app, "1", rk, None)                                                    # (the Library page's Bring Back: all)
         self.assertNotIn(rk, libhealth.ignored(app).get("1") or {})
         self.assertEqual(sync.mark_stops("1", [row], set()), 0)                                      # (merged: nothing stops it)
+
+
+class _FakeApp:
+    """A stand-in app for the small stores and helpers (converting.py, trash.py, plexbackup.py, safety.py): its JSON kept
+    in a dict, its events noted, its settings a dict of sections, its libraries and datasets whatever a test gives it."""
+
+    def __init__(self, **sections):
+        self.store, self.events, self.sections = {}, [], {"general": {}, "truenas": {}, "plex2": {}, **sections}
+        self.settings = types.SimpleNamespace(section=lambda name: self.sections.setdefault(name, {}), update=lambda d: [self.sections.setdefault(k, {}).update(v) for k, v in d.items()])
+        self.activity = types.SimpleNamespace(event=lambda *a, **k: self.events.append((en(a[1]) if len(a) > 1 else "", k)))
+        self.files, self.libraries, self.datasets, self.version, self.zfs, self.config_dir = [], [], [], "0", None, tempfile.mkdtemp(dir=TMP)
+
+    def _load_json(self, name):
+        return self.store.get(name)
+
+    def _save_json(self, name, data):
+        self.store[name] = json.loads(json.dumps(jsonable(data)))
+
+    def library_info(self, key):
+        return next((lib for lib in self.libraries if str(lib["key"]) == str(key)), None)
+
+    def library_datasets(self, key):
+        return list(self.datasets)
+
+    def map_path(self, path):
+        return path
+
+
+class FileActionTests(unittest.TestCase):
+    """The optimizer's file actions (optimize/files.py): what each refuses, the trash's folders pruned only when empty,
+    and a copy made where a link can't be or a swap failed."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(dir=TMP)
+
+    def _file(self, rel, data=b"abc"):
+        p = os.path.normpath(os.path.join(self.root, rel))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(data)
+        return p
+
+    def test_set_aside_put_back_and_purge(self):
+        from plexcache.optimize import files
+        root = self.root
+        folder = os.path.join(root, "sub")
+        os.makedirs(folder)
+        with self.assertRaisesRegex(ValueError, "not a plain file"):
+            files.set_aside(root, folder)                                                             # (a folder)
+        outside = self._file("../outside.mkv")
+        with self.assertRaisesRegex(ValueError, "not inside"):
+            files.set_aside(root, outside)
+        f = self._file("sub/a.mkv")
+        got = files.set_aside(root, f)
+        self.assertEqual(got, {"trashed": os.path.join(root, files.TRASH, "sub", "a.mkv")})
+        self.assertEqual(_read(os.path.join(root, files.TRASH, ".plexignore")), "*\n")
+        f2 = self._file("sub/a.mkv")
+        with self.assertRaisesRegex(ValueError, "already set aside"):
+            files.set_aside(root, f2)
+        with self.assertRaisesRegex(ValueError, "not in the trash"):
+            files.put_back(root, f2)
+        with self.assertRaisesRegex(ValueError, "a file is there now"):
+            files.put_back(root, got["trashed"])
+        os.remove(f2)
+        other = self._file(os.path.join(files.TRASH, "sub", "b.mkv"))                                 # (another file in the same trash folder)
+        self.assertEqual(files.put_back(root, got["trashed"]), {"path": f2})
+        self.assertTrue(os.path.isdir(os.path.dirname(other)))                                        # (not pruned: not empty)
+        with self.assertRaisesRegex(ValueError, "not in the trash"):
+            files.purge(root, f2)
+        self.assertEqual(files.purge(root, other), {"purged": True})
+        self.assertFalse(os.path.exists(os.path.join(root, files.TRASH, "sub")))                      # (pruned up to the trash, which keeps its .plexignore)
+        self.assertTrue(os.path.isdir(os.path.join(root, files.TRASH)))
+
+    def test_copies_links_and_removals(self):
+        from plexcache.optimize import files
+        root = self.root
+        a = self._file("a.mkv")
+        dst = os.path.join(root, "copy.mkv")
+        with mock.patch("shutil.copystat", side_effect=PermissionError("no")), mock.patch("os.chmod", side_effect=OSError("no")):
+            files.copy_keeping_dates(a, dst)                                                          # (ownership, flags and even the mode refused: the dates still)
+        self.assertEqual(os.stat(dst).st_mtime_ns, os.stat(a).st_mtime_ns)
+        os.makedirs(os.path.join(root, "sub"))
+        os.symlink(os.path.join(root, "sub"), os.path.join(root, "to-folder"))
+        with self.assertRaisesRegex(ValueError, "target isn't a file"):
+            files.make_real(os.path.join(root, "to-folder"))
+        with self.assertRaisesRegex(ValueError, "not a file or a link"):
+            files.make_real(os.path.join(root, "sub"))
+        link = os.path.join(root, "link.mkv")
+        os.symlink(a, link)
+        with mock.patch("os.replace", side_effect=OSError("busy")), self.assertRaises(OSError):
+            files.make_real(link)
+        self.assertEqual([n for n in os.listdir(root) if n.startswith(".plexcache-copy-")], [])       # (the copy removed again)
+        self.assertTrue(os.path.islink(link))
+        with self.assertRaisesRegex(ValueError, "there already"):
+            files.link(a, dst)
+        new = os.path.join(root, "new", "a.mkv")
+        with mock.patch("os.link", side_effect=OSError(18, "cross-device")):
+            self.assertEqual(files.link(a, new), {"linked": new})                                     # (another dataset: copied)
+        self.assertEqual((os.stat(new).st_nlink, _read(new, "rb")), (1, b"abc"))
+        with mock.patch("os.link", side_effect=OSError(13, "denied")), self.assertRaises(OSError):
+            files.link(a, os.path.join(root, "new", "b.mkv"))
+        with self.assertRaisesRegex(ValueError, "isn't there"):
+            files.unlink(new, keep=os.path.join(root, "nope.mkv"))
+        bigger = self._file("bigger.mkv", b"abcdef")
+        with self.assertRaisesRegex(ValueError, "isn't the same file"):
+            files.unlink(new, keep=bigger)
+        with mock.patch("os.listdir", side_effect=OSError("no")):
+            self.assertEqual(files.unlink(new, keep=a), {"removed": True})                             # (the same bytes elsewhere: fine; the folder's emptiness unknown)
+        self.assertTrue(os.path.isdir(os.path.join(root, "new")))
+        with self.assertRaisesRegex(ValueError, "isn't there"):
+            files.copy_from(a, os.path.join(root, "nope.mkv"))
+        with self.assertRaisesRegex(ValueError, "not a plain file"):
+            files.copy_from(os.path.join(root, "sub"), bigger)
+        with mock.patch("os.replace", side_effect=OSError("busy")), self.assertRaises(OSError):
+            files.copy_from(a, bigger)
+        self.assertEqual([n for n in os.listdir(root) if n.startswith(".plexcache-copy-")], [])
+        self.assertEqual(files.copy_from(a, bigger), {"bytes": 6})
+        self.assertEqual(files.copy_from(os.path.join(root, "fresh.mkv"), bigger), {"bytes": 6})       # (a path with nothing at it yet)
+
+
+class ConversionTests(unittest.TestCase):
+    """Converted files on their way into Plex (converting.py), on a stand-in app: each state when Plex, the mirror or
+    the optimizer service can't be asked, and the page's actions."""
+
+    def _app(self):
+        app = _FakeApp()
+        app.plex_calls, app.plex_fail, app.item_files, app.playing, app.mirrors = [], False, [], set(), None
+
+        class Client:
+            def scan(self_, library, folder):
+                app.plex_calls.append(("scan", library, folder))
+                if app.plex_fail:
+                    raise PlexError("Plex down")
+
+            def item_files(self_, rk):
+                if app.plex_fail:
+                    raise PlexError("Plex down")
+                return app.item_files
+
+        app.plex = lambda timeout=30: Client()
+        app.monitor = types.SimpleNamespace(playing_paths=lambda: app.playing)
+        app.delete = lambda p, n: os.remove(p)
+        app.optimizing = types.SimpleNamespace(client=types.SimpleNamespace(delete_original=lambda p, n: app.delete(p, n)))
+        return app
+
+    def test_states_refusals_and_actions(self):
+        from plexcache import converting
+        app = self._app()
+        d = tempfile.mkdtemp(dir=TMP)
+        orig, new = os.path.join(d, "a.avi"), os.path.join(d, "a MKV-AVI.mkv")
+        for p in (orig, new):
+            with open(p, "wb") as fh:
+                fh.write(b"x")
+        conv = converting.Conversions(app)
+        app.plex_fail = True
+        conv.add("1", "/plex/a.avi", orig, new, rating_key="7", title="A")
+        e = conv.items[0]
+        self.assertEqual((e["note"], e["state"]), ("Plex down", "waiting"))                          # (the scan that failed: said)
+        app.plex_fail = False
+        conv.busy = True                                                                              # (a tick while one runs: nothing)
+        e["checked"] = 0
+        conv.tick()
+        self.assertEqual(e["checked"], 0)
+        conv.busy = False
+        app.plex_fail = True
+        self.assertTrue(conv._check(e))                                                               # (Plex can't be asked: said, tried again)
+        self.assertEqual(e["note"], "Plex down")
+        app.plex_fail = False
+        F = lambda path, rk: types.SimpleNamespace(path=path, rating_key=rk)  # noqa: E731
+        app.files = [F("/plex/a.avi", "9"), F("/plex/a MKV-AVI.mkv", "9")]                            # (merged in Plex since: one item again)
+        app.playing = {orig}
+        e["checked"] = 0
+        self.assertTrue(conv._check(e))
+        self.assertEqual((e["state"], e["rating_key"], e["servers"]), ("seen", "9", {"here": "same"}))
+        self.assertTrue(os.path.exists(orig))                                                         # (playing: next time)
+        app.playing = set()
+
+        def refused(p, n):
+            raise urllib.error.HTTPError("http://x", 409, "conflict", {}, io.BytesIO(b'{"error": "the MKV is not there"}'))  # type: ignore[arg-type]
+
+        app.delete = refused
+        e["failed"] = 0
+        self.assertTrue(conv._check(e))                                                               # (seen: the deletion tried again, the service's reason kept)
+        self.assertEqual((e["state"], e["error"]), ("seen", "the MKV is not there"))
+
+        def down(p, n):
+            raise RuntimeError("down")
+
+        def odd(p, n):
+            raise urllib.error.HTTPError("http://x", 502, "bad gateway", {}, io.BytesIO(b"<html>"))  # type: ignore[arg-type]
+
+        app.delete = odd
+        e["failed"] = 0
+        conv._check(e)
+        self.assertEqual(e["error"], "bad gateway")                                                   # (an error that isn't the service's: its own reason)
+        app.delete = down
+        self.assertFalse(conv._check(e))                                                              # (failed just now: not tried again yet)
+        e["failed"] = 0
+        conv._check(e)
+        self.assertEqual(e["error"], "down")
+        with self.assertRaisesRegex(ValueError, "Not deleted: down"):
+            conv.act(orig, "delete")
+        e["state"] = "waiting"
+        with self.assertRaisesRegex(ValueError, "Not until Plex"):
+            conv.act(orig, "delete")
+        with self.assertRaisesRegex(ValueError, "no such"):
+            conv.act("/nope", "check")
+        with self.assertRaisesRegex(ValueError, "unknown action"):
+            conv.act(orig, "frobnicate")
+        e["rating_key"], e["checked"] = "7", 0
+        app.files = [F("/plex/a.avi", "7"), F("/plex/a MKV-AVI.mkv", "8")]                            # (an item of its own)
+        conv._check(e)
+        self.assertEqual(e["state"], "separate")
+
+        class Other:
+            def state_of(self_, key):
+                return "mirror"
+
+            def where(self_, e, now):
+                raise PlexError("mirror down")
+
+            def server_of(self_, key):
+                return "abc"
+
+            def name_of(self_, server):
+                return "Cabin"
+
+        class Unset(Other):
+            def state_of(self_, key):
+                return "unset"
+
+        app.mirrors = Other()
+        e["checked"] = 0
+        conv._check(e)
+        self.assertEqual(en(e["note"]), "Cabin: mirror down")
+        app.mirrors = Unset()                                                                           # (not decided on the Mirror page: waits, said once)
+        self.assertTrue(conv._check(e))
+        self.assertIn("isn’t chosen yet", en(e["note"]))
+        self.assertFalse(conv._check(e))
+        app.mirrors = None
+        e.update(state="waiting", checked=0, scanned=0, rating_key="")
+        app.files, app.plex_calls = [], []
+        conv._check(e)
+        self.assertEqual(app.plex_calls, [("scan", "1", "/plex")])                                     # (Plex hasn't got it after a while: the folder scanned again)
+        e["state"] = "deleted"
+        self.assertFalse(conv._check(e))
+        e.update(state="seen", failed=0)
+        app.delete = lambda p, n: os.remove(p)
+        conv.act(orig, "delete")
+        self.assertEqual((e["state"], os.path.exists(orig), "error" in e), ("deleted", False, False))
+        e["deleted"] = time.time() - converting.KEEP_DONE - 1
+        conv.tick()
+        self.assertEqual(conv.items, [])                                                              # (a deleted original drops off the list after KEEP_DONE)
+        conv.add("1", "/plex/a.avi", orig, new, rating_key="7", title="A")
+        e = conv.items[0]
+        os.remove(new)
+        e["checked"] = 0
+        self.assertTrue(conv._check(e))                                                               # (the MKV gone: missing, said once)
+        self.assertEqual(e["state"], "missing")
+        self.assertFalse(conv._check(e))
+
+
+class TrashTests(unittest.TestCase):
+    """Files the tools set aside (trash.py), on a stand-in app: held while Plex here or the mirror's lists them, purged
+    after the hold, and the page's actions."""
+
+    def _app(self):
+        app = _FakeApp()
+        app.libraries = [{"key": "1", "title": "Movies", "locations": ["/media/Movies"]}]
+        app.mirrors = None
+        app.file_action = lambda action, path, root="": {"ok": True}
+        app.optimizing = types.SimpleNamespace(client=types.SimpleNamespace(file_action=lambda *a, **k: app.file_action(*a, **k)))
+        return app
+
+    def test_holds_and_actions(self):
+        from plexcache import trash
+        app = self._app()
+        t = trash.Trash(app)
+        e = t.add("1", "/media/Movies/A/a.mkv", "/media/Movies/A/a.mkv", "/media/Movies/.plexcache-trash/A/a.mkv", "duplicate", "A")
+        self.assertEqual((t._root("1", "/media/Movies/A/a.mkv"), t._root("1", "/elsewhere/a.mkv")), ("/media/Movies", None))
+        t.busy = True
+        e["checked"] = 0
+        t.tick()
+        self.assertEqual(e["checked"], 0)                                                             # (a tick while one runs: nothing)
+        t.busy = False
+        e["checked"] = time.time()
+        self.assertFalse(t._check(e))                                                                 # (checked lately)
+
+        class NoFiles(_FakeApp):
+            @property
+            def files(self):
+                raise RuntimeError("not read")
+
+            @files.setter
+            def files(self, v):
+                pass
+
+        bad = NoFiles()
+        bad.libraries, bad.mirrors = app.libraries, None
+        t2 = trash.Trash(bad)
+        e2 = t2.add("1", "/media/Movies/A/b.mkv", "/media/Movies/A/b.mkv", "/media/Movies/.plexcache-trash/A/b.mkv", "duplicate")
+        self.assertTrue(t2._check(e2))
+        self.assertEqual((e2["here"], e2["there"]), (False, None))                                    # (Plex's listing not read: not taken as gone)
+
+        class Other:
+            fail = False
+
+            def mirror_for(self_, key):
+                return "LIB"
+
+            def index(self_, lib, fresh=False):
+                if self_.fail:
+                    raise PlexError("mirror down")
+                return {"/m/A/a.mkv": "5"}
+
+            def paths_there(self_, key, path, lib):
+                return ["/m/A/a.mkv"]
+
+        app.mirrors = Other()
+        e["checked"] = 0
+        self.assertTrue(t._check(e))
+        self.assertEqual((e["here"], e["there"]), (True, False))                                      # (the mirror's Plex still lists it: held)
+        app.mirrors.fail = True
+        e["checked"] = 0
+        self.assertTrue(t._check(e))
+        self.assertEqual(e["note"], "mirror down")
+        app.mirrors = None
+
+        def busy(action, path, root=""):
+            raise RuntimeError("busy")
+
+        app.file_action = busy
+        e.update(checked=0, clear_at=time.time() - 400 * 86400)
+        self.assertTrue(t._check(e))
+        self.assertEqual((e["state"], e["error"]), ("waiting", "busy"))                                # (the purge that failed: said, tried again)
+        with self.assertRaisesRegex(ValueError, "Not deleted: busy"):                                # (Purge Now while the service refuses: said, the error kept on the row)
+            t.act("/media/Movies/A/a.mkv", "purge")
+        self.assertEqual((e["state"], e["error"]), ("waiting", "busy"))
+        with self.assertRaisesRegex(ValueError, "unknown action"):
+            t.act("/media/Movies/A/a.mkv", "frobnicate")
+        with self.assertRaisesRegex(ValueError, "no such file"):
+            t.act("/nope", "purge")
+        t.act("/media/Movies/A/a.mkv", "keep")
+        self.assertEqual((e["state"], t.snapshot()["items"], t.snapshot()["hold_days"]), ("kept", [], 30))
+
+
+class SyncApplyTests(unittest.TestCase):
+    """Sync Libraries' applying (syncapply.py), with the two Plex clients stood in for: each kind of difference made
+    true on the side changed, and undone again from what the row had before."""
+
+    def test_apply_and_undo_each_kind(self):
+        from plexcache import syncapply
+        app = types.SimpleNamespace(mirrors=types.SimpleNamespace(pairs=lambda: {}, client=lambda server, timeout=120: None))
+        with self.assertRaisesRegex(ValueError, "isn’t paired"):
+            syncapply.ends(app, "1", "here")
+        src, dst = mock.Mock(), mock.Mock()
+        logs = []
+        log = lambda m: logs.append(en(m))  # noqa: E731
+        e = {"src": src, "dst": dst, "section": "9", "name": "Cabin", "server": "mirror"}
+        out = syncapply.apply({"scan": ["/a", "/b"]}, ["missing"], e, log)
+        self.assertEqual((out["scanned"], out["done"], logs[-1]), (["/a", "/b"], ["missing"], "Cabin’s Plex asked to scan 2 folders"))
+        self.assertEqual(syncapply.apply({"shape": "split", "dst_items": [{"key": "1"}]}, ["edits"], e, log)["done"], [])  # (merging not asked)
+        row = {"src": {"key": "1", "fields": {"title": "A"}, "locked": ["title", "genre"], "values": {"year": ""}, "tags": {"genre": ["Drama"]}, "matched": False, "guid": "",
+                       "art": ["art"], "art_path": "/art/1", "edition": "Cut", "collections": ["C"], "labels": []},
+               "dst": {"key": "2", "fields": {"summary": "s", "year": "2000"}, "locked": ["summary", "year", "director"], "values": {"summary": "s", "year": "2000"},
+                       "tags": {"director": ["X"]}, "guid": "plex://movie/2", "matched": True, "edition": "", "collections": [], "labels": ["kids"]}}
+        dst.images.side_effect = PlexError("no images")
+        src.image.return_value = b"IMG"
+        out = syncapply.apply(row, ["edits", "match", "art", "collections", "labels", "editions"], e, log)
+        self.assertEqual(out["done"], ["edits", "match", "art", "collections", "labels", "editions"])
+        self.assertEqual(dst.edit.call_args_list[0].args[3], {"title.value": "A", "title.locked": 1, "summary.value": "", "summary.locked": 0, "year.locked": 0})  # (edited only there: unlocked; a blank year not set)
+        self.assertEqual([(c.args[3], c.args[4], c.kwargs) for c in dst.set_tags.call_args_list],
+                         [("genre", ["Drama"], {"remove": [], "locked": True}), ("director", [], {"remove": ["X"], "locked": False}),
+                          ("collection", ["C"], {"remove": []}), ("label", [], {"remove": ["kids"]})])
+        dst.unmatch.assert_called_once_with("2")
+        dst.upload_image.assert_called_once_with("2", b"IMG", "arts")
+        self.assertEqual(dst.edit.call_args_list[1].args[3], {"editionTitle.value": "Cut", "editionTitle.locked": 1})
+        self.assertEqual((out["before"]["art"], out["after"]["editions"]), ({"art": ""}, "Cut"))
+        self.assertIn("The background chosen by hand uploaded and chosen", logs)
+        self.assertIn("Unmatched, as on the other side", logs)
+        # undone from what it had before
+        client = mock.Mock()
+        app.mirrors.client = lambda server, timeout=120: client
+        syncapply.undo(app, out, "A", log)
+        self.assertEqual(client.edit.call_args_list[0].args[3], {"title.value": "", "title.locked": 0, "summary.value": "s", "summary.locked": 1, "year.value": "2000", "year.locked": 1})
+        self.assertEqual([(c.args[3], c.args[4], c.kwargs) for c in client.set_tags.call_args_list],
+                         [("genre", [], {"remove": ["Drama"], "locked": False}), ("director", ["X"], {"remove": [], "locked": True}),
+                          ("collection", [], {"remove": ["C"]}), ("label", ["kids"], {"remove": []})])
+        client.match.assert_called_once_with("2", "plex://movie/2", "A")
+        self.assertEqual(client.edit.call_args_list[1].args[3], {"editionTitle.value": "", "editionTitle.locked": 0})
+        self.assertIn("The background chosen before couldn’t be told: choose it in Plex", logs)
+        self.assertEqual(logs[-1], "The edition put back")
+        logs.clear()
+        syncapply.undo(app, {"done": ["match", "grouping", "missing"], "before": {"match": {"guid": "", "matched": False}}, "after": {}, "dst_key": "2", "server": "mirror"}, "A", log)
+        client.unmatch.assert_called_once_with("2")
+        self.assertEqual(logs, ["The match put back", "The merge can’t be undone without the backup: split the item in Plex", "Nothing to put back for the scan: it only had Plex look at the folder"])
+
+
+class _RecordClient:
+    """A Plex client for the records (plexbackup.py): each answered from XML, every change noted."""
+
+    def __init__(self, records):
+        self.records, self.calls, self.fail, self.fail_leaves, self.images_fail, self.chosen, self.items, self.items_fail, self.split_fail = records, [], None, False, False, {}, [], False, False
+
+    def get(self, path, params=None):
+        import xml.etree.ElementTree as ET
+        if self.fail:
+            raise PlexError(self.fail)
+        m = re.fullmatch(r"/library/metadata/(\d+)(/allLeaves)?", path)
+        assert m, path
+        if m.group(2):
+            if self.fail_leaves:
+                raise PlexError("HTTP 500")
+            return [ET.fromstring(x) for x in self.records.get(m.group(1) + "/leaves", [])]
+        if m.group(1) not in self.records:
+            raise PlexError("HTTP 404")
+        xml = self.records[m.group(1)]
+        return [ET.fromstring(xml)] if xml else []
+
+    def images(self, key, many):
+        if self.images_fail:
+            raise PlexError("no images")
+        return [{"id": self.chosen.get((key, many), ""), "selected": True}]
+
+    def library_items(self, section, leaf):
+        if self.items_fail:
+            raise PlexError("down")
+        return self.items
+
+    def split(self, key):
+        if self.split_fail:
+            raise PlexError("can’t split")
+        self.calls.append(("split", key))
+
+    def __getattr__(self, name):
+        if name in ("match", "unmatch", "edit", "set_tags", "set_image", "merge"):
+            return lambda *a, **k: self.calls.append((name, *a, k))
+        raise AttributeError(name)
+
+
+class PlexBackupTests(unittest.TestCase):
+    """The backup of Plex's records (plexbackup.py) on a stand-in app and client: a record read in every shape, a
+    backup that can't be taken, each thing put back, and a revert's refusals and failures."""
+
+    def test_read_session_put_back_and_revert(self):
+        from plexcache import plexbackup
+        app = _FakeApp(general={"backup": "snapshot", "backup_days": 5})
+        movie = ('<Video type="movie" ratingKey="1" title="A" guid="plex://movie/1" librarySectionID="3"><Field locked="1" name="title"/>'
+                 '<Media><Part file="/m/a.mkv" size="1"/></Media></Video>')
+        c = _RecordClient({"1": movie, "2": '<Directory type="show" ratingKey="2" title="S" librarySectionID="4"/>', "3": "",
+                           "2/leaves": ['<Video type="episode" ratingKey="21"><Media><Part file="/t/e1.mkv"/></Media></Video>']})
+        c.chosen = {("1", "posters"): "upload://posters/old"}
+        rec = plexbackup.read(c, "1")
+        self.assertEqual((rec["section"], rec["locked"], rec["files"], rec["images"]), ("3", ["title"], ["/m/a.mkv"], {"thumb": "upload://posters/old", "art": ""}))
+        self.assertEqual(plexbackup.read(c, "2")["files"], ["/t/e1.mkv"])                              # (a show's files: its episodes')
+        c.fail_leaves = True
+        self.assertEqual(plexbackup.read(c, "2")["files"], [])
+        self.assertIsNone(plexbackup.read(c, "3"))                                                    # (an empty answer)
+        self.assertIsNone(plexbackup.read(c, "9"))                                                    # (no such record)
+        c.fail = "HTTP 500"
+        with self.assertRaises(PlexError):
+            plexbackup.read(c, "1")
+        c.fail = None
+        c.images_fail = True
+        self.assertEqual(plexbackup.read(c, "1")["images"], {"thumb": "", "art": ""})
+        c.images_fail = False
+        # a process's backup: the records taken first — one that can't be read stops it, and no backup is left behind
+        app.plex = lambda timeout=120: c
+        c.fail = "HTTP 500"
+        with self.assertRaisesRegex(ValueError, "couldn’t be read"):
+            with plexbackup.session(app, "x", keys=["1"]):
+                pass
+        self.assertEqual(plexbackup.backups(app), [])
+        c.fail = None
+        with plexbackup.session(app, "x", keys=["1", "2"]) as b:
+            self.assertEqual(b["library"], "3")                                                       # (the library: the first record's)
+        self.assertEqual(len(plexbackup.backups(app)), 1)
+        # put back: no record now; unmatched again; the edition; the poster chosen
+        with self.assertRaisesRegex(ValueError, "no record 9"):
+            plexbackup.put_back(c, "3", {"key": "9"}, "9")
+        rec = dict(plexbackup.read(c, "1"), guid="", matched=False, edition="Cut", images={"thumb": "upload://posters/new", "art": ""})
+        self.assertEqual(plexbackup.put_back(c, "3", rec, "1"), ["match", "fields", "thumb"])
+        self.assertEqual([x[0] for x in c.calls], ["unmatch", "edit", "set_image"])
+        self.assertEqual(c.calls[1][4], {"editionTitle.value": "Cut", "editionTitle.locked": 1})
+        self.assertEqual(c.calls[2][1:3], ("1", "upload://posters/new"))
+        # the record holding a backed-up record's files now: none without files; Plex not answering, until the wait is up
+        self.assertIsNone(plexbackup._holder(c, "3", {"files": []}))
+        c.items_fail = True
+        with mock.patch.object(plexbackup, "FIND_WAIT", 0.05), mock.patch.object(plexbackup, "FIND_POLL", 0.01):
+            self.assertIsNone(plexbackup._holder(c, "3", {"files": ["/m/a.mkv"], "type": "movie"}))
+        c.items_fail = False
+        c.items = [{"key": "5", "files": [("/m/a.mkv", 1)]}]
+        self.assertEqual(plexbackup._holder(c, "3", {"files": ["/m/a.mkv"], "type": "movie"}), "5")
+        # revert: no such backup; expired; a merge that can't be split apart; a record no record holds the files of; a
+        # key it hasn't got; some of its records only
+        with self.assertRaisesRegex(ValueError, "No such backup"):
+            plexbackup.revert(app, "nope")
+        b["until"] = time.time() - 1
+        with self.assertRaisesRegex(ValueError, "expired"):
+            plexbackup.revert(app, b["id"])
+        b["until"] = time.time() + 100
+        b["ops"] = [{"op": "merge", "keep": "1", "others": ["8"]}]
+        b["items"]["1"]["files"] = ["/m/gone.mkv"]
+        c.split_fail, c.items = True, []
+        with mock.patch.object(plexbackup, "FIND_WAIT", 0):
+            got = plexbackup.revert(app, b["id"], keys=["8"])
+        self.assertEqual((got["restored"], got["failed"], [en(x) for x in got["left"]]), (0, 1, ["A wasn’t split apart: can’t split", "A: no record holds its files now"]))
+        self.assertEqual((b.get("reverted"), b["reverted_keys"]), (False, ["1", "8"]))               # (some of its records: open still)
+        self.assertEqual(app.events[-1][1], {"level": "warn"})
+        b["ops"], b["items"]["1"]["files"] = [], ["/m/a.mkv"]
+        self.assertEqual(plexbackup.revert(app, b["id"])["restored"], 2)
+        self.assertTrue(b["reverted"])
+        with self.assertRaisesRegex(ValueError, "Reverted already"):
+            plexbackup.revert(app, b["id"])
+        self.assertEqual(plexbackup.prune(app), 0)
+
+
+class SafetyTests(unittest.TestCase):
+    """Room and backups before files change (safety.py), on a stand-in app: folders that can't be read, the snapshots
+    found under .zfs and through TrueNAS, and what each TrueNAS call does when it fails."""
+
+    def _app(self):
+        app = _FakeApp()
+        self.d = tempfile.mkdtemp(dir=TMP)
+        app.libraries = [{"key": "1", "title": "Movies -- Old", "locations": [self.d, "/nope/nowhere"]}, {"key": "2", "title": "Nowhere", "locations": ["/nope/nowhere"]}]
+        app.datasets = [{"dataset": "tank/media", "mountpoint": self.d}]
+        self.tn = types.SimpleNamespace(calls=[], fail={}, answers={})
+
+        def call(method, params):
+            self.tn.calls.append((method, params))
+            if method in self.tn.fail:
+                raise RuntimeError(self.tn.fail[method])
+            return self.tn.answers.get(method, [])
+
+        self.tn.call = call
+        app.truenas = lambda: contextlib.nullcontext(self.tn)
+        return app
+
+    def test_space_life_and_snapshots(self):
+        from plexcache import safety
+        app = self._app()
+        self.assertEqual(safety.space(app, "1", 1)["status"], "ok")                                   # (a folder that can't be read: skipped)
+        self.assertIn("can’t be read here", en(safety.space(app, "2", 1)["text"]))
+        app.sections["general"]["backup_days"] = "soon"
+        self.assertEqual(safety.life(app), safety.LIFE)
+        app.sections["general"]["backup_days"] = 7
+        self.assertEqual((safety._slug("Movies -- Old"), safety._slug("")), ("movies-old", "library"))
+        # the newest snapshot: under .zfs/snapshot, and (TrueNAS connected) what the API lists, each creation read
+        sdir = os.path.join(self.d, ".zfs", "snapshot")
+        os.makedirs(os.path.join(sdir, "auto-1"))
+        os.utime(os.path.join(sdir, "auto-1"), (1000, 1000))
+        self.assertEqual(safety.newest_snapshot(app, "1"), (1000, "auto-1"))
+        with mock.patch("os.lstat", side_effect=OSError("gone")):
+            self.assertEqual(safety.newest_snapshot(app, "1"), (None, ""))                            # (a snapshot folder that can't be read: skipped)
+        app.sections["truenas"] = {"url": "http://nas", "api_key": "k"}
+        self.tn.answers["pool.snapshot.query"] = [{"name": "tank/media@none", "properties": {}}, {"name": "tank/media@odd", "properties": {"creation": "soon"}},
+                                                  {"name": "tank/media@new", "properties": {"creation": {"rawvalue": "2000"}}}]
+        self.assertEqual(safety.newest_snapshot(app, "1"), (2000.0, "tank/media@new"))
+        self.assertEqual(app._snapshot_api, "pool.snapshot")
+        app.truenas = lambda: (_ for _ in ()).throw(RuntimeError("no"))
+        self.assertEqual(safety.newest_snapshot(app, "1"), (1000, "auto-1"))                          # (TrueNAS not answering: the folder's word)
+        app.truenas = lambda: contextlib.nullcontext(self.tn)
+        # taking one: TrueNAS not connected, the dataset unknown; deleting the old ones: each failure said
+        app.sections["truenas"] = {}
+        with self.assertRaisesRegex(ValueError, "TrueNAS API"):
+            safety.take_snapshot(app, "1", "merge")
+        self.assertIn("snapshot not taken", app.events[-1][0])
+        self.assertEqual(safety.readiness(app, "1")["error"]["text"], safety.errors(app)["1"]["text"])
+        app.sections["truenas"] = {"url": "http://nas", "api_key": "k"}
+        with self.assertRaisesRegex(ValueError, "dataset isn’t known"):
+            safety.take_snapshot(app, "2", "merge")
+        made = safety.take_snapshot(app, "1", "merge")
+        self.assertRegex(made[0], r"^tank/media@plexcache-merge-movies-old-\d{8}-\d{4}$")
+        self.assertNotIn("1", safety.errors(app))
+        self.assertEqual(safety.prune_snapshots(app), 0)                                              # (none old yet)
+        safety.taken(app)[0]["at"] = time.time() - 400 * 86400
+        app.sections["truenas"] = {}
+        self.assertEqual(safety.prune_snapshots(app), 0)                                              # (TrueNAS not connected: kept)
+        app.sections["truenas"] = {"url": "http://nas", "api_key": "k"}
+        self.tn.fail["pool.snapshot.delete"] = "busy"
+        self.assertEqual(safety.prune_snapshots(app), 0)
+        self.assertIn("not deleted: busy", app.events[-1][0])
+        app.truenas = lambda: (_ for _ in ()).throw(RuntimeError("no"))
+        self.assertEqual(safety.prune_snapshots(app), 0)
+        app.truenas = lambda: contextlib.nullcontext(self.tn)
+        del self.tn.fail["pool.snapshot.delete"]
+        self.assertEqual(safety.prune_snapshots(app), 1)
+        self.assertEqual(safety.taken(app), [])
+        # rolling back
+        app.sections["truenas"] = {}
+        with self.assertRaisesRegex(ValueError, "TrueNAS API"):
+            safety.rollback(app, made)
+        app.sections["truenas"] = {"url": "http://nas", "api_key": "k"}
+        self.tn.fail["pool.snapshot.rollback"] = "refused"
+        with self.assertRaisesRegex(ValueError, "didn’t roll back tank/media@.*: refused"):
+            safety.rollback(app, made)
+        del self.tn.fail["pool.snapshot.rollback"]
+        self.assertEqual(safety.rollback(app, made), made)
+        self.assertEqual(self.tn.calls[-1], ("pool.snapshot.rollback", [made[0], {"force": True}]))
+
+
+def _http_error(code: int, body: bytes, msg: str = "error") -> urllib.error.HTTPError:
+    """An HTTP error as urllib raises it, with its response body (a new one each time: a body reads once)."""
+    return urllib.error.HTTPError("http://x", code, msg, {}, io.BytesIO(body))  # type: ignore[arg-type]
+
+
+
+def _raise(e):
+    raise e
+
+
+class _Resp:
+    """A response as urlopen gives one: a context manager with the bytes."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def read(self, n=-1):
+        return self.data
+
+
+class ServerRouteTests(unittest.TestCase):
+    """The API routes the pages use for the tools, the mirror, the peer link, the processes and the records, each
+    with its part of the app stood in for: what each answers, and how a refusal reaches the page."""
+
+    @classmethod
+    def setUpClass(cls):
+        from plexcache.server import serve
+        cls.app = _new_app()
+        cls.httpd = serve(cls.app, "127.0.0.1", 0)
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def req(self, method, path, body=None):
+        """(status, the JSON answer — or the bytes when it isn't JSON, headers)."""
+        data = json.dumps(body).encode() if body is not None else None
+        r = urllib.request.Request(self.base + path, data=data, method=method)
+        if data is not None:
+            r.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(r) as resp:
+                status, raw, headers = resp.status, resp.read(), resp.headers
+        except urllib.error.HTTPError as e:
+            with e:
+                status, raw, headers = e.code, e.read(), e.headers
+        try:
+            return status, json.loads(raw), headers
+        except ValueError:
+            return status, raw, headers
+
+    def _lib(self, key="1", **more):
+        return mock.patch.object(self.app, "library_info", lambda k: dict({"key": key, "title": "Movies", "kind": "movie", "locations": []}, **more) if str(k) == key else None)
+
+    def test_build_id_and_peer_requests(self):
+        from plexcache import server
+        with mock.patch("builtins.open", side_effect=OSError("no")):
+            self.assertEqual(len(server._build_id()), 12)                                             # (a file that can't be read: left out)
+        import http.client
+        for length, want in (("abc", 400), (str(2 * 1024 * 1024), 400)):
+            conn = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=10)
+            conn.putrequest("POST", "/peer/v1/pair")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", length)
+            conn.endheaders()
+            self.assertEqual(conn.getresponse().status, want, length)
+            conn.close()
+        with mock.patch.object(self.app, "peerlinks", None):
+            self.assertEqual(self.req("GET", "/peer/v1/hello")[0], 404)
+
+    def test_state_focus_readiness_and_optimizer_files(self):
+        with mock.patch.object(self.app.evaluator, "focus") as focus:
+            self.assertEqual(self.req("GET", "/api/state?focus=optimizer:1")[0], 200)
+            focus.assert_called_once_with("optimizer", "1")
+        self.assertEqual(self.req("GET", "/api/tools/readiness?key=9")[0], 404)
+        fake = lambda app, key, need, keeps=False, retained=0, tool="": {"key": key, "need": need, "keeps": keeps, "retained": retained, "tool": tool}  # noqa: E731
+        with self._lib(), mock.patch("plexcache.safety.readiness", side_effect=fake), mock.patch.object(self.app.optimizing, "summary", {"1": {"todo_bytes": 77}}):
+            self.assertEqual(self.req("GET", "/api/tools/readiness?key=1&needed=abc&retained=x&keeps=1")[1], {"key": "1", "need": 0, "keeps": True, "retained": 0, "tool": ""})
+            self.assertEqual(self.req("GET", "/api/tools/readiness?key=1&needed=largest&tool=optimizer")[1], {"key": "1", "need": "largest", "keeps": False, "retained": 77, "tool": "optimizer"})
+            self.assertEqual(self.req("GET", "/api/tools/readiness?key=1&needed=500&retained=3")[1]["retained"], 3)
+            self.assertEqual(self.req("GET", "/api/optimizer/files?key=1&offset=abc")[0], 400)
+
+    def test_library_health_kept_or_waited_for(self):
+        self.assertEqual(self.req("GET", "/api/library/health?key=9")[0], 404)
+        with self._lib(), mock.patch.object(self.app.evaluator, "started", True), mock.patch.object(self.app, "health_current", lambda k, cat=None: False):
+            with mock.patch.object(self.app, "health_kept", lambda k: {"kept": True}):
+                self.assertEqual(self.req("GET", "/api/library/health?key=1")[1], {"kept": True})         # (the answer kept while it's worked out again)
+            with mock.patch.object(self.app, "health_kept", lambda k: None), mock.patch.object(self.app.evaluator, "bring", side_effect=ValueError(M("Still waiting"))):
+                self.assertEqual(self.req("GET", "/api/library/health?key=1")[0], 503)
+            with mock.patch.object(self.app, "health_kept", lambda k: None), mock.patch.object(self.app.evaluator, "bring", return_value=None), \
+                    mock.patch.object(self.app, "library_health", lambda k: {"items": []}):
+                self.assertEqual(self.req("GET", "/api/library/health?key=1")[1], {"items": []})
+
+    def test_match_route(self):
+        q = urllib.parse.quote("plex://movie/1", safe="")
+        with mock.patch.object(self.app, "match_info", lambda guid, image=False: None if guid != "plex://movie/1" else b"JPG" if image else {"title": "A"}):
+            self.assertEqual(self.req("GET", f"/api/match?guid={q}")[1], {"title": "A"})
+            status, body, headers = self.req("GET", f"/api/match?guid={q}&image=1")
+            self.assertEqual((status, body, headers["Content-Type"]), (200, b"JPG", "image/jpeg"))
+            self.assertEqual(self.req("GET", "/api/match?guid=plex")[0], 404)
+        with mock.patch.object(self.app, "match_info", side_effect=OSError("away")):
+            self.assertEqual(self.req("GET", f"/api/match?guid={q}")[0], 404)
+
+    def test_optimize_library_refusals(self):
+        not_ready = {"ready": False, "space": {"status": "warn", "text": M("Only 1 GB free")}, "backup": {"status": "ok", "text": ""}}
+        with self._lib(), mock.patch("plexcache.peers.optimizer_conflict", return_value=None), mock.patch.object(self.app.mirror_health, "hold", return_value=None):
+            with mock.patch("plexcache.safety.readiness", return_value=not_ready):
+                status, body, _ = self.req("POST", "/api/optimize/library", {"library": "1"})
+                self.assertEqual((status, en(body["error"])), (400, "Not yet: Only 1 GB free"))
+            with mock.patch("plexcache.safety.readiness", return_value={"ready": True}), mock.patch.object(self.app.optimizing, "queue", return_value="queued"):
+                self.assertEqual(self.req("POST", "/api/optimize/library", {"library": "1", "files": "nope"})[0], 400)
+                self.assertEqual(self.req("POST", "/api/optimize/library", {"library": "1", "files": ["/m/a.mkv"]})[1], {"started": False, "queued": True})
+
+    def test_peer_sync_update_and_snapshot_routes(self):
+        links = self.app.peerlinks
+        link = links.link("xyz")
+        with mock.patch.object(link, "pair_now") as pn, mock.patch.object(link, "unpair") as up, mock.patch.object(links, "snapshot", return_value={"ok": 1}), \
+                mock.patch.object(links, "tick_async") as ta:
+            self.assertEqual(self.req("POST", "/api/peer/pair", {"server": "xyz"})[1], {"ok": 1})
+            self.assertEqual(self.req("POST", "/api/peer/unpair", {"server": "xyz"})[1], {"ok": 1})
+            self.assertEqual(self.req("POST", "/api/peer/test", {})[1], {"ok": 1})
+            self.assertEqual((pn.call_count, up.call_count, ta.call_count), (1, 1, 1))
+            self.assertEqual(self.req("POST", "/api/peer/nope", {"server": "xyz"})[0], 400)
+            self.assertEqual(self.req("POST", "/api/peer/pair", {})[0], 400)                        # (which mirror: its server)
+        with mock.patch.object(self.app.sync, "discover_async") as d:
+            self.assertEqual(self.req("POST", "/api/sync/discover", {})[1], {"started": True})
+            d.assert_called_once()
+        with mock.patch.object(self.app.updates, "check_async") as c, mock.patch.object(self.app.updates, "status", return_value={"checked": 1}):
+            self.assertEqual(self.req("POST", "/api/updates/check", {})[1], {"checked": 1})
+            c.assert_called_once()
+        with mock.patch.object(self.app, "update_now", return_value={"updating": True, "app": "plex-cache"}):
+            self.assertEqual(self.req("POST", "/api/updates/apply", {})[1], {"updating": True, "app": "plex-cache"})
+        with mock.patch.object(self.app, "update_now", side_effect=ValueError(M("No update is available."))):
+            status, body, _ = self.req("POST", "/api/updates/apply", {})
+            self.assertEqual((status, en(body["error"])), (400, "No update is available."))
+        from plexcache import safety
+        self.assertEqual(self.req("POST", "/api/tools/snapshot", {"library": "9"})[0], 400)
+        with self._lib(), mock.patch("plexcache.safety.readiness", return_value={"ready": True}), mock.patch("plexcache.safety.take_snapshot", side_effect=[ValueError("nope"), ["tank@x"]]):
+            safety.errors(self.app)["1"] = {"at": 1, "text": "old"}
+            self.assertEqual(self.req("POST", "/api/tools/snapshot", {"library": "1", "action": "dismiss"})[1], {"ready": True})
+            self.assertNotIn("1", safety.errors(self.app))
+            status, body, _ = self.req("POST", "/api/tools/snapshot", {"library": "1", "action": "take", "tool": "merge"})
+            self.assertEqual((status, en(body["error"])), (400, "nope"))
+            self.assertEqual(self.req("POST", "/api/tools/snapshot", {"library": "1", "action": "take", "tool": "merge"})[1], {"ready": True})
+
+    def test_tool_trash_conversion_and_migration_routes(self):
+        name, tool = next(iter(self.app.tools.items()))
+        with mock.patch.object(tool, "apply_async", side_effect=ValueError(M("Nothing to do."))):
+            status, body, _ = self.req("POST", f"/api/tools/{name}", {"action": "apply", "ids": ["1"]})
+            self.assertEqual((status, en(body["error"])), (400, "Nothing to do."))
+            self.assertEqual(self.req("POST", f"/api/tools/{name}", {"action": "frob"})[0], 400)
+        with mock.patch.object(self.app.trash, "act") as act, mock.patch.object(self.app.trash, "snapshot", return_value={"items": []}):
+            self.assertEqual(self.req("POST", "/api/trash", {"path": "/a", "action": "keep"})[1], {"items": []})
+            act.assert_called_once_with("/a", "keep")
+        with mock.patch.object(self.app.conversions, "act") as act, mock.patch.object(self.app.conversions, "snapshot", return_value={"items": []}):
+            self.assertEqual(self.req("POST", "/api/conversions", {"original": "/a", "action": "check"})[1], {"items": []})
+            act.assert_called_once_with("/a", "check")
+        with mock.patch.object(self.app.conversions, "act", side_effect=ValueError("no such converted file")):
+            self.assertEqual(self.req("POST", "/api/conversions", {"original": "/a", "action": "check"})[0], 400)
+        mig = self.app.migration
+        with mock.patch.object(mig, "set_scope", return_value={"scope": "here"}), mock.patch.object(mig, "confirm", return_value={"ok": 1}), \
+                mock.patch.object(mig, "pass_then_move", return_value={"pass": 1}), mock.patch.object(mig, "restart", return_value={"restart": 1}):
+            for action, want in (("scope", {"scope": "here"}), ("sync_paused", {"ok": 1}), ("pass_then_move", {"pass": 1}), ("restart", {"restart": 1})):
+                self.assertEqual(self.req("POST", "/api/migration", {"action": action, "scope": "here"})[1], want, action)
+
+    def test_health_ignore_and_job_revert_routes(self):
+        self.assertEqual(self.req("POST", "/api/library/health/ignore", {"library": "9", "item": "1"})[0], 400)
+        with self._lib(), mock.patch("plexcache.libhealth.scanning", side_effect=[M("Scanning now"), None, None, None]), mock.patch("plexcache.libhealth.set_ignored") as si:
+            self.assertEqual(self.req("POST", "/api/library/health/ignore", {"library": "1", "item": "5", "action": "ignore", "ids": ["x"]})[0], 400)  # (busy: refused)
+            self.assertEqual(self.req("POST", "/api/library/health/ignore", {"library": "1", "item": "5", "action": "ignore", "ids": ["x"]})[1], {"ok": True})
+            si.assert_called_with(self.app, "1", "5", ["x"])
+            self.assertEqual(self.req("POST", "/api/library/health/ignore", {"library": "1", "item": "5", "action": "restore"})[1], {"ok": True})
+            si.assert_called_with(self.app, "1", "5", None, restore=True)
+            self.assertEqual(self.req("POST", "/api/library/health/ignore", {"library": "1", "item": "5", "action": "frob"})[0], 400)
+        with mock.patch("plexcache.plexbackup.revert", return_value={"restored": 1, "failed": 0, "left": []}):
+            self.assertEqual(self.req("POST", "/api/job", {"action": "plex_revert", "id": "x"})[1], {"restored": 1, "failed": 0, "left": []})
+        with mock.patch("plexcache.plexbackup.revert", side_effect=ValueError(M("No such backup."))):
+            status, body, _ = self.req("POST", "/api/job", {"action": "plex_revert", "id": "x"})
+            self.assertEqual((status, en(body["error"])), (400, "No such backup."))
+        with mock.patch("plexcache.tools.revert_job", return_value={"reverted": 1, "failed": 0}), mock.patch("plexcache.tools.rollback_job", side_effect=ValueError("Not a tool’s run.")):
+            self.assertEqual(self.req("POST", "/api/job", {"action": "revert", "job": "j"})[1], {"reverted": 1, "failed": 0})
+            self.assertEqual(self.req("POST", "/api/job", {"action": "rollback", "job": "j"})[0], 400)
+
+    def test_second_server_routes(self):
+        other = self.app.mirrors
+        with mock.patch.object(other, "list_servers", return_value=[{"id": "x"}]), mock.patch.object(other, "set_address") as sa, \
+                mock.patch.object(other, "choose", return_value=M("Movies: no mirror")) as ch, mock.patch.object(other, "forget") as fg, \
+                mock.patch.object(other, "refresh") as rf, mock.patch.object(other, "snapshot", return_value={"snap": 1}):
+            self.assertEqual(self.req("POST", "/api/plex2/servers", {})[1], {"servers": [{"id": "x"}]})
+            self.assertEqual(self.req("POST", "/api/plex2/address", {"server": "x", "url": "http://10.0.0.2:32400"})[1], {"snap": 1})
+            sa.assert_called_once_with("x", "http://10.0.0.2:32400")
+            self.assertEqual(self.req("POST", "/api/plex2/choose", {"key": "1", "state": "mirror", "server": "x", "their_key": "7"})[1], {"snap": 1})
+            ch.assert_called_once_with("1", "mirror", "x", "7")
+            self.assertEqual(self.req("POST", "/api/plex2/forget", {"server": "x"})[1], {"snap": 1})
+            self.assertEqual(self.req("POST", "/api/plex2/refresh", {})[1], {"snap": 1})
+            fg.assert_called_once_with("x")
+            rf.assert_called_once()
+        with mock.patch.object(other, "choose", side_effect=ValueError(M("Choose a library of one of your account’s servers."))):
+            status, body, _ = self.req("POST", "/api/plex2/choose", {"key": "1", "state": "mirror"})
+            self.assertEqual((status, en(body["error"])), (400, "Choose a library of one of your account’s servers."))
+        with mock.patch("plexcache.server.check_pin", return_value="acct-token"):
+            self.assertEqual(self.req("POST", "/api/plex2/pin/4242", {})[1], {"done": True})          # (the second server's sign-in: its account's token, kept apart)
+            self.assertEqual(self.app.settings.section("plex2")["account_token"], "acct-token")
+
+
+class PeerLinkEdgeTests(unittest.TestCase):
+    """The link to the Plex Cache at the mirror's site (peerlink.py) at its edges: the addresses and ports worked out,
+    a probe or request that fails each way, pairing refused each way, the regular look's turns, and what the folder-sync
+    and version lights say of each state."""
+
+    def _side(self, me, mirror):
+        from plexcache.server import serve
+        app = App(tempfile.mkdtemp(dir=TMP))
+        httpd = serve(app, "127.0.0.1", 0)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        app.settings.update({"plex2": {"servers": {mirror: {"name": mirror, "url": "http://127.0.0.1:1", "token": "t"}}, "libraries": {"*": {"state": "mirror", "server": mirror, "key": ""}}}})
+        app.peerlinks._own_plex = (time.time() + 1e9, me)
+        app.mirror_link = app.peerlinks.link(mirror)
+        app.mirror_link._hosts = (time.time() + 1e9, [])
+        app.plex_name = me
+        return app, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def _paired(self):
+        """Two sides paired by their markers, talking."""
+        a, ua = self._side("plexA", "plexB")
+        b, ub = self._side("plexB", "plexA")
+        a.settings.update({"peer": {"servers": {"plexB": {"url": ub}}}})
+        b.settings.update({"peer": {"servers": {"plexA": {"url": ua}}}})
+        a.mirror_link._marker_public = lambda inst: b.mirror_link.public()
+        b.mirror_link._marker_public = lambda inst: a.mirror_link.public()
+        a.mirror_link.tick(force=True)
+        self.assertTrue(a.mirror_link.talking())
+        return a, ua, b, ub
+
+    def test_addresses_ports_and_candidates(self):
+        from plexcache import peerlink as pl
+        self.assertEqual((pl.base_url("http:///x"), pl._host_of("http://[bad"), pl._host_of("http://x")), ("", "", "x"))
+        a, ua = self._side("plexA", "plexB")
+        link = a.mirror_link
+        a.web_url = "http://[bad"
+        with mock.patch.dict(os.environ, {"PLEXCACHE_PORT": "abc"}):
+            self.assertEqual(a.peerlinks.own_port(), pl.PORT)                                                # (neither the page's address nor the port variable say)
+        a.web_url = "http://10.0.0.2:9000"
+        self.assertEqual(a.peerlinks.own_port(), 9000)
+        apps = [{"active_workloads": {"container_details": [{"id": "abc123def456xyz"}], "used_ports": [{"container_port": 8642, "host_ports": [{"host_port": "8643"}]}]}},
+                {"active_workloads": {"container_details": [{"id": "other"}]}}]
+        tn = types.SimpleNamespace(apps=lambda: apps)
+        a.settings.update({"truenas": {"url": "https://nas.local", "api_key": "k"}})
+        with mock.patch("plexcache.zfs.own_container_id", return_value="abc123def456"), mock.patch.object(a, "truenas", lambda: contextlib.nullcontext(tn)), \
+                mock.patch.dict(os.environ, {"PLEXCACHE_PORT": "8642"}):
+            a.peerlinks._tn_port = (0.0, None)
+            self.assertEqual((a.peerlinks._truenas_port(), a.peerlinks.own_port()), (8643, 8643))                   # (the port TrueNAS publishes the app on)
+        a.peerlinks._tn_port = (0.0, None)
+        with mock.patch("plexcache.zfs.own_container_id", side_effect=RuntimeError("no")):
+            self.assertIsNone(a.peerlinks._truenas_port())
+        a.settings.update({"plex2": {"account_token": "tok"}})
+        link._hosts = (0.0, [])
+        with mock.patch("plexcache.plex.servers", return_value=[{"id": "plexB", "connections": [{"relay": True, "address": "1.1.1.1"}, {"address": "10.0.0.9"}, {"uri": "http://10.0.0.10:32400"}]}]), \
+                mock.patch("plexcache.plex.rank_connections", side_effect=lambda c: list(c)):
+            self.assertEqual(link._mirror_hosts(), ["127.0.0.1", "10.0.0.9", "10.0.0.10"])          # (the one that answers, then plex.tv's, no relay)
+        link.paired = {"url": "http://10.0.0.3:8642", "instance": "x", "public": link.public(), "name": "X"}
+        with mock.patch.object(link, "_markers", return_value={"i": {"peer": {"port": 9001, "addresses": ["10.0.0.5", "fd00::1"]}}, "j": {}}):
+            c = link.candidates()
+        self.assertEqual(c[:3], ["http://10.0.0.3:8642", "http://10.0.0.5:9001", "http://[fd00::1]:9001"])
+        self.assertIn("http://127.0.0.1:9001", c)
+        link.paired = None
+        with mock.patch("plexcache.peers.read", side_effect=RuntimeError("no")):
+            self.assertEqual(link._markers(), {})
+
+    def test_probes_requests_and_pairing_refusals(self):
+        from plexcache import peerlink as pl
+        a, ua = self._side("plexA", "plexB")
+        link = a.mirror_link
+        self.assertIsNone(link.probe("http://127.0.0.1:1"))                                           # (nothing there)
+        self.assertIsNone(link.probe(ua))                                                             # (ourselves)
+        with mock.patch("urllib.request.urlopen", return_value=_Resp(b"[1, 2]")), self.assertRaisesRegex(pl.PeerError, "not an object"):
+            link._get("http://x")
+        with mock.patch("urllib.request.urlopen", side_effect=lambda *a, **k: _raise(_http_error(500, b"nope"))):
+            with self.assertRaises(urllib.error.HTTPError):
+                link._get("http://x")
+            with self.assertRaisesRegex(pl.PeerError, "HTTP 500"):
+                link._post_open("http://x", {})
+        with mock.patch("urllib.request.urlopen", side_effect=lambda *a, **k: _raise(_http_error(400, b'{"paired": false, "why": "no"}'))):
+            self.assertEqual(link._post_open("http://x", {}), {"paired": False, "why": "no"})
+        for call in (link._key, lambda: link.request("GET", "/peer/v1/status"), lambda: a.peerlinks.verify({}, "GET", "/x", b"")):
+            with self.assertRaisesRegex(pl.PeerError, "not paired"):
+                call()
+        with mock.patch.object(link, "wanted", return_value=False):
+            self.assertIn("No library is mirrored by plexB", en(jsonable(link.may_pair({}, ""))))
+        # nothing to try; a dead address tried
+        with mock.patch.object(link, "_mirror_hosts", return_value=[]), mock.patch.object(link, "_markers", return_value={}):
+            self.assertIsNone(link.find())
+            self.assertIn("No address to try", en(jsonable(link.find_error)))
+            link.ticked = time.time()
+            self.assertEqual(link.lights()["found"]["status"], "warn")
+            a.settings.update({"peer": {"servers": {"plexB": {"url": "http://127.0.0.1:1"}}}})
+            self.assertIsNone(link.find())
+            self.assertEqual((link.tried, "Nothing answered" in en(jsonable(link.find_error))), (["http://127.0.0.1:1"], True))
+        # pairing with what was found: nothing found; the other side can't be asked, says no, or answers with another key
+        self.assertFalse(link.try_pair())
+        link.found = {"url": "http://127.0.0.1:1", "hello": {"instance": "x", "public": link.public(), "name": "X"}, "at": time.time()}
+        with mock.patch.object(link, "may_pair", return_value=None):
+            with mock.patch.object(link, "_post_open", side_effect=OSError("refused")):
+                self.assertFalse(link.try_pair())
+                self.assertIn("couldn’t be asked", en(jsonable(link.pair_error)))
+            with mock.patch.object(link, "_post_open", return_value={"paired": False, "why": "busy"}):
+                self.assertFalse(link.try_pair())
+                self.assertIn("didn’t pair: busy", en(jsonable(link.pair_error)))
+            with mock.patch.object(link, "_post_open", return_value={"paired": True, "public": "deadbeef"}):
+                self.assertFalse(link.try_pair())
+                self.assertIn("another key", en(jsonable(link.pair_error)))
+        link.found = None
+        # unpair while the other side can't be told: forgotten here all the same
+        link.paired = {"instance": "x", "name": "X", "url": "http://127.0.0.1:1", "public": link.public(), "at": 1, "how": "auto"}
+        link.unpair()
+        self.assertEqual((link.paired, link.declined), (None, ["x"]))
+        # handling a request to pair: a bad one; one that names nobody reachable
+        self.assertEqual(link.handle_pair({}, "127.0.0.1"), {"paired": False, "why": "bad request"})
+        self.assertIn("couldn’t be fetched back", link.handle_pair({"instance": "zzz", "public": link.public(), "port": 1, "addresses": ["127.0.0.1", "127.0.0.1"]}, "127.0.0.1")["why"])
+        # the regular look: busy, not wanted, a failure, and nothing found lately
+        a.peerlinks.busy = True
+        with mock.patch.object(a.peerlinks, "_tick_safe") as ts:
+            a.peerlinks.tick_async()
+            ts.assert_not_called()
+        a.peerlinks.busy = False
+        with mock.patch.object(link, "tick", side_effect=RuntimeError("boom")):
+            a.peerlinks._tick_safe([link])
+        self.assertFalse(a.peerlinks.busy)
+        with mock.patch.object(link, "wanted", return_value=False), mock.patch.object(link, "find") as fd:
+            link.tick()
+            fd.assert_not_called()
+        link.found, link.tried, link.find_at = None, ["http://127.0.0.1:1"], time.time()
+        with mock.patch.object(link, "find") as fd:
+            link.tick()
+            fd.assert_not_called()                                                                    # (tried lately: not again until FIND_EVERY)
+
+    def test_paired_sides_at_their_edges(self):
+        from plexcache import peerlink as pl
+        a, ua, b, ub = self._paired()
+        link = a.mirror_link
+        with self.assertRaisesRegex(pl.PeerError, "not found"):
+            link.request("GET", "/peer/v1/nope")                                                      # (the other side's error, in words)
+        good = pl.signature(link._key(), "GET", "/peer/v1/status", "abc", "n9", b"")
+        req = urllib.request.Request(ub + "/peer/v1/status", headers={"X-Plexcache-Peer": link.instance(), "X-Plexcache-Time": "abc", "X-Plexcache-Nonce": "n9", "X-Plexcache-Signature": good})
+        with self.assertRaises(urllib.error.HTTPError) as got:
+            urllib.request.urlopen(req, timeout=10).close()
+        with got.exception:
+            self.assertEqual((got.exception.code, json.loads(got.exception.read())), (403, {"error": "bad time"}))
+        self.assertEqual(b.peerlinks.handle("GET", "/peer/v1/status", {"X-Plexcache-Peer": "nobody"}, b"", "127.0.0.1")[0], 403)
+        self.assertEqual(b.peerlinks.handle("POST", "/peer/v1/pair", {}, b"{nope", "127.0.0.1"), (400, {"error": "invalid JSON"}))
+        self.assertEqual(b.mirror_link.handle_pair({"instance": link.instance(), "public": link.public(), "port": int(ua.rsplit(":", 1)[1]), "addresses": ["127.0.0.1", "127.0.0.1"]}, "127.0.0.1")["paired"], True)
+        b.settings.update({"peer": {"auto_pair": False}})
+        b.mirror_link.declined = []
+        self.assertIn("Pairing by itself is off", b.mirror_link.handle_pair({"instance": link.instance(), "public": link.public()}, "127.0.0.1")["why"])
+        # Pair Now pressed on the other side (its request says so, with its window): kept here, said on every page until it
+        # closes or the two pair; a request that wasn't a Pair Now, or from a server the account hasn't, leaves nothing
+        ask = {"instance": link.instance(), "public": link.public(), "name": "Box A", "plex": "plexA", "manual": True, "window": 300}
+        bp, b.mirror_link.paired = b.mirror_link.paired, None                                          # (not paired here: the ask stands)
+        self.assertFalse(b.peerlinks.handle("POST", "/peer/v1/pair", {}, json.dumps(ask).encode(), "127.0.0.1")[1]["paired"])
+        got = b.peerlinks.snapshot()["asked"]
+        self.assertEqual((set(got), got["plexA"]["name"], got["plexA"]["wanted"], 290 < got["plexA"]["left"] <= 300), ({"plexA"}, "Box A", True, True))
+        self.assertIn("Pairing by itself is off", got["plexA"]["why"])
+        b.peerlinks.handle("POST", "/peer/v1/pair", {}, json.dumps(dict(ask, plex="nobody")).encode(), "127.0.0.1")
+        b.peerlinks.handle("POST", "/peer/v1/pair", {}, json.dumps(dict(ask, manual=False)).encode(), "127.0.0.1")
+        self.assertEqual(set(b.peerlinks.snapshot()["asked"]), set())                                  # (not a Pair Now: the ask withdrawn)
+        b.peerlinks.handle("POST", "/peer/v1/pair", {}, json.dumps(ask).encode(), "127.0.0.1")
+        b.peerlinks.asked["plexA"]["until"] = time.time() - 1
+        self.assertEqual(b.peerlinks.asks(), {})                                                        # (its window closed)
+        b.peerlinks.asked["plexA"]["until"] = time.time() + 300
+        b.mirror_link.paired = bp
+        self.assertEqual(b.peerlinks.asks(), {})                                                        # (paired since: nothing to ask)
+        b.settings.update({"peer": {"auto_pair": True}})
+        # the other side's name followed; not answering where it was, then found again at its new address
+        link.paired["name"] = "Old"
+        self.assertTrue(link.talk())
+        self.assertEqual(link.paired["name"], "plexB")
+        link.paired["url"] = "http://127.0.0.1:1"
+        self.assertFalse(link.talk())
+        self.assertIn("refused", str(link.last_error).lower() + " refused")
+        link.tick(force=True)
+        self.assertEqual((link.paired["url"], link.talking()), (pl.base_url(ub), True))
+        link.paired["url"] = "http://127.0.0.1:1"
+        with mock.patch.object(link, "find", return_value=None):
+            link.tick(force=True)                                                                     # (not found again: left as it is)
+        self.assertEqual(link.paired["url"], "http://127.0.0.1:1")
+        link.paired["url"] = pl.base_url(ub)
+        self.assertTrue(link.talk())
+        # what this side tells the other: per library, the markers seen; the facts it keeps of the other
+        a.libraries = [{"key": "1", "title": "Movies", "kind": "movie", "locations": ["/plex/Movies"]}]
+        with mock.patch("plexcache.peers.read", return_value={"inst": {"by_library": {"1": {"at": 5}}}}), mock.patch.object(a.migration, "folders", side_effect=RuntimeError("no")), \
+                mock.patch.object(a.mirror_health, "converting", side_effect=RuntimeError("no")):
+            st = a.peerlinks.local_status()
+        self.assertEqual((st["libraries"]["1"]["seen"], st["libraries"]["1"]["holding"], "folders" in st["libraries"]["1"]), ({"inst": 5.0}, None, False))
+        with mock.patch("plexcache.peers.read", side_effect=RuntimeError("no")):
+            self.assertEqual(a.peerlinks.local_status()["libraries"]["1"]["seen"], {})
+            self.assertIsNone(link._facts_marker())
+        with mock.patch.object(a.mirrors, "pairs", side_effect=RuntimeError("no")):
+            self.assertEqual(link._facts_link()["libraries"], {})
+        link.paired["instance"] = "other"
+        with mock.patch("plexcache.peers.read", return_value={"only": {"marker": {"name": "Only", "at": 3, "plex": "plexB"}, "by_library": {"1": {"folders": None}}}}):
+            self.assertEqual(link._facts_marker()["name"], "Only")                                   # (the marker of the one whose Plex is this mirror)
+        link.paired["instance"] = b.mirror_link.instance()
+        # this side's files of a library, for the other
+        self.assertEqual(a.peerlinks.local_files("1"), {"ready": False, "files": []})
+        d = a.libdata.data("1")
+        d.records_at = d.files_at = 1.0
+        d.roots, d.files, d.unlisted = [("/plex/Movies", "/local/Movies")], [{"local": "/local/Movies/a.mkv", "size": 1, "mtime": 2}], [{"local": "/elsewhere/x.mkv"}, {"local": "/local/Movies/gone.mkv", "missing": True}]
+        self.assertEqual(a.peerlinks.local_files("1"), {"ready": True, "at": 1.0, "files": [["a.mkv", 1, 2.0]]})
+        d.records_at = d.files_at = 0.0
+
+    def test_folder_sync_rows_and_lights(self):
+        from plexcache import peerlink as pl
+        a, ua, b, ub = self._paired()
+        link = a.mirror_link
+        now = time.time()
+        a.libraries = [{"key": "1", "title": "Movies", "kind": "movie", "locations": ["/plex/Movies"]}]
+        there = types.SimpleNamespace(key="7", title="Films", locations=["/m"], server="plexB")
+        link.status = None
+        self.assertEqual(link.folder_sync(), {})
+        link.status = {"name": "plexB", "api": pl.API, "version": a.version, "time": now, "publishing": True, "libraries": {"7": {"seen": {}, "published": now, "first": now - 4 * 3600}}}
+        a.published_markers, a.first_published = {"1": now}, {"1": now - 4 * 3600}
+        with mock.patch.object(a.mirrors, "pairs", return_value={"1": there, "2": None}), mock.patch("plexcache.peers.read", side_effect=RuntimeError("no")):
+            self.assertEqual(link.folder_sync(), {"1": {"status": "fail", "out": None, "in": None}})   # (neither side's markers ever reach the other)
+        mine, theirs = link.instance(), link.paired["instance"]
+        rows = {"1": {"seen": {mine: now - 3 * 3600}, "published": now, "first": now - 4 * 3600}}
+        link.status["libraries"] = {"7": rows["1"]}
+        with mock.patch.object(a.mirrors, "pairs", return_value={"1": there}), mock.patch("plexcache.peers.read", return_value={theirs: {"by_library": {"1": {"at": now - 3 * 3600}}}}):
+            got = link.folder_sync()["1"]
+            self.assertEqual((got["status"], int(got["out"]), int(got["in"])), ("warn", 3 * 3600, 3 * 3600))   # (behind, both ways)
+            self.assertEqual(link._folders_light()["status"], "warn")
+            with mock.patch.object(type(a.optimizing.client), "configured", mock.PropertyMock(return_value=False)):
+                self.assertEqual(link._folders_light()["status"], "off")                            # (not publishing here: can't be checked)
+            link.status["libraries"]["7"]["seen"][mine] = now
+            with mock.patch("plexcache.peers.read", return_value={theirs: {"by_library": {"1": {"at": now}}}}), mock.patch.object(type(a.optimizing.client), "configured", mock.PropertyMock(return_value=True)):
+                self.assertEqual(link.folder_sync()["1"], {"status": "ok", "out": 0.0, "in": 0.0})
+                self.assertEqual(en(link._folders_light()["text"]), "Folder sync carries .plexcache")
+            a.published_markers = {}
+            link.status["libraries"]["7"] = {"seen": {}}
+            self.assertEqual(link.folder_sync()["1"]["status"], "off")
+        self.assertFalse(link._published_long_ago("9"))
+        link.status.update(api=2, version="9.9")
+        link.skew = 500
+        light = link._version_light()
+        self.assertEqual((light["status"], light["detail"].count(";")), ("warn", 2))
+        a.settings.update({"peer": {"enabled": False}})
+        self.assertEqual(en(link.lights()["found"]["text"]), "No Plex Cache at plexB’s site")
+
+
+class AppEdgeTests2(unittest.TestCase):
+    """More of the app's edges (app.py): a Plex match looked up and its public page, the scheduler's turns, an update
+    through TrueNAS, and files that can't be read while their history or compression is asked."""
+
+    def test_match_lookup_and_public_page(self):
+        app = _new_app()
+        page = App._public_page
+        self.assertEqual(page({"Guid": [{"id": "imdb://tt1"}, {"id": "tmdb://5"}]}), "https://www.imdb.com/title/tt1/")
+        self.assertEqual(page({"Guid": [{"id": "tmdb://5"}], "type": "show"}), "https://www.themoviedb.org/tv/5")
+        self.assertEqual(page({"Guid": [{"id": "tvdb://7"}]}), "https://thetvdb.com/dereferrer/series/7")
+        self.assertEqual(page({"title": "A Film", "year": 2000}), "https://watch.plex.tv/search?q=A%20Film%202000")
+        self.assertEqual(page({}), "")
+        self.assertIsNone(app.match_info("local://1"))
+        md = {"MediaContainer": {"Metadata": [{"type": "movie", "title": "A", "year": 2000, "slug": "a-2000", "thumb": "https://img/x.jpg", "summary": "s"}]}}
+        resp = mock.MagicMock()
+        resp.__enter__.return_value.read.side_effect = [json.dumps(md).encode(), b"JPG"]
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            self.assertEqual(app.match_info("plex://movie/abcdef123456"), {"title": "A", "year": 2000, "type": "movie", "summary": "s", "url": "https://watch.plex.tv/movie/a-2000"})
+            self.assertEqual(app.match_info("plex://movie/abcdef123456", image=True), b"JPG")       # (kept: looked up once)
+        app._matches["plex://movie/abcdef123456"]["thumb"] = "/library/thumb"
+        with self.assertRaisesRegex(OSError, "no poster"):
+            app.match_info("plex://movie/abcdef123456", image=True)
+        with mock.patch("urllib.request.urlopen", side_effect=lambda *a, **k: _raise(_http_error(404, b""))), self.assertRaises(urllib.error.HTTPError):
+            app.match_info("plex://show/abcdef123457")
+
+    def test_scheduler_turn_and_helpers(self):
+        app = _new_app()
+        with mock.patch.object(app.migration, "refresh", side_effect=RuntimeError("boom")):
+            app._refresh_migration()                                                                  # (checked again next time)
+        app.conversions.items.append({"original": "/x", "new": "/y", "state": "waiting", "library": "1", "plex_original": "/x", "plex_new": "/y", "checked": time.time(), "scanned": time.time()})
+        app.trash.items.append({"state": "waiting", "path": "/x", "plex_path": "/x", "library": "1", "trashed": "/t", "why": "w", "at": time.time(), "checked": time.time()})
+        app.migration.state = {"step": "create"}
+        with mock.patch.object(app.stopping, "wait", side_effect=[False, True]), mock.patch.object(app.peerlinks, "wanted", return_value=True), \
+                mock.patch.object(app.peerlinks, "tick_async") as pt, mock.patch.object(app.sync, "settings", return_value={"discover": False}), \
+                mock.patch.object(app, "_refresh_migration") as rm:
+            app._scheduler_loop()
+            pt.assert_called_once()
+        wait_for(lambda: rm.called)
+        app.migration.state = None
+        app.conversions.items.clear()
+        app.trash.items.clear()
+        app.scanning = True
+        with mock.patch.object(app, "plex") as px:
+            app.scan_library()                                                                        # (one scan at a time)
+            px.assert_not_called()
+        app.scanning = False
+        app.libraries = [{"key": "5", "title": "Photos", "locations": [], "excluded": True, "kind": "movie"}]
+        with mock.patch.object(app, "plex") as px:
+            app.refresh_library_files("5")                                                            # (a library left out: nothing listed)
+            px.assert_not_called()
+        app.benchmarking = True
+        with mock.patch("threading.Thread") as th:
+            app.run_benchmark()
+            th.assert_not_called()
+        app.benchmarking = False
+
+    def test_update_now_through_truenas(self):
+        app = _new_app()
+        with mock.patch.object(app.updates, "available", return_value=True):
+            with mock.patch.object(app.optimizing, "_containers", side_effect=RuntimeError("no")), self.assertRaisesRegex(ValueError, "can’t update itself"):
+                app.update_now()
+            calls = []
+
+            def call(method, params):
+                calls.append(method)
+                if method == "app.pull_images" or app.fail_all:
+                    raise TrueNASError("older")
+                return None
+
+            app.fail_all = False
+            tn = types.SimpleNamespace(call=call)
+            with mock.patch.object(app.optimizing, "_containers", return_value={"app": "plex-cache"}), mock.patch.object(app, "truenas", lambda: contextlib.nullcontext(tn)):
+                self.assertEqual(app.update_now(), {"updating": True, "app": "plex-cache"})           # (an older TrueNAS: a redeploy pulls the tag)
+                self.assertEqual(calls, ["app.pull_images", "app.redeploy"])
+                app.fail_all = True
+                with self.assertRaisesRegex(ValueError, "didn’t update plex-cache: older"):
+                    app.update_now()
+
+    def test_files_that_cannot_be_read(self):
+        app = _new_app()
+        self.assertEqual(app.compression_of("/nope/a.mkv"), "lz4")                                    # (not there: TrueNAS's default)
+        self.assertIsNone(app._optimized_version("/nope/a.mp4"))
+        self.assertIsNone(app._optimized_version("/nope/a.mkv"))
+        d = tempfile.mkdtemp(dir=TMP)
+        path = os.path.join(d, "a.mkv")
+        fakes.make_mkv(path, 1024 * 1024)
+        with mock.patch.object(app.optimizing, "_mkv_info", side_effect=RuntimeError("unreadable tags")):
+            app.observe_history(path, "1")                                                            # (taken as untagged)
+
+
+class EvaluatorEdgeTests(unittest.TestCase):
+    """The evaluator's edges (evaluate.py): a unit's defaults, a count where a library doesn't apply or a unit can't say,
+    what went wrong kept per state, and a page brought up against data that fails or never comes."""
+
+    def test_unit_defaults_totals_and_counts(self):
+        from plexcache import evaluate
+        app = _new_app()
+        u = evaluate.Unit(app)
+        self.assertEqual((u.applies("1"), u.waiting("1"), u.due("1"), u.busy("1"), u.holds_off("1", None)), (None, None, False, None, False))
+        for call in (lambda: u.sig("1"), lambda: u.current("1"), lambda: u.evaluate("1"), lambda: u.again("1")):
+            with self.assertRaises(NotImplementedError):
+                call()
+        self.assertEqual(evaluate.total([{"s": "done", "n": 1}, {"s": "failed", "why": "x"}]), {"s": "failed", "why": "x"})
+        ev = app.evaluator
+        app.libraries = [{"key": "1", "title": "Photos", "locations": []}, {"key": "2", "title": "Movies", "kind": "movie", "locations": [], "excluded": True},
+                         {"key": "3", "title": "TV", "kind": "tv", "locations": []}]
+        self.assertIn("doesn’t work on this kind", en(ev.count("health", "1")["why"]))
+        self.assertIn("left out", en(ev.count("health", "2")["why"]))
+        self.assertIn("Not counted per library", en(ev.count("nope", "3")["why"]))
+        self.assertTrue(ev.settled("nope", "3"))
+        ev.focus("", "")
+        self.assertIsNone(ev.focus_now())
+        self.assertFalse(ev.units()["optimizer"].holds_off("3", ("optimizer", "3")))
+        # what went wrong, kept while the state it was at stands; a unit that can't say how busy it is
+        name = next(iter(ev.units()))
+        unit = ev.units()[name]
+        ev.failures[(name, "3")] = ("sig", "boom", time.time())
+        with mock.patch.object(unit, "sig", return_value="sig"):
+            self.assertEqual(ev.gone_wrong(name, "3"), "boom")
+        with mock.patch.object(unit, "sig", return_value="moved"):
+            self.assertIsNone(ev.gone_wrong(name, "3"))
+        with mock.patch.object(unit, "sig", side_effect=RuntimeError("no")):
+            self.assertEqual(ev.gone_wrong(name, "3"), "boom")
+        with mock.patch.object(unit, "busy", side_effect=RuntimeError("no")):
+            self.assertIsNone(ev._busy_progress(unit, "3"))
+        app.zfs = {"pools": {}}
+        with mock.patch.object(app.migration, "candidates", side_effect=RuntimeError("no datasets")):
+            self.assertEqual(ev._dataset_count("3"), {"s": "failed", "why": M("{why}", why="no datasets")})
+        with mock.patch.object(ev, "count", side_effect=RuntimeError("boom")):
+            self.assertEqual(ev.counts()[ev.pages()[0]]["libraries"]["3"]["s"], "failed")
+        self.assertTrue(ev.settle(timeout=5))
+
+    def test_bring_against_data_that_fails_or_never_comes(self):
+        app = _new_app()
+        app.scan_library()
+        ev = app.evaluator
+        with mock.patch.object(ev, "started", True):
+            with mock.patch.object(app.libdata, "fast_track") as ft, self.assertRaisesRegex(ValueError, "Still waiting"):
+                ev.bring("health", "1", timeout=0)
+            ft.assert_called_once()
+            d = app.libdata.data("1")
+            d.errors["records"] = "Plex said no"
+            with mock.patch.object(app.libdata, "busy", return_value={}), self.assertRaisesRegex(ValueError, "couldn’t be read: Plex said no"):
+                ev.bring("health", "1", timeout=0.5)
+            d.errors.clear()
+
+
+class LibDataEdgeTests(unittest.TestCase):
+    """The library data layer's edges (libdata.py): a copy's lookups, a gathering asked from inside one, the mirror's
+    pairing when the mirror can't be read, folders that can't be read, and what a page says meanwhile."""
+
+    def test_copy_lookups(self):
+        from plexcache import libdata
+        self.assertIsNone(libdata.ends("/nope/a.mkv", 10))
+        app = _new_app()
+        d = app.libdata.data("1")
+        d.details = {"5": {"streams": [{"file": "/p/a.mkv", "codec": "aac"}, {"file": "/p/b.mkv", "codec": "ac3"}]}}
+        d.files = [{"path": "/p/a.mkv", "local": "/l/a.mkv"}]
+        d.unlisted = [{"local": "/l/u.mkv"}]
+        self.assertEqual(d.streams("5", "/l/a.mkv"), [{"file": "/p/a.mkv", "codec": "aac"}])          # (its own file's streams)
+        self.assertEqual(d.file("/l/u.mkv"), {"local": "/l/u.mkv"})
+        d.tree = {"/l": ["a.mkv", "sub", ".hidden"], "/l/sub": ["b.mkv"]}
+        self.assertEqual(d.listing("/l"), ["a.mkv", "sub/b.mkv"])
+        d.roots = [("/p", "/l")]
+        self.assertEqual((d.root_of("/p/a.mkv"), d.root_of("/x/a.mkv")), (("/p", "/l"), None))
+        ld = app.libdata
+        ld._inside.key = "1"
+        try:
+            self.assertIs(ld.gather("1", wait=True), d)                                               # (from inside a gathering: what's there)
+            self.assertEqual(ld._gather("1", ("records",)), ())
+        finally:
+            ld._inside.key = None
+        with mock.patch.object(ld, "fast_track") as ft:
+            self.assertIs(ld.gather("1"), d)
+            ft.assert_called_once_with("1", libdata.ALL)
+        self.assertIn("read first", en(ld.why_not_ready("1")))
+        ld.current = "1"
+        self.assertIn("Reading", en(ld.why_not_ready("1")))
+        ld.current = None
+        d.files_at = 0.0
+        self.assertFalse(ld.dirs_changed("1"))
+        root = tempfile.mkdtemp(dir=TMP)
+        d.files_at, d.roots, d.dirs = 1.0, [("/p", root)], {}
+        with mock.patch("os.stat", side_effect=OSError("gone")):
+            self.assertTrue(ld.dirs_changed("1"))                                                     # (a folder that can't be read: its time taken as 0)
+        d.files_at = 0.0
+        ld.last_tick = time.time()
+        self.assertEqual(ld.tick(), [])
+
+    def test_mirror_pairing_when_the_mirror_cannot_be_read(self):
+        app = _new_app()
+        ld = app.libdata
+        other = types.SimpleNamespace(state_of=lambda k: "mirror", server_of=lambda k: "xyz", configured=lambda s: True, known=lambda s: False,
+                                      libraries=mock.Mock(side_effect=RuntimeError("away")), mirror_for=mock.Mock(side_effect=RuntimeError("away")))
+        with mock.patch.object(app, "mirrors", other):
+            self.assertEqual(ld.mirror_of("1"), (None, None))                                         # (never read: not taken as unpaired)
+            other.known = lambda s: True
+            self.assertEqual(ld.mirror_of("1"), (None, ""))
+            other.mirror_for = lambda k: None
+            self.assertEqual(ld.mirror_of("1"), (None, ""))
+            d = ld.data("1")
+            d.mirror = {"kept": True}
+            with mock.patch.object(ld, "mirror_of", return_value=(None, None)):
+                ld._gather_mirror(d, {}, lambda *a: None)
+            self.assertEqual(d.mirror, {"kept": True})
+
+
+class ToolBaseTests(unittest.TestCase):
+    """What the tools share (tools/__init__.py): the base's defaults, a file action the service refuses or can't be
+    asked for, a row put back from the snapshot, a run whose tool or backup is missing, and a run undone or rolled back
+    from the log."""
+
+    def test_base_defaults_and_file_actions(self):
+        from plexcache import tools
+        app = _new_app()
+        tool = app.tools["versions"]
+        base = tools.Tool
+        self.assertEqual((base.history_row(tool, {}, {}), base.flag_lines(tool, [{"title": "A"}, {"id": "b"}]), base.waiting(tool), base.changed_paths(tool, {}, {})), ({}, ["A", "b"], False, []))
+        for call in (lambda: base.scan(tool, None), lambda: base.apply_row(tool, {}, None)):
+            with self.assertRaises(NotImplementedError):
+                call()
+        self.assertIsNone(tool.root_of("1", "/elsewhere/a.mkv"))
+        client = app.optimizing.client
+        with mock.patch.object(type(client), "configured", mock.PropertyMock(return_value=False)), self.assertRaisesRegex(ValueError, "isn’t set up"):
+            tool.file_action("purge", "/a")
+        with mock.patch.object(type(client), "configured", mock.PropertyMock(return_value=True)):
+            with mock.patch.object(client, "file_action", side_effect=lambda *a, **k: (_ for _ in ()).throw(_http_error(409, b'{"error": "not in the trash"}'))), \
+                    self.assertRaisesRegex(ValueError, "refused: not in the trash"):
+                tool.file_action("purge", "/a")
+            with mock.patch.object(client, "file_action", side_effect=lambda *a, **k: (_ for _ in ()).throw(_http_error(500, b"<html>", "boom"))), \
+                    self.assertRaisesRegex(ValueError, "refused: HTTP Error 500: boom"):
+                tool.file_action("purge", "/a")
+            with mock.patch.object(client, "file_action", side_effect=OSError("down")), self.assertRaisesRegex(ValueError, "couldn’t be reached: down"):
+                tool.file_action("purge", "/a")
+        # a row put back from the snapshot: nothing to put back; a file outside the snapshot's dataset; put back
+        with self.assertRaisesRegex(ValueError, "Nothing to put back"):
+            base.revert_row(tool, {"id": "r", "title": "A"}, {}, {"kind": "snapshot", "names": ["tank/m@s"]}, lambda m: None)
+        steps = []
+        with mock.patch.object(tool, "changed_paths", return_value=["/l/a.mkv"]):
+            with mock.patch("plexcache.safety.snapshot_path", return_value=None), self.assertRaisesRegex(ValueError, "isn’t in the snapshot"):
+                base.revert_row(tool, {"id": "r", "library": "1"}, {}, {"kind": "snapshot", "names": ["tank/m@s"]}, steps.append)
+            with mock.patch("plexcache.safety.snapshot_path", return_value="/l/.zfs/snapshot/s/a.mkv"), mock.patch.object(tool, "file_action") as fa:
+                base.revert_row(tool, {"id": "r", "library": "1"}, {}, {"kind": "snapshot", "names": ["tank/m@s"]}, steps.append)
+                fa.assert_called_once_with("copy_from", "/l/a.mkv", to="/l/.zfs/snapshot/s/a.mkv")
+        self.assertEqual(en(steps[0]), "a.mkv put back from the snapshot")
+
+    def test_runs_without_a_tool_or_a_backup(self):
+        from plexcache import tools
+        app = _new_app()
+        job = tools.ToolJob(app, {"tool": "nope", "library": "1"})
+        job.run()
+        self.assertEqual([e.get("event") for e in app.jobs.log.entries() if e.get("job") == job.state["id"]], ["failed"])
+        tool = app.tools["versions"]
+        with mock.patch.object(tool, "rows_for", return_value=[{"id": "r", "size": 1}]), mock.patch.object(tool, "row_file", return_value="/a"), \
+                mock.patch("plexcache.safety.plan", return_value={"kind": "none", "text": M("No backup is possible as things are")}):
+            job = tools.ToolJob(app, {"tool": "versions", "library": "1", "ids": ["r"]})
+            job.run()
+        self.assertEqual(job.state["errors"][0]["reason"], "No backup is possible as things are")
+        with mock.patch.object(tool, "rows_for", return_value=[{"id": "r", "size": 1}]), mock.patch.object(tool, "row_file", return_value="/a"), mock.patch.object(tool, "plex_keys", return_value=["1"]), \
+                mock.patch("plexcache.safety.plan", return_value={"kind": "manual", "text": ""}), \
+                mock.patch("plexcache.plexbackup.session", side_effect=ValueError(M("The Plex records couldn’t be read for the backup: down"))):
+            job = tools.ToolJob(app, {"tool": "versions", "library": "1", "ids": ["r"]})
+            job.run()
+        self.assertEqual(job.state["errors"][0]["reason"], "The Plex records couldn’t be read for the backup: down")
+        self.assertIn("backup_failed", [e.get("event") for e in app.jobs.log.entries() if e.get("job") == job.state["id"]])
+
+    def test_revert_and_rollback_from_the_log(self):
+        from plexcache import tools
+        app = _new_app()
+        log = app.jobs.log
+        log.add({"job": "j1", "kind": "optimize", "type": "job", "event": "started"})
+        log.add({"job": "j2", "kind": "tool", "tool": "versions", "type": "job", "event": "started"})
+        log.add({"job": "j2", "kind": "tool", "type": "job", "event": "backup", "backup": {"kind": "snapshot", "until": time.time() - 1, "names": ["tank/m@s"]}})
+        log.add({"job": "j3", "kind": "tool", "tool": "", "type": "job", "event": "started"})
+        log.add({"job": "j3", "kind": "tool", "type": "job", "event": "backup", "backup": {"kind": "manual", "until": time.time() + 100}})
+        log.add({"job": "j3", "kind": "tool", "type": "file", "result": "done", "row": {"id": "row-x"}})
+        log.add({"job": "j4", "kind": "tool", "tool": "", "type": "job", "event": "started"})
+        log.add({"job": "j4", "kind": "tool", "type": "job", "event": "backup", "backup": {"kind": "snapshot", "until": time.time() + 100, "names": ["tank/m@s"]}})
+        log.add({"job": "j4", "kind": "tool", "type": "job", "event": "reverted"})
+        log.add({"job": "j5", "kind": "tool", "tool": "", "type": "job", "event": "started", "library": "1"})
+        log.add({"job": "j5", "kind": "tool", "type": "job", "event": "backup", "backup": {"kind": "snapshot", "until": time.time() + 100, "names": ["tank/m@s"]}})
+        for job, why in (("j1", "Not a tool’s run"), ("j2", "expired"), ("j3", "isn’t known"), ("j9", "Not a tool’s run")):
+            with self.assertRaisesRegex(ValueError, why):
+                tools.revert_job(app, job)
+        tool = app.tools["versions"]
+        with mock.patch.object(tool, "results", [{"id": "row-x"}]), mock.patch.object(tool, "revert_row") as rr, mock.patch.object(tool, "rescan"), mock.patch.object(app, "run_checks_async"):
+            self.assertEqual(tools.revert_job(app, "j3"), {"reverted": 1, "failed": 0})                # (the tool found by its rows)
+            rr.assert_called_once()
+        for job, why in (("j1", "Not a tool’s run"), ("j3", "took no snapshot"), ("j4", "Undone already")):
+            with self.assertRaisesRegex(ValueError, why):
+                tools.rollback_job(app, job)
+        with mock.patch("plexcache.safety.rollback", return_value=["tank/m@s"]), mock.patch.object(app.libdata, "refresh") as rf, mock.patch.object(app, "run_checks_async"):
+            self.assertEqual(tools.rollback_job(app, "j5"), {"rolled_back": ["tank/m@s"]})
+            rf.assert_called_once_with("1")
+
+
+class OptimizerClientTests(unittest.TestCase):
+    """The app's client of the optimizer service (optimizing.py): what each call sends, and an error answer read and
+    closed, its body kept for the callers that read it."""
+
+    def test_calls_and_errors(self):
+        import base64
+        from plexcache import optimizing
+        client = optimizing.OptimizerClient("http://127.0.0.1:1", "a-long-test-token-123456")
+        sent = []
+
+        def urlopen(req, timeout=5):
+            sent.append((req.full_url, json.loads(req.data) if req.data else None))
+            return _Resp(b'{"started": true}')
+
+        with mock.patch("urllib.request.urlopen", side_effect=urlopen):
+            self.assertEqual(client.convert("/m/a.avi", "compress", cover=b"IMG", tags="strip", name="a MKV-AVI.mkv"), {"started": True})
+            self.assertEqual(sent[-1], ("http://127.0.0.1:1/api/convert", {"path": "/m/a.avi", "images": "compress", "tags": "strip", "name": "a MKV-AVI.mkv", "cover": base64.b64encode(b"IMG").decode()}))
+            client.delete_original("/m/a.avi", "/m/a MKV-AVI.mkv")
+            self.assertEqual(sent[-1][1], {"action": "delete_original", "path": "/m/a.avi", "to": "/m/a MKV-AVI.mkv"})
+            client.file_action("purge", "/m/.plexcache-trash/a.mkv", root="/m")
+            self.assertEqual(sent[-1][1], {"action": "purge", "path": "/m/.plexcache-trash/a.mkv", "to": "", "root": "/m"})
+        with mock.patch("urllib.request.urlopen", side_effect=lambda *a, **k: _raise(_http_error(409, b'{"error": "busy"}'))):
+            with self.assertRaises(urllib.error.HTTPError) as got:
+                client._call("/api/x")
+            self.assertEqual((got.exception.code, optimizing.error_body(got.exception)), (409, b'{"error": "busy"}'))   # (read and closed, kept)
+            self.assertEqual(client.healthz(), {"error": "HTTP Error 409: error"})
+        self.assertIn("error", client.healthz())                                                      # (nothing listens there)
+
+
+class Plex2EdgeTests(unittest.TestCase):
+    """The second Plex server (plex2.py) at its edges: listing the account's servers without a sign-in or with plex.tv
+    away, a server none of whose addresses answer, reaching it again, and where a converted file's MKV is there."""
+
+    def test_listing_using_and_reaching_the_server(self):
+        from plexcache import plex2 as plex2mod
+        from plexcache.plex import Library
+        app = _new_app()
+        other = app.mirrors
+        self.assertEqual(other.libraries("zzz"), [])                                                  # (no such server reached)
+        app.settings.update({"plex": {"token": ""}})
+        with self.assertRaisesRegex(ValueError, "Sign in with Plex first"):
+            other.list_servers()
+        app.settings.update({"plex": {"token": "good-token"}})
+        with mock.patch.object(plex2mod, "servers", side_effect=PlexError("plex.tv is away")), self.assertRaisesRegex(ValueError, "plex.tv is away"):
+            other.list_servers()
+        with mock.patch.object(app, "plex", side_effect=PlexError("down")):
+            self.assertEqual(other._main_id(), "")
+        server = {"id": "zzz", "name": "Cabin", "owned": True, "token": "t", "connections": [{"uri": "http://10.0.0.9:32400"}]}
+        with mock.patch.object(plex2mod, "servers", return_value=[server]), mock.patch.object(plex2mod, "reachable", return_value=None):
+            with self.assertRaisesRegex(ValueError, "isn’t among your account’s"):
+                other.reach("nope")
+            self.assertEqual(other.list_servers(), [{"id": "zzz", "name": "Cabin", "owned": True, "addresses": 1, "reached": False}])
+            with self.assertRaisesRegex(ValueError, "None of Cabin’s addresses answer"):
+                other.reach("zzz")
+            app.settings.update({"plex2": {"servers": {"zzz": {"name": "Cabin", "url": "http://127.0.0.1:1", "token": "t"}}}})
+            other._reconnected = {}
+            self.assertFalse(other.reconnect("zzz"))                                                  # (none of its addresses answer)
+            # an address by hand: nothing answers there, or another server does
+            with self.assertRaisesRegex(ValueError, "No Plex answers at"):
+                other.set_address("zzz", "http://127.0.0.1:1")
+            with mock.patch.object(plex2mod.PlexClient, "identity", lambda self: {"machine_id": "abc"}), self.assertRaisesRegex(ValueError, "is another server, not Cabin"):
+                other.set_address("zzz", "http://127.0.0.1:1")
+        with mock.patch.object(plex2mod, "servers", return_value=[]):
+            other._reconnected = {}
+            self.assertFalse(other.reconnect("zzz"))                                                  # (not among the account's servers)
+        self.assertEqual((other.name_of("zzz"), other.name_of("qqq")), ("Cabin", "qqq"))
+        # its libraries can't be read: not known (never "none"), the error kept, not asked again at once
+        with mock.patch.object(other, "client", side_effect=PlexError("away")), mock.patch.object(plex2mod, "servers", return_value=[]):
+            other._reconnected = {}
+            self.assertEqual(other.libraries("zzz"), [])
+        self.assertEqual((other.error("zzz"), other.known("zzz")), ("away", False))
+        self.assertEqual(other.libraries("zzz"), [])
+        there = plex2mod.Mirror("7", "Films", "movie", "movie", ["/m/Films"], "", "zzz", "Cabin")
+        self.assertEqual(other.paths_there("1", "/elsewhere/a.mkv", there), [])
+        with mock.patch.object(other, "index", return_value={}):
+            self.assertEqual(other.match_rate("1", there), 0.0)                                       # (no files here)
+        with mock.patch.object(other, "pairs", return_value={"1": there}), mock.patch.object(other, "match_rate", side_effect=PlexError("away")):
+            other.refresh()                                                                           # (a pair whose files can't be read: said for its row, the rest compared)
+        self.assertEqual((other.compare_errors, other.snapshot()["compare_errors"]), ({"1": "away"}, {"1": "away"}))
+        with mock.patch.object(other, "match_rate", return_value=1.0):
+            self.assertEqual(other.compare("1", there), 1.0)
+        self.assertEqual(other.compare_errors, {})
+        other.note_error("zzz", "reset")                                                              # (a read elsewhere failed: the server's last error, its libraries kept)
+        self.assertEqual((other.error("zzz"), other.known("zzz")), ("reset", False))
+        with mock.patch.object(other, "refresh") as rf, mock.patch.object(other, "any_mirror", return_value=True):
+            other.refresh_async()
+            wait_for(lambda: rf.called)
+        # where the MKV is on the other server: the paths don't line up; its rating key gone there
+        e = {"library": "1", "plex_original": "/elsewhere/a.avi", "plex_new": "/elsewhere/a MKV-AVI.mkv"}
+        with mock.patch.object(other, "mirror_for", return_value=there):
+            self.assertEqual(other.where(e, time.time()), "unpaired")
+            app.libraries = [{"key": "1", "title": "Movies", "kind": "movie", "locations": ["/elsewhere"]}]
+            other.rates.pop("1", None)
+            with mock.patch.object(other, "index", return_value={}), mock.patch.object(other, "match_rate", return_value=0.0):
+                self.assertEqual(other.where(e, time.time()), "unpaired")                             # (its paths found nowhere there)
+            e["other"] = {"rating_key": "5", "path": "/m/Films/a.avi", "new": "/m/Films/a.mkv"}
+            with mock.patch.object(other, "run", return_value=None), mock.patch.object(other, "index", return_value={"/m/Films/a.mkv": "9"}):
+                self.assertEqual(other.where(e, time.time()), "other")
+            with mock.patch.object(other, "run", return_value=None), mock.patch.object(other, "index", return_value={}):
+                self.assertEqual(other.where(e, time.time()), "")
+                self.assertNotIn("rating_key", e["other"])                                            # (its item gone there: looked up again)
+
+
+class ConvertEdgeTests(unittest.TestCase):
+    """Converting to MKV (optimize/convert.py) with the tools stood in for: each reason a file would lose something,
+    each way the MKV can fail the check against the original, and the deletions refused."""
+
+    def test_inspection_reasons(self):
+        from plexcache.optimize import convert
+        self.assertIsNone(convert._kind({"disposition": {"attached_pic": 1}}))
+        path = "/m/a.mp4"
+        answers = {}
+        with mock.patch.object(convert, "run", side_effect=lambda tool, *args: json.dumps(answers[tool])):
+            answers["mkvmerge"] = {"container": {"recognized": True, "supported": False}}
+            self.assertEqual(convert.inspect(path)["reasons"], ["MKVToolNix can't read this container"])
+            answers["mkvmerge"] = {"container": {"recognized": True, "supported": True, "properties": {"title": "A"}}, "tracks": [{"type": "video"}, {"type": "audio"}], "attachments": [], "chapters": [{"n": 1}]}
+            answers["ffprobe"] = {"streams": [{"codec_type": "video", "codec_tag_string": "drmi"}]}
+            self.assertEqual(convert.inspect(path)["reasons"], ["protected by DRM (bought from a store): it can't be converted"])
+            answers["ffprobe"] = {"streams": [{"codec_type": "video", "codec_name": "h264"}, {"codec_type": "audio", "codec_name": "aac"}, {"codec_type": "audio", "codec_name": "ac3"},
+                                              {"codec_type": "data", "codec_tag_string": "tmcd"}, {"codec_type": "data", "codec_tag_string": "text"}, {"codec_type": "data", "codec_name": "bin_data"},
+                                              {"codec_type": "video", "disposition": {"attached_pic": 1}}],
+                                  "chapters": [{"id": 1}], "format": {"tags": {"title": "A", "encoder": "x", "comment": "c"}}}
+            self.assertEqual(convert.inspect(path)["reasons"], ["1 of its audio tracks (aac, ac3) wouldn't be kept", "a data track (bin_data) wouldn't be kept",
+                                                                "its cover art wouldn't be kept", "details in the file (comment) wouldn't be kept"])
+            answers["mkvmerge"]["chapters"] = []
+            self.assertEqual(convert.inspect(path)["reasons"][1:4], ["a data track (text) wouldn't be kept", "a data track (bin_data) wouldn't be kept", "its chapters wouldn't be kept"])
+
+    def test_verification_and_refused_deletions(self):
+        from plexcache.optimize import convert
+        probes = {}
+        V = lambda codec, n: {"codec_type": "video", "codec_name": codec, "nb_read_packets": n}  # noqa: E731
+        S = {"codec_type": "subtitle", "codec_name": "mov_text"}
+        with mock.patch.object(convert, "_probe", side_effect=lambda p, count=False: probes[p]):
+            probes["a"], probes["b"] = {"streams": [V("h264", 100)]}, {"streams": [V("hevc", 100)]}
+            with self.assertRaisesRegex(convert.VerifyError, "video tracks differ"):
+                convert.verify("a", "b", False)
+            probes["b"] = {"streams": [V("h264", 50)]}
+            with self.assertRaisesRegex(convert.VerifyError, "lost packets"):
+                convert.verify("a", "b", False)
+            probes["a"], probes["b"] = {"streams": [V("h264", 100), S]}, {"streams": [V("h264", 100)]}
+            with self.assertRaisesRegex(convert.VerifyError, "subtitle tracks differ"):
+                convert.verify("a", "b", False)
+            probes["b"] = {"streams": [V("h264", 100), S]}
+            with self.assertRaisesRegex(convert.VerifyError, "closed captions"):
+                convert.verify("a", "b", True)
+            convert.verify("a", "b", False)
+        d = tempfile.mkdtemp(dir=TMP)
+        with self.assertRaisesRegex(convert.Skipped, "not a kind of file"):
+            convert.convert_file(os.path.join(d, "a.txt"))
+        with mock.patch.object(convert, "free_target", return_value=None), self.assertRaisesRegex(convert.Skipped, "every name"):
+            convert.convert_file(os.path.join(d, "a.mp4"))
+        orig, new = os.path.join(d, "f.avi"), os.path.join(d, "f MKV-AVI.mkv")
+        for p in (orig, new):
+            with open(p, "wb") as fh:
+                fh.write(b"x" * 10)
+        with self.assertRaisesRegex(ValueError, "not a converted file"):
+            convert.delete_original(orig, orig)
+        os.link(orig, os.path.join(d, "f-link.avi"))
+        with mock.patch("plexcache.optimize.mkv.check", return_value={"applies": True}), self.assertRaisesRegex(ValueError, "not a plain file"):
+            convert.delete_original(orig, new)                                                        # (a hard link: another path holds it)
+        with self.assertRaisesRegex(ValueError, "not the file's MKV"):
+            convert.remove_converted(new, new)
+        with self.assertRaisesRegex(ValueError, "original isn't there"):
+            convert.remove_converted(os.path.join(d, "g MKV-AVI.mkv"), os.path.join(d, "g.avi"))
+        os.remove(new)
+        with self.assertRaisesRegex(ValueError, "MKV isn't there"):
+            convert.remove_converted(new, orig)
+
+
+class OptimizerServiceRouteTests(unittest.TestCase):
+    """The optimizer service's routes (optimize/server.py): the file actions and what each needs, the token file that
+    can't be read, a wrong token, bad tag modes, and a conversion asked for."""
+
+    def test_folder_actions_token_and_posts(self):
+        from plexcache.optimize import server as osrv
+        root = os.path.realpath(tempfile.mkdtemp(dir=TMP))
+        svc = osrv.Service([root], "a-long-test-token-123456")
+        f = os.path.join(root, "a.mkv")
+        with open(f, "wb") as fh:
+            fh.write(b"x" * 10)
+        act = lambda **body: osrv.folder_action(svc, body)  # noqa: E731
+        self.assertEqual(act(action="mark", path=root, instance="!!", info={})[0], 400)
+        self.assertEqual(act(action="mark", path=root, instance="0123456789abcdef", info={"big": "x" * 9000}), (400, {"error": "too much to publish"}))
+        self.assertEqual(act(action="mark", path=root, instance="0123456789abcdef", info={"name": "A"})[0], 200)
+        self.assertTrue(os.path.isfile(os.path.join(root, ".plexcache", "systems", "0123456789abcdef.json")))
+        self.assertEqual(act(action="make_real", path=f), (200, {"bytes": 0, "already": True}))
+        self.assertEqual(act(action="set_aside", path=f), (400, {"error": "root is needed"}))
+        got = act(action="set_aside", path=f, root=root)
+        self.assertEqual(got[0], 200)
+        self.assertEqual(act(action="restore", path=got[1]["trashed"], root=root), (200, {"path": f}))
+        self.assertEqual(act(action="link", path=f), (400, {"error": "to is needed"}))
+        b = os.path.join(root, "b.mkv")
+        self.assertEqual(act(action="link", path=f, to=b), (200, {"linked": b}))
+        self.assertEqual(act(action="unlink", path=b, to=f), (200, {"removed": True}))
+        self.assertEqual(act(action="copy_from", path=os.path.join(root, "c.mkv"), to=f), (200, {"bytes": 10}))
+        self.assertEqual(act(action="copy", path=root), (400, {"error": "to is needed"}))
+        self.assertEqual(act(action="delete_original", path=f, to=f), (400, {"error": "not a converted file's original"}))
+        self.assertEqual(act(action="remove_converted", path=f, to=f), (400, {"error": "not the file's MKV"}))
+        self.assertEqual(act(action="frob", path=f), (404, {"error": "not found"}))
+        tf = os.path.join(root, "token")
+        with open(tf, "w") as fh:
+            fh.write("x" * 20)
+        os.chmod(tf, 0)
+        try:
+            if os.geteuid() != 0:                                                                     # (root reads anything: inside the image, say)
+                self.assertEqual(osrv.Service([root], token_file=tf).token_problem(), "unreadable")
+        finally:
+            os.chmod(tf, 0o600)
+        from http.server import ThreadingHTTPServer
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), osrv.make_handler(svc))
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        def post(path, body, token=svc.token):
+            req = urllib.request.Request(base + path, data=json.dumps(body).encode(), headers={"X-Plexcache-Token": token, "Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.loads(e.read() or b"{}")
+
+        self.assertIn(post("/api/folder", {"action": "probe", "path": root}, token="wrong")[0], (401, 403))
+        self.assertEqual(post("/api/optimize", {"path": f, "tags": "weird"}), (400, {"error": "bad request"}))
+        with mock.patch.object(svc, "start", return_value={"started": True}) as st:
+            self.assertEqual(post("/api/convert", {"path": f, "name": "/x/a MKV-AVI.mkv"})[1], {"started": True})
+            self.assertEqual(st.call_args.kwargs, {"action": "convert", "tags": "keep", "name": "a MKV-AVI.mkv"})
+
+
+class FoldersToolTests(unittest.TestCase):
+    """Organize Folders (tools/folders.py) at its edges: a library that isn't films, a row put back with Plex away, and
+    the follow-up on the mirror when there's none or its Plex doesn't answer."""
+
+    def test_refusals_revert_and_follow_up(self):
+        app = _new_app()
+        app.scan_library()
+        tool = app.tools["folders"]
+        with self.assertRaisesRegex(ValueError, "Only movie libraries"):
+            tool.scan(app.libdata.data("2"))
+        row = {"moves": [{"from": "/p/a.mkv", "to": "/p/A/a.mkv"}], "root": "/p", "folder": "A", "library": "1"}
+        steps = []
+        with mock.patch.object(tool, "file_action") as fa, mock.patch.object(app, "plex", side_effect=PlexError("down")):
+            tool.revert_row(row, {}, {}, steps.append)
+        self.assertEqual([c.args[0] for c in fa.call_args_list], ["link", "unlink"])
+        self.assertEqual([en(s) for s in steps], ["1 file back at its old path", "Plex wasn’t asked to scan: down"])
+        plex = mock.Mock()
+        with mock.patch.object(tool, "file_action"), mock.patch.object(app, "plex", return_value=plex):
+            tool.revert_row(row, {}, {}, steps.append)
+        self.assertEqual([c.args for c in plex.scan.call_args_list], [("1", "/p"), ("1", "/p/A")])
+        tool.extra["pending"] = [{"library": "1", "title": "A", "new": ["/p/A/a.mkv"], "old": ["/p/a.mkv"], "scanned": 0, "at": time.time()}]
+        self.assertTrue(tool.waiting())
+        with mock.patch.object(tool, "mirror", return_value=None):
+            tool.tick()                                                                               # (no mirror for the library: left as it is)
+        self.assertNotIn("note", tool.extra["pending"][0])
+        there = types.SimpleNamespace(key="7", locations=["/m"], server="xyz")
+        other = types.SimpleNamespace(index=mock.Mock(side_effect=PlexError("away")), paths_there=lambda *a: [], run=lambda server, fn: None)
+        with mock.patch.object(tool, "mirror", return_value=there), mock.patch.object(app, "mirrors", other):
+            tool.tick()
+        self.assertEqual(tool.extra["pending"][0]["note"], "away")
+        tool.extra["pending"] = []
+
+
+class FileHistoryEdgeTests(unittest.TestCase):
+    """The files' history (filehistory.py) at its edges: a seed kept once, a seeded file whose layout is read for the
+    first time, a file written that was never seen, what's reported of each, and a history that can't be saved."""
+
+    def test_seeds_observations_and_saving(self):
+        from plexcache import filehistory
+        self.assertIsNone(filehistory.snapshot({}, None))
+        self.assertIsNone(filehistory.snapshot(None, None))
+        d = tempfile.mkdtemp(dir=TMP)
+        h = filehistory.FileHistory(d)
+        mix = {"mix": {"files": 1, "video": 10}, "size": 10}
+        h.seed("/m/a.mkv", "1", {"files": 1}, mix, [10, 1, 1])
+        h.seed("/m/a.mkv", "1", {"files": 1}, mix, [10, 1, 1])                                         # (once)
+        self.assertEqual(h.files["/m/a.mkv"]["ours"], None)
+        self.assertEqual(h.observe("/m/a.mkv", "1", mix, [11, 2, 2], {filehistory.TAG: "1.0"}), "synced")   # (seeded: taken as it is now)
+        h.files["/m/b.mkv"] = {"lib": "1", "id": [1, 1, 1], "ours": {}, "origin": "seen", "first": 1, "original": None, "now": None, "runs": 0, "gone": 5}
+        self.assertIsNone(h.observe("/m/b.mkv", "1", mix, [1, 1, 1], {}))
+        self.assertEqual(h.files["/m/b.mkv"]["original"], filehistory.snapshot(mix))                   # (back, its layout kept as the original)
+        self.assertIsNone(h.original("/m/b.mkv"))
+        h.processed("/m/c.mkv", "1", mix, mix, [2, 2, 2], {filehistory.TAG: "1.0"})                   # (never seen before it was written)
+        self.assertEqual((h.files["/m/c.mkv"]["runs"], h.original("/m/c.mkv")), (1, filehistory.snapshot(mix)))
+        self.assertEqual(h.observe("/m/c.mkv", "1", mix, [3, 3, 3], {filehistory.TAG: "2.0"}), "discovered")  # (no job log here: not logged)
+        self.assertEqual(h.library("1")["files"], 2)
+        h.save_soon()
+        self.assertFalse(h.dirty)
+        h._changed()
+        with mock.patch("os.replace", side_effect=OSError("read-only")):
+            h.save()
+        self.assertTrue(h.dirty)
+
+
+class SmallEdgeTests2(unittest.TestCase):
+    """The small modules' edges: claims and markers that can't be read, catalogs and labels, the platform told by the
+    environment, scrubs that can't be asked about, and the checks' helpers."""
+
+    def test_claims_and_peers(self):
+        from plexcache import peers
+        from plexcache.optimize import claims
+        d = tempfile.mkdtemp(dir=TMP)
+        with self.assertRaisesRegex(ValueError, "bad instance"):
+            claims.mark(d, "!!", {})
+        claims.claim(d, "key1", "inst-a", now=1000)                                                   # (a claim from long ago: stale)
+        with mock.patch("os.remove", side_effect=OSError("busy")):
+            self.assertEqual(claims.claim(d, "key1", "inst-b")["claims"], [{"instance": "inst-b", "at": mock.ANY}])
+        real_stat = os.stat
+        with mock.patch("os.stat", side_effect=lambda p, *a, **k: _raise(OSError("gone")) if "/systems/" in str(p) else real_stat(p, *a, **k)):
+            self.assertEqual(claims.claim(d, "key1", "inst-b")["peers"], [])                          # (another system's marker that can't be read)
+        self.assertEqual(peers.publish(types.SimpleNamespace()), 0)
+        app = _new_app()
+        with mock.patch("plexcache.peerlink.own_facts", side_effect=RuntimeError("no")):
+            self.assertEqual(peers._conversion_facts(app, "1"), {})
+        app.libraries = [{"key": "1", "title": "Movies", "kind": "movie", "locations": [d]}]
+        sdir = os.path.join(d, ".plexcache", "systems")
+        os.makedirs(sdir, exist_ok=True)
+        with open(os.path.join(sdir, "old.json"), "w") as fh:
+            fh.write('{"at": 1}')
+        os.utime(os.path.join(sdir, "old.json"), (1, 1))
+        with open(os.path.join(sdir, "bad.json"), "w") as fh:
+            fh.write("{nope")
+        with open(os.path.join(sdir, "fresh.json"), "w") as fh:
+            fh.write('{"at": 1, "name": "Fresh"}')
+        with mock.patch.object(app, "map_path", lambda p: p):
+            found = peers.read(app)
+        self.assertEqual(("fresh" in found, "old" in found, "bad" in found), (True, False, False))     # (too old, or unreadable: left out)
+        self.assertIsNone(peers.sync_conflict(app, "1", {"fresh": {"by_library": {}}}))
+        with mock.patch("plexcache.peers._source", return_value=None):
+            self.assertIsNone(peers.sync_conflict(app, "1", found))
+        self.assertIsNone(peers.optimizer_conflict(app, "1", {"fresh": {"by_library": {}}}))
+        self.assertIsNone(peers.tool_conflict(app, "1", "folders", {"fresh": {"by_library": {}}}))
+
+    def test_catalogs_platform_and_scrubs(self):
+        from plexcache import i18n, pauses, platform as platform_mod
+        i18n._catalogs.pop("de", None)
+        self.assertIsInstance(i18n._load("de"), dict)
+        self.assertIsNone(i18n.lookup("no such string at all", "de"))
+        self.assertEqual(i18n.tr("Movies", "en"), "Movies")
+        with mock.patch.dict(os.environ, {"PLEXCACHE_PLATFORM": "truenas"}):
+            self.assertEqual(platform_mod.detect(None)["how"], "env")
+        with mock.patch("platform.release", side_effect=RuntimeError("no")):
+            self.assertEqual(platform_mod.kernel_release(), "")
+        self.assertEqual(en(platform_mod._out("linux", False, "guess", "", False)["label"]), "Linux without ZFS")
+        app = _new_app()
+        app.zfs = {"datasets": [{"pool": "tank", "keys": ["1"]}]}
+        p = pauses.L2arcPauses(app, False)
+        p._scrub_at = None
+        app.settings.update({"truenas": {"api_key": ""}})
+        self.assertIsNone(p._scrubbing())                                                             # (TrueNAS not connected: not asked)
+        app.settings.update({"truenas": {"api_key": "good-key"}})
+        p._scrub_at = None
+        with mock.patch.object(app, "truenas", side_effect=TrueNASError("refused")):
+            self.assertIsNone(p._scrubbing())
+            self.assertEqual(p.scrub_error, "refused")
+        p._scrub_at, p._scrub = time.monotonic(), M("a scrub is running on {pool}", pool="tank")
+        app.settings.update({"warmup": {"pause_scrub": True, "pause_buffering": False, "pause_preload": False}})
+        self.assertEqual(en(p.reason()), "a scrub is running on tank")
+
+    def test_checks_helpers(self):
+        from plexcache import checks
+        self.assertFalse(checks._none_match(None, 1))
+        self.assertEqual(checks._mirror_items(types.SimpleNamespace()), [])
+        app = _new_app()
+        app.migration.state = {"step": "create", "title": "Films"}
+        with mock.patch.object(app.migration, "checks", []):
+            self.assertEqual(checks._migration_items(app), [])                                        # (nothing waits on you)
+        app.migration.state = None
+
+
+class MigratingEdgeTests(unittest.TestCase):
+    """Converting a folder to a child dataset (migrating.py) at its edges: the helpers, a plan while another folder
+    moves, a restart TrueNAS refuses, the mirror not known, and the moves refused out of order."""
+
+    def test_helpers_and_refusals(self):
+        from plexcache import migrating
+        self.assertEqual((migrating._rs(0), migrating._rs(1024), migrating._rs(2 * 1024 * 1024)), ("?", "1K", "2M"))
+        root = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(root, migrating.SYNC_IGNORE), "w") as fh:
+            fh.write("# comment\n\n/\n(?i)Films/**\n!keep\n")
+        self.assertTrue(migrating.ignored(root, "films/a.mkv"))
+        self.assertFalse(migrating.ignored(root, "keep"))
+        app = _new_app()
+        mig = app.migration
+        mig.state = {"step": "copy", "folder": "/m/A"}
+        with mock.patch.object(mig, "candidates", return_value=[{"library": "1", "folder": "/m/B", "child": "tank/m/B"}]), self.assertRaisesRegex(ValueError, "another folder"):
+            mig.plan("1", "/m/B")
+        mig.state = None
+        with mock.patch.object(app.optimizing, "_containers", side_effect=RuntimeError("no")):
+            self.assertIsNone(mig._app_name())
+        with self.assertRaisesRegex(ValueError, "nothing here needs a restart"):
+            mig.restart()
+        mig.state = {"step": "create", "folder": "/m/A"}
+        with mock.patch.object(mig, "_app_name", return_value="plex-cache"), mock.patch.object(mig, "_save"), \
+                mock.patch.object(app, "truenas", side_effect=TrueNASError("not allowed")), self.assertRaisesRegex(ValueError, "didn’t restart plex-cache: not allowed"):
+            mig.restart()
+        self.assertNotIn("restart_asked", mig.state)
+        mig._reconcile({})
+        mig._check_sync({}, lambda *a, **k: None)
+        self.assertIsNone(mig._mirror_seen(""))
+        with mock.patch("plexcache.tools.mirrored", side_effect=RuntimeError("no")):
+            self.assertIsNone(mig._mirror_seen("1"))
+        with mock.patch.object(app.mirrors, "any_mirror", side_effect=RuntimeError("no")):
+            self.assertFalse(mig._mirror_watched("1"))
+        with mock.patch.object(app, "peerlinks", None):
+            self.assertIsNone(mig._mirror())
+        quiet = types.SimpleNamespace(talking=lambda: False, facts=mock.Mock(side_effect=RuntimeError("no")))
+        with mock.patch.object(app.peerlinks, "for_library", return_value=quiet):
+            self.assertIsNone(mig._mirror())
+        mig.state = {"step": "switch", "folder": "/m/A", "old_path": "/m/.A.plexcache-old", "library": "1"}
+        with self.assertRaisesRegex(ValueError, "moved already"):
+            mig.pass_then_move()
+        mig.state = {"step": "switch", "folder": "/m/A", "library": "1"}
+        with mock.patch.object(mig, "_not_while_optimizing"), self.assertRaisesRegex(ValueError, "compare both copies first"):
+            mig.rename_old()
+        mig.state = None
+
+
+class MirrorHealthEdgeTests(unittest.TestCase):
+    """Mirror Checks (mirrorhealth.py) at its edges: the mirror's libraries read in the background or not read at all,
+    scans asked for while the evaluator runs or not, a check that fails, and what the page says of each state."""
+
+    def _app(self):
+        from plexcache.optimizing import Optimizing
+        d = tempfile.mkdtemp(dir=TMP)
+        cat = fakes.make_media(d, movies=2, seasons=1, episodes=1, tracks=1)
+        for i, m in enumerate(cat["movies"]):
+            m.update(title=f"Film {i}", year=2010 + i, guid=f"plex://movie/{i}", duration=5400000 + i * 1000)
+        plex = fakes.FakePlex(cat)
+        self.addCleanup(plex.close)
+        other = fakes.FakePlex({"movies": [dict(m) for m in cat["movies"]], "episodes": [], "tracks": [], "tracks_b": [], "root": d}, token="other-token")
+        self.addCleanup(other.close)
+        app = _new_app(plex={"url": plex.url, "token": "good-token"},
+                       plex2={"servers": {"xyz": {"name": "Starlit", "url": other.url, "token": "other-token"}}, "libraries": {"*": {"state": "mirror", "server": "xyz", "key": ""}}})
+        app.optimizing = Optimizing(app, FakeOptimizer())
+        app.scan_library()
+        return app
+
+    def test_libraries_scans_and_notes(self):
+        from plexcache import mirrorhealth
+        self.assertEqual(mirrorhealth.rel_of(types.SimpleNamespace(roots=[]), "/x/a.mkv"), "")
+        self.assertEqual(mirrorhealth._back([{"_t": "x"}, 1]), [M("x"), 1])
+        self.assertEqual(en(mirrorhealth._said({"kind": "sync_files", "behind": 600})), "What this side writes in .plexcache reaches the other site 10 minutes late.")
+        app = self._app()
+        mh = app.mirror_health
+        mh._libs = None
+        with mock.patch.object(app.mirrors, "pairs", side_effect=RuntimeError("no pairs")):
+            self.assertEqual(mh.paired(), ([], ("failed", "no pairs")))
+        with mock.patch.object(app.evaluator, "started", True):
+            with app.mirrors.lock:
+                app.mirrors.libs.pop("xyz", None)
+            mh._libs = None
+            self.assertEqual(mh.paired()[1], ("pending", None))                                       # (read in the background: waited for)
+            wait_for(lambda: not mh.reading and app.mirrors.known("xyz"))
+            mh._libs = None
+            self.assertEqual(mh.paired()[1], None)
+            self.assertTrue(mh.check_async("1"))                                                      # (the evaluator's turn)
+            self.assertIn("1", mh.wanted)
+            with mock.patch.object(mh, "libraries", return_value=[]):
+                self.assertFalse(mh.check_async())
+            mh.wanted.clear()
+        mh.running = "1"
+        self.assertFalse(mh.check_async("1"))
+        mh.running = None
+        with mock.patch.object(mh, "check", side_effect=RuntimeError("boom")):
+            self.assertTrue(mh.check_async("1"))
+            wait_for(lambda: mh.running is None and "1" in mh.results)
+        self.assertEqual(mh.results["1"]["error"], "boom")
+        self.assertTrue(mh.due())
+        self.assertTrue(mh.due_for("9"))
+        self.assertFalse(mh.scanning("9"))
+        self.assertFalse(mh.sync_handles({"kind": "only_here"}, {"scan": True, "source": "other"}))
+        self.assertEqual(mh.regroup("1"), [])                                                         # (the library's data not in)
+        d = app.libdata.data("1")
+        d.records_at = d.files_at = 1.0
+        with mock.patch.object(app.tools["sync"], "regroup", side_effect=RuntimeError("refused")):
+            self.assertEqual(mh.regroup("1"), [])
+        d.records_at = d.files_at = 0.0
+        self.assertIn("The last check failed: boom", [en(n["text"]) for n in mh.notes("1")])
+        self.assertIn("isn’t paired with one on the mirror", en(mh.notes("5")[0]["text"]))
+        mh.results["1"] = {"v": 0, "at": 1, "disk": True, "notes": []}
+        with mock.patch.object(app.peerlinks, "known", return_value=True):
+            self.assertEqual(mh.unchecked("1"), [])                                                   # (an old scan that did compare the other site's files)
+        mh.results["1"] = {"v": mirrorhealth.FORMAT, "at": 1, "rows": [{"item": "100", "kind": "not_listed_there", "folders": ["/m"]}]}
+        with mock.patch.object(app.mirrors, "pairs", return_value={}), self.assertRaisesRegex(ValueError, "isn’t paired"):
+            mh.act("1", "100", "mirror_not_listed_there")
+        mh.results.pop("1", None)
+
+
+class PlaybackEdgeTests(unittest.TestCase):
+    """The playback monitor (playback.py) at its edges: a session never seen, a file whose size Plex doesn't give, a
+    preload with nothing to probe, and a read job cancelled before it starts."""
+
+    def test_small_edges(self):
+        from plexcache import playback
+        app = _new_app()
+        mon = app.monitor
+        self.assertIsNone(playback.PlaybackMonitor._byte_pos(types.SimpleNamespace(files=[], progress=0.5)))
+        self.assertIsNone(playback.PlaybackMonitor._byte_pos(types.SimpleNamespace(files=[("/a", 0)], progress=0.5)))
+        mon._observe("never", types.SimpleNamespace(state="playing", view_offset_ms=0), app.settings.get())
+        mon._probe(types.SimpleNamespace(length=0))
+        job = playback.Job(feature="nextepisode", target="A", path="/a", ranges=[], state="cancelled")
+        mon._run_job("k", job, 0, 100, 1)
+        self.assertEqual(job.state, "cancelled")
+        mon.stop.set()
+        try:
+            job2 = playback.Job(feature="nextepisode", target="A", path="/a", ranges=[])
+            mon._run_job("k", job2, 0.01, 100, 1)
+            self.assertEqual(job2.state, "waiting")                                                   # (stopping: never started)
+        finally:
+            mon.stop.clear()
+
+
+class ToolEdgeTests2(unittest.TestCase):
+    """The tools' edges: a scan of a library Plex hasn't got, a row put back with Plex away, and the block rewriter's
+    walk over files that vanish."""
+
+    def test_unknown_library_and_reverts(self):
+        app = _new_app()
+        for name in ("unlink", "versions"):
+            with self.assertRaisesRegex(ValueError, "No such library"):
+                app.tools[name].scan(app.libdata.data("99"))
+        tool = app.tools["versions"]
+        steps = []
+        with mock.patch.object(app.trash, "act") as act, mock.patch.object(app, "plex", side_effect=PlexError("down")):
+            tool.revert_row({"library": "1", "extras": [{"local": "/l/a.mkv", "path": "/p/a.mkv", "name": "a.mkv"}]}, {}, {}, steps.append)
+        act.assert_called_once_with("/l/a.mkv", "restore")
+        self.assertEqual([en(s) for s in steps], ["a.mkv put back", "Plex wasn’t asked to scan: down"])
+        tool = app.tools["unlink"]
+        steps = []
+        with mock.patch.object(tool, "file_action") as fa:
+            tool.revert_row({"local": "/l/a.mkv", "name": "a.mkv", "kind": "hardlink", "others": [{"path": "/l/b.mkv"}]}, {}, {}, steps.append)
+        self.assertEqual([(c.args, c.kwargs) for c in fa.call_args_list], [(("unlink", "/l/a.mkv"), {"to": "/l/b.mkv"}), (("link", "/l/b.mkv"), {"to": "/l/a.mkv"})])
+        self.assertEqual(en(steps[0]), "a.mkv is a link to b.mkv again; the copy is gone")
+
+
+def _mirror_app(test):
+    """An app on a Plex of its own, with a second Plex holding the same films as the mirrored server (every library mirrored)."""
+    from plexcache.optimizing import Optimizing
+    d = tempfile.mkdtemp(dir=TMP)
+    cat = fakes.make_media(d, movies=2, seasons=1, episodes=1, tracks=1)
+    for i, m in enumerate(cat["movies"]):
+        m.update(title=f"Film {i}", year=2010 + i, guid=f"plex://movie/{i}", duration=5400000 + i * 1000)
+    plex = fakes.FakePlex(cat)
+    test.addCleanup(plex.close)
+    other = fakes.FakePlex({"movies": [dict(m) for m in cat["movies"]], "episodes": [], "tracks": [], "tracks_b": [], "root": d}, token="other-token")
+    test.addCleanup(other.close)
+    app = _new_app(plex={"url": plex.url, "token": "good-token"},
+                   plex2={"servers": {"xyz": {"name": "Starlit", "url": other.url, "token": "other-token"}}, "libraries": {"*": {"state": "mirror", "server": "xyz", "key": ""}}})
+    app.optimizing = Optimizing(app, FakeOptimizer())
+    app.scan_library()
+    return app, cat
+
+
+class PlexEdgeTests2(unittest.TestCase):
+    """The Plex client's edges (plex.py): a stream as Plex describes it, tag locks, unmatching, items Plex hasn't got,
+    listings of other kinds, and a server none of whose addresses answer."""
+
+    def test_helpers_and_client_edges(self):
+        import xml.etree.ElementTree as ET
+        from plexcache import plex as plexmod
+        self.assertFalse(plexmod._int("abc"))
+        st = ET.Element("Stream", {"streamType": "2", "index": "1", "codec": "AAC", "channels": "6", "bitrate": "640", "languageTag": "en", "forced": "1", "default": "true",
+                                   "title": "T", "extendedDisplayTitle": "D", "audioChannelLayout": "5.1", "profile": "lc"})
+        got = plexmod.stream_summary(st, "/f")
+        self.assertEqual((got["type"], got["codec"], got["channels"], got["forced"], got["default"], got["display"], got["layout"], got["language"]), ("audio", "aac", 6, True, True, "D", "5.1", "en"))
+        d = tempfile.mkdtemp(dir=TMP)
+        cat = fakes.make_media(d, movies=1, seasons=1, episodes=1, tracks=1)
+        cat["movies"][0].update(title="Film", year=2010, guid="plex://movie/0", key="100")
+        plex = fakes.FakePlex(cat)
+        self.addCleanup(plex.close)
+        c = PlexClient(plex.url, "good-token", timeout=10)
+        c.set_tags("1", 1, "100", "genre", ["Drama"], locked=True)
+        self.assertEqual((cat["movies"][0]["genre"], cat["movies"][0]["locked"]), (["Drama"], ["genre"]))
+        c.unmatch("100")
+        self.assertEqual(cat["movies"][0]["guid"], "local://100")
+        self.assertIsNone(c.item_files("999"))
+        self.assertIsNone(c.item_detail("999"))
+        with mock.patch.object(c, "get", side_effect=PlexError("HTTP 500")), self.assertRaises(PlexError):
+            c.item_files("100")
+        self.assertEqual(c.library_items("1", 1, limit=0), [])
+        self.assertEqual(c.library_items("2", 2)[0]["type"], "show")
+        self.assertIsNone(plexmod.reachable({"id": "x", "token": "t", "connections": []}))
+
+
+class FileMapEdgeTests(unittest.TestCase):
+    """The file layouts' edges (filemap.py): an old ID3 tag read as one block, text frames run together, an M4A's
+    one track, and a file never inspected before the history was kept."""
+
+    def test_id3_and_m4a(self):
+        from plexcache import filemap
+        d = tempfile.mkdtemp(dir=TMP)
+        p = os.path.join(d, "a.mp3")
+        with open(p, "wb") as fh:
+            fh.write(b"ID3" + bytes([2, 0, 0]) + bytes([0, 0, 0, 20]) + b"\x00" * 20 + b"\xff\xfb" * 100)
+        fd = os.open(p, os.O_RDONLY)
+        try:
+            parts, pics, total = filemap._id3(fd, os.path.getsize(p))
+        finally:
+            os.close(fd)
+        self.assertEqual((parts[1], total), ({"part": "tags", "pos": 10, "size": 20}, 30))
+        frames = (b"TIT2" + (5).to_bytes(4, "big") + b"\x00\x00" + b"\x00abcd") * 2 + b"\x00" * 10
+        p3 = os.path.join(d, "b.mp3")
+        with open(p3, "wb") as fh:
+            fh.write(b"ID3" + bytes([3, 0, 0]) + bytes([0, 0, 0, len(frames)]) + frames + b"\xff\xfb" * 100)
+        fd = os.open(p3, os.O_RDONLY)
+        try:
+            parts, pics, total = filemap._id3(fd, os.path.getsize(p3))
+        finally:
+            os.close(fd)
+        self.assertEqual([(x["part"], x["size"]) for x in parts], [("id3", 10), ("tags", 30), ("padding", 10)])   # (two frames in a row: one block)
+        m4a = os.path.join(d, "c.m4a")
+        fakes.make_mp4(m4a, 400000)
+        self.assertEqual(filemap.describe(m4a)["tracks"], [{"type": "audio", "codec": "", "number": 1}])
+        app = _new_app()
+        self.assertIsNone(app.file_maps.before("/nope"))
+
+
+class OptimizingEdgeTests(unittest.TestCase):
+    """The optimizer's edges (optimizing.py): choices that aren't ones, a survey while one runs, results and histories
+    of files that can't be read, posters that can't be fetched, a conversion refused before it starts, and claims on a
+    file outside the library folders or with the service away."""
+
+    def test_small_edges(self):
+        from plexcache.optimizing import Claims
+        app = _new_app()
+        op = app.optimizing
+        real = app.settings.section
+        with mock.patch.object(app.settings, "section", side_effect=lambda name: {"libraries": {"1": {"tags": "weird", "images": "odd"}}} if name == "optimizer" else real(name)):
+            got = op.options("1")
+        from plexcache.optimizing import DEFAULTS
+        self.assertEqual((got["tags"], got["images"]), (DEFAULTS["tags"], DEFAULTS["images"]))              # (choices that aren't ones: the defaults)
+        op.surveying = True
+        op.survey()
+        op.surveying = False
+        op.note("/x", "1", {"result": "optimized"}, {})
+        self.assertIsNone(op._layout_before("/nope/a.mkv", "1"))
+        self.assertEqual(op._history("/nope/a.mkv", "1", "/nope/a.mkv", None), (None, None))
+        with mock.patch.object(app, "file_maps", None):
+            self.assertIsNone(op._layout_before("/x", "1"))
+            self.assertEqual(op._history("/x", "1", "/x", None), (None, None))
+        entries = []
+        with mock.patch("plexcache.optimizing.settled_blocks", return_value=None):
+            op._log_file(lambda **e: entries.append(e), "j", "/nope/a.mkv", {}, {}, {"result": "optimized", "images_before": 1, "images_after": 0}, 1.0, {"size": 1})
+        self.assertEqual((entries[0]["size_after"], entries[0]["cover"]), (None, "1 removed"))
+        with mock.patch.object(op, "_poster", side_effect=PlexError("no")):
+            self.assertIsNone(op.poster_size("/library/metadata/1/thumb/1", fetch=True))
+        with mock.patch.object(op, "_poster", return_value=b"IMG"):
+            op.poster_sizes_soon(["/p/1", "/p/1", ""])
+            wait_for(lambda: op._poster_sizes().get("/p/1") == 3)
+        with mock.patch.object(app.monitor, "playing_paths", return_value={"/m/a.avi"}):
+            self.assertEqual(op.convert_one("/m/a.avi", "1"), {"result": "skipped", "reason": "playing"})
+        self.assertEqual(op.convert_one("/nope/a.avi", "1")["result"], "failed")
+        d = tempfile.mkdtemp(dir=TMP)
+        p = os.path.join(d, "a.avi")
+        with open(p, "wb") as fh:
+            fh.write(b"x")
+        self.assertEqual(op.convert_one(p, "1"), {"result": "skipped", "reason": "just written"})
+        os.utime(p, (time.time() - 7200, time.time() - 7200))
+        with mock.patch.object(op, "images_mode", return_value="plex"), mock.patch.object(op, "_poster", side_effect=PlexError("no poster")):
+            self.assertEqual(op.convert_one(p, "1", "/library/metadata/1/thumb/1")["result"], "failed")
+        cl = Claims(op, [("/l/a.mkv", "/p/a.mkv")])
+        self.assertIsNone(cl._call("/l/a.mkv"))
+        with mock.patch.object(op, "library_root", return_value="/l"), mock.patch.object(op.client, "claim", side_effect=OSError("down")):
+            self.assertIsNone(cl._call("/l/a.mkv"))
+
+
+class EvaluatorEdgeTests2(unittest.TestCase):
+    """More of the evaluator's edges (evaluate.py): a unit worked out again, the loop's one job done or gone wrong,
+    the next job when a unit can't say or is only due again, and a page brought up against a unit that fails."""
+
+    def test_loop_next_job_and_bring(self):
+        app = _new_app()
+        app.libraries = [{"key": "3", "title": "TV", "kind": "tv", "locations": []}]
+        ev = app.evaluator
+        units = ev.units()
+        for name in units:
+            ev.closure(name)
+        health = units["health"]
+        with mock.patch.object(health, "evaluate") as e, mock.patch.object(app, "forget_health") as fg:
+            health.again("3")
+            e.assert_called_once_with("3")
+            fg.assert_called_once_with("3")
+        name = next(iter(units))
+        u = units[name]
+        with mock.patch.object(ev, "next_job", side_effect=[(name, "3"), None]), mock.patch.object(u, "sig", return_value="s"), \
+                mock.patch.object(u, "current", return_value=True), mock.patch.object(u, "again") as ag, mock.patch.object(ev, "steer"):
+            ev.working = True
+            ev._work()
+            ag.assert_called_once_with("3")
+        with mock.patch.object(ev, "next_job", side_effect=[(name, "3"), None]), mock.patch.object(u, "sig", return_value="s"), \
+                mock.patch.object(u, "current", return_value=False), mock.patch.object(u, "evaluate", side_effect=RuntimeError("boom")), mock.patch.object(ev, "steer"):
+            ev.working = True
+            ev._work()
+        self.assertEqual(ev.failures[(name, "3")][:2], ("s", "boom"))
+        ev.failures.clear()
+        names = list(units)
+        u2 = units[names[1]]
+        with mock.patch.object(ev, "order", return_value=[(names[0], "3"), (names[1], "3")]), mock.patch.object(u, "waiting", side_effect=RuntimeError("no")), \
+                mock.patch.object(u2, "waiting", return_value=None), mock.patch.object(u2, "applies", return_value=None), mock.patch.object(u2, "busy", return_value=None), \
+                mock.patch.object(u2, "current", return_value=True), mock.patch.object(u2, "due", return_value=True), mock.patch.object(ev, "ready", return_value=True), \
+                mock.patch.object(ev, "gone_wrong", return_value=None):
+            self.assertEqual(ev.next_job(), (names[1], "3"))                                          # (current but due again: after everything else)
+        d = app.libdata.data("3")
+        d.records_at = d.files_at = d.details_at = d.mirror_at = 1.0
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(ev, "started", False))
+            stack.enter_context(mock.patch.object(app.libdata, "gather", return_value=d))
+            for n in ev.closure("health"):
+                stack.enter_context(mock.patch.object(units[n], "applies", return_value=None))
+                stack.enter_context(mock.patch.object(units[n], "current", return_value=False))
+                stack.enter_context(mock.patch.object(units[n], "evaluate", side_effect=RuntimeError("boom") if n == "health" else None))
+            with self.assertRaisesRegex(ValueError, "boom"):
+                ev.bring("health", "3")
+        with mock.patch.object(ev, "started", True), mock.patch.object(health, "applies", return_value=None), mock.patch.object(health, "current", return_value=False), \
+                mock.patch.object(ev, "gone_wrong", return_value="bad"):
+            with self.assertRaisesRegex(ValueError, "bad"):
+                ev.bring("health", "3", timeout=1)
+            with mock.patch.object(ev, "settled", return_value=True):
+                self.assertEqual(en(ev._unit_count("health", "3", M("Counting…"))["why"]), "Couldn’t be worked out: bad")
+        with mock.patch.object(ev, "next_job", return_value=("health", "3")):
+            self.assertFalse(ev.settle(timeout=0.2))
+        d.records_at = d.files_at = d.details_at = d.mirror_at = 0.0
+
+
+class LibDataEdgeTests2(unittest.TestCase):
+    """The data layer's files on disk (libdata.py) when one can't be read — a dangling link where Plex lists a file, a
+    folder or an unlisted file that vanishes — a listener that fails, and the other site's files over a link that
+    answers, is still reading, or has gone quiet."""
+
+    def test_files_that_vanish_and_listeners(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        cat = fakes.make_media(d, movies=2, seasons=1, episodes=1, tracks=1)
+        plex = fakes.FakePlex(cat)
+        self.addCleanup(plex.close)
+        app = _new_app(plex={"url": plex.url, "token": "good-token"})
+        app.scan_library()
+        ld = app.libdata
+        gone = cat["movies"][0]["path"]
+        os.remove(gone)
+        os.symlink(os.path.join(d, "nope.mkv"), gone)                                                 # (a dangling link where Plex lists a file)
+        extra = os.path.join(d, "Movies", "extra.mkv")
+        with open(extra, "wb") as fh:
+            fh.write(b"x")
+        ld.listeners.append(lambda key, done: _raise(RuntimeError("listener")))
+        real_stat, real_lstat = os.stat, os.lstat
+        with mock.patch("os.stat", side_effect=lambda p, *a, **k: _raise(OSError("busy")) if str(p).endswith("/Movies") else real_stat(p, *a, **k)), \
+                mock.patch("os.lstat", side_effect=lambda p, *a, **k: _raise(OSError("gone")) if str(p).endswith("extra.mkv") else real_lstat(p, *a, **k)):
+            ld._gather("1", ("records", "files"))
+        ld.listeners.pop()
+        data = ld.data("1")
+        row = next(r for r in data.files if r["path"] == gone)
+        self.assertEqual((row["symlink"], row["missing"]), (True, False))
+        self.assertEqual(data.dirs.get(os.path.join(d, "Movies")), 0)
+        self.assertNotIn(extra, [r["local"] for r in data.unlisted])
+
+    def test_the_other_sites_files_over_the_link(self):
+        app, cat = _mirror_app(self)
+        ld = app.libdata
+        ld.gather("1", ("records",), wait=True)
+        data, lib = ld.data("1"), app.library_info("1")
+        with mock.patch.object(app.peerlinks.link("xyz"), "talking", return_value=True):
+            with mock.patch.object(app.peerlinks.link("xyz"), "files", return_value={"ready": False}):
+                ld._gather_mirror(data, lib, lambda *a: None)
+            self.assertEqual((data.mirror["disk"], data.mirror["disk_why"]), (None, "reading"))
+            with mock.patch.object(app.peerlinks.link("xyz"), "files", side_effect=RuntimeError("quiet")):
+                ld._gather_mirror(data, lib, lambda *a: None)
+            self.assertEqual(data.mirror["disk_why"], "quiet")
+            with mock.patch.object(app.peerlinks.link("xyz"), "files", return_value={"ready": True, "files": [["a.mkv", 1, 2]]}):
+                ld._gather_mirror(data, lib, lambda *a: None)
+            self.assertEqual((data.mirror["disk"], data.mirror["disk_why"]), ([["a.mkv", 1, 2.0]], None))
+
+
+class AppEdgeTests3(unittest.TestCase):
+    """More of the app's edges (app.py): the last warm-up remembered at start, Plex not found where it's looked for,
+    the match cache's size, a next-day check that fails, and what optimizing would make of a file that can't be
+    projected."""
+
+    def test_last_warmup_autodetect_and_matches(self):
+        app = _new_app()
+        app.activity.add_run({"started": 1000.0, "finished": 1100.0, "files": 1, "bytes": 1})
+        self.assertEqual(App(app.config_dir).last_warmup, dt.datetime.fromtimestamp(1000.0))
+        app.settings.update({"plex": {"url": ""}, "truenas": {"url": ""}})
+        with mock.patch("plexcache.app.PlexClient") as pc, mock.patch("plexcache.app.probe_truenas", return_value=False):
+            pc.return_value.identity.side_effect = PlexError("refused")
+            app._autodetect_inner("127.0.0.1")
+        self.assertEqual(app.settings.section("plex")["url"], "")
+        app._matches = {f"plex://movie/{i:012x}": {"thumb": ""} for i in range(500)}
+        md = {"MediaContainer": {"Metadata": [{"type": "movie", "title": "A"}]}}
+        with mock.patch("urllib.request.urlopen", return_value=_Resp(json.dumps(md).encode())):
+            self.assertEqual(app.match_info("plex://movie/ffffffffffff")["url"], "https://watch.plex.tv/search?q=A")
+        self.assertEqual(len(app._matches), 500)                                                      # (the oldest dropped)
+        app.activity.add_run({"started": 2000.0, "finished": 2100.0, "sample": [{"path": "/x", "offset": 0}]})
+        with mock.patch("plexcache.app.next_day_check", side_effect=RuntimeError("boom")), mock.patch.object(app.activity, "update_run") as ur, mock.patch("plexcache.app.NEXT_DAY", 0):
+            app.check_next_day()
+            wait_for(lambda: ur.called)
+        ur.assert_called_with(2000.0, sample=None)
+
+    def test_projection_edges(self):
+        app = _new_app()
+        f = types.SimpleNamespace(path="/m/a.mkv", poster="", matched=None, library_key="1")
+        opts = {"mkv": True, "images": "compress", "tags": "keep", "sync": False}
+        self.assertIsNone(app._projection(f, None, {}, (opts, None, None)))
+        m = {"format": "mkv", "size": 10, "mix": {}}
+        self.assertIsNone(app._projection(f, m, {}, (opts, None, None)))                               # (no record size known)
+        self.assertIsNone(app._projection(f, m, {}, (opts, {"ours": {}, "problems": ["x"]}, None)))     # (laid out again: no record size known either)
+        missing = []
+        with mock.patch.object(app.optimizing, "images_mode", return_value="plex"), mock.patch.object(app.optimizing, "poster_size", return_value=None):
+            app._projection(f, {"format": "mkv", "size": 10, "mix": {"record": 4096}}, {}, (dict(opts, images="plex"), {"ours": {}, "problems": ["x"]}, None), missing=missing)
+        self.assertEqual(missing, [""])                                                               # (Plex's poster not known yet: asked for)
+
+
+class ChecksEdgeTests(unittest.TestCase):
+    """The health checks' items (checks.py) at their edges: a mirror marked but its server not reached, another Plex Cache
+    that can't be summed up or whose mirror's edits win, and a conversion that waits on a rename or a warning."""
+
+    def test_items(self):
+        from plexcache import checks
+        app = _new_app(plex2={"libraries": {"*": {"state": "mirror", "server": "xyz", "key": ""}}})
+        app.libraries = [{"key": "1", "title": "Movies", "kind": "movie", "locations": []}]
+        self.assertIn("A mirror isn’t reached: Movies", [en(i["title"]) for i in checks._sync_items(app)])
+        app.peers_summary = None
+        with mock.patch("plexcache.peers.summary", side_effect=RuntimeError("no")):
+            self.assertEqual(checks._peer_items(app), [])
+        app.peers_summary = {"systems": [{"name": "Cabin", "sync": {"source": "mirror", "mode": "apply"}, "libraries": ["1"]}], "sync_conflicts": {"1": M("x")}, "publishing": True}
+        items = checks._peer_items(app)
+        self.assertIn("mirror’s edits winning", en(items[0]["detail"]))
+        self.assertEqual(en(items[1]["title"]), "Sync Libraries would go back and forth: Movies")
+        app.peers_summary = None
+        app.migration.state = {"step": "switch", "title": "Films"}
+        with mock.patch.object(app.migration, "checks", [{"ok": False, "level": "warn", "title": M("Only a warning")}]):
+            self.assertIn("Only a warning", en(checks._migration_items(app)[0]["detail"]))
+        with mock.patch.object(app.migration, "checks", []):
+            self.assertIn("rename the dataset", en(checks._migration_items(app)[0]["detail"]))
+        app.migration.state = None
+
+
+class ToolEdgeTests3(unittest.TestCase):
+    """Convert to MKV and Sync Libraries (tools/convert.py, tools/sync.py) at their edges: a library Plex hasn't got,
+    a conversion cancelled or not done, a row put back with Plex away, and rows refused since the scan."""
+
+    def test_convert_and_sync_rows(self):
+        app = _new_app()
+        conv = app.tools["convert"]
+        with self.assertRaisesRegex(ValueError, "No such library"):
+            conv.scan(app.libdata.data("99"))
+        row = {"local": "/l/a.avi", "library": "1", "path": "/p/a.avi", "name": "a.avi", "kind": "avi", "poster": "", "rk": "1", "title": "A"}
+        with mock.patch.object(conv, "_converted", return_value=False):
+            with mock.patch.object(app.optimizing, "convert_one", return_value={"result": "cancelled"}):
+                self.assertEqual(en(conv.apply_row(row, lambda m: None)["reason"]), "Cancelled before it started")
+            with mock.patch.object(app.optimizing, "convert_one", return_value={"result": "failed"}):
+                self.assertEqual(en(conv.apply_row(row, lambda m: None)["reason"]), "the optimizer service didn’t convert it")
+        steps = []
+        with mock.patch.object(conv, "file_action") as fa, mock.patch.object(app.conversions, "forget"), mock.patch("os.path.exists", return_value=True), \
+                mock.patch.object(app, "plex", side_effect=PlexError("down")):
+            conv.revert_row(row, {"new": "/l/a MKV-AVI.mkv"}, {}, steps.append)
+        fa.assert_called_once_with("remove_converted", "/l/a MKV-AVI.mkv", to="/l/a.avi")
+        self.assertEqual(en(steps[0]), "a MKV-AVI.mkv removed: the original stays")
+
+        class On(dict):
+            def get(self, k, d=None):
+                return self[k] if k in self else True
+
+        sync = app.tools["sync"]
+        with mock.patch.object(sync, "enabled", return_value={"source": "this"}):
+            self.assertIn("changed since", en(sync.apply_row({"library": "1", "source": "mirror", "kinds": ["edits"]}, lambda m: None)["reason"]))
+            self.assertIn("switched off", en(sync.apply_row({"library": "1", "source": "this", "kinds": ["edits"]}, lambda m: None)["reason"]))
+        with mock.patch.object(sync, "enabled", return_value=On(source="this")), mock.patch("plexcache.syncapply.ends", return_value={"name": "X", "server": "mirror"}), \
+                mock.patch("plexcache.syncapply.apply", return_value={"done": []}):
+            self.assertIn("Nothing could be done", en(sync.apply_row({"library": "1", "source": "this", "kinds": ["edits"]}, lambda m: None)["reason"]))
+        with mock.patch("plexcache.plexbackup.revert", return_value={"restored": 0, "failed": 1, "left": [M("x")]}), self.assertRaisesRegex(ValueError, "not put back"):
+            sync.revert_row({"id": "r", "title": "A"}, {"done": ["edits"], "dst_key": "2"}, {"plex": {"id": "b"}}, lambda m: None)
+        steps = []
+        with mock.patch("plexcache.plexbackup.revert", return_value={"restored": 1, "failed": 1, "left": [M("one left")]}):
+            sync.revert_row({"id": "r", "title": "A"}, {"done": ["grouping"], "dst_key": "2"}, {"plex": {"id": "b"}}, steps.append)
+        self.assertEqual([en(s) for s in steps], ["A split into items of their own again, each with its own metadata back from the backup", "one left"])
+
+
+class MiscEdgeTests4(unittest.TestCase):
+    """Small edges across the helpers: TrueNAS's method list, a check already running, compression ratios and
+    projections of nothing, the mirror looked for among the account's servers, prefetch ladders, and the health check."""
+
+    def test_small_helpers(self):
+        from plexcache import healthcheck, prefetch, projection
+        from plexcache.tools import merge as mergemod
+        tn = TrueNASClient(TRUENAS.url, "good-key", verify_tls=False)
+        with mock.patch.object(tn, "call", side_effect=TrueNASError("no")):
+            self.assertIsNone(tn.known_methods())
+        with mock.patch.object(tn, "call", return_value=[{"name": "a.b"}, "c.d"]):
+            self.assertEqual(tn.known_methods(), {"a.b", "c.d"})
+        with mock.patch.object(tn, "call", return_value="odd"):
+            self.assertIsNone(tn.known_methods())
+        app = _new_app()
+        app.updates.checking = True
+        self.assertFalse(app.updates.check_async())
+        app.updates.checking = False
+        self.assertEqual(projection._ratio({"x": [10, 5]}, "x", "off"), 1.0)
+        self.assertIsNone(projection.project({"size": 10}, 4096, "keep", False, rewrite=True))
+        self.assertEqual(projection.views({"mix": {}}, None, {"row": 1}, "lz4")["before"], {"row": 1})
+        self.assertIsNone(prefetch.audio_steps([{"rating_key": "1"}], "9", None, [], "music"))
+        self.assertEqual(prefetch.movie_steps([[{"rating_key": "1"}], [{"rating_key": "2"}, {"rating_key": "3"}]], "2"),
+                         [("next", [{"rating_key": "3"}]), ("rest", [{"rating_key": "3"}]), ("whole", [{"rating_key": "3"}])])
+        self.assertFalse(mergemod.duplicates({"title": "Alpha", "files": [], "durations": []}, {"title": "Beta", "files": [], "durations": []}))
+        self.assertEqual(app.activity.since(60), [])
+        with mock.patch("urllib.request.urlopen", side_effect=lambda *a, **k: _raise(_http_error(500, b""))):
+            self.assertEqual(healthcheck.main(), 1)
+        app.monitor.poll({"plex": {"url": "", "token": ""}})                                           # (no Plex to ask)
+        app.settings.update({"plex": {"token": ""}})
+        with self.assertRaisesRegex(ValueError, "Sign in"):
+            app.sync.discover()
+        app.settings.update({"plex": {"token": "good-token"}})
+        app.scan_library()
+        me = {"id": "abc", "name": "Me", "token": "good-token", "connections": []}
+        good = {"id": "zzz", "name": "Cabin", "token": "good-token", "connections": [{"uri": PLEX.url}]}
+        bad = {"id": "yyy", "name": "Far", "token": "bad", "connections": [{"uri": PLEX.url}]}
+        with mock.patch("plexcache.sync.servers", return_value=[me, good, bad]), mock.patch("plexcache.sync.reachable", side_effect=lambda sv: PLEX.url):
+            out = app.sync.discover()
+        self.assertEqual(([c["id"] for c in out], "error" in out[1]), (["zzz", "yyy"], True))         # (this server left out; one that refuses its token said)
+        app.sync.running = True
+        app.sync.discover_async()
+        app.sync.running = False
+
+
+class MigratingEdgeTests2(unittest.TestCase):
+    """More of the conversion's edges (migrating.py): the mirror's view when it's known through its marker only or
+    not at all, the files compared with it when the link is quiet or still reading, and the copy job's end."""
+
+    def test_mirror_view_files_and_copy_end(self):
+        from plexcache import migrating
+        app = _new_app()
+        mig = app.migration
+        with mock.patch.object(mig, "candidates", return_value=[{"library": "1", "folder": "/m/A"}]), mock.patch.object(mig, "_mirror_watched", return_value=True):
+            with mock.patch.object(mig, "_mirror", return_value={"via": "marker", "name": "Cabin", "libraries": {}}):
+                got = mig.mirror_view()
+            self.assertEqual((got["status"], en(got["title"])), ("warn", "Mirror: Cabin, through its marker only"))
+            with mock.patch.object(mig, "_mirror", return_value=None):
+                self.assertIn("not heard from", en(mig.mirror_view()["title"]))
+        checks = []
+        check = lambda cid, ok, title, detail="", *a, **k: checks.append((cid, ok, en(detail)))  # noqa: E731
+        st = {"folder": "/m/A", "library": "1"}
+        mig._check_mirror_files(st, check, None, "Cabin", {"key": "7"}, False)
+        with mock.patch.object(mig, "_compare_with_mirror", side_effect=RuntimeError("quiet")):
+            mig._check_mirror_files(st, check, {"via": "link"}, "Cabin", {"key": "7"}, True)
+        with mock.patch.object(mig, "_compare_with_mirror", return_value={"pending": True}):
+            mig._check_mirror_files(st, check, {"via": "link"}, "Cabin", {"key": "7"}, True)
+        self.assertEqual([c[2][:22] for c in checks], ["Not compared: the two ", "Not compared: quiet", "Reading the files on b"])
+        with mock.patch.object(app.libdata, "fast_track") as ft:
+            self.assertEqual(mig._compare_with_mirror(st, {"key": "7"}), {"pending": True})
+            ft.assert_called_once_with("1")
+        mig.state = {"folder": "/m/A", "library": "1", "copying": True, "queued": False, "mirror": False}
+        job = migrating.CopyJob(mig)
+        job._held = True
+        with mock.patch.object(job, "apply_pause") as ap, mock.patch.object(mig, "_save"):
+            job.finished()
+        ap.assert_called_once_with(False)
+        self.assertFalse(mig.state["copying"])
+        mig.state = None
+
+
+class FileChecksEdgeTests(unittest.TestCase):
+    """The file checks' edges (filechecks.py): metadata in front of the video that fits the first block but belongs at
+    the end, chapters in front, a file the optimizer can't rewrite, a container that isn't converted, and tags that
+    can't be read."""
+
+    def test_layout_container_and_context(self):
+        from plexcache import filechecks
+        app = _new_app()
+        opts = {"mkv": True, "images": "compress", "tags": "keep", "sync": False}
+
+        def run(m, info=None):
+            return {c["id"]: (c["status"], en(c["text"])) for c in filechecks.check_file(app, None, "/m/a" + (".mkv" if m.get("format") == "mkv" else ".mp4"), m, {"rs": 1024 * 1024}, opts, info, None)}
+
+        mkv = {"format": "mkv", "size": 10_000_000, "blksize": None, "video_start": 100_000, "tracks": [{"type": "video"}], "attachments": [],
+               "parts": [{"part": "index", "pos": 10, "size": 10}, {"part": "chapters", "pos": 30, "size": 10}]}
+        got = run(mkv)
+        self.assertIn("belongs at the end", got["front"][1])
+        self.assertEqual((got["front"][0], got["chapters"][0]), ("pass", "warn"))
+        mp4 = {"format": "mp4", "size": 10_000_000, "blksize": None, "video_start": 500_000, "tracks": [{"type": "video"}], "attachments": [], "parts": []}
+        self.assertIn("only rewrites MKV", run(mp4)["front"][1])
+        found = []
+        add = lambda cid, status, text: found.append((cid, status, en(text)))  # noqa: E731
+        d = tempfile.mkdtemp(dir=TMP)
+        avi, p = os.path.join(d, "a.avi"), os.path.join(d, "a.mkv")
+        for x in (avi, p):
+            with open(x, "wb") as fh:
+                fh.write(b"x")
+        with mock.patch.object(app.optimizing, "convert_skipped", side_effect=OSError("gone")):
+            filechecks._container(app, add, avi, "1")
+        with mock.patch.object(app.optimizing, "convert_skipped", return_value="its chapters wouldn't be kept"):
+            filechecks._container(app, add, avi, "1")
+        self.assertIn("and not converted: its chapters wouldn't be kept", found[1][2])
+        self.assertNotIn("not converted", found[0][2])
+        with mock.patch.object(app.optimizing, "_mkv_info", side_effect=ValueError("odd")):
+            self.assertEqual(filechecks.context(app, p, {"format": "mkv"}, "1", {})[1:], (None, None))
+        with mock.patch.object(app.optimizing, "_mkv_info", side_effect=RuntimeError("unreadable")):
+            self.assertEqual(filechecks.context(app, p, {"format": "mkv"}, "1", {})[1:], (None, None))
+
+
+class AppEdgeTests4(unittest.TestCase):
+    """The scheduler's hourly turns (app.py): the snapshots and record backups pruned, the tools' follow-ups looked at,
+    and the health checks run again after their six hours."""
+
+    def test_scheduler_hourly_turns(self):
+        app = _new_app()
+        real = time.time
+        calls = {"n": 0}
+
+        def fake():
+            calls["n"] += 1
+            return real() + (0 if calls["n"] <= 3 else 8 * 3600)                                    # (the loop's own clocks set, then eight hours on)
+
+        fake_time = types.SimpleNamespace(time=fake, sleep=time.sleep, monotonic=time.monotonic, strftime=time.strftime, localtime=time.localtime)
+        with mock.patch.object(app.stopping, "wait", side_effect=[False, True]), mock.patch("plexcache.app.time", fake_time), \
+                mock.patch.object(app.sync, "settings", return_value={"discover": False}), mock.patch.object(app, "publish_peers"), \
+                mock.patch.object(app, "run_checks_async") as rc, mock.patch.object(app.peerlinks, "wanted", return_value=False), \
+                mock.patch("plexcache.safety.prune_snapshots", return_value=0) as ps, mock.patch("plexcache.plexbackup.prune", return_value=0) as pb, \
+                mock.patch.object(app.tools["folders"], "waiting", return_value=True), mock.patch.object(app.tools["folders"], "tick") as tk:
+            app._scheduler_loop()
+            rc.assert_called_once()
+            pb.assert_called_once()
+            wait_for(lambda: ps.called and tk.called)
+
+
+class ToolEdgeTests4(unittest.TestCase):
+    """Merge Duplicates' revert from the records' backup (tools/merge.py): refused when nothing came back, and what was
+    left said."""
+
+    def test_merge_revert_from_backup(self):
+        app = _new_app()
+        tool = app.tools["merge"]
+        row = {"id": "r", "title": "A", "keep": {"key": "1"}}
+        with mock.patch("plexcache.plexbackup.revert", return_value={"restored": 0, "failed": 1, "left": ["x"]}), self.assertRaisesRegex(ValueError, "not put back"):
+            tool.revert_row(row, {}, {"plex": {"id": "b"}}, lambda m: None)
+        steps = []
+        with mock.patch("plexcache.plexbackup.revert", return_value={"restored": 1, "failed": 1, "left": [M("one left")]}):
+            tool.revert_row(row, {}, {"plex": {"id": "b"}}, steps.append)
+        self.assertEqual([en(s) for s in steps], ["A split into records of its own again, each with its own metadata back from the backup", "one left"])
+
+
+class FileMapEdgeTests2(unittest.TestCase):
+    """More of the file layouts' edges (filemap.py): a tag frame of no size ends the tag, and a mix that can't be
+    worked out leaves the layout without one."""
+
+    def test_empty_frame_and_unreadable_mix(self):
+        from plexcache import filemap
+        d = tempfile.mkdtemp(dir=TMP)
+        frames = b"TIT2" + (5).to_bytes(4, "big") + b"\x00\x00" + b"\x00abcd" + b"TPE1" + (0).to_bytes(4, "big") + b"\x00\x00" + b"\x00" * 10
+        p = os.path.join(d, "a.mp3")
+        with open(p, "wb") as fh:
+            fh.write(b"ID3" + bytes([3, 0, 0]) + bytes([0, 0, 0, len(frames)]) + frames + b"\xff\xfb" * 100)
+        fd = os.open(p, os.O_RDONLY)
+        try:
+            parts, _pics, _total = filemap._id3(fd, os.path.getsize(p))
+        finally:
+            os.close(fd)
+        self.assertEqual([(x["part"], x["size"]) for x in parts], [("id3", 10), ("tags", 15), ("padding", 20)])
+        mkv = os.path.join(d, "a.mkv")
+        fakes.make_mkv(mkv, 1024 * 1024)
+        with mock.patch("plexcache.filemap.cache_mix", side_effect=OSError("no")):
+            self.assertIsNone(filemap.describe(mkv)["mix"])
+
+
+class EvaluatorEdgeTests3(unittest.TestCase):
+    """The evaluator's steering of the file inspector (evaluate.py) when the inspector can't say where it is."""
+
+    def test_steer_that_fails(self):
+        app = _new_app()
+        app.libraries = [{"key": "3", "title": "TV", "kind": "tv", "locations": []}]
+        app.health_counts = {"3": {"unread": 1}}
+        ev = app.evaluator
+        with mock.patch.object(ev, "started", True), mock.patch.object(app.inspector, "looked", mock.Mock(get=mock.Mock(side_effect=RuntimeError("no")))), \
+                mock.patch.object(app.inspector, "start") as st:
+            ev.steer()
+            st.assert_not_called()
+
+
+class MirrorHealthEdgeTests2(unittest.TestCase):
+    """A library compared (mirrorhealth.check) when the mirror's library isn't paired any more, when the other Plex
+    Cache is still reading its files or has gone quiet, and when more differs than the page shows."""
+
+    def test_check_against_the_other_site(self):
+        from plexcache import mirrorhealth
+        app, cat = _mirror_app(self)
+        mh = app.mirror_health
+        app.libdata.gather("1", ("records", "files"), wait=True)
+        with mock.patch.object(app.mirrors, "pairs", return_value={}), self.assertRaisesRegex(ValueError, "isn’t paired"):
+            mh.check("1")
+        with mock.patch.object(app.peerlinks.link("xyz"), "talking", return_value=True):
+            with mock.patch.object(app.peerlinks.link("xyz"), "files", return_value={"ready": False}):
+                got = mh.check("1")
+            self.assertTrue(any("still reading" in en(u["why"]) for u in got["unchecked"]))
+            with mock.patch.object(app.peerlinks.link("xyz"), "files", side_effect=RuntimeError("quiet")):
+                got = mh.check("1")
+            self.assertTrue(any("couldn’t be read: quiet" in en(u["why"]) for u in got["unchecked"]))
+            with mock.patch.object(app.peerlinks.link("xyz"), "files", return_value={"ready": True, "files": []}), mock.patch.object(mirrorhealth, "MAX_PER_KIND", 0), \
+                    mock.patch.object(mirrorhealth, "RECENT", 0):
+                got = mh.check("1")
+            self.assertEqual((got["disk"], got["rows"], sum(got["counts"].values()) > 0), (True, [], True))   # (every file here is only here: more than the page shows)
+            self.assertTrue(any("more differences were found" in en(n) for n in got["notes"]))
+
+
+class MigratingEdgeTests3(unittest.TestCase):
+    """The conversion's checks and moves at their edges (migrating.py): the optimizer not running, TrueNAS not
+    connected, a copy still running or compared and found different, a dataset renamed but not seen, the last pass
+    ending with a move that fails, a copy that can't be queued, and the service refusing a rename or a delete."""
+
+    def test_checks_and_refusals(self):
+        app = _new_app()
+        mig = app.migration
+        checks = []
+
+        def check(cid, ok, title, detail="", *a, **k):
+            checks.append((cid, bool(ok), en(detail)))
+            return ok
+
+        with mock.patch.object(mig.client, "ready", return_value=False):
+            mig._check_create({"folder": "/m/A", "temp": "tank/t"}, check)
+        self.assertEqual(checks[-1][:2], ("optimizer", False))
+        with mock.patch.object(mig.client, "ready", return_value=True), mock.patch.object(mig.client, "status", return_value={}), \
+                mock.patch.object(mig, "_folder", return_value={"exists": True, "parent_writable": True, "free": None}), mock.patch.object(mig, "_props", return_value="no-api"):
+            mig._check_create({"folder": "/m/A", "temp": "tank/t", "size": 1}, check)
+        self.assertEqual(checks[-1][:2], ("api", False))
+        mig._check_switch({"copying": True, "queued": True}, check)
+        mig._check_switch({"compare": {"same": False, "missing": ["a.mkv"], "different": [], "extra": []}}, check)
+        self.assertEqual(checks[-2], ("compare", False, "Different: a.mkv"))
+        st = {"compare": {"same": True, "files": 1, "bytes": 1}, "old_path": "/m/.A.plexcache-old", "child": "tank/m/A", "folder": "/m/A"}
+        with mock.patch.object(mig, "_props", return_value={"recordsize": 1}), mock.patch.object(mig, "_folder", return_value={"is_mount": False}), \
+                mock.patch.object(mig.client, "status", return_value={}), mock.patch.object(mig, "_sees") as sees:
+            mig._check_switch(st, check)
+            sees.assert_called_once()                                                                 # (renamed in TrueNAS, not seen here yet)
+        with mock.patch.object(mig, "_mirror_watched", return_value=False), mock.patch.object(mig, "_mirror_seen", return_value={"how": "suspected", "name": "Cabin", "their_title": "Films"}):
+            mig._check_mirror({"step": "create", "library": "1"}, check)
+        self.assertEqual(checks[-1][0], "mirror_chosen")
+        with mock.patch.object(mig, "candidates", return_value=[{"library": "1", "folder": "/nope/A", "child": "c", "size": 1}]):
+            self.assertNotIn("room", mig.folders("1")[0])                                             # (a folder that isn't there: no room worked out)
+        mig.state = {"folder": "/m/A", "temp_folder": "/m/A-new", "step": "copy", "mirror": False}
+        with mock.patch.object(mig, "_save"), mock.patch.object(mig, "start_copy", side_effect=ValueError("busy")):
+            mig.copy_finished({"result": "copied"})
+        self.assertEqual(mig.state["step"], "switch")
+        mig.state = {"folder": "/m/A", "temp_folder": "/m/A-new", "step": "switch", "mirror": True, "move_after": True}
+        with mock.patch.object(mig, "_save"), mock.patch.object(mig, "_folder", return_value={"same": True}), mock.patch.object(mig, "rename_old", side_effect=ValueError("not now")):
+            mig.copy_finished({"result": "copied"})
+        self.assertEqual(mig.state["move_error"], "not now")
+        mig.state = {"step": "switch", "folder": "/m/A", "library": "1", "temp_folder": "/m/A-new", "child": "c"}
+        with mock.patch.object(mig, "_save"), mock.patch.object(mig, "_plex_count", return_value=0), mock.patch.object(app.jobs, "enqueue", return_value=None), \
+                self.assertRaisesRegex(ValueError, "queued or copying already"):
+            mig.start_copy(mirror=True)
+        mig.state = {"step": "switch", "folder": "/m/A", "library": "1", "compare": {"same": True}, "compare_at": time.time()}
+        with mock.patch.object(mig, "_check_gate"), mock.patch.object(mig, "blocking", return_value=[]), mock.patch.object(mig, "_folder", return_value={"error": "busy"}), \
+                self.assertRaisesRegex(ValueError, "busy"):
+            mig.rename_old(from_pass=True)
+        mig.state = {"step": "verify", "folder": "/m/A", "library": "1", "old_path": "/m/.A.plexcache-old", "child": "c"}
+        with mock.patch.object(mig, "_not_while_optimizing"), mock.patch.object(mig, "refresh"), mock.patch.object(mig, "blocking", return_value=[]), \
+                mock.patch.object(mig, "_folder", return_value={"error": "in use"}), self.assertRaisesRegex(ValueError, "in use"):
+            mig.delete_old()
+        mig.state = None
+
+
+class PlaybackEdgeTests2(unittest.TestCase):
+    """The playback monitor (playback.py) with a stream of a library that isn't cached, and a read job cancelled as it
+    starts."""
+
+    def test_uncached_library_and_cancelled_job(self):
+        from plexcache import playback
+        app = _new_app(nowplaying={"enabled": True, "delay_sec": 0, "min_delay_sec": 0})
+        app.scan_library()
+        PLEX.sessions = [{"id": "m9", "item": CAT["episodes"][0], "offset": 1000, "duration": 1200000, "state": "playing"}]
+        try:
+            with mock.patch.object(app, "library_cacheable", return_value=False):
+                app.monitor.poll(app.settings.get())
+        finally:
+            PLEX.sessions = []
+            app.monitor.poll(app.settings.get())
+        job = playback.Job(feature="nextepisode", target="A", path="/nope", ranges=[], cancel=True)
+        app.monitor._run_job("k", job, 0, 100, 1)
+        self.assertIn(job.state, ("done", "cancelled"))

@@ -6,7 +6,7 @@ This folder holds what you need to try changes on a real TrueNAS before pushing 
 |------|------------|
 | `compose.dev.yaml` | A **test copy** of the app (`plex-cache-dev`, port 8643) that runs the published image but with its code replaced by whatever you last copied to the NAS. It has its own settings, so it never touches the real `plex-cache` app. |
 | `tnsync` | A small script that **copies your code to the NAS, restarts the test app and runs the tests** — in one command, from your computer. |
-| `future.py` | Builds the image on the **next** Python's prerelease (3.16 while the image runs 3.15) and runs the suite inside it, every warning an error; `--local` uses an interpreter on your computer instead. The "future" track, local only (below). |
+| `future.py` | Builds the image on the **next** Python's prerelease (3.16 while the image runs 3.15) and each tool's newest pre-release where one is ahead of its stable release (Node's nightlies, ffmpeg's git snapshot, libjpeg-turbo's and oxipng's pre-releases; MKVToolNix has releases only), and runs the suite inside it, every warning an error; `--stable` keeps the tools at their pins, `--local` uses an interpreter on your computer instead. The "future" track, local only (below). |
 | `upkeep.py` | The dependency check: everything the app depends on against upstream's newest release, pins a minor behind moved, a major behind a prompt. The suite runs it by hand (below). |
 | `versions.py` | Prints what an image carries (its OS, Python, MKVToolNix, ffmpeg…); each build logs it. |
 | `coverage.py` | Runs the tests and shows how much of the code they reach, per file. No installs needed (Python 3.12+). |
@@ -31,13 +31,14 @@ tnsync init       set up tnsync for a project
   -N  don't restart and don't ask
   --tests-first  run the tests before copying, and copy nothing unless they pass
   --skip-tests   don't run the tests
+  --skip-future  run the current tests only, not the future ones
 ```
 
 1. **Copies only what changed** with rsync over SSH, and deletes files on the NAS that you deleted locally.
 2. **Restarts the test app** with TrueNAS's own `midclt call app.redeploy plex-cache-dev`, and waits until TrueNAS says it's done. You can refresh the page and try your change from here.
-3. **Runs the tests** (`python3 tests/run.py`) on exactly the code it copied. If any fail, a big red banner says so — the test app is already running that code, so fix it and sync again.
+3. **Runs the tests** (`python3 tests/run.py`) on exactly the code it copied, and once they pass, **the future tests** (`python3 dev/future.py`: the same suite on the next Python, see below). The run ends in one big box, green when both passed, red when one failed, with a line for each — current and future — so one glance says which is which. The test app is already running that code, so fix it and sync again. The future tests only run when the current ones pass; `--skip-future` leaves them out when you're in a hurry.
 
-**If the NAS already has exactly these files** (compared by content, so the same code from another branch counts too), nothing is copied and the app isn't restarted. If the last tests tnsync ran on that code passed, a green banner says you're already in sync and done. If they failed (or there's no result yet, `TN_TEST` changed, or the last run was a different command such as `tnsync master`), a yellow banner says the files are in sync and the tests run again. The last result is kept in `~/.local/state/tnsync/`.
+**If the NAS already has exactly these files** (compared by content, so the same code from another branch counts too), nothing is copied and the app isn't restarted. If the last tests tnsync ran on that code passed, a green banner says you're already in sync and done. If they failed (or there's no result yet, `TN_TEST` or `TN_FUTURE` changed, or the last run was a different command such as `tnsync master`), a yellow banner says the files are in sync and the tests run again. The last result is kept in `~/.local/state/tnsync/`.
 
 With `--tests-first`, the tests run before anything is copied instead, and if any fail **nothing is copied and the app isn't restarted**, so the NAS keeps running the last good code. Use it when the test app needs to stay working (for example, before syncing `master` or a release).
 
@@ -81,8 +82,9 @@ tnsync isn't specific to this project — any project with a `.tnsync` file in i
    TN_PATHS=plexcache
    TN_EXCLUDE=.git .DS_Store __pycache__ *.pyc
    TN_TEST=python3 tests/run.py
+   TN_FUTURE=python3 dev/future.py
    ```
-   `tnsync init` asks for these and writes both files for you. Settings are read as `KEY=value` lines, not run — except `TN_TEST`, which is run as a command, so only put commands there you'd type yourself.
+   `tnsync init` asks for these and writes both files for you. Settings are read as `KEY=value` lines, not run — except `TN_TEST` and `TN_FUTURE`, which are run as commands, so only put commands there you'd type yourself.
 
 ### 3. The test app
 
@@ -120,7 +122,7 @@ The code needs Python 3.15 or later. The image is built on `python:3.15-slim-tri
 
 **Kept current by a check, not by memory.** `test_dependencies_are_current` runs when the suite runs by hand (not on GitHub): once a day it asks upstream for the newest release of everything the app depends on — the Python and the Debian the image is built on, MKVToolNix, ffmpeg, oxipng, libjpeg-turbo, pyright — against what the project pins. A pin a patch or minor release behind is moved there and then (the Dockerfile or workflow edited, said in the output; MKVToolNix's every release counts as minor, since each carries fixes); a major release, or a new Debian or Python, fails the test naming it, until it's moved or held by choice. `python3 dev/upkeep.py` is the same check as a report (`--report` moves nothing, `--fresh` asks again). The GitHub Actions are Dependabot's. `python3 dev/versions.py` prints what an image carries; each build logs it.
 
-**The future track.** `python3 dev/future.py` builds the image on the next Python's prerelease tag (`python:3.16-rc-slim-trixie` while the image runs 3.15) and runs the whole suite inside it with every warning an error (node added for the page tests); `--tag 3.15-slim-forky` will try the next Debian the same way. It needs Docker with a running engine; `--local` uses a `python3.16` of your own (or `uv`, which fetches prerelease builds). It is local on purpose: GitHub shows how the app runs; this shows where it is going. When the next Python is released and the suite is clean on it, moving the image is `PYTHON_TAG` in the Dockerfile and `python-version` in `build.yml`.
+**The future track.** `python3 dev/future.py` builds the image on the next Python's newest prerelease (`python:3.16.0a1-slim-trixie`, say, while the image runs 3.15) and runs the whole suite inside it with every warning an error. The tools come the same way: for each, upstream's newest pre-release when it's ahead of the stable release, else that stable release — Python's alphas, betas and rcs as Docker Hub tags them; Node's nightlies and rcs from nodejs.org (the page tests need node; the image serves no pages through it, so the build is fetched once, kept in `~/.cache/plex-cache/node/`, and mounted into the container); ffmpeg's git snapshot, built from source once a week (`FFMPEG_SOURCE` and `FFMPEG_STAMP` in the Dockerfile); libjpeg-turbo's and oxipng's GitHub pre-releases; MKVToolNix has releases only. The run starts with a table of what it chose, kept for a day in `~/.cache/plex-cache/future.json` (`--fresh` asks again; `python3 dev/upkeep.py` reports it too); upstream not reached means the pin. `--stable` keeps every tool at the Dockerfile's pin, with Debian's node; `--tag 3.15-slim-forky` will try the next Debian the same way. The build shows as one line that moves (its step, what it's doing, the time); its full output goes to a log, shown when the build fails, or on the terminal with `-v`. The suite then runs through `tests/run.py`, with its progress bar. It needs Docker with a running engine, and uses BuildKit when Docker has it (`docker buildx`; on a Mac, `brew install docker-buildx`, then the `cliPluginsExtraDirs` line brew prints in `~/.docker/config.json`), else Docker's legacy builder. `--local` uses a `python3.16` of your own (or `uv`, which fetches prerelease builds). It is local on purpose: GitHub shows how the app runs; this shows where it is going. When the next Python is released and the suite is clean on it, moving the image is `PYTHON_TAG` in the Dockerfile and `python-version` in `build.yml`.
 
 ## Troubleshooting
 

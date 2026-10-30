@@ -29,8 +29,8 @@ from .filemap import FileMaps, Inspector
 from .pauses import L2arcPauses
 from .jobs import Jobs
 from .converting import Conversions
-from .plex2 import OtherServer
-from .peerlink import PeerLink
+from .plex2 import Mirrors
+from .peerlink import PeerLinks
 from .mirrorhealth import MirrorHealth
 from .sync import Sync
 from .trash import Trash
@@ -225,14 +225,14 @@ class App:
         self.optimizing = Optimizing(self)
         self.migration = Migration(self)
         self.conversions = Conversions(self)  # converted files waiting for Plex before their originals go
-        self.other = OtherServer(self)  # a second Plex server with the same files (plex2.py)
+        self.mirrors = Mirrors(self)  # the mirrors: other Plex servers with the same files, chosen per library (plex2.py)
         self.sync = Sync(self)  # the mirror: whether there's one, and the servers that may be (sync.py; Sync Libraries is a tool)
         self.trash = Trash(self)  # files the tools set aside, purged once Plex (here and mirrored) no longer lists them
         self.tool_runs: dict = self._load_json("tool-runs.json") or {}  # {library: {tool: when}} — told to the other Plex Cache (peers.py)
         self.peers_summary: dict | None = None
         self.published_markers: dict[str, float] = {}  # library -> when our marker was last written there (peers.publish)
         self.first_published: dict[str, float] = self._load_json("published.json") or {}  # library -> when first: for "never arrived"
-        self.peerlink = PeerLink(self)  # the other Plex Cache, at the mirror's site: found, paired, asked (peerlink.py)
+        self.peerlinks = PeerLinks(self)  # the Plex Cache at each mirror's site: found, paired, asked (peerlink.py)
         self.mirror_health = MirrorHealth(self)  # Tools → Mirror Checks: the two sites' files and Plexes compared (mirrorhealth.py)
         self.libdata = libdata.Gatherer(self)  # the library data layer: records and files, gathered once, read by every check and tool
         self.tools = {t.name: t for t in (MergeDuplicates(self), DuplicateVersions(self), OrganizeFolders(self), UnlinkFiles(self), ConvertToMkv(self), SyncLibraries(self))}  # the Tools pages
@@ -343,7 +343,7 @@ class App:
             if mst in ("create", "switch", "verify"):
                 threading.Thread(target=self._refresh_migration, daemon=True).start()
             # the mirror: looked for weekly among the account's servers, while it isn't chosen
-            if self.sync.settings().get("discover") and time.time() - self.sync.discovered_at > 7 * 86400 and self.other.undecided():
+            if self.sync.settings().get("discover") and time.time() - self.sync.discovered_at > 7 * 86400 and self.mirrors.undecided():
                 self.sync.discover_async()
             # converted files: Plex asked whether it has the MKVs, originals deleted once it has (and the hold is over)
             if any(e["state"] != "deleted" for e in self.conversions.items):
@@ -358,8 +358,7 @@ class App:
             if time.time() - last_publish > peers.PUBLISH_EVERY and self.libraries:  # our marker in the shared folders (peers.py)
                 last_publish = time.time()
                 threading.Thread(target=self.publish_peers, name="peers", daemon=True).start()
-            if self.peerlink.wanted():  # the other Plex Cache: found, paired, asked how its side is (every few minutes)
-                self.peerlink.tick_async()
+            self.peerlinks.tick_async()  # the Plex Cache at each mirror's site: found, paired, asked how its side is (every few minutes)
             self.evaluator.kick()  # (what's due again: Mirror Checks every few hours)
             if self.libdata.started:  # the library data layer: a changed library (Plex's stamp, a folder's mtime) gathered again
                 threading.Thread(target=self.libdata.tick, name="libdata-tick", daemon=True).start()
@@ -549,7 +548,7 @@ class App:
                 if rescan:
                     self.scan_library()
                 self.run_checks()
-            self.other.refresh_async()  # (the second Plex server's libraries, and how their paths line up)
+            self.mirrors.refresh_async()  # (the mirrors' libraries, and how their paths line up)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -621,14 +620,14 @@ class App:
 
     def poster_thumb(self, path: str, server: str = "") -> bytes:
         """A small poster for lists (the Processes page), kept in memory: the last few hundred.
-        ``server`` "mirror": the mirrored server's (Sync Libraries' rows)."""
+        ``server``: a mirror's machine id for one of its (Sync Libraries' rows), else this server's."""
         key = (server or "") + path
         with self.lock:
             hit = self._thumbs.pop(key, None)
             if hit is not None:
                 self._thumbs[key] = hit
                 return hit
-        data = (self.other.client(timeout=15) if server == "mirror" else self.plex(timeout=15)).thumb(path)
+        data = (self.mirrors.client(server, timeout=15) if server else self.plex(timeout=15)).thumb(path)
         with self.lock:
             self._thumbs[key] = data
             while len(self._thumbs) > 400:
@@ -1843,7 +1842,7 @@ class App:
             "optimizer": dict(self._optimizer_state(), service=self.optimizing.client.status()),
             "migration": dict(self.migration.snapshot(), candidates=self.migration.candidates(), mirror=self.migration.mirror_view()),
             "conversions": self.conversions.snapshot(),
-            "plex2": self.other.snapshot(),
+            "plex2": self.mirrors.snapshot(),
             "sync": self.sync.snapshot(),
             "tools": {name: t.snapshot() for name, t in self.tools.items()},  # the Tools pages: each one's last scan, run, results
             "plex_backup": plexbackup.plan(self),  # what's done before Plex's records change: the backup of them, or none (plexbackup.py)
@@ -1870,7 +1869,7 @@ class App:
             "mqtt": dict(self.ha.status),
             "updates": self.updates.status(),
             "peers": self.peers_summary,  # the other Plex Caches sharing library folders, and what fights (peers.py)
-            "peer": self.peerlink.snapshot(),  # the other Plex Cache at the mirror's site: System → Mirror Plex Cache (peerlink.py)
+            "peer": self.peerlinks.snapshot(),  # the Plex Cache at each mirror's site: System → Mirror Plex Cache (peerlink.py)
             "health_scans": libhealth_scans(self),  # the checks that scan by themselves (Mirror Checks): what's running, when each library was checked
         }
         out["tools_red"] = self._tools_red(out)  # each tool page's red, per library: its card on the Tools page, its tabs, the menu

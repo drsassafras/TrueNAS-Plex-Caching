@@ -94,6 +94,23 @@ def _html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _plex2_call(app, path: str, body: dict) -> dict:
+    """The mirrors (plex2.py): the account's servers; a library's mirror chosen on the Mirror page (its server reached first,
+    said in the log); an address for a server entered by hand; a server (or every one) forgotten; read again."""
+    mirrors = app.mirrors
+    if path == "/api/plex2/servers":
+        return {"servers": mirrors.list_servers()}
+    if path == "/api/plex2/choose":
+        app.activity.event("settings", mirrors.choose(str(body.get("key") or ""), str(body.get("state") or ""), str(body.get("server") or ""), str(body.get("their_key") or "")))
+    elif path == "/api/plex2/address":
+        mirrors.set_address(str(body.get("server") or ""), str(body.get("url") or ""))
+    elif path == "/api/plex2/forget":
+        mirrors.forget(str(body.get("server") or ""))
+    else:
+        mirrors.refresh()
+    return mirrors.snapshot()
+
+
 def make_handler(app):
     auth = getattr(app, "auth", None) or Auth()
     refused, refused_lock = {}, threading.Lock()  # address -> when a refusal from it was last logged
@@ -224,10 +241,10 @@ def make_handler(app):
                 if n < 0 or n > MAX_BODY:
                     return self._error("request too large", 400)
                 raw = self.rfile.read(n) if n else b""
-            link = getattr(app, "peerlink", None)
-            if link is None:
+            links = getattr(app, "peerlinks", None)
+            if links is None:
                 return self._error("not found", 404)
-            status, answer = link.handle(method, self.path, self.headers, raw, self.client_address[0])
+            status, answer = links.handle(method, self.path, self.headers, raw, self.client_address[0])
             return self._json(answer, status)
 
         def do_GET(self):
@@ -345,7 +362,7 @@ def make_handler(app):
                 if not re.fullmatch(r"/library/metadata/\d+/(thumb|art)/\d+", p):
                     return self._error("not found", 404)
                 try:
-                    data = app.poster_thumb(p, "mirror" if (qs.get("server") or [""])[0] == "mirror" else "")
+                    data = app.poster_thumb(p, (qs.get("server") or [""])[0])
                 except Exception:  # noqa: BLE001 — Plex unreachable, or no such poster: no thumbnail
                     return self._error("not found", 404)
                 return self._send(200, data, "image/jpeg", {"Cache-Control": "private, max-age=86400"})
@@ -506,17 +523,20 @@ def make_handler(app):
                     got = app.optimizing.queue(key, mode, files)  # now, or after the jobs before it
                     return self._json({"started": got == "started", "queued": got == "queued"})
                 if path.startswith("/api/peer/"):
-                    # System → Mirror Plex Cache (peerlink.py): Pair Now, Unpair, Test Again
-                    if path == "/api/peer/pair":
-                        app.peerlink.pair_now()
+                    # System → Mirror Plex Cache (peerlink.py): Pair Now and Unpair on a mirror's link ({"server": its id}), Test Again on every one
+                    link = app.peerlinks.for_server(str(body.get("server") or ""))
+                    if path == "/api/peer/test":
+                        app.peerlinks.tick_async(force=True)
+                    elif link is None:
+                        raise SettingsError(M("Which mirror: name its server."))
+                    elif path == "/api/peer/pair":
+                        link.pair_now()
                     elif path == "/api/peer/unpair":
-                        app.peerlink.unpair()
-                    elif path == "/api/peer/test":
-                        app.peerlink.tick_async(force=True)
+                        link.unpair()
                     else:
                         raise SettingsError(M("unknown action"))
-                    return self._json(jsonable(app.peerlink.snapshot()))
-                if path == "/api/sync/discover":  # the Mirror page's Look Now: the account's servers that may be mirrors (sync.py)
+                    return self._json(jsonable(app.peerlinks.snapshot()))
+                if path == "/api/sync/discover":  # the Mirror page's Look for Mirrors: the account's servers that may be mirrors (sync.py)
                     app.sync.discover_async()
                     return self._json({"started": True})
                 if path == "/api/updates/check":  # Check Now: GitHub asked for the newest version (and, on dev, commit)
@@ -711,18 +731,9 @@ def make_handler(app):
                         app.activity.event("settings", M("signed in with Plex"))
                         app.test_connections_async(then_checks=True, rescan=True)
                     return self._json({"done": bool(token)})
-                if path in ("/api/plex2/servers", "/api/plex2/use", "/api/plex2/forget", "/api/plex2/refresh"):
-                    # The second Plex server (plex2.py): the account's servers; watch one; stop; read it again
+                if path in ("/api/plex2/servers", "/api/plex2/address", "/api/plex2/forget", "/api/plex2/refresh", "/api/plex2/choose"):
                     try:
-                        if path == "/api/plex2/servers":
-                            return self._json({"servers": app.other.list_servers()})
-                        if path == "/api/plex2/use":
-                            return self._json(jsonable(app.other.use(str(body.get("id") or ""))))
-                        if path == "/api/plex2/forget":
-                            app.other.forget()
-                        else:
-                            app.other.refresh()
-                        return self._json(jsonable(app.other.snapshot()))
+                        return self._json(jsonable(_plex2_call(app, path, body)))
                     except ValueError as e:
                         raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
                 if path in ("/api/plex/pin", "/api/plex2/pin"):

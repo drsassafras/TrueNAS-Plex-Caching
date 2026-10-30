@@ -72,16 +72,16 @@ class SyncLibraries(Tool):
         return ("mirrorchecks", "merge")
 
     def not_applicable(self, library: str) -> M | None:
-        """No mirror watched, or the library not paired with one there: read so by the data layer (libdata's mirror side)."""
+        """No mirror chosen, or the library not paired with one there: read so by the data layer (libdata's mirror side)."""
         d = self.app.libdata.data(str(library))
         if d.mirror_at and d.mirror is None and not d.errors.get("mirror"):
-            return M("This library isn’t paired with one on a mirrored server: set the mirror up on the [Mirror page](/mirrors).")
+            return M("This library isn’t paired with one on its mirror: choose its mirror on the [Mirror page](/mirrors).")
         return None
 
     # ------------------------------------------------------------ the scan
-    def names(self) -> dict:
-        """How the page names the two sides: {"this", "mirror"}."""
-        return {"this": getattr(self.app, "plex_name", "") or M("This server"), "mirror": self.app.settings.section("plex2").get("name") or M("the mirror")}
+    def names(self, key: str = "") -> dict:
+        """How the page names the two sides of a library: {"this", "mirror"}."""
+        return {"this": getattr(self.app, "plex_name", "") or M("This server"), "mirror": self.mirror_name(key)}
 
     def scan(self, data) -> dict:
         from .. import libhealth
@@ -89,9 +89,9 @@ class SyncLibraries(Tool):
         lib = self.app.library_info(key) or {}
         source = self.enabled(key).get("source") or "this"
         m = data.mirror
-        out = {"library": key, "rows": [], "total": 0, "records": None, "matched": 0, "source": source, "names": self.names(), "regroup": [],
+        out = {"library": key, "rows": [], "total": 0, "records": None, "matched": 0, "source": source, "names": self.names(key), "regroup": [],
                "mirror": (m or {}).get("title") or "", "disk": None}
-        if not m:  # (no mirror watched, the library not paired with one there, not read yet, or the mirror away)
+        if not m:  # (no mirror chosen, the library not paired with one there, not read yet, or the mirror away)
             out["why"] = "error" if data.errors.get("mirror") else "reading" if not data.mirror_at else "none"
             out["error"] = data.errors.get("mirror") or ""
             return out
@@ -169,7 +169,7 @@ class SyncLibraries(Tool):
         return self.analysis(data).get("regroup") or []
 
     def flag_lines(self, rows):
-        names = self.names()
+        names = self.names(str((rows[0] if rows else {}).get("library") or ""))
         return [M("{what}, brought in line on {server}", what=", ".join(str(NAMES.get(k, k)) for k in r.get("kinds") or []),
                   server=names["mirror"] if r.get("source") != "mirror" else names["this"]) for r in rows]
 
@@ -179,7 +179,7 @@ class SyncLibraries(Tool):
         return [str(x["key"]) for r in rows if any(k != "missing" for k in r.get("kinds") or []) for x in r.get("dst_items") or []]
 
     def plex_server(self, library: str) -> str:
-        return "here" if self.enabled(library).get("source") == "mirror" else "mirror"
+        return "here" if self.enabled(library).get("source") == "mirror" else "mirror:" + self.app.mirrors.server_of(str(library))
 
     def apply_row(self, row: dict, log) -> dict:
         from .. import syncapply
@@ -198,7 +198,7 @@ class SyncLibraries(Tool):
         return {"result": "done", **got}
 
     def history_row(self, row: dict, outcome: dict) -> dict:
-        names = self.names()
+        names = self.names(str(row.get("library") or ""))
         return {"server": names["this"] if (outcome.get("server") or ("here" if row.get("source") == "mirror" else "mirror")) == "here" else names["mirror"],
                 "what": ", ".join(str(NAMES.get(k, k)) for k in outcome.get("done") or row.get("kinds") or [])}
 

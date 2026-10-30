@@ -11,7 +11,7 @@ wouldn't keep: the optimizer's record), so you can untick it.
 Each file is converted by the optimizer service (optimize/convert.py): inspected first, the MKV
 written next to the original (``<name> MKV-<EXT>.mkv``, or ``<name> MKV-<EXT> 2.mkv``… where that
 name is taken: the scan shows each file the name it will get) and checked against it, then optimized. The original stays until
-Plex has the MKV as a version of the same item — on the mirrored server too, where one is watched
+Plex has the MKV as a version of the same item — on the library's mirror too, where it has one
 (converting.py sees it in, and deletes the original then): Plex keeps the item's edits, watch
 history and collections. Revert, while the run's backup lasts: the MKV removed and, where the
 original has gone already, put back from the snapshot.

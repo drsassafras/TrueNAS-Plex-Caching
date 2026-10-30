@@ -23,12 +23,14 @@ SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"), ("mqtt", "password"))
 
 DEFAULTS: dict = {
     "plex": {"url": "", "token": ""},
-    # The mirrored server (plex2.py): another Plex server with the same files (another site, synced), watched so a
-    # converted file's original goes only once both have its MKV. "account_token": from signing in (lists the account's
-    # servers); "token": the chosen server's own; "libraries": each library's state — this server's library key (or "*",
-    # every library not listed) -> {"state": "unset" (not decided) | "none" | "mirror", "key": its library there, "" for
-    # the one of the same name and kind}. A library with no entry isn't decided: nothing is assumed of it.
-    "plex2": {"url": "", "token": "", "account_token": "", "name": "", "machine_id": "", "libraries": {}},
+    # The mirrors (plex2.py): the other Plex servers with the same files (another site's, kept in step by syncing the
+    # folders), one or several, chosen per library. "account_token": from signing in (lists the account's servers; "" uses
+    # this server's own sign-in); "servers": the account's servers as reached — its machine id -> {"name", "url": the
+    # address that answers from here, "token": its own}; "libraries": each library's state — this server's library key (or
+    # "*", every library not listed) -> {"state": "unset" (not decided) | "none" | "mirror", "server": the mirror's machine
+    # id, "key": its library there, "" for the one of the same name and kind}. A library with no entry isn't decided:
+    # nothing is assumed of it.
+    "plex2": {"account_token": "", "servers": {}, "libraries": {}},
     # The mirror (sync.py, the Mirror page): looking for mirrors among the account's servers, and what Plex's own sync
     # carries between the two. What Sync Libraries brings in line, and whose edits win, are that tool's options (the
     # "tools" section).
@@ -42,8 +44,8 @@ DEFAULTS: dict = {
     "truenas": {"url": "", "api_key": "", "verify_tls": False},
     # The other Plex Cache, at the mirror's site (peerlink.py: System → Mirror Plex Cache). "enabled": looked for (off: there's
     # none there); "auto_pair": paired by itself when it's safe; "port": the port the other side reaches this one on (0: worked
-    # out); "url": the other one's address ("": found by itself).
-    "peer": {"enabled": True, "auto_pair": True, "port": 0, "url": ""},
+    # out); "servers": per mirrored server (its machine id) -> {"url": the Plex Cache's address at its site ("": found by itself)}.
+    "peer": {"enabled": True, "auto_pair": True, "port": 0, "servers": {}},
     "general": {
         "poll_seconds": 5,
         "update_check": True,  # ask GitHub every few hours whether there's a newer version
@@ -345,10 +347,21 @@ def _coerce(section: str, key: str, value, current):
         return value
     if key == "url":
         return _url(section, value)
-    if (section, key) in (("plex", "token"), ("truenas", "api_key"), ("plex2", "token"), ("plex2", "account_token")):
+    if (section, key) in (("plex", "token"), ("truenas", "api_key"), ("plex2", "account_token")):
         return _text(section, key, value, 255, spaces=False)
-    if (section, key) in (("plex2", "name"), ("plex2", "machine_id")):
-        return _text(section, key, value, 200)
+    if (section, key) in (("plex2", "servers"), ("peer", "servers")):
+        # the mirrored servers by machine id: as reached (name, url, token, relay: through Plex's relay only), or the Plex Cache's address at each one's site
+        if not isinstance(value, dict) or len(value) > MAX_ITEMS or any(not isinstance(v, dict) or not _LIB_KEY.fullmatch(str(k)) for k, v in value.items()):
+            raise SettingsError(M("{setting} must map each server’s id to its settings", setting=f"{section}.servers"))
+        out = {}
+        for k, v in value.items():
+            url = _url(section, str(v.get("url") or "")) if v.get("url") else ""
+            token = str(v.get("token") or "")
+            if token == SECRET_MASK:  # (the page sends the mask back: the token kept)
+                token = str(((current or {}).get(str(k)) or {}).get("token") or "")
+            out[str(k)] = {"url": url} if section == "peer" else {"name": _text(section, "name", str(v.get("name") or ""), 200), "url": url,
+                                                                 "token": _text(section, "token", token, 255, spaces=False), "relay": bool(v.get("relay"))}
+        return out
     if (section, key) == ("library_health", "audio_quality"):
         if value not in ("poor", "fair", "good", "best"):
             raise SettingsError(M("library_health.audio_quality must be poor, fair, good or best"))
@@ -377,9 +390,11 @@ def _coerce(section: str, key: str, value, current):
             if v is None:
                 continue
             if (not isinstance(v, dict) or v.get("state") not in ("unset", "none", "mirror")
-                    or not (v.get("key", "") == "" or (isinstance(v.get("key"), str) and _LIB_KEY.fullmatch(v["key"])))):
-                raise SettingsError(M("plex2.libraries: each library’s state is “unset”, “none” or “mirror”, with the key of its library there (or none)"))
-            out[str(k)] = {"state": v["state"], "key": str(v.get("key") or "") if v["state"] == "mirror" else ""}
+                    or not (v.get("key", "") == "" or (isinstance(v.get("key"), str) and _LIB_KEY.fullmatch(v["key"])))
+                    or not (v.get("server", "") == "" or (isinstance(v.get("server"), str) and _LIB_KEY.fullmatch(v["server"])))):
+                raise SettingsError(M("plex2.libraries: each library’s state is “unset”, “none” or “mirror”, with the mirror’s server and the key of its library there (or none)"))
+            mirror = v["state"] == "mirror"
+            out[str(k)] = {"state": v["state"], "server": str(v.get("server") or "") if mirror else "", "key": str(v.get("key") or "") if mirror else ""}
         return out
     if (section, key) == ("mqtt", "host"):
         value = _text(section, key, value, 253).strip()
@@ -595,18 +610,33 @@ class Settings:
             if g is not None and "snapshot_days" in g:  # (renamed: the one length covers snapshots and file backups alike)
                 g.setdefault("backup_days", g["snapshot_days"])
                 del g["snapshot_days"]
-            p2l = (saved.get("plex2") or {}).get("libraries") if isinstance(saved, dict) and isinstance(saved.get("plex2"), dict) else None
+            p2 = saved.get("plex2") if isinstance(saved, dict) and isinstance(saved.get("plex2"), dict) else None
+            p2l = p2.get("libraries") if p2 is not None else None
             if isinstance(p2l, dict):  # (the shape before: the library there, or "" for none — a state now)
                 for k, v in list(p2l.items()):
                     if isinstance(v, str):
-                        p2l[k] = {"state": "mirror", "key": v} if v else {"state": "none", "key": ""}
+                        p2l[k] = {"state": "mirror", "server": "", "key": v} if v else {"state": "none", "server": "", "key": ""}
+            if p2 is not None and any(k in p2 for k in ("url", "token", "name", "machine_id")):  # (one server watched before: the first of the mirrors)
+                sid = str(p2.pop("machine_id", "") or "")
+                url, token, name = str(p2.pop("url", "") or ""), str(p2.pop("token", "") or ""), str(p2.pop("name", "") or "")
+                if sid and url:
+                    p2.setdefault("servers", {})[sid] = {"name": name, "url": url, "token": token}
+                    for v in (p2l or {}).values():
+                        if isinstance(v, dict) and v.get("state") == "mirror" and not v.get("server"):
+                            v["server"] = sid
+                    pe = saved.get("peer") if isinstance(saved.get("peer"), dict) else None
+                    if pe is not None and pe.get("url"):  # (the other Plex Cache's address by hand: that server's)
+                        pe.setdefault("servers", {})[sid] = {"url": str(pe.pop("url"))}
+            pe = saved.get("peer") if isinstance(saved, dict) and isinstance(saved.get("peer"), dict) else None
+            if pe is not None:
+                pe.pop("url", None)
             sy = saved.get("sync") if isinstance(saved, dict) and isinstance(saved.get("sync"), dict) else None
             if sy is not None and ("mirrors" in sy or "ignored" in sy):  # (the mirror is a choice per library now: the one choice stands for every library)
                 choice, p2 = sy.pop("mirrors", None), saved.setdefault("plex2", {}) if isinstance(saved.get("plex2", {}), dict) else {}
                 sy.pop("ignored", None)
                 libs = p2.setdefault("libraries", {}) if isinstance(p2.get("libraries", {}), dict) else {}
                 if choice in ("none", "plex2") and "*" not in libs:
-                    libs["*"] = {"state": "none", "key": ""} if choice == "none" else {"state": "mirror", "key": ""}
+                    libs["*"] = {"state": "none", "server": "", "key": ""} if choice == "none" else {"state": "mirror", "server": "", "key": ""}
             o = saved.get("optimizer") if isinstance(saved, dict) and isinstance(saved.get("optimizer"), dict) else None
             if o is not None:  # (converting is the Convert to MKV tool's now: no hold, and no per-library switch)
                 o.pop("convert_hold_days", None)
@@ -669,6 +699,9 @@ class Settings:
         for sec, key in SECRET_PATHS:
             data[sec][key + "_set"] = bool(data[sec][key])
             data[sec][key] = SECRET_MASK if data[sec][key] else ""
+        data["plex2"]["account_token"] = SECRET_MASK if data["plex2"]["account_token"] else ""
+        for sv in data["plex2"]["servers"].values():  # (each mirror's own token: never shown)
+            sv["token"] = SECRET_MASK if sv.get("token") else ""
         return data
 
     def update(self, patch: dict) -> dict:
@@ -685,7 +718,7 @@ class Settings:
                         continue
                     if key not in DEFAULTS[sec]:
                         raise SettingsError(M("unknown setting: {setting}", setting=f"{sec}.{key}"))
-                    if (sec, key) in SECRET_PATHS and value == SECRET_MASK:
+                    if ((sec, key) in SECRET_PATHS or (sec, key) == ("plex2", "account_token")) and value == SECRET_MASK:
                         continue
                     new[sec][key] = _coerce(sec, key, value, DEFAULTS[sec][key])
             if new["nowplaying"]["ram_percent"] + new["nextepisode"]["ram_percent"] > 100:
@@ -701,4 +734,7 @@ class Settings:
         for sec, key in SECRET_PATHS:
             data[sec][key] = ""
         data["general"]["client_id"] = ""
+        data["plex2"]["account_token"] = ""
+        for sv in data["plex2"]["servers"].values():
+            sv["token"] = ""
         return data

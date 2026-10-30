@@ -85,6 +85,7 @@ def closed_error(e: urllib.error.HTTPError) -> urllib.error.HTTPError:
         body = e.read()
     err = ServiceError(e.url, e.code, e.msg, e.hdrs, None)
     err.body = body
+    err.close()  # (nothing to close, but told so: dropped unclosed it would warn like an open response)
     return err
 
 

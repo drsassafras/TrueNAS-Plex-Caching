@@ -11,7 +11,7 @@ Two ways, the library's option ``remove`` (a choice):
   disappears anywhere — a path removed here would be removed at the other site too, where it isn't
   a link but the only copy. Then Merge Duplicates or Duplicate Versions tidy the copies, the same
   way on each side.
-* **The extra paths removed** (``remove``: a library with no mirrored server only): the paths to
+* **The extra paths removed** (``remove``: a library with no mirror only): the paths to
   the file that Plex doesn't list are removed, so the file is where Plex has it and nowhere else
   (optimize/files.py unlink, which only removes a path while another path still holds the file).
   A link whose every path Plex lists (two records) is made a file of its own instead, for Merge

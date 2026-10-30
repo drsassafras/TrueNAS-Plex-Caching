@@ -2,7 +2,7 @@
 
 import os
 
-__version__ = "0.16.16"
+__version__ = "0.16.17"
 REPO_URL = "https://github.com/drsassafras/TrueNAS-Plex-Caching"
 # Which build this is: "stable" (the main branch, released and tagged) or "dev" (the dev branch, the
 # same version number until the next release). Set when the image is built (Dockerfile ARG); the

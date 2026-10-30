@@ -13,6 +13,10 @@ ARG MKVTOOLNIX=103.0
 ARG FFMPEG=9.0.2
 ARG OXIPNG=10.2.1
 ARG LIBJPEG_TURBO=3.2.1
+# dev/future.py builds ffmpeg from its git snapshot instead: FFMPEG_SOURCE the tarball's URL (any compression tar knows),
+# FFMPEG_STAMP the week, so the layer is built again when it changes. Empty: the release above.
+ARG FFMPEG_SOURCE=""
+ARG FFMPEG_STAMP=""
 
 # jpegtran built from libjpeg-turbo's release: the one tool of it the optimizer uses, linked statically against it.
 FROM python:${PYTHON_TAG} AS jpegtran
@@ -29,11 +33,14 @@ RUN set -eux; \
 # ffmpeg (with ffprobe) built from its release, with no external libraries (zlib for PNG cover art). A few minutes of the build.
 FROM python:${PYTHON_TAG} AS ffmpeg
 ARG FFMPEG
+ARG FFMPEG_SOURCE
+ARG FFMPEG_STAMP
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl xz-utils build-essential nasm pkg-config zlib1g-dev; \
-    curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG}.tar.xz" | tar xJ; \
-    cd "ffmpeg-${FFMPEG}"; \
+    apt-get install -y --no-install-recommends ca-certificates curl xz-utils bzip2 build-essential nasm pkg-config zlib1g-dev; \
+    src="${FFMPEG_SOURCE:-https://ffmpeg.org/releases/ffmpeg-${FFMPEG}.tar.xz}"; echo "ffmpeg from $src ${FFMPEG_STAMP}"; \
+    curl -fsSL "$src" -o "${src##*/}"; mkdir ffmpeg-src; tar xaf "${src##*/}" -C ffmpeg-src --strip-components=1; \
+    cd ffmpeg-src; \
     ./configure --disable-doc --disable-debug --disable-ffplay --disable-autodetect --enable-zlib --disable-shared --enable-static >/dev/null; \
     make -j "$(nproc)" >/dev/null; \
     install -m 755 ffmpeg ffprobe /usr/local/bin/; \

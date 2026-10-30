@@ -1,7 +1,7 @@
 """Files set aside by the tools (the library's .plexcache-trash), and when they go for good.
 
 A file set aside — a duplicate version, an old path after a move — is purged only once Plex here no
-longer lists it (a scan), and, with a mirrored server, once the mirror's Plex no longer lists it
+longer lists it (a scan), and, with a mirror, once its Plex no longer lists it
 either (the synced folder carries the move there as a deletion), then after the hold
 (general.backup_days: the one length every backup is kept). A file that never meets that —
 the mirror keeps listing it, say — is held, and said so: Health lists it, and the tool's page offers
@@ -78,7 +78,7 @@ class Trash:
         except Exception:  # noqa: BLE001
             pass
         # there: the mirror's Plex no longer lists it (or there's no mirror for this library)
-        other = getattr(self.app, "other", None)
+        other = getattr(self.app, "mirrors", None)
         there = None
         try:
             lib_there = other.mirror_for(str(e["library"])) if other is not None else None
@@ -94,18 +94,19 @@ class Trash:
         if e["here"] and there is not False:
             e.setdefault("clear_at", now)
             if now - e["clear_at"] >= self.hold_days() * 86400:
-                return self._purge(e)
+                self._purge(e)
         elif now - e["at"] > STUCK_AFTER:
             e["stuck"] = True
         return True
 
     def _purge(self, e: dict) -> bool:
+        """The file deleted for good through the optimizer service; False when it refused (said on the row, tried again later)."""
         root = self._root(e["library"], e["path"])
         try:
             self.app.optimizing.client.file_action("purge", e["trashed"], root=root or "")
         except Exception as err:  # noqa: BLE001 — said; tried again later
             e["error"] = str(getattr(err, "reason", None) or err)
-            return True
+            return False
         e.update(state="purged", purged=time.time())
         e.pop("error", None)
         self.app.activity.event("tools", M("deleted for good: {file} ({why})", file=os.path.basename(e["path"]), why=e["why"]))

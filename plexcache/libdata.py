@@ -13,7 +13,7 @@ Four kinds of data, each with its own way of learning it changed:
 * **Details** — each file's item page in Plex (plex.item_detail): the streams as Plex probed them — a
   track's bitrate, channels, bit depth, and Atmos or DTS:X in its name — and the fields you locked. Read
   after the records and files, one request per item, and again when the library's stamp moves.
-* **The mirror** — with the library paired with one on the mirrored server (the Mirror page): both servers' items of
+* **The mirror** — with the library paired with one on its mirror (the Mirror page): both servers' items of
   the kind the two compare by (films; shows, seasons and episodes; artists, albums and tracks), each one's own page
   where the two differ, and the other site's files on disk, through the Plex Cache there when it's talking. What Sync
   Libraries brings in line, and Mirror Checks. Read again when the pairing changes, the records here were read since,
@@ -509,30 +509,32 @@ class Gatherer:
         d.errors.pop("files", None)
 
     def mirror_of(self, key: str) -> tuple:
-        """(the mirrored server's library paired with this one, "<the mirror's machine id>/<that library>"), or (None, "")
-        with no mirror watched, or the library not paired — or (None, None) while that isn't known: the mirror's libraries
+        """(the mirror's library paired with this one, "<the mirror's machine id>/<that library>"), or (None, "")
+        with no mirror chosen, or the library not paired — or (None, None) while that isn't known: the mirror's libraries
         never read (it couldn't be reached), never taken for "not paired" (what was read of it kept)."""
-        other = getattr(self.app, "other", None)
-        if other is None or other.state_of(str(key)) != "mirror" or not other.configured():
+        other = getattr(self.app, "mirrors", None)
+        if other is None or other.state_of(str(key)) != "mirror":
             return None, ""
-        if hasattr(other, "known") and not other.known():
+        sid = other.server_of(str(key))
+        if not sid or not other.configured(sid):
+            return None, ""
+        if not other.known(sid):
             try:
-                other.libraries()
+                other.libraries(sid)
             except Exception:  # noqa: BLE001
                 pass
-            if not other.known():
+            if not other.known(sid):
                 return None, None
         try:
-            there = other.pairs().get(str(key))
+            there = other.mirror_for(str(key))
         except Exception:  # noqa: BLE001 — the mirror away: as unpaired, until it's back
             return None, ""
         if there is None:
             return None, ""
-        s = other.settings()
-        return there, f"{s.get('machine_id') or s.get('url') or ''}/{there.key}"
+        return there, f"{sid}/{there.key}"
 
     def _gather_mirror(self, d: LibraryData, lib: dict, step) -> None:
-        """The mirrored server's side (see the module's docstring): both servers' items, each one's own page where the two
+        """The mirror's side (see the module's docstring): both servers' items, each one's own page where the two
         differ — read again only when the listing says it changed — and the other site's files. A mirror that can't be read
         keeps what was read of it (said in the errors), unless it was of another pairing."""
         from .sync import DETAIL_KEYS, LEAVES, _Side, compare_library
@@ -553,8 +555,8 @@ class Gatherer:
             here_client = app.plex(timeout=120)
             # (the records, read just now, are the films' and shows' items already)
             here = [keep(it) for t in leaves for it in (d.records if t == TOP_TYPE.get(typ) and d.records_at and "records" not in d.errors else here_client.library_items(d.key, t))]
-            app.other.run(lambda c: c.identity(), timeout=20)  # (reached — at another of its addresses if need be)
-            there_client = app.other.client(timeout=120)
+            app.mirrors.run(there.server, lambda c: c.identity(), timeout=20)  # (reached — at another of its addresses if need be)
+            there_client = app.mirrors.client(there.server, timeout=120)
             theirs = [keep(it) for t in leaves for it in there_client.library_items(there.key, t)]
             # the items on both servers the two differ on, either way round: each one's own page (which fields are edited,
             # the summary) — an item on one server only has nothing there to be compared with
@@ -590,7 +592,8 @@ class Gatherer:
             return
         # the other site's files, through the Plex Cache there
         disk, why = None, "none"
-        link = getattr(app, "peerlink", None)
+        links = getattr(app, "peerlinks", None)
+        link = links.for_library(d.key) if links is not None else None
         if link is not None and link.talking():
             try:
                 got = link.files(there.key)

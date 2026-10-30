@@ -9,7 +9,7 @@ app knows, so there's no snapshot of it to take); under "A backup I make myself"
 then deleted by the app.
 
 Every change to Plex goes through PlexClient, which asks guard() first (``before_change``, set by App.plex() and
-OtherServer.client()). A process opens a backup of its own (session(), with the records it will change taken first, so
+Mirrors.client()). A process opens a backup of its own (session(), with the records it will change taken first, so
 one that can't be read stops it before anything changes); a change made outside one gets a backup of its own all the same.
 """
 
@@ -94,10 +94,15 @@ def read(client, rating_key: str) -> dict | None:
 
 
 # ------------------------------------------------------------ taking one
+def _client(app, server: str, timeout: float = 120):
+    """The client of the server a backup is of: "here", or "mirror:<a mirror's machine id>"."""
+    return app.mirrors.client(server.split(":", 1)[1], timeout=timeout) if server.startswith("mirror") else app.plex(timeout=timeout)
+
+
 def _new(app, what, server: str, library: str = "", job: str = "", loose: bool = False) -> dict:
     from . import safety
     now = time.time()
-    name = (app.settings.section("plex2").get("name") or str(M("the mirror"))) if server == "mirror" else (getattr(app, "plex_name", "") or str(M("This server")))
+    name = (app.mirrors.name_of(server.split(":", 1)[1]) if ":" in server else str(M("the mirror"))) if server.startswith("mirror") else (getattr(app, "plex_name", "") or str(M("This server")))
     b = {"id": uuid.uuid4().hex[:12], "at": now, "until": now + safety.life(app), "what": jsonable(what), "server": server, "server_name": name,
          "library": str(library or ""), "job": job, "loose": loose, "items": {}, "ops": [], "reverted": False}
     with _lock:
@@ -129,7 +134,7 @@ def session(app, what, server: str = "here", library: str = "", job: str = "", c
     b = _new(app, what, server, library, job)
     try:
         if keys:
-            _capture(app, b, client or (app.other.client(timeout=120) if server == "mirror" else app.plex(timeout=120)), keys)
+            _capture(app, b, client or _client(app, server), keys)
     except PlexError as e:
         with _lock:
             backups(app).remove(b)
@@ -243,7 +248,7 @@ def revert(app, backup_id: str, keys=None) -> dict:
     merges = [op for op in b.get("ops") or [] if op.get("op") == "merge" and want & {op["keep"], *op["others"]}]
     for op in merges:
         want |= {op["keep"], *op["others"]}
-    client = app.other.client(timeout=120) if b.get("server") == "mirror" else app.plex(timeout=120)
+    client = _client(app, str(b.get("server") or "here"))
     ok = failed = 0
     left: list = []
     _tl.quiet = True

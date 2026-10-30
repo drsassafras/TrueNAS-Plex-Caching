@@ -32,6 +32,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCKERFILE = os.path.join(ROOT, "Dockerfile")
 BUILD = os.path.join(ROOT, ".github", "workflows", "build.yml")
 CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "plex-cache", "upkeep.json")
+FUTURE = os.path.join(os.path.dirname(CACHE), "future.json")  # what dev/future.py last chose to run on (its day's choices)
 A_DAY = 24 * 3600
 TIMEOUT = 20
 
@@ -290,6 +291,18 @@ def check(apply: bool = True, fresh: bool = False) -> Report:
     return out
 
 
+def future_track() -> str | None:
+    """What dev/future.py last ran on — each dependency's version and channel (alpha, nightly, snapshot, stable…) — from its
+    day's choices; None when it hasn't run here."""
+    try:
+        with open(FUTURE, encoding="utf-8") as fh:
+            got = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    picks = [p for p in got.get("picks") or [] if isinstance(p, dict) and p.get("name")]
+    return ", ".join(f"{p['name']} {p.get('version', '?')} ({p.get('channel', '?')})" for p in picks) or None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--fresh", action="store_true", help="ask upstream again rather than using the day's answers")
@@ -303,6 +316,8 @@ def main() -> int:
     if r.stale:
         print("(upstream not reached now: the last look's answers)")
     print("\n".join(r.lines))
+    if track := future_track():
+        print(f"\nThe future run (dev/future.py) last chose: {track}")
     if r.bumped:
         print("\nMoved:\n  " + "\n  ".join(r.bumped))
     if r.prompts:

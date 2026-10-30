@@ -100,7 +100,7 @@ class MirrorHealth:
         return self.paired()[0]
 
     def waiting(self):
-        """None once what's paired with the mirror is known (a mirror watched or not); else ("pending", None) while the
+        """None once what's paired with the mirrors is known (a mirror chosen or not); else ("pending", None) while the
         mirror's libraries are being read — the first time — or ("failed", why) when they couldn't be. Never "no mirror"
         for a mirror that's watched but not reached yet."""
         return self.paired()[1]
@@ -114,47 +114,40 @@ class MirrorHealth:
         cached = getattr(self, "_libs", None)
         if cached and cached[2] == sig and time.time() - cached[0] < 60:
             return cached[1], None
-        other = getattr(self.app, "other", None)
+        other = getattr(self.app, "mirrors", None)
         out, waiting = [], None
         watched = other is not None and other.any_mirror()
         if watched and not here:  # (this Plex's libraries not read yet: what's paired with them isn't known)
             waiting = ("pending", None)
         elif watched and other is not None:
-            from .plex2 import LIBS_TTL
-            with other.lock:
-                theirs, err, at = other.libs, other.error, other.libs_at
-            if theirs is None or time.time() - at >= LIBS_TTL:
-                theirs = self._read_mirror(theirs)
-                with other.lock:
-                    err = other.error
-            if theirs is None:
+            known, err = self._read_mirror()
+            if not known:
                 waiting = ("failed", err) if err else ("pending", None)
             else:
                 try:
-                    out = [k for k, t in other.pairs(list(theirs)).items() if t is not None]
+                    out = [k for k, t in other.pairs().items() if t is not None]
                 except Exception as e:  # noqa: BLE001
                     out, waiting = [], ("failed", str(e))
         if waiting is None:
             self._libs = (time.time(), out, sig)
         return out, waiting
 
-    def _read_mirror(self, theirs):
-        """The mirror's libraries read (again): in a thread of its own once the evaluator runs — what's known kept meanwhile,
-        the evaluator told when they're in — else here. What's known now."""
-        other = self.app.other
+    def _read_mirror(self) -> tuple:
+        """The mirrors' libraries read (again, when their age is up): in a thread of its own once the evaluator runs — what's
+        known kept meanwhile, the evaluator told when they're in — else here. (every mirror in use known, the first error)."""
+        other = self.app.mirrors
         ev = getattr(self.app, "evaluator", None)
         if ev is None or not ev.started:
-            other.libraries()
-            with other.lock:
-                return other.libs
+            other.read_all()
+            return other.status()
         with self.lock:
             if getattr(self, "reading", False):
-                return theirs
+                return other.status()
             self.reading = True
 
         def run():
             try:
-                other.libraries()
+                other.read_all()
             except Exception:  # noqa: BLE001 — said by its error (waiting)
                 pass
             finally:
@@ -163,14 +156,14 @@ class MirrorHealth:
                 self._libs = self._snap = None
                 ev.kick()
         threading.Thread(target=run, name="mirror-libraries", daemon=True).start()
-        return theirs
+        return other.status()
 
     def check(self, key: str) -> dict:
         """One library compared now (see the module's docstring): {"at", "rows", "counts", "notes", "error", "disk",
         "mirror"}. Each row a finding on an item of Library Health's: Plex's record here where it lists the file
         (item: its rating key), else the file here (its path), else its place in the folder (there:<place>)."""
         key = str(key)
-        link = self.app.peerlink
+        link = self.app.peerlinks.for_library(key)
         notes: list = []
         unchecked: list[dict] = []  # the checks that couldn't run, a group for each reason: [{"checks", "label", "why", "link"}]
         rows: dict[str, list[dict]] = {k: [] for k in KINDS}
@@ -210,11 +203,11 @@ class MirrorHealth:
             if rel:
                 here_plex[_norm(rel)] = f
         # the other site's disk, through the other Plex Cache
-        there = self.app.other.pairs().get(key)
+        there = self.app.mirrors.pairs().get(key)
         if there is None:
             raise ValueError(M("This library isn’t paired with one on the mirror ([Mirror page](/mirrors))."))
         there_disk, disk_why = None, None
-        if link.talking():
+        if link is not None and link.talking():
             try:
                 got = link.files(there.key)
                 if got.get("ready"):
@@ -223,14 +216,14 @@ class MirrorHealth:
                     disk_why = (M("The other Plex Cache is still reading this library’s files: they’re compared at the next scan."), None)
             except Exception as e:  # noqa: BLE001
                 disk_why = (M("The other site’s files couldn’t be read: {why}", why=str(e)), PEER_CARD)
-        elif link.known():
+        elif link is not None and link.known():
             bad = "; ".join(str(v["text"]) for v in link.lights().values() if v["status"] in ("warn", "fail"))
             disk_why = (M("The link to the Plex Cache at the other site isn’t working: {lights}.", lights=bad) if bad
                         else M("The link to the Plex Cache at the other site isn’t working."), PEER_CARD)
-        elif not link.wanted():  # (none there, or none found yet: nothing that should have been compared wasn't — not red)
+        elif link is None or not link.wanted():  # (none there, or none found yet: nothing that should have been compared wasn't — not red)
             notes.append(M("The other site’s files aren’t compared: System → Mirror Plex Cache is set to say there’s no Plex Cache there."))
         if disk_why:  # (the checks that need the other site's files, and the folder sync's, which needs the link)
-            unchecked.append({"checks": ["mirror_only_here", "mirror_only_there", "mirror_size_differs"] + ([] if link.talking() else ["mirror_sync_files"]),
+            unchecked.append({"checks": ["mirror_only_here", "mirror_only_there", "mirror_size_differs"] + ([] if link is not None and link.talking() else ["mirror_sync_files"]),
                               "label": M("Other site’s files not compared"), "why": disk_why[0], "link": disk_why[1]})
         if there_disk is not None:
             for n, (rel, size, mtime) in here_disk.items():
@@ -245,7 +238,7 @@ class MirrorHealth:
                     add("only_there", rel, size=size)
         # the mirror's Plex against Plex here
         try:
-            idx = self.app.other.index(there, fresh=True)
+            idx = self.app.mirrors.index(there, fresh=True)
         except Exception as e:  # noqa: BLE001
             idx = None
             unchecked.append({"checks": ["mirror_not_listed_there", "mirror_only_listed_there", "mirror_unlisted_here"], "label": M("Mirror’s Plex not read"),
@@ -269,7 +262,7 @@ class MirrorHealth:
             for r in rows["unlisted_here"]:  # (a file Plex here doesn't list that the mirror's does: Sync Libraries' to scan for, where the mirror's edits win)
                 r["listed_there"] = _norm(r["rel"]) in there_plex
         # the folder sync of .plexcache
-        fs = (link.folder_sync() or {}).get(key) if link.talking() else None
+        fs = (link.folder_sync() or {}).get(key) if link is not None and link.talking() else None
         if fs and fs["status"] in ("warn", "fail"):
             counts["sync_files"] += 1
             behind = fs.get("out") or fs.get("in")
@@ -338,7 +331,7 @@ class MirrorHealth:
 
     # ------------------------------------------------------------ the evaluator's (evaluate.MirrorUnit)
     def not_applicable(self, key: str):
-        """Why a library isn't compared (an M: its count "na"): no mirror watched, it isn't paired with one there, or the
+        """Why a library isn't compared (an M: its count "na"): no library mirrored, it isn't paired with one there, or the
         other side is switching its folder to a child dataset (compared again once that's done)."""
         libs, waiting = self.paired()
         if str(key) in libs:
@@ -353,7 +346,7 @@ class MirrorHealth:
                     self.wanted.add(str(key))
         if str(key) in libs or waiting:  # (not known yet: its count says so — waiting())
             return None
-        return M("No mirror is watched: mark a library as mirrored on the [Mirror page](/mirrors).") if not libs else \
+        return M("No library is mirrored: choose a library’s mirror on the [Mirror page](/mirrors).") if not libs else \
             M("This library isn’t paired with one on the mirror: pair it on the [Mirror page](/mirrors) to compare it.")
 
     def current(self, key: str) -> bool:
@@ -456,7 +449,7 @@ class MirrorHealth:
             groups = tool.regroup(d)
         except Exception:  # noqa: BLE001 — the tool's scan refusing this library: none
             return []
-        names = tool.names()
+        names = tool.names(key)
         src_name, dst_name = (names["this"], names["mirror"]) if self.source(key) != "mirror" else (names["mirror"], names["this"])
         here_first = self.source(key) != "mirror"
         out = []
@@ -508,7 +501,7 @@ class MirrorHealth:
         if snap["waiting"]:
             return [self.waiting_note(snap["waiting"])]
         if key not in snap["libraries"]:
-            return [{"status": "info", "text": M("No mirror is watched: mark a library as mirrored on the [Mirror page](/mirrors).") if not snap["libraries"]
+            return [{"status": "info", "text": M("No library is mirrored: choose a library’s mirror on the [Mirror page](/mirrors).") if not snap["libraries"]
                      else M("This library isn’t paired with one on the mirror: pair it on the [Mirror page](/mirrors) to compare it.")}]
         out = []
         with self.lock:
@@ -547,7 +540,7 @@ class MirrorHealth:
         why = M("{why}", why=re.sub(r"\s*\(\[[^\]]*\]\([^)]*\)\)", "", str(said))) if said is not None else None  # (its link left out: the chip is it)
         if res.get("disk") is not False and said is None:
             return []
-        link = getattr(self.app, "peerlink", None)
+        link = self.app.peerlinks.for_library(key)
         return [{"checks": ["mirror_only_here", "mirror_only_there", "mirror_size_differs"] + ([] if link is not None and link.talking() else ["mirror_sync_files"]),
                  "label": M("Other site’s files not compared"), "why": why or M("The last scan didn’t compare the other site’s files."), "link": PEER_CARD}]
 
@@ -576,12 +569,12 @@ class MirrorHealth:
                 self.app.plex(timeout=20).scan(key, folder)
             said = M("Plex here asked to scan {folder}", folder=folders[0] if folders else "")
         else:
-            there = self.app.other.pairs().get(key)
+            there = self.app.mirrors.pairs().get(key)
             if there is None:
                 raise ValueError(M("This library isn’t paired with one on the mirror any more."))
             folders = sorted({f for r in rows for f in r.get("folders") or []})
             for folder in folders:
-                self.app.other.run(lambda c, f=folder: c.scan(there.key, f), timeout=20)
+                self.app.mirrors.run(there.server, lambda c, f=folder: c.scan(there.key, f), timeout=20)
             said = M("The mirror’s Plex asked to scan {folder}", folder=folders[0] if folders else "")
         with self.lock:
             self.scanned[key + "/" + str(item) + "/" + check] = time.time()
@@ -597,8 +590,8 @@ class MirrorHealth:
         """Why this library waits while the Plex Cache at the other site converts its folder to a child dataset: past its
         copy (Switch, Verify), its folder about to be set aside, or set aside, and its folder sync paused — anything changed
         here meanwhile would reach it the wrong way round. Told by the link, or the marker (peerlink.facts). None otherwise."""
-        link = getattr(self.app, "peerlink", None)
-        if link is None or not link.mirror_id():
+        link = self.app.peerlinks.for_library(key)
+        if link is None:
             return None
         from .migrating import HOLD_STEPS, step_name
         f = link.facts()
@@ -616,7 +609,7 @@ class MirrorHealth:
         why = self.converting(key)
         if why:
             return why
-        link = getattr(self.app, "peerlink", None)
+        link = self.app.peerlinks.for_library(key)
         if link is None or not link.talking():
             return None
         fs = link.folder_sync().get(str(key))
@@ -639,16 +632,16 @@ class MirrorHealth:
 
     def connection(self) -> dict:
         """The link's health, as the page says it: {"status": "ok" | "warn" | "off", "text": M, "lights": [names not ok]}."""
-        link = self.app.peerlink
+        links = self.app.peerlinks
         waiting = self.waiting()
         if waiting:
             n = self.waiting_note(waiting)
             return {"status": "warn" if n["status"] == "warn" else "off", "text": n["text"], "lights": []}
         if not self.libraries():
-            return {"status": "off", "text": M("No mirror is watched: mark a library as mirrored on the [Mirror page](/mirrors)."), "lights": []}
-        if not link.wanted():
-            return {"status": "ok", "text": M("No Plex Cache at the mirror’s site: the disks aren’t compared."), "lights": []}
-        bad = [v["text"] for v in link.lights().values() if v["status"] in ("warn", "fail")]
+            return {"status": "off", "text": M("No library is mirrored: choose a library’s mirror on the [Mirror page](/mirrors)."), "lights": []}
+        if not links.wanted():
+            return {"status": "ok", "text": M("No Plex Cache at the mirrors’ sites: the disks aren’t compared."), "lights": []}
+        bad = [v["text"] for lk in links.used() if lk.wanted() for v in lk.lights().values() if v["status"] in ("warn", "fail")]
         if bad:
             return {"status": "warn", "text": M("The link to the other Plex Cache needs attention ([System → Mirror Plex Cache](/system#peer)): {lights}. Mirror Checks rely on it, so some checks are left out.",
                                                  lights="; ".join(str(b) for b in bad)), "lights": bad}
@@ -666,9 +659,9 @@ class MirrorHealth:
         libs, waiting = self.paired()
         with self.lock:
             at = {k: (self.results.get(k) or {}).get("at") for k in libs}
-        link = getattr(self.app, "peerlink", None)
+        links = getattr(self.app, "peerlinks", None)
         got = {"running": self.running, "checked_at": self.checked_at, "at": at, "libraries": libs, "connection": self.connection(),
-               "held": [k for k in libs if self.hold(k)], "known": bool(link is not None and link.known()),
+               "held": [k for k in libs if self.hold(k)], "known": bool(links is not None and links.known()),
                "waiting": waiting}
         self._snap = (key, time.time(), got)
         return got

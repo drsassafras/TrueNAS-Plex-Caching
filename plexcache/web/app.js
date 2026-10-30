@@ -387,7 +387,18 @@ PCI18N.ready.then(function () {
     return '<div class="card tile"><div class="big" style="color:' + color + '">' + esc(n || 0) + '</div><div class="det" style="margin:0">' + esc(label) + "</div></div>";
   }
   function top(title, sub, actions) {
-    return '<div class="top"><div><h1>' + esc(title) + '</h1><div class="sub">' + sub + "</div></div>" + (actions || "") + "</div>";
+    return '<div class="top"><div><h1>' + esc(title) + '</h1><div class="sub">' + sub + "</div></div>" + (actions || "") + "</div>" + pairAsks();
+  }
+  // Pair Now pressed on the Plex Cache at a mirror's site (peerlink.py asks): said at the top of every page here, with where
+  // to press it — or that no library here is mirrored by that server yet, so the Mirror page comes first
+  function pairAsks() {
+    var asked = (ST && ST.peer && ST.peer.asked) || {};
+    return Object.keys(asked).map(function (sid) {
+      var a = asked[sid], n = Math.max(1, Math.ceil((a.left || 0) / 60));
+      return '<div class="note">' + links(a.wanted
+        ? T("The Plex Cache on {name} asks to pair: press Pair Now on [System → Mirror Plex Cache](/system#peer) within {n} minutes.", { name: a.name, n: n })
+        : T("The Plex Cache on {name} asks to pair, but no library here is mirrored by {server}: choose one on the [Mirror page](/mirrors), then press Pair Now on [System → Mirror Plex Cache](/system#peer).", { name: a.name, server: a.server })) + "</div>";
+    }).join("");
   }
   function rec(feature) {
     var r = ST.health && ST.health.recommendations.filter(function (x) { return x.feature === feature; })[0];
@@ -1373,14 +1384,19 @@ PCI18N.ready.then(function () {
   }
   // The mirror's light, at the top (migrating.py mirror_view): grey, none (this server alone); green, its Plex Cache
   // talking directly; yellow, heard of only through its marker, or not at all — with how the conversion goes with it
-  // — and, while the library's state isn't chosen, Mark as Mirror (a library found that looks like one) or No Mirror, as on
-  // the Mirror page: one or the other is needed before the copy (migrating.py mirror_chosen)
+  // — and, while the library's state isn't chosen, Mark as Mirror (a library found that looks like one) or No Mirror, the
+  // Mirror page's choice: one or the other is needed before the copy (migrating.py mirror_chosen)
   function migMirror(mv) {
     if (!mv) return "";
     var acts = !mv.watched && mv.library ? '<div class="acts" style="margin:4px 0 0 26px">' +
       (mv.how === "suspected" && mv.id ? '<button class="btn sm pri" type="button" data-act="mirror-set" data-key="' + esc(mv.library) + '" data-state="mirror" data-server="' + esc(mv.id) + '" data-their="' + esc(mv.their_key || "") + '">' + H("Mark {name} as the Mirror", { name: mv.name }) + "</button> " : "") +
       '<button class="btn sm" type="button" data-act="mirror-set" data-key="' + esc(mv.library) + '" data-state="none">' + H("No Mirror for This Library") + "</button></div>" : "";
     return '<div class="lights">' + light(mv.status, mv.title, mv.detail) + acts + "</div>";
+  }
+  // a library's mirror chosen (plex2.choose: its server reached first when it isn't yet — a refusal said in a toast); a
+  // conversion under way looks at its checks again at once
+  function mirrorChoose(key, state, server, their) {
+    return api("/api/plex2/choose", { key: key, state: state, server: server || "", their_key: their || "" }).then(migRecheck).then(load).catch(function (e) { toast(e.message, true); load(); });
   }
   // a mirror chosen or ignored: a conversion under way looks at its checks again at once, not in 30 seconds
   function migRecheck() {
@@ -1428,7 +1444,7 @@ PCI18N.ready.then(function () {
       [N("The timecode track: dropped — nothing you watch."), N("Camera details: where and when it was filmed, make and model."), N("Trims made without re-encoding (edit lists) — kept as far as MKV can; worth a look after.")],
       N("A file with camera details is left as it is; the timecode track is dropped.")]];
   var CONVERT_HELP = H("Each file is inspected first: what MKVToolNix reads of it against everything in it. If anything wouldn’t be kept — a track, chapters, cover art, details like an iTunes show and episode — or it’s protected by DRM, it’s left as it is, with the reason on its row, and isn’t tried again while it stays as it is. Converted, the MKV is checked against the original (every video and audio track with the same number of packets, every subtitle track, captions in the video), then optimized like any MKV.") +
-    "<br><br>" + H("<strong>Plex keeps its metadata.</strong> The MKV is written next to the original, and Plex is asked to scan that folder (needed when libraries are scanned by hand). Plex adds it as a second version of the same item; once it has — on the mirrored server too, where one is watched (<a href=\"/mirrors#plex2\" data-nav>Mirror → Second Plex Server</a>) — the original is deleted and the folder scanned again: the item keeps its edits, watch history and collections. If Plex makes the MKV an item of its own instead, nothing is deleted: merge the two in Plex, or keep both.") +
+    "<br><br>" + H("<strong>Plex keeps its metadata.</strong> The MKV is written next to the original, and Plex is asked to scan that folder (needed when libraries are scanned by hand). Plex adds it as a second version of the same item; once it has — on the library’s mirror too, where it has one (<a href=\"/mirrors\" data-nav>Mirror</a>) — the original is deleted and the folder scanned again: the item keeps its edits, watch history and collections. If Plex makes the MKV an item of its own instead, nothing is deleted: merge the two in Plex, or keep both.") +
     "<br><br>" + H("<strong>The way back.</strong> The run backs up first, like every tool that changes files; while the backup lasts, Revert on the run removes the MKVs and puts back any original that has gone, and the run is on the <a href=\"/processes\" data-nav>Processes page</a> like any other.");
   // Where each Plex server is with a converted file: this one, and the second one if it's watched
   function serversLine(e) {
@@ -1460,7 +1476,7 @@ PCI18N.ready.then(function () {
       return '<button class="btn sm" type="button" data-act="conv" data-conv="' + a + '" data-orig="' + esc(e.original) + '">' + label + "</button> ";
     };
     return '<section class="card" id="conversions">' + heading(esc(T("Converted Files in Plex")),
-      H("Each converted file, and where Plex is with it: the original is deleted only once Plex has the MKV as a version of the same item — on the mirrored server too, where one is watched. <strong>Check Again</strong> asks Plex now; <strong>Keep Both</strong> stops following the file, both staying; <strong>Delete Original Now</strong> is there when Plex has the MKV but the original couldn’t go yet (it was playing, say).")) +
+      H("Each converted file, and where Plex is with it: the original is deleted only once Plex has the MKV as a version of the same item — on the library’s mirror too, where it has one. <strong>Check Again</strong> asks Plex now; <strong>Keep Both</strong> stops following the file, both staying; <strong>Delete Original Now</strong> is there when Plex has the MKV but the original couldn’t go yet (it was playing, say).")) +
       '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Converted") + '</th><th scope="col">' + H("Now") + '</th><th scope="col"></th></tr></thead><tbody>' +
       items.map(function (e) {
         return "<tr><td>" + esc(e.title) + '<div class="det mono">' + esc(e.original.split("/").pop()) + " → " + esc(e.new.split("/").pop()) + "</div></td><td>" + state(e) +
@@ -2512,7 +2528,7 @@ PCI18N.ready.then(function () {
     // its border says where the poster's from: chosen by hand (green), the match's (grey), unmatched (yellow)
     var pcls = (x.art || []).length ? " p-hand" : x.matched ? " p-match" : " p-warn";
     var ptip = (x.art || []).length ? T("Poster chosen by hand") : x.matched ? T("Poster from its match") : T("Unmatched: the poster isn’t from a match");
-    var poster = x.thumb ? '<img class="ssposter' + pcls + '" title="' + esc(ptip) + '" src="/api/poster?path=' + encodeURIComponent(x.thumb) + (server === "mirror" ? "&server=mirror" : "") + '" alt="" loading="lazy">' : '<div class="ssposter none' + pcls + '" title="' + esc(ptip) + '"></div>';
+    var poster = x.thumb ? '<img class="ssposter' + pcls + '" title="' + esc(ptip) + '" src="/api/poster?path=' + encodeURIComponent(x.thumb) + (server ? "&server=" + encodeURIComponent(server) : "") + '" alt="" loading="lazy">' : '<div class="ssposter none' + pcls + '" title="' + esc(ptip) + '"></div>';
     var lines = sideValues(x, other, kinds, isSource), chips = "", shown = "";
     // its match: a button when the two are matched differently, its entry shown (a link to it) when pressed
     // its match: only when that's what differs (a button: a change); else nothing — the poster's border says unmatched
@@ -3706,138 +3722,200 @@ PCI18N.ready.then(function () {
       '" value="" data-secret="' + sec + "." + key + '"></div>';
   }
   // Fields with no meaningful default (where your servers are): no ↺
-  var NO_REVERT = { "plex.url": 1, "truenas.url": 1, "mqtt.host": 1, "mqtt.username": 1, "peer.url": 1 };
+  var NO_REVERT = { "plex.url": 1, "truenas.url": 1, "mqtt.host": 1, "mqtt.username": 1 };
   function textInput(sec, key, label, id, help, placeholder) {
     var h = splitHelp(help);
     return '<div class="fld"><label for="' + id + '">' + esc(label) + info(h.more, label) + (NO_REVERT[sec + "." + key] ? "" : revertBtn(sec, key, "")) + '</label><input id="' + id + '" type="text" value="' + esc(S[sec][key]) + '" placeholder="' + esc(placeholder || "") +
       '" data-set="' + sec + "." + key + '">' + helpDiv(h) + "</div>";
   }
 
-  // A second Plex server with the same files (plex2.py): signed in, chosen from the account's servers,
-  // its libraries paired with these — so converting waits for both before an original goes
-  var PLEX2_LIST = null;
-  function plex2Card() {
-    var p2 = ST.plex2 || {};
-    var out = '<section class="card" id="plex2"><h2>' + H("Mirrored Server") + "</h2>" +
-      '<p class="hint">' + H("Another Plex server with the same files — at another site, kept in step by syncing the folders. A file converted to MKV keeps its original until both servers have the MKV as a version of the same item, so neither loses its metadata (edits, watch history, collections).") + "</p>";
-    var signin = '<button class="btn" type="button" data-act="plex2-signin">' + (p2.own_signin ? H("Sign In Again") : H("Use Another Plex Account")) + "</button> ";
-    if (p2.configured) {
-      out += '<div class="det">' + badge("pass", T("Watched")) + " " + H("{name} at {url}", { name: p2.name || T("the server"), url: p2.url }) + "</div>";
-      if (p2.error) out += '<div class="det bad">' + esc(p2.error) + "</div>";
-    } else if (p2.signed_in) {
-      out += '<div class="det">' + H("Choose it from your Plex account’s servers: this server’s sign-in lists them, so there’s nothing more to sign in to — unless it’s on another account.") + "</div>";
-    } else {
-      out += '<div class="det">' + H("Sign in with Plex first (<a href=\"/system#plex\" data-nav>System → Plex</a>): your account’s servers are listed from there.") + "</div>";
-    }
-    out += '<div class="acts">' + (p2.signed_in ? '<button class="btn' + (p2.configured ? "" : " pri") + '" type="button" data-act="plex2-list">' +
-      (p2.configured ? H("Choose Another Server") : H("Choose the Server")) + "</button> " : "") + signin +
-      (p2.configured ? '<button class="btn" type="button" data-act="plex2-refresh">' + H("Check Again") + '</button> <button class="link" type="button" data-act="plex2-forget">' + H("Stop Watching") + "</button>" : "") + "</div>";
-    if (PLEX2_LIST) {
-      out += PLEX2_LIST.length ? '<div class="tbl-wrap"><table class="tbl"><tbody>' + PLEX2_LIST.map(function (sv) {
-        return "<tr><td>" + esc(sv.name) + '<div class="det">' + (sv.owned ? H("Yours") : H("Shared with you")) + " · " + esc(P(sv.addresses, "{n} address", "{n} addresses", { n: sv.addresses })) +
-          '</div></td><td><button class="btn sm" type="button" data-act="plex2-use" data-id="' + esc(sv.id) + '">' + H("Use This Server") + "</button></td></tr>";
-      }).join("") + "</tbody></table></div>" : '<p class="muted">' + H("This account has no other Plex server.") + "</p>";
-    }
-    out += details("plex2manual", H("Or enter its address and token by hand"), '<div class="grid">' +
-      textInput("plex2", "url", T("Server address"), "s-p2url", H("An address this NAS can reach: the other site’s public address with Remote Access on, or one over a VPN."), "https://") +
-      secretInput("plex2", "token", T("Token"), "s-p2tok") + "</div>", false);
-    return out + "</section>";
-  }
-  // The Plex Cache at the mirror's site (peerlink.py): found from the mirrored Plex server's addresses, paired by itself
-  // through the synced folders when that's safe, then asked directly — what Mirror Checks' disk comparison relies on
+  // The Plex Cache at each mirror's site (peerlink.py): found from that Plex server's addresses, paired by itself through the
+  // synced folders when that's safe, then asked directly — what Mirror Checks' disk comparison relies on. One block per
+  // server some library is mirrored by, with its five lights and Pair Now, Unpair; the found/paired/talking light is on the Mirror page too.
   var PEER_LIGHTS = [["found", N("Plex Cache at the mirror’s site")], ["paired", N("Paired")], ["talking", N("Talking")], ["folders", N("Folder sync")], ["version", N("Version and clock")]];
+  function mirrorName(key) {
+    var p2 = ST.plex2 || {}, p = (p2.pairs || {})[key], st = (p2.states || {})[key] || {};
+    return (p && p.name) || st.name || T("the mirror");
+  }
+  function peerServerBlock(lk, pe) {
+    var lt = lk.lights || {}, sid = lk.server, url = ((S.peer || {}).servers || {})[sid] || {};
+    var out = '<fieldset class="sub"><legend>' + esc(lk.name) + "</legend>" +
+      '<div class="lights">' + PEER_LIGHTS.map(function (l) { return lightFor(lt[l[0]], T(l[1])); }).join("") + "</div>" +
+      '<div class="grid"><div class="fld"><label for="s-peerurl-' + esc(sid) + '">' + H("Its address") + '</label>' +
+      '<input id="s-peerurl-' + esc(sid) + '" type="text" value="' + esc(url.url || "") + '" placeholder="' + esc(lk.detected || "http://192.168.1.20:8642") + '" data-peerurl="' + esc(sid) + '">' +
+      (url.url ? ' <button type="button" class="revert" data-peerurl-revert="' + esc(sid) + '" title="' + H("Back to the default ({value})", { value: T("found by itself") }) + '">↺</button>' : "") +
+      '<div class="help">' + H("Found by itself. Enter it when the other one runs on another port, or is reached at another address.") + "</div></div></div>";
+    if (lk.paired) out += '<div class="det">' + H("Fingerprint {fp}: the other one shows the same when the two are paired with each other.", { fp: lk.fingerprint }) + "</div>";
+    if (lk.window) {  // (open here: a link to the other one's Pair Now, where it's known)
+      var there = ((lk.paired || {}).url || lk.detected || url.url || "").replace(/\/+$/, "");
+      out += '<div class="note">' + H("Pairing is open for {n} more minutes: press Pair Now on the other Plex Cache too.", { n: Math.max(1, Math.ceil(lk.window / 60)) }) +
+        (there ? ' <a href="' + esc(there) + '/system#peer" target="_blank" rel="noopener">' + H("Open Pair Now on the other one ↗") + "</a>" : "") + "</div>";
+    }
+    var asked = !!((pe.asked || {})[sid]);
+    out += '<div class="acts"><button class="btn' + ((lt.found && lt.found.status === "ok" && !lk.paired) || asked ? " pri" : "") + '" type="button" data-act="peer-pair" data-server="' + esc(sid) + '"' + (lk.window ? " disabled" : "") + ">" + H("Pair Now") + "</button>" +
+      info(H("Opens pairing for 10 minutes, without waiting for the synced folder or the mirror’s address: press it on both, then compare the fingerprints. For when pairing by itself can’t, or is off."), T("Pair Now")) +
+      (lk.paired ? ' <button class="link" type="button" data-act="peer-unpair" data-server="' + esc(sid) + '" title="' + H("Forgets the pairing on both sides. Neither pairs again by itself: Pair Now on both does.") + '">' + H("Unpair") + "</button>" : "") + "</div>";
+    return out + "</fieldset>";
+  }
   function peerCard() {
-    var pe = ST.peer || {}, ps = S.peer || {}, lt = pe.lights || {}, own = pe.own || {};
+    var pe = ST.peer || {}, ps = S.peer || {}, own = pe.own || {}, links = Object.keys(pe.links || {}).map(function (k) { return pe.links[k]; });
     var out = '<section class="card" id="peer"><h2>' + H("Mirror Plex Cache") + ' <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional") + "</span></h2>" +
-      '<p class="hint">' + H("The Plex Cache at the mirrored server’s site, if there is one. The two talk directly, over your network or a VPN, so Mirror Checks can compare both sites’ files.") +
-      info(H("They find each other from the mirrored Plex server’s addresses, and pair by themselves when it’s safe: each writes a public key into the synced .plexcache folder, and a pairing is taken only from the mirrored server’s address, with the key the folder carried. " +
+      '<p class="hint">' + H("The Plex Cache at the site of each server your libraries are mirrored by, if there is one. The two talk directly, over your network or a VPN, so Mirror Checks can compare both sites’ files.") +
+      info(H("They find each other from the mirror’s Plex addresses, and pair by themselves when it’s safe: each writes a public key into the synced .plexcache folder, and a pairing is taken only from the mirror’s address, with the key the folder carried. " +
         "Every request after that is signed with a key the two work out from those, which never leaves either side. What they ask each other only reads: how each side is, and a library’s list of files.<br><br>" +
         "Meant for your network, a VPN or Tailscale: don’t open its port to the internet."), T("Mirror Plex Cache")) + "</p>" +
-      '<div class="lights">' + PEER_LIGHTS.map(function (l) { return lightFor(lt[l[0]], T(l[1])); }).join("") + "</div>" +
-      '<div style="margin-top:10px">' + checkbox("peer", "enabled", T("Look for a Plex Cache at the mirror’s site"),
-        { s: H("Untick when there’s none there: Mirror Checks then compare the two Plexes only.") }) + "</div>";
-    if (!ps.enabled || !pe.mirror) return out + "</section>";  // (no mirror watched: the lights say so, and there's nothing to set)
+      '<div style="margin-top:10px">' + checkbox("peer", "enabled", T("Look for a Plex Cache at each mirror’s site"),
+        { s: H("Untick when there’s none there: Mirror Checks then compare the Plexes only.") }) + "</div>";
+    if (!ps.enabled) return out + "</section>";
     out += checkbox("peer", "auto_pair", T("Pair by itself"),
-      { s: H("When the other one answers from the mirrored server’s address with the key the synced folder carried."),
+      { s: H("When the other one answers from the mirror’s address with the key the synced folder carried."),
         more: H("Off: the two pair only when you press Pair Now on both, within 10 minutes of each other. Then compare the fingerprints the two show: they’re the same when each is paired with the other.") });
-    out += '<div class="grid">' +
-      textInput("peer", "url", T("Its address"), "s-peerurl", H("Found by itself. Enter it when the other one runs on another port, or is reached at another address."), pe.detected || "http://192.168.1.20:8642") +
-      number("peer", "port", T("The port this one answers on"), 0, 65535,
-        { s: own.port ? H("0 works it out: {port} now.", { port: String(own.port) }) : H("0 works it out."),
-          more: H("The port the other Plex Cache reaches this one on, told to it through the synced folder. 0 works it out: from TrueNAS’s settings for this app, or the port this page is open on. Set it when a port mapping or a proxy changes it.") }) + "</div>";
+    out += '<div class="grid">' + number("peer", "port", T("The port this one answers on"), 0, 65535,
+      { s: own.port ? H("0 works it out: {port} now.", { port: String(own.port) }) : H("0 works it out."),
+        more: H("The port the other Plex Cache reaches this one on, told to it through the synced folder. 0 works it out: from TrueNAS’s settings for this app, or the port this page is open on. Set it when a port mapping or a proxy changes it.") }) + "</div>";
     if ((own.addresses || []).length) out += '<div class="det">' + H("This one answers at {addresses}, port {port}.", { addresses: own.addresses.join(", "), port: String(own.port) }) + "</div>";
-    if (pe.paired) out += '<div class="det">' + H("Fingerprint {fp}: the other one shows the same when the two are paired with each other.", { fp: pe.fingerprint }) + "</div>";
-    if (pe.window) out += '<div class="note">' + H("Pairing is open for {n} more minutes: press Pair Now on the other Plex Cache too.", { n: Math.max(1, Math.ceil(pe.window / 60)) }) + "</div>";
-    out += '<div class="acts"><button class="btn' + (lt.found && lt.found.status === "ok" && !pe.paired ? " pri" : "") + '" type="button" data-act="peer-pair"' + (pe.window ? " disabled" : "") + ">" + H("Pair Now") + "</button>" +
-      info(H("Opens pairing for 10 minutes, without waiting for the synced folder or the mirrored server’s address: press it on both, then compare the fingerprints. For when pairing by itself can’t, or is off."), T("Pair Now")) +
-      ' <button class="btn" type="button" data-act="peer-test"' + (pe.busy ? " disabled" : "") + ">" + (pe.busy ? H("Testing…") : H("Test Again")) + "</button>" +
-      (pe.paired ? ' <button class="link" type="button" data-act="peer-unpair" title="' + H("Forgets the pairing on both sides, and makes a new key here. Neither pairs again by itself: Pair Now on both does.") + '">' + H("Unpair") + "</button>" : "") + "</div>";
+    if (!links.length) return out + '<div class="det muted">' + H("No library is mirrored yet: the Plex Cache at a mirror’s site is looked for once one is (<a href=\"/mirrors\" data-nav>Mirror</a>).") + "</div></section>";
+    out += links.map(function (lk) { return peerServerBlock(lk, pe); }).join("") +
+      '<div class="acts"><button class="btn" type="button" data-act="peer-test"' + (pe.busy ? " disabled" : "") + ">" + (pe.busy ? H("Testing…") : H("Test Again")) + "</button></div>";
     return out + "</section>";
   }
-  // Mirrored Libraries: each library here, what discovery found for it, its state — not decided (nothing assumed), no mirror,
-  // or mirrored by a library of the server watched — and the ways to set it. The state is per library (plex2.libraries).
-  var MIRROR_LIBS_HELP = N("Whether another Plex server has the same files is a choice per library, since one server can mirror some of your libraries and not others. <strong>Not decided</strong> (how every library starts): nothing is assumed — Health asks, and converted files’ originals aren’t deleted, since a mirror that isn’t watched could lose its item. <strong>No mirror</strong>: this server’s alone. <strong>Mirrored</strong> by a library of the server watched above: converting waits for both servers, Sync Libraries and Mirror Checks compare the two, the file tools refuse what a folder sync would carry wrongly, and Convert Folder to Child Dataset converts both sides — through the Plex Cache at the other site (<a href=\"/system#peer\" data-nav>System → Mirror Plex Cache</a>), whose link shows on the row.<br><br><strong>Found</strong> is what looking among your account’s servers turned up for the library: the library there whose files are most found here, with how many of a sample of its files are.");
+  // Mirrored Libraries: one row per library here, its mirror chosen from a list — not decided (nothing assumed), no mirror,
+  // or a library of one of the account's servers, each with how many of a sample of this library's files it has (sync.py
+  // discover: Look for Mirrors, weekly, and by itself when the page opens — lookIfDue; the same look compares the mirror
+  // chosen over all of them: plex2.match_rate) — under a light per server in use (reached, its libraries read) and one for
+  // the Plex Cache at its site. The state is per library (plex2.libraries): any server for any library. Nothing is said of
+  // a library before it was looked at, and a mirror chosen whose files aren't this library's gets a warning in place of
+  // Mirrored.
+  var MIRROR_LIBS_HELP = N("Whether another Plex server has the same files is a choice per library, since one server can mirror some of your libraries and not others, and two libraries can be mirrored by two servers. <strong>Not decided</strong> (how every library starts): nothing is assumed — Health asks, and converted files’ originals aren’t deleted, since a mirror that isn’t known could lose its item. <strong>No mirror</strong>: this server’s alone. <strong>A library of another server</strong>: converting waits for both servers, Sync Libraries and Mirror Checks compare the two, the file tools refuse what a folder sync would carry wrongly, and Convert Folder to Child Dataset converts both sides — through the Plex Cache at the other site (<a href=\"/system#peer\" data-nav>System → Mirror Plex Cache</a>), whose light is above the table.<br><br>The list holds every library of the kind on your account’s other servers, each with how many of a sample of this library’s files it has, by path (<strong>Look for Mirrors</strong>, and weekly while a library isn’t decided): nearly all of them, and it looks like the mirror. The same look compares the mirror chosen over all of this library’s files, and runs by itself when this page opens after an hour, or with a library it hasn’t scored: most of them not there, and its row warns instead of saying Mirrored — the wrong library, or a folder sync that’s behind. A server is reached when a library of it is chosen: its addresses are tried, local ones first and each at the address itself rather than through its plex.direct name, and the first that answers from here is kept; Plex’s relay is the last resort, and the light says when it’s the one in use.");
+  // the lights: per server some library is mirrored by, whether it answers and its libraries are read, and the Plex Cache at
+  // its site — the first of that link's lights that isn't green, since that one says what's missing, with where to fix it
+  function mirrorLights(p2, pe) {
+    var servers = p2.servers || [], ps = S.peer || {}, links = pe.links || {};
+    if (!servers.length) return '<div class="lights">' + light("off", T("No mirror yet"), T("Choose a library’s mirror below: its server is reached from then on.")) + "</div>";
+    var out = "";
+    servers.forEach(function (sv) {
+      // (reached through Plex's relay only — a Plex-run proxy, slow, limited and apt to drop: said, with the way out)
+      var relayHint = T("Only Plex’s relay reaches {name} from here: slow, limited, and it drops. Give this NAS a direct way to it — Remote Access on in its Plex settings, a VPN between the sites, or enter an address this NAS can reach, below.", { name: sv.name });
+      if (!sv.reached) out += light("fail", T("{name} isn’t reached", { name: sv.name }), T("None of its addresses answered from here. Choose its library again, or enter an address this NAS can reach, below."));
+      else if (sv.error && !sv.known) out += light("fail", sv.relay ? T("Plex’s relay to {name} isn’t answering", { name: sv.name }) : T("{name} isn’t answering", { name: sv.name }), sv.error + (sv.relay ? " " + relayHint : ""));
+      else if (!sv.known) out += light("testing", T("{name}: reading its libraries…", { name: sv.name }), sv.url);
+      else if (sv.relay) out += light("warn", sv.error ? T("{name} answered through Plex’s relay, then stopped", { name: sv.name }) : T("{name} answers through Plex’s relay", { name: sv.name }), (sv.error ? sv.error : T("{url} · {n} libraries", { url: sv.url, n: fmtNum((sv.libraries || []).length) })) + " " + relayHint);
+      else out += light(sv.error ? "warn" : "ok", sv.error ? T("{name} answered, then stopped", { name: sv.name }) : T("{name} answers", { name: sv.name }), sv.error ? sv.error : T("{url} · {n} libraries", { url: sv.url, n: fmtNum((sv.libraries || []).length) }));
+      var lk = links[sv.id], lt = (lk || {}).lights || {};
+      if (!ps.enabled) out += light("off", T("No Plex Cache at {name}’s site", { name: sv.name }), T("Not looked for: Mirror Checks compare the two Plexes only. [System → Mirror Plex Cache](/system#peer)"));
+      else if (!lk) out += light("off", T("Plex Cache at {name}’s site", { name: sv.name }), T("Looked for once the server is reached."));
+      else {
+        var first = ["found", "paired", "talking"].map(function (k) { return lt[k]; }).filter(function (r) { return r && r.status !== "ok"; })[0] || lt.talking;
+        out += first ? light(first.status, msg(first.text), msg(first.detail || "") + (first.status === "ok" ? "" : " " + T("How to fix it: [System → Mirror Plex Cache](/system#peer).")))
+          : light("testing", T("Plex Cache at {name}’s site", { name: sv.name }), "");
+      }
+    });
+    return '<div class="lights">' + out + "</div>";
+  }
+  // the list a library's mirror is chosen from: not decided, no mirror, then every library of its kind on each server — the
+  // ones in use first (their libraries as read), then those found by looking — each named with its server, and with how
+  // many of this library's files it has: of a sample, where looking counted; of all of them, for the mirror chosen
+  function mirrorOptions(l, st, p2, sy) {
+    var key = String(l.key), servers = [], byId = {}, counts = (p2.counts || {})[key];
+    (p2.servers || []).forEach(function (sv) {
+      byId[sv.id] = { id: sv.id, name: sv.name, libs: (sv.libraries || []).filter(function (t) { return t.kind === l.kind; }).map(function (t) { return { key: t.key, title: t.title, found: null, of: 0 }; }) };
+      servers.push(byId[sv.id]);
+    });
+    (sy.candidates || []).forEach(function (c) {
+      if (!c.url) return;
+      var libs = (c.libraries || []).filter(function (t) { return t.kind === l.kind; }).map(function (t) {
+        var m = (t.matches || {})[key]; return { key: t.key, title: t.title, found: m ? m.found : null, of: m ? m.of : 0 }; });
+      if (byId[c.id]) {  // (the same server, as looking saw it: its counts added to what was read)
+        var have = {};
+        byId[c.id].libs.forEach(function (t) { have[t.key] = t; });
+        libs.forEach(function (t) { if (have[t.key]) { have[t.key].found = t.found; have[t.key].of = t.of; } else byId[c.id].libs.push(t); });
+      } else { byId[c.id] = { id: c.id, name: c.name, libs: libs }; servers.push(byId[c.id]); }
+    });
+    var cur = st.state === "mirror" ? (st.server || "") + ":" + (st.there_key || st.key) : st.state, seen = false;
+    var opts = '<option value="unset"' + (cur === "unset" ? " selected" : "") + ">" + H("Not decided") + '</option><option value="none"' + (cur === "none" ? " selected" : "") + ">" + H("No mirror") + "</option>";
+    servers.forEach(function (sv) {
+      if (!sv.libs.length) return;
+      opts += '<optgroup label="' + esc(sv.name) + '">' + sv.libs.map(function (t) {
+        var v = sv.id + ":" + t.key, sel = v === cur || (st.state === "mirror" && st.server === sv.id && !st.key && t.title.toLowerCase() === String(l.title).toLowerCase()); seen = seen || sel;
+        var found = sel && counts ? counts.found : t.found, of = sel && counts ? counts.of : t.of;
+        return '<option value="' + esc(v) + '"' + (sel ? " selected" : "") + ">" + esc(T("{library} ({server})", { library: t.title, server: sv.name })) +
+          (found != null ? " · " + esc(T("{found} of {of} files there", { found: fmtNum(found), of: fmtNum(of) })) : "") + "</option>";
+      }).join("") + "</optgroup>";
+    });
+    if (st.state === "mirror" && !seen) {
+      var sv = (p2.servers || []).filter(function (x) { return x.id === st.server; })[0];
+      opts += '<option value="' + esc(cur) + '" selected>' + esc(!sv || !sv.known ? T("{library} ({server}): reading…", { library: st.key || l.title, server: st.name || st.server }) : T("{library} ({server}): not there now", { library: st.key || l.title, server: st.name || st.server })) + "</option>";
+    }
+    return opts;
+  }
   function mirrorLibrariesCard() {
     var p2 = ST.plex2 || {}, sy = ST.sync || {}, pe = ST.peer || {}, libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
     var out = '<section class="card" id="mirrorlibs">' + heading(esc(T("Mirrored Libraries")), MIRROR_LIBS_HELP) +
-      '<p class="hint">' + H("Which libraries another server mirrors — chosen per library. A library not decided holds back what would act on a mirror.") + "</p>";
+      '<p class="hint">' + H("Which libraries another server mirrors — chosen per library, from your account’s servers; any server for any library. A library not decided holds back what would act on a mirror.") + "</p>";
+    out += mirrorLights(p2, pe);
+    // a server in use that isn't reached, stopped answering, or is reached through Plex's relay only: an address this NAS can reach, by hand
+    (p2.servers || []).forEach(function (sv) {
+      if (sv.reached && !sv.error && !sv.relay) return;
+      out += '<div class="grid" style="margin-top:8px"><div class="fld"><label for="s-p2addr-' + esc(sv.id) + '">' + esc(T("Address for {name}", { name: sv.name })) + "</label>" +
+        '<input id="s-p2addr-' + esc(sv.id) + '" type="text" value="" placeholder="https://" data-p2addr="' + esc(sv.id) + '">' +
+        '<div class="help">' + H("An address this NAS can reach: the other site’s public address with Remote Access on, or one over a VPN. Its token comes from your sign-in.") + "</div></div>" +
+        '<div class="acts"><button class="btn" type="button" data-act="plex2-address" data-server="' + esc(sv.id) + '">' + H("Use This Address") + "</button></div></div>";
+    });
+    // looking for mirrors: a sample of each library's files looked for on each of the account's servers' libraries, by path
+    out += '<div style="margin-top:10px">' + checkbox("sync", "discover", T("Look for mirrors among my Plex account’s servers"),
+      { s: H("Weekly while a library’s mirror isn’t chosen, when this page opens after an hour, and on Look for Mirrors — which also compares each mirror chosen over all of the library’s files.") }) + "</div>" +
+      '<div class="acts"><button class="btn" type="button" data-act="sync-discover"' + (sy.running ? " disabled" : "") + ">" + (sy.running ? H("Looking…") : H("Look for Mirrors")) + "</button>" +
+      ' <span class="muted" style="font-size:13px">' + esc(sy.discovered_at ? T("looked {when}", { when: ago(sy.discovered_at) }) : T("Not looked yet")) + "</span></div>";
+    if (sy.error) out += '<div class="det bad">' + esc(sy.error) + "</div>";
+    (sy.candidates || []).forEach(function (c) {  // (a server in use: its light above says how it is)
+      if ((p2.servers || []).some(function (sv) { return sv.id === c.id; })) return;
+      if (!c.url) out += '<div class="det muted">' + esc(T("{name}: can’t be reached from here.", { name: c.name })) + "</div>";
+      else if (c.error) out += '<div class="det bad">' + esc(c.name) + ": " + esc(c.error) + "</div>";
+    });
     if (!libs.length) return out + '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No libraries yet.")) + "</p></section>";
-    var states = p2.states || {}, found = sy.libraries || {}, theirs = p2.libraries || [], talking = ((pe.lights || {}).talking || {}).status === "ok";
-    out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library here") + '</th><th scope="col">' + H("Found") + '</th><th scope="col">' + H("State") + '</th><th scope="col"></th></tr></thead><tbody>' +
+    var states = p2.states || {}, found = sy.libraries || {}, pairs = p2.pairs || {};
+    out += '<div class="tbl-wrap"><table class="tbl mid"><thead><tr><th scope="col">' + H("Library here") + '</th><th scope="col">' + H("Mirrored by") + '</th><th scope="col"></th></tr></thead><tbody>' +
       libs.map(function (l) {
-        var key = String(l.key), st = states[key] || { state: "unset", key: "", there: "", there_key: "" }, f = found[key], rate = f ? Math.round(100 * f.rate) : null;
-        var det = f ? esc(f.name) + ": " + esc(f.their_title) + ' <span class="muted">' + esc(T("{found} of {of} files here", { found: fmtNum(f.found), of: fmtNum(f.of) })) + "</span> " +
-          (rate >= 90 ? badge("pass", T("Looks like a mirror")) : rate >= 20 ? badge("warn", T("Partly the same")) : badge("info", T("Not a mirror"))) : '<span class="muted">' + H("Nothing found") + "</span>";
-        var state;
+        var key = String(l.key), st = states[key] || { state: "unset", server: "", key: "", there: "", there_key: "", name: "" }, f = found[key], rate = f ? Math.round(100 * f.rate) : null;
+        var sel = '<select data-p2lib="' + esc(key) + '" aria-label="' + esc(T("The mirror of {library}", { library: l.title })) + '">' + mirrorOptions(l, st, p2, sy) + "</select>" +
+          (st.state !== "unset" ? ' <button type="button" class="revert" data-p2lib-revert="' + esc(key) + '" title="' + H("Back to the default ({value})", { value: T("not decided") }) + '">↺</button>' : "");
+        var status;
         if (st.state === "mirror") {
-          var rt = (p2.rates || {})[key];
-          state = badge("pass", T("Mirrored")) + " " + (!p2.configured ? '<span class="bad">' + H("no server watched") + "</span>"
-            : st.there ? esc(p2.name) + ": " + esc(st.there) + (rt != null ? ' <span class="muted">' + esc(T("{pct}% of its files found there", { pct: Math.round(100 * rt) })) + "</span>" : "")
-            : '<span class="bad">' + H("no such library on {name}", { name: p2.name }) + "</span>") +
-            (p2.configured ? " " + (talking ? badge("pass", T("Plex Cache there talking")) : badge("warn", T("Plex Cache there not talking"))) : "");
-          if (p2.configured) state += '<div class="det"><select data-p2lib="' + esc(key) + '" aria-label="' + esc(T("Its library there")) + '"><option value=""' + (st.key ? "" : " selected") + ">" + H("The library of the same name") + "</option>" +
-            theirs.filter(function (t) { return t.kind === l.kind; }).map(function (t) { return '<option value="' + esc(t.key) + '"' + (t.key === st.key ? " selected" : "") + ">" + esc(t.title) + "</option>"; }).join("") + "</select>" +
-            (st.key ? ' <button type="button" class="revert" data-p2lib-revert="' + esc(key) + '" title="' + H("Back to the default ({value})", { value: T("the library of the same name") }) + '">↺</button>' : "") + "</div>";
-        } else state = st.state === "none" ? badge("info", T("No mirror")) : badge("warn", T("Not decided"));
-        var canMark = !!(f && f.url && rate != null) || p2.configured;
-        var markTitle = canMark ? H("Marks {library} as mirrored by {where}.", { library: l.title, where: f && f.url ? f.name + ": " + f.their_title : (p2.name || T("the server watched")) }) : H("Choose the mirrored server above first.");
-        var btns = (st.state !== "mirror" ? '<button class="btn sm' + (st.state === "unset" && rate >= 90 ? " pri" : "") + '" type="button" data-act="mirror-set" data-key="' + esc(key) + '" data-state="mirror" data-server="' + esc(f && f.url ? f.id : "") + '" data-their="' + esc(f && f.url ? f.their_key : "") + '"' + (canMark ? "" : " disabled") +
-            ' title="' + markTitle + '">' + H("Mark as Mirror") + "</button> " : "") +
-          (st.state !== "none" ? '<button class="btn sm" type="button" data-act="mirror-set" data-key="' + esc(key) + '" data-state="none">' + H("No Mirror") + "</button> " : "") +
-          (st.state !== "unset" ? '<button class="link" type="button" data-act="mirror-set" data-key="' + esc(key) + '" data-state="unset">' + H("Undo") + "</button>" : "");
-        return "<tr><td>" + libIcon(key) + esc(l.title) + "</td><td>" + det + "</td><td>" + state + "</td><td>" + btns + "</td></tr>";
+          // the mirror chosen: Mirrored while its files are this library's (plex2.match_rate, over all of them: the count is in
+          // the list) — a warning once they aren't, and what's in the way before that's known
+          var rt = (p2.rates || {})[key], sv = (p2.servers || []).filter(function (x) { return x.id === st.server; })[0] || {}, pair = pairs[key], cerr = (p2.compare_errors || {})[key];
+          var differ = !!pair && rt != null && rt < (p2.matched || 0.9);
+          var where = !sv.reached ? '<span class="bad">' + esc(T("{name} isn’t reached", { name: st.name || st.server })) + "</span>"
+            : !sv.known && sv.error ? '<span class="bad">' + esc(T("{name} isn’t answering", { name: sv.name })) + "</span>"
+            : !sv.known ? '<span class="muted">' + esc(T("{name}: reading its libraries…", { name: sv.name })) + "</span>"
+            : !pair ? '<span class="bad">' + esc(T("no such library on {name} now", { name: sv.name })) + "</span>"
+            : differ ? '<span class="bad">' + esc(T("{library} on {name} doesn’t have most of this library’s files: the wrong library, or a folder sync that’s behind?", { library: pair.title, name: pair.name })) + "</span>"
+            : cerr ? '<span class="bad">' + esc(T("{library} on {name}: its files couldn’t be compared — {why}", { library: pair.title, name: pair.name, why: cerr })) + "</span>"
+            : '<span class="muted">' + esc(T("{library} on {name}", { library: pair.title, name: pair.name })) + (rt == null ? " · " + esc(T("files not compared yet")) : "") + "</span>";
+          status = (differ ? badge("warn", T("Files differ")) : badge("pass", T("Mirrored"))) + " " + where;
+        } else if (st.state === "none") status = "";
+        else {  // not decided: what looking found for it (the list says the state) — nothing said of a library not looked at yet
+          var where = f ? esc(f.name) + ": " + esc(f.their_title) + ' <span class="muted">' + esc(T("{found} of {of} files there", { found: fmtNum(f.found), of: fmtNum(f.of) })) + "</span>" : "";
+          status = rate >= 90 ? badge("pass", T("Looks like a mirror")) + " " + where : rate >= 20 ? badge("warn", T("Partly the same")) + " " + where
+            : '<span class="muted">' + (sy.running ? H("Looking…") : (sy.compared || []).indexOf(key) >= 0 ? H("Nothing found that looks like one") : H("Not looked for yet")) + "</span>";
+        }
+        return "<tr><td>" + libIcon(key) + esc(l.title) + "</td><td>" + sel + "</td><td>" + status + "</td></tr>";
       }).join("") + "</tbody></table></div>";
+    if ((sy.peers || []).length) out += '<div class="note">' + H("Another Plex Cache shares these folders (it marked itself in them): {n} system(s). Each optimizes its own side; claims keep them off the same file.", { n: sy.peers.length }) + "</div>";
+    // the sign-in the servers are listed from: this server's, or an account of its own
+    var signin = '<button class="btn" type="button" data-act="plex2-signin">' + (p2.own_signin ? H("Sign In Again") : H("Use Another Plex Account")) + "</button>";
+    out += '<div class="acts" style="margin-top:10px">' + signin + "</div>" +
+      '<div class="det muted">' + (p2.signed_in ? H("Your account’s servers are listed from this server’s sign-in (<a href=\"/system#plex\" data-nav>System → Plex</a>) — or sign in to another account, when the mirror is on one.")
+        : H("Sign in with Plex first (<a href=\"/system#plex\" data-nav>System → Plex</a>): your account’s servers are listed from there.")) + "</div>";
     return out + "</section>";
   }
   // Mirror: the server kept in step with this one (sync.py: the servers that may be one), each library's state, Plex's own
   // sync of watched state, and what uses the mirror — Sync Libraries (the tool that brings its libraries in line) among them
   function pageMirrors() {
     var sy = ST.sync || {}, p2 = ST.plex2 || {};
-    var out = top(T("Mirror"), H("Another Plex server with the same files — at another site, kept in step by syncing the folders — and which of your libraries it mirrors."), "");
+    var out = top(T("Mirror"), H("Other Plex servers with the same files — at another site, kept in step by syncing the folders — chosen per library, from the servers of your Plex account."), "");
     out += '<div class="stack" style="max-width:980px">';
-    // ---- the mirrored server: the connection, and the account's servers that may be one
-    out += plex2Card();
-    out += '<section class="card"><h2>' + H("Servers Found") + "</h2>" +
-      '<p class="hint">' + H("Your Plex account’s other servers, and whether their files are here too: a sample of each of their libraries looked up here by path. Which library here each one mirrors is chosen below, per library.") + "</p>" +
-      '<div style="margin-top:4px">' + checkbox("sync", "discover", T("Look for mirrors among my Plex account’s servers"),
-        { s: H("Weekly, while a library’s mirror isn’t chosen; and Look Now.") }) + "</div>";
-    if (sy.running) out += '<div class="det muted">' + H("Working…") + "</div>";
-    if (sy.error) out += '<div class="det bad">' + esc(sy.error) + "</div>";
-    var cands = sy.candidates || [];
-    if (cands.length) {
-      out += '<div class="what" style="margin-top:12px">' + H("Found") + ' <span class="muted">' + esc(T("looked {when}", { when: ago(sy.discovered_at) })) + "</span></div>" +
-        '<div class="tbl-wrap"><table class="tbl"><tbody>' + cands.map(function (c) {
-          var rate = c.rate == null ? null : Math.round(100 * c.rate), mine = c.id === p2.machine_id;
-          var verdict = !c.url ? badge("info", T("Can’t be reached")) : rate == null ? badge("info", T("Not read")) : rate >= 90 ? badge("pass", T("Looks like a mirror")) : rate >= 20 ? badge("warn", T("Partly the same")) : badge("info", T("Not a mirror"));
-          return "<tr><td>" + esc(c.name) + (mine ? " " + badge("pass", T("The mirrored server")) : "") + '<div class="det">' + (c.libraries || []).map(function (l) { return esc(l.title) + ": " + esc(T("{found} of {of} files here", { found: fmtNum(l.found), of: fmtNum(l.of) })); }).join(" · ") +
-            (c.error ? ' <span class="bad">' + esc(c.error) + "</span>" : "") + "</div></td><td>" + verdict + (rate != null ? ' <span class="muted">' + rate + "%</span>" : "") + "</td><td>" +
-            (c.url && !mine ? '<button class="btn sm" type="button" data-act="plex2-use-found" data-id="' + esc(c.id) + '">' + H("Use as the Mirrored Server") + "</button>" : "") + "</td></tr>";
-        }).join("") + "</tbody></table></div>";
-    }
-    out += '<div class="acts" style="margin-top:10px"><button class="btn" type="button" data-act="sync-discover"' + (sy.running ? " disabled" : "") + ">" + H("Look Now") + "</button></div>";
-    if ((sy.peers || []).length) out += '<div class="note">' + H("Another Plex Cache shares these folders (it marked itself in them): {n} system(s). Each optimizes its own side; claims keep them off the same file.", { n: sy.peers.length }) + "</div>";
-    out += "</section>";
-    // ---- each library: what was found for it, its state, and the ways to set it
+    // ---- each library: its mirror, chosen from the account's servers (what looking found for it), under the lights
     out += mirrorLibrariesCard();
     // ---- what Plex's own sync carries (Sync Libraries leaves it to Plex)
     out += '<section class="card"><h2>' + H("Watched State") + "</h2>" +
@@ -3852,7 +3930,7 @@ PCI18N.ready.then(function () {
     var on = !!p2.any_mirror;
     out += '<section class="card">' + heading(esc(T("What Uses It")), "") + '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) +
       '<div class="grow"><div class="what">' + H("Converting to MKV") + '</div><div class="det">' +
-      H("A converted file’s original is deleted only once every server watched here has the MKV as a version of the same item. <a href=\"/convert\" data-nav>Tools → Convert to MKV</a>") + "</div></div></div>" +
+      H("A converted file’s original is deleted only once its library’s mirror has the MKV as a version of the same item too. <a href=\"/convert\" data-nav>Tools → Convert to MKV</a>") + "</div></div></div>" +
       '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) + '<div class="grow"><div class="what">' + H("Sync Libraries") + '</div><div class="det">' +
       H("Brings each paired library in line with the other server’s, one way, from the side whose edits win — when you press Apply. <a href=\"/sync\" data-nav>Tools → Sync Libraries</a>") + "</div></div></div>" +
       '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) + '<div class="grow"><div class="what">' + H("Mirror Checks") + '</div><div class="det">' +
@@ -4222,7 +4300,7 @@ PCI18N.ready.then(function () {
     ["versions", N("Duplicate Versions"), N("Where one Plex item holds the same file twice, removes the extra copy — the file and Plex’s part — after a hold.")],
     ["folders", N("Organize Folders"), N("Moves loose files into a folder of their own, and renames folders to Title (Year) {edition}, without Plex losing anything.")],
     ["unlink", N("Unlink Files"), N("Replaces hard links and symlinks with files of their own — the same bytes — so synced folders match everywhere and the duplicate tools can tidy them safely.")],
-    ["sync", N("Sync Libraries"), N("Makes a library on the mirrored server the same as here, or here the same as there — the files it doesn’t list, versions, matches, edited fields, posters, collections and editions — one way, from the side whose edits win.")],
+    ["sync", N("Sync Libraries"), N("Makes a library on its mirror the same as here, or here the same as there — the files it doesn’t list, versions, matches, edited fields, posters, collections and editions — one way, from the side whose edits win.")],
     ["filechecks", N("File Checks"), N("What’s in each file, as inspected: its tracks — audio, subtitles, their languages and codecs — checked against what a good file has. Each check can be turned off.")],
     ["plexchecks", N("Plex Checks"), N("How Plex has each item: its versions, their names and lengths, the fields you locked. Each check can be turned off.")],
     ["mirrorchecks", N("Mirror Checks"), N("Compares the two sites of a mirror: the files on each one’s disk, and what each Plex lists. Finds what the folder sync or a Plex scan missed, and has Plex look again.")]];
@@ -4340,7 +4418,7 @@ PCI18N.ready.then(function () {
     if (!t.running || !pg) return "";
     if (pg.what === "scan") {
       var spct = pg.total ? Math.round(100 * (pg.done || 0) / pg.total) : null;
-      return '<div class="migprog"><div class="what">' + H("Scanning…") + '</div><div class="det">' + H("Reading the library from Plex (and the mirrored server’s, if one is watched).") +
+      return '<div class="migprog"><div class="what">' + H("Scanning…") + '</div><div class="det">' + H("Reading the library from Plex (and its mirror’s, if it has one).") +
         (spct != null ? " " + H("{done} of {total} · {pct}%", { done: fmtNum(pg.done || 0), total: fmtNum(pg.total), pct: spct }) : "") + "</div>" +
         (spct != null ? '<div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + spct + '"><div style="width:' + spct + '%"></div></div>'
           : '<div class="meter thin busy" role="progressbar" aria-busy="true"><div></div></div>') + "</div>";
@@ -4895,10 +4973,10 @@ PCI18N.ready.then(function () {
     return '<div>' + esc(r.label) + (r.locked ? " " + badge("info", P(r.locked, "{n} edited field", "{n} edited fields", { n: r.locked })) : "") + (r.matched === false ? " " + badge("warn", T("Unmatched")) : "") + "</div>" +
       '<div class="det mono">' + esc((r.files || []).join(", ")) + "</div>";
   }
-  var MERGE_HELP = N("Plex can hold the same film on two records — one added before the other was matched, a second copy in another folder — each with its own poster, edits and watched state. Plex’s own Merge turns them into versions of one record, keeping the record’s metadata; this finds them for you. Records are the same film when they hold the very same file (a link or a copy in another folder: the same size and running time), whatever each is matched to; or when they share a match or, unmatched, when their files are named for the same title and year — and their running times agree (4% or 30 seconds, whichever is more: a different frame rate or cut of the credits; two films that merely share a title and year differ by more), and they’re the same edition (a Director’s Cut and the theatrical cut are two records on purpose), unless their files are the very same file. The record kept is the one with the most edited fields, then the most files, then the oldest. No file is touched, so a mirrored server isn’t affected.");
+  var MERGE_HELP = N("Plex can hold the same film on two records — one added before the other was matched, a second copy in another folder — each with its own poster, edits and watched state. Plex’s own Merge turns them into versions of one record, keeping the record’s metadata; this finds them for you. Records are the same film when they hold the very same file (a link or a copy in another folder: the same size and running time), whatever each is matched to; or when they share a match or, unmatched, when their files are named for the same title and year — and their running times agree (4% or 30 seconds, whichever is more: a different frame rate or cut of the credits; two films that merely share a title and year differ by more), and they’re the same edition (a Director’s Cut and the theatrical cut are two records on purpose), unless their files are the very same file. The record kept is the one with the most edited fields, then the most files, then the oldest. No file is touched, so a mirror isn’t affected.");
   function pageMerge() {
     return toolPage({ name: "merge", title: "Merge Duplicate Plex Records", types: ["movie", "show"],
-      help: MERGE_HELP + "<br><br>" + H("Why: a film added twice — a copy in another folder, a file re-added, one matched after the other — is two records in Plex: twice in every list, two posters, and watched on one but not the other. Merging makes them one record with two versions, as Plex offers for a single pair; this finds them all. Only this server’s records: no file is touched, so a mirrored server isn’t affected — its own duplicates are merged there."),
+      help: MERGE_HELP + "<br><br>" + H("Why: a film added twice — a copy in another folder, a file re-added, one matched after the other — is two records in Plex: twice in every list, two posters, and watched on one but not the other. Merging makes them one record with two versions, as Plex offers for a single pair; this finds them all. Only this server’s records: no file is touched, so a mirror isn’t affected — its own duplicates are merged there."),
       stale: function (sc) { return !("mirror" in sc) || sc.rows.some(function (r) { return !r.keep || !r.keep.fields; }); },  // (no mirror said: from before the box before Apply)
       read: function (sc) { return sc.records == null ? null : { n: sc.records, text: P(sc.records, "{n} record read", "{n} records read", { n: fmtNum(sc.records) }) }; },
       units: function (r) { return 1 + (r.others || []).length; },  // (a film's every record: none of them passes)
@@ -4924,19 +5002,19 @@ PCI18N.ready.then(function () {
         there = H("{name}’s Plex keeps its own records. <a href=\"/sync\" data-nav>Sync Libraries</a> can merge them there too once “Versions grouped differently” is on for this library.", { name: m.name });
       }
     } else if (m) {
-      there = H("{name} looks like a mirror of these files, but it isn’t watched: its Plex keeps its own records. Run Merge Duplicates there too, or watch it on the <a href=\"/mirrors\" data-nav>Mirror page</a>.", { name: m.name });
+      there = H("{name} looks like a mirror of these files, but it isn’t chosen as this library’s mirror: its Plex keeps its own records. Run Merge Duplicates there too, or choose it on the <a href=\"/mirrors\" data-nav>Mirror page</a>.", { name: m.name });
     }
     return { warn: warn,
       does: H("Each ticked film’s records become one, with Plex’s own Merge: the kept record’s metadata stays, and the others’ files become its versions."),
       changes: H("Only this server’s Plex records. No file is touched, so the folder sync carries nothing.") + (there ? " " + there : "") };  // (the backup: the Plex records', from the gate)
   }
-  var VERSIONS_HELP = N("One Plex record can hold the same file twice — a copy that slipped in, or a second path to one file (a link). This finds them: versions of one record with the same running time and size. It also finds the copies Plex doesn’t list at all — a second path to a listed file, or an identical copy of one (the same size and bytes at both ends): Plex’s scanner skips a file it already has under another path, so these only show on disk, taking space and getting cached and optimized twice. The copy kept is the one in a folder of its own, then the newest, then the first Plex lists — or the one you choose with the arrow between them; the others are set aside in the library’s own trash folder (on the same dataset: no copying) and Plex asked to scan. They’re deleted for good only once Plex here no longer lists them — and, with a mirrored server watched, once its Plex no longer does either (the synced folder carries the change there) — then after the hold below. Until then, each can be put back.<br><br><strong>Run <a href=\"/merge\" data-nav>Merge Duplicates</a> first.</strong> A film on two records isn’t one item holding its file twice yet: merging makes its files versions of one record, and only then can this tell an extra copy for sure. Rows whose record is still to be merged are marked in red. A copy that’s the only file of a Plex record here would take the record with it (its metadata and watched state): it’s marked Record destroyed, in red, and can’t be ticked until Merge Duplicates has made it a version of the record kept. One that’s the only file of a record on the mirrored server — where the synced folder carries the deletion — is marked Record destroyed there, in grey: it can still be done, and that record goes; merge the records there first to keep it.");
+  var VERSIONS_HELP = N("One Plex record can hold the same file twice — a copy that slipped in, or a second path to one file (a link). This finds them: versions of one record with the same running time and size. It also finds the copies Plex doesn’t list at all — a second path to a listed file, or an identical copy of one (the same size and bytes at both ends): Plex’s scanner skips a file it already has under another path, so these only show on disk, taking space and getting cached and optimized twice. The copy kept is the one in a folder of its own, then the newest, then the first Plex lists — or the one you choose with the arrow between them; the others are set aside in the library’s own trash folder (on the same dataset: no copying) and Plex asked to scan. They’re deleted for good only once Plex here no longer lists them — and, with a mirror, once its Plex no longer does either (the synced folder carries the change there) — then after the hold below. Until then, each can be put back.<br><br><strong>Run <a href=\"/merge\" data-nav>Merge Duplicates</a> first.</strong> A film on two records isn’t one item holding its file twice yet: merging makes its files versions of one record, and only then can this tell an extra copy for sure. Rows whose record is still to be merged are marked in red. A copy that’s the only file of a Plex record here would take the record with it (its metadata and watched state): it’s marked Record destroyed, in red, and can’t be ticked until Merge Duplicates has made it a version of the record kept. One that’s the only file of a record on the mirror — where the synced folder carries the deletion — is marked Record destroyed there, in grey: it can still be done, and that record goes; merge the records there first to keep it.");
   // Duplicate Versions' rows, on the comparison card: the file kept and the files deleted, as Merge Duplicates shows a
   // film's records. Which is kept is the tool's pick (a folder of its own, then the newest) or the one chosen with the
   // arrow (sent with Apply as keep_key: its path). A file on a Plex record shows the record's poster; one on none (a copy
   // Plex doesn't list), a grey one. Each deleted file says what deleting it does to a Plex record: red when it destroys
   // one here (its record's only file — merge the records first; the row can't be ticked), grey when it destroys one on
-  // the mirrored server (the synced folder carries the deletion there: worth knowing, and it doesn't stop the row).
+  // the mirror (the synced folder carries the deletion there: worth knowing, and it doesn't stop the row).
   function versionsCard(r, sc) {
     var mname = (sc.mirror || {}).name || "";
     var all = [r.keep].concat(r.extras || []), chosen = TOOL.versions.keep[r.id] || r.keep.path;
@@ -4975,15 +5053,15 @@ PCI18N.ready.then(function () {
   function trashList() {
     var tr = ST.trash || { items: [] }, items = tr.items || [];
     if (!items.length) return "";
-    var mname = (ST.plex2 || {}).name || T("the mirrored server");
     var state = function (e) {
+      var mname = mirrorName(e.library);
       var here = e.here ? badge("pass", T("Gone from Plex")) : badge("info", T("Plex still lists it"));
       var there = e.there === null || e.there === undefined ? "" : " " + (e.there ? badge("pass", T("Gone from {name}", { name: mname })) : badge("info", T("{name} still lists it", { name: mname })));
       var when = e.clear_at ? '<div class="det">' + H("Deleted for good {when}", { when: fmtWhen(e.clear_at + tr.hold_days * 86400) }) + "</div>" : "";
       return here + there + (e.stuck ? " " + badge("warn", T("Held: not deleted after {n} days", { n: 14 })) : "") + when + (e.error ? '<div class="det bad">' + esc(e.error) + "</div>" : "") + (e.note ? '<div class="det muted">' + esc(e.note) + "</div>" : "");
     };
     var act = function (e, a, label, pri) { return '<button class="btn sm' + (pri ? " pri" : "") + '" type="button" data-act="trash" data-trash="' + a + '" data-path="' + esc(e.path) + '">' + label + "</button> "; };
-    return '<section class="card">' + heading(esc(T("Set Aside")), N("Files the tools set aside, in the library’s .plexcache-trash folder, waiting until Plex no longer lists them (and the mirrored server’s Plex, with one watched), then the hold. A file that never gets there is held and said so on Health: delete it now, put it back, or keep it set aside and stop following it.")) +
+    return '<section class="card">' + heading(esc(T("Set Aside")), N("Files the tools set aside, in the library’s .plexcache-trash folder, waiting until Plex no longer lists them (and the mirror’s Plex, where the library has one), then the hold. A file that never gets there is held and said so on Health: delete it now, put it back, or keep it set aside and stop following it.")) +
       '<p class="help">' + H("Kept {n} days once every Plex has let go of them (the backup length in <a href=\"/system#prefs\" data-nav>System → Preferences</a>).", { n: tr.hold_days }) + "</p>" +
       '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("File") + '</th><th scope="col">' + H("Now") + '</th><th scope="col"></th></tr></thead><tbody>' +
       items.map(function (e) {
@@ -4993,7 +5071,7 @@ PCI18N.ready.then(function () {
   }
   function pageVersions() {
     return toolPage({ name: "versions", title: "Duplicate Versions",
-      help: VERSIONS_HELP + "<br><br>" + H("Why: a second copy of the same file on one record — a copy that slipped in, a file linked twice — takes space, is cached and optimized twice, and shows as two versions that are one. This sets the extra copy aside, and deletes it once every Plex has let go of it; nothing goes for good until then, and it can be put back. With a mirrored server, the synced folder carries the deletion there, so each copy says whether its Plex lists it."),
+      help: VERSIONS_HELP + "<br><br>" + H("Why: a second copy of the same file on one record — a copy that slipped in, a file linked twice — takes space, is cached and optimized twice, and shows as two versions that are one. This sets the extra copy aside, and deletes it once every Plex has let go of it; nothing goes for good until then, and it can be put back. With a mirror, the synced folder carries the deletion there, so each copy says whether its Plex lists it."),
       read: function (sc) { return sc.records == null ? null : { n: sc.records, text: P(sc.records, "{n} record read", "{n} records read", { n: fmtNum(sc.records) }) }; },
       extra: function (sc) { return sc.frees ? [statChip("pass", T("{size} freed", { size: fmtBytes(sc.frees) }), T("What deleting every extra copy found frees."))] : []; },
       empty: H("No file is held twice."),
@@ -5005,7 +5083,7 @@ PCI18N.ready.then(function () {
       },
       after: function () { return trashList(); } });
   }
-  var FOLDERS_HELP = N("Plex recommends each film in a folder of its own, named <code>Title (Year)</code> — with <code>{edition-…}</code> for an edition, and <code>{tmdb-…}</code> only when two films share a title and year. This moves loose files (in the library folder itself) into such folders, with their subtitles and artwork; with Clean Up, it also renames a film’s folder whose name doesn’t carry the title and year (a folder you named, with both in it, is left as it is).<br><br>Plex loses nothing: each file is first given its new path (a hard link — the same file, nothing copied), Plex asked to scan the new folder, the record it makes for it merged into the original (edits, poster and watched state kept), and only then the old path removed. With a mirrored server, the synced folder carries the change there and the same merge is done there once its Plex has the new path.");
+  var FOLDERS_HELP = N("Plex recommends each film in a folder of its own, named <code>Title (Year)</code> — with <code>{edition-…}</code> for an edition, and <code>{tmdb-…}</code> only when two films share a title and year. This moves loose files (in the library folder itself) into such folders, with their subtitles and artwork; with Clean Up, it also renames a film’s folder whose name doesn’t carry the title and year (a folder you named, with both in it, is left as it is).<br><br>Plex loses nothing: each file is first given its new path (a hard link — the same file, nothing copied), Plex asked to scan the new folder, the record it makes for it merged into the original (edits, poster and watched state kept), and only then the old path removed. With a mirror, the synced folder carries the change there and the same merge is done there once its Plex has the new path.");
   var UNLINK_HELP = N("A hard link is one file under two paths; a symlink is a path that points at another. Plex lists only one of two paths to the same bytes, so a linked copy never shows there. Syncthing can’t carry a hard link at all: the other site gets two whole, separate copies, and once either changes the two sites no longer hold the same thing. A symlink is carried as a link, and dangles on the other side when its target isn’t in the synced folder. This tool makes each linked file a file of its own under the same path — the bytes copied beside it and swapped in, the dates kept, so Plex and the folder sync see the same file. Once every site holds plain files, Merge Duplicates and Duplicate Versions can tidy the copies safely.");
   function pageFolders() {
     return toolPage({ name: "folders", title: "Organize Folders", types: ["movie"],
@@ -5038,7 +5116,7 @@ PCI18N.ready.then(function () {
       after: function (t) {
         var pend = (t.extra || {}).pending || [];
         if (!pend.length) return "";
-        var mname = (ST.plex2 || {}).name || T("the mirrored server");
+        var mname = mirrorName((pend[0] || {}).library);
         return '<section class="card"><h3>' + H("Waiting for {name}", { name: mname }) + "</h3>" + info(H("Its Plex hasn’t listed the new folder yet; the synced folder brings the files, and the new record there is merged into the old once it has."), T("Waiting for {name}", { name: mname })) +
           pend.map(function (e) { return '<div class="det">' + esc(e.title) + " → " + esc(e.folder) + "/ · " + fmtWhen(e.at) + (e.stuck ? " " + badge("warn", T("Not picked up after {n} days", { n: 3 })) : "") + (e.note ? ' <span class="muted">' + esc(e.note) + "</span>" : "") + "</div>"; }).join("") + "</section>";
       } });
@@ -5086,7 +5164,7 @@ PCI18N.ready.then(function () {
       },
       applies: function (sc) {
         // the warning (the way to do it is the choice among the options above), with what Apply does
-        var how = { watched: T("the mirrored server watched on the Mirror page"), suspected: T("a server of your account whose files are here too — a mirror until you say otherwise on the Mirror page"), peer: T("another Plex Cache sharing these folders") }[sc.mirror && sc.mirror.how];
+        var how = { watched: T("the mirror chosen on the Mirror page"), suspected: T("a server of your account whose files are here too — a mirror until you say otherwise on the Mirror page"), peer: T("another Plex Cache sharing these folders") }[sc.mirror && sc.mirror.how];
         var out = sc.mirror
           ? H("<strong>These files look mirrored on {name}</strong>{how}. Syncing files — Syncthing and the like — doesn’t carry a hard link: at the other site each path is a whole copy of its own. So here each link is made a file of its own, which copies the original into a duplicate; the sync then carries the same copies across. Afterwards, make sure your file sync and both Plex servers have caught up with the changes, then run <a href=\"/merge\" data-nav>Merge Duplicates</a> on each side. Removing the extra paths instead would delete the other site’s only copy, and Plex there would lose the item’s metadata.", { name: sc.mirror.name, how: how ? " (" + how + ")" : "" })
           : H("No mirror is known: <strong>removing the extra paths</strong> is the clean way — the file stays where Plex has it and nowhere else. Making each link a file of its own, then merging, is the safer way if these files are mirrored somewhere the app can’t see: a duplicate survives a sync, a removed path doesn’t.");
@@ -5111,6 +5189,7 @@ PCI18N.ready.then(function () {
   }
   function syncCard(r, sc) {
     var nm = syncNames({ names: sc.names, source: r.source }), mirrorWins = r.source === "mirror", kinds = r.kinds || [];
+    var mid = (((ST.plex2 || {}).pairs || {})[r.library] || {}).server || "";  // (the mirror's posters come through this app from its server)
     var srcs = r.src_items || [], dsts = r.dst_items || [], src = srcs[0] || r.src || {}, dst = dsts[0] || {};
     var act = 'data-act="sync-field" data-id="' + esc(r.id) + '"', openId = SYNC_FIELD && SYNC_FIELD.row === r.id ? SYNC_FIELD.id : null;
     // the files, numbered over both sides (the winning side's first) by name; each side's path is its own server's
@@ -5139,10 +5218,10 @@ PCI18N.ready.then(function () {
     // the side brought in line as it is now (each of its items, where the winning side's one is several there) — or, not
     // listed there at all, a side saying so; and as it will be: the winning side's item
     var left = dsts.length ? dsts.map(function (x) {
-      return { kind: "drop", label: T("{name} now", { name: nm.dst }), body: syncSide(Object.assign({}, x, { files: [] }), src, mirrorWins ? "" : "mirror", false, kinds, act, openId, null, null, null, null, true),
+      return { kind: "drop", label: T("{name} now", { name: nm.dst }), body: syncSide(Object.assign({}, x, { files: [] }), src, mirrorWins ? "" : mid, false, kinds, act, openId, null, null, null, null, true),
         checks: (x.files || []).map(function (f, i) { return fileChip(x, f, i, dropFile(f)); }) };
     }) : [{ kind: "drop", label: T("{name} now", { name: nm.dst }), poster: "", noPoster: T("Not listed there"), what: '<span class="muted">' + H("Not listed on {name}", { name: nm.dst }) + "</span>", lines: [], checks: [] }];
-    var right = [{ kind: "keep", label: T("{name} after syncing", { name: nm.dst }), body: syncSide(Object.assign({}, src, { files: [] }), dsts[0] || null, mirrorWins ? "mirror" : "", true, kinds, act, openId, null, null, null, null, true),
+    var right = [{ kind: "keep", label: T("{name} after syncing", { name: nm.dst }), body: syncSide(Object.assign({}, src, { files: [] }), dsts[0] || null, mirrorWins ? mid : "", true, kinds, act, openId, null, null, null, null, true),
       checks: (src.files || []).map(function (f, i) { return fileChip(src, f, i, keepFile(f)); }) }];
     // the row's checks: each kind of difference, yellow while its option is on — then what's worth knowing first (grey)
     var both = function (a, b) { return [esc(nm.src) + ": " + a, esc(nm.dst) + ": " + b]; };
@@ -5221,7 +5300,7 @@ PCI18N.ready.then(function () {
     return checksPage("plexchecks", "plex", "Plex Checks", H("Each check looks at an item as Plex has it: several files on one item named for different titles or years (a version added to the wrong item), versions whose running times differ by more than a little, a field you locked that holds nothing. The locked-field check reads each item’s own page, which the data layer gathers after the records. Only the items a check flags are listed (every item is on the Library page), each with a chip per check."));
   }
   function pageMirrorchecks() {
-    return checksPage("mirrorchecks", "mirror", "Mirror Checks", H("Each library paired with one on the mirrored server (the Mirror page) is compared file by file, by each file’s place in the library folder. " +
+    return checksPage("mirrorchecks", "mirror", "Mirror Checks", H("Each library paired with one on its mirror (the Mirror page) is compared file by file, by each file’s place in the library folder. " +
       "<strong>The disks</strong>: through the Plex Cache at the other site, its files against these — on one side only, or a different size. A file changed in the last hour is left out: it may still be syncing. " +
       "<strong>The Plexes</strong>: what the mirror’s Plex lists against what Plex here lists, and the files here that Plex doesn’t list. Scan Folder, under such a finding, asks the Plex that’s missing the file to look at its folder. " +
       "<strong>The folder sync</strong>: whether the markers and claims in the hidden .plexcache folder reach the other site. While they don’t, the two Plex Caches could optimize the same file, so optimizing and the file tools are held in that library until the sync carries them, until you ignore the finding, or while its check is off.<br><br>" +
@@ -5442,6 +5521,7 @@ PCI18N.ready.then(function () {
       retriesChanged(st);
       if (!Object.keys(pending).length) S = st.settings;
       if (!editing() && !selecting() && !interacting()) render();
+      lookIfDue();
     }).catch(function () {
       if (!ST) main.innerHTML = '<p class="muted">' + H("Can’t reach the Plex Cache service. Retrying…") + "</p>";
       else if (UPDATING || (ST.updates || {}).updating) render();  // (away while it restarts: still "Updating…")
@@ -5459,6 +5539,20 @@ PCI18N.ready.then(function () {
     render();
     window.scrollTo(0, 0);
     main.focus({ preventScroll: true });
+    lookIfDue();
+  }
+  // The Mirror page open: a look for mirrors by itself (sync.py discover, which also compares each mirror chosen) — when
+  // there's never been one, a library the last one didn't score, or an hour since; at most every 10 minutes from this tab,
+  // and only while looking by itself is on (sync.discover) and there's a sign-in to list the servers from.
+  var LOOKED = 0;
+  function lookIfDue() {
+    if (!ST || page !== "mirrors") return;
+    var sy = ST.sync || {}, p2 = ST.plex2 || {}, libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
+    if (sy.running || !p2.signed_in || !(S.sync || {}).discover || Date.now() - LOOKED < 600000) return;
+    var compared = sy.compared || [], now = Date.now() / 1000;
+    if (sy.discovered_at && now - sy.discovered_at < 3600 && !libs.some(function (l) { return compared.indexOf(String(l.key)) < 0; })) return;
+    LOOKED = Date.now();
+    try { api("/api/sync/discover", {}).then(function () { load(); }).catch(function () {}); } catch (e) { /* (the page drawn offline: nothing to ask) */ }
   }
 
   // --------------------------------------------------------------- events
@@ -5538,7 +5632,7 @@ PCI18N.ready.then(function () {
 
   document.addEventListener("click", function (e) {
     // ↺ on the Optimizer page and the second server's pairs: back to the default
-    var orv = e.target.closest("[data-optlib-revert], [data-p2lib-revert], [data-lhcheck-revert], [data-lhlang-revert], [data-lhquality-revert]");
+    var orv = e.target.closest("[data-optlib-revert], [data-p2lib-revert], [data-peerurl-revert], [data-lhcheck-revert], [data-lhlang-revert], [data-lhquality-revert]");
     if (orv) {
       e.preventDefault();
       if (orv.dataset.lhlangRevert !== undefined) {
@@ -5556,11 +5650,12 @@ PCI18N.ready.then(function () {
         var lh = JSON.parse(JSON.stringify((S.library_health || {}).checks || {}));
         delete lh[orv.dataset.lhcheckRevert];
         queueSave("library_health", "checks", lh, true);
+      } else if (orv.dataset.peerurlRevert !== undefined) {  // (the other Plex Cache's address: found by itself again)
+        var svs = JSON.parse(JSON.stringify((S.peer || {}).servers || {}));
+        delete svs[orv.dataset.peerurlRevert];
+        queueSave("peer", "servers", svs, true);
       } else {
-        var pairs = JSON.parse(JSON.stringify((S.plex2 || {}).libraries || {}));
-        pairs[orv.dataset.p2libRevert] = { state: "mirror", key: "" };  // (mirrored still: by the library of the same name)
-        queueSave("plex2", "libraries", pairs, true);
-        setTimeout(function () { api("/api/plex2/refresh", {}).then(function () { load(); }); }, 1500);
+        mirrorChoose(orv.dataset.p2libRevert, "unset");  // (the Mirror page's row: back to not decided)
       }
       render();
       return;
@@ -5870,23 +5965,9 @@ PCI18N.ready.then(function () {
       api("/api/sync/discover", {}).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "mirror-set") {
-      // a library's state: mirrored (by a library of the server watched — that server connected first when the one found isn't
-      // it), no mirror, or undone to not decided; a conversion under way looks at its checks again at once
+      // a library's mirror (the dataset page's buttons): a library of a server, or none — plex2.choose, as the Mirror page's list
       el.disabled = true;
-      var mk = el.dataset.key, ms = el.dataset.state, msv = el.dataset.server || "", mth = el.dataset.their || "";
-      var connect = ms === "mirror" && msv && msv !== (S.plex2 || {}).machine_id
-        ? api("/api/plex2/servers", {}).then(function () { return api("/api/plex2/use", { id: msv }); }) : Promise.resolve();
-      connect.then(function () {
-        var map = JSON.parse(JSON.stringify((S.plex2 || {}).libraries || {}));
-        if (ms === "unset" && !map["*"]) delete map[mk]; else map[mk] = { state: ms, key: ms === "mirror" ? mth : "" };
-        queueSave("plex2", "libraries", map, true);
-        return flush();
-      }).then(function () { return ms === "mirror" ? api("/api/plex2/refresh", {}).catch(function () {}) : null; })
-        .then(migRecheck).then(load).catch(function (e) { toast(e.message, true); load(); });
-    }
-    else if (act === "plex2-use-found") {  // a server found by discovery: watched (its addresses tried again) — the connection; each library's state is its own
-      el.disabled = true;
-      api("/api/plex2/servers", {}).then(function () { return api("/api/plex2/use", { id: el.dataset.id }); }).then(migRecheck).then(load).catch(function (e) { toast(e.message, true); load(); });
+      mirrorChoose(el.dataset.key, el.dataset.state, el.dataset.server || "", el.dataset.their || "");
     }
     else if (act === "lib-tab") {
       // the library opened is worked out first — its counts, and the inspector reads its files first (focusQuery: load)
@@ -5935,22 +6016,14 @@ PCI18N.ready.then(function () {
     else if (act === "retest") { flush().then(function () { return api("/api/test", {}); }).then(function () { ST.testing = true; render(); load(); }); }
     else if (act === "plex-signin") { signIn(); }
     else if (act === "plex2-signin") { signIn("plex2"); }
-    else if (act === "plex2-list") {
+    else if (act === "plex2-address") {  // an address for a mirror this NAS can reach, by hand
+      var inp = document.querySelector('[data-p2addr="' + el.dataset.server + '"]');
       el.disabled = true;
-      api("/api/plex2/servers", {}).then(function (r) { PLEX2_LIST = r.servers || []; render(); }).catch(function (e) { toast(e.message); render(); });
+      api("/api/plex2/address", { server: el.dataset.server, url: inp ? inp.value.trim() : "" }).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
-    else if (act === "plex2-use") {
+    else if (act === "peer-pair" || act === "peer-unpair" || act === "peer-test") {  // System → Mirror Plex Cache, per mirror's server
       el.disabled = true;
-      toast(T("Trying its addresses…"));
-      api("/api/plex2/use", { id: el.dataset.id }).then(function () { PLEX2_LIST = null; load(); }).catch(function (e) { toast(e.message); render(); });
-    }
-    else if (act === "plex2-refresh" || act === "plex2-forget") {
-      el.disabled = true;
-      api("/api/" + act.replace("-", "/"), {}).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
-    }
-    else if (act === "peer-pair" || act === "peer-unpair" || act === "peer-test") {  // System → Mirror Plex Cache
-      el.disabled = true;
-      flush().then(function () { return api("/api/peer/" + act.slice(5), {}); }).then(function (got) { ST.peer = got; render(); setTimeout(load, 2000); })
+      flush().then(function () { return api("/api/peer/" + act.slice(5), { server: el.dataset.server || "" }); }).then(function (got) { ST.peer = got; render(); setTimeout(load, 2000); })
         .catch(function (e) { toast(e.message, true); load(); });
     }
   }
@@ -6133,14 +6206,21 @@ PCI18N.ready.then(function () {
     var v = document.querySelector('[data-val="' + el.id + '"]');
     if (v) v.textContent = secText(el.value, el.dataset.unit);
   });
-  // Mirror: a mirrored library's library there (the one of the same name, or chosen)
+  // Mirror: a library's mirror chosen from its row's list — not decided, no mirror, or "<server>:<its library there>"
   document.addEventListener("change", function (e) {
     var el = e.target;
     if (!el.dataset || el.dataset.p2lib === undefined) return;
-    var pairs = JSON.parse(JSON.stringify((S.plex2 || {}).libraries || {}));
-    pairs[el.dataset.p2lib] = { state: "mirror", key: el.value };
-    queueSave("plex2", "libraries", pairs, true);
-    setTimeout(function () { api("/api/plex2/refresh", {}).then(function () { load(); }); }, 1500);
+    var v = el.value, i = v.indexOf(":");
+    el.disabled = true;
+    if (i < 0) mirrorChoose(el.dataset.p2lib, v); else mirrorChoose(el.dataset.p2lib, "mirror", v.slice(0, i), v.slice(i + 1));
+  });
+  // System → Mirror Plex Cache: the other Plex Cache's address by hand, per mirror's server (peer.servers)
+  document.addEventListener("change", function (e) {
+    var el = e.target;
+    if (!el.dataset || el.dataset.peerurl === undefined) return;
+    var svs = JSON.parse(JSON.stringify((S.peer || {}).servers || {}));
+    svs[el.dataset.peerurl] = { url: el.value.trim() };
+    queueSave("peer", "servers", svs, true);
   });
   // Library → Health: each check's switch
   document.addEventListener("change", function (e) {

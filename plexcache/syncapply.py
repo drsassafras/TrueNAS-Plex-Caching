@@ -24,19 +24,20 @@ TAG_LOCKS = ("genre", "writer", "director", "producer", "country")  # tag fields
 def ends(app, key: str, source: str) -> dict:
     """The two servers of a library, as a row is applied: {"src", "dst" (clients), "section" (the library on the side
     changed), "name" (that side's), "server" ("here" | "mirror": the side changed)}."""
-    there = app.other.pairs().get(str(key))
+    there = app.mirrors.pairs().get(str(key))
     if there is None:
         raise ValueError(M("This library isn’t paired with one on the mirror any more ([Mirror page](/mirrors))."))
     here = app.plex(timeout=120)
-    app.other.run(lambda c: c.identity(), timeout=20)  # (reached — at another of its addresses if need be)
-    mirror = app.other.client(timeout=120)
+    app.mirrors.run(there.server, lambda c: c.identity(), timeout=20)  # (reached — at another of its addresses if need be)
+    mirror = app.mirrors.client(there.server, timeout=120)
     if source == "mirror":
-        return {"src": mirror, "dst": here, "section": str(key), "name": getattr(app, "plex_name", "") or M("This server"), "server": "here"}
-    return {"src": here, "dst": mirror, "section": there.key, "name": app.settings.section("plex2").get("name") or M("the mirror"), "server": "mirror"}
+        return {"src": mirror, "dst": here, "section": str(key), "name": getattr(app, "plex_name", "") or M("This server"), "server": "here", "mirror_id": there.server}
+    return {"src": here, "dst": mirror, "section": there.key, "name": there.server_name or M("the mirror"), "server": "mirror", "mirror_id": there.server}
 
 
-def client_for(app, server: str):
-    return app.other.client(timeout=120) if server == "mirror" else app.plex(timeout=120)
+def client_for(app, server: str, mirror_id: str = ""):
+    """The client of the side changed: "here", or "mirror" (``mirror_id``: which)."""
+    return app.mirrors.client(mirror_id, timeout=120) if server == "mirror" else app.plex(timeout=120)
 
 
 def apply(row: dict, kinds: list[str], e: dict, log) -> dict:
@@ -46,7 +47,7 @@ def apply(row: dict, kinds: list[str], e: dict, log) -> dict:
     src_client, dst_client, section = e["src"], e["dst"], e["section"]
     src, dst = row.get("src"), row.get("dst")
     out = {"done": [], "dst_key": (dst or {}).get("key"), "merged": [], "scanned": [], "before": {}, "after": {}, "section": section,
-           "type": (dst or src or {}).get("type", ""), "server": e["server"]}
+           "type": (dst or src or {}).get("type", ""), "server": e["server"], "mirror_id": e.get("mirror_id") or ""}
     if "missing" in kinds and row.get("scan"):
         for folder in row["scan"]:
             dst_client.scan(section, folder)
@@ -143,7 +144,7 @@ def apply(row: dict, kinds: list[str], e: dict, log) -> dict:
 def undo(app, outcome: dict, title: str, log) -> None:
     """A row put back as it was from what it had before (apply()'s outcome) — what can be, without a backup of the records:
     a merge can't be (split the item in Plex), nor a scan (it only made Plex look)."""
-    client = client_for(app, outcome.get("server") or "mirror")
+    client = client_for(app, outcome.get("server") or "mirror", outcome.get("mirror_id") or "")
     section, type_no, key, b, after = outcome.get("section") or "", TYPE_NO.get(outcome.get("type") or "", 1), outcome.get("dst_key"), outcome.get("before") or {}, outcome.get("after") or {}
     for kind in outcome.get("done") or []:
         if kind == "edits" and "edits" in b:
