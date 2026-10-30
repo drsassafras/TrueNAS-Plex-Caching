@@ -103,6 +103,10 @@ a.badge{text-decoration:none}a.badge:hover{text-decoration:underline}
 .b-reading,.b-running,.b-scanning{background:var(--run-bg);color:var(--run)}
 .what{font-weight:600}
 .det{color:var(--soft);font-size:14px;margin-top:3px}
+fieldset.sub{color:inherit;font-size:inherit;max-width:none;margin:14px 0 0;padding:12px 18px 18px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+fieldset.sub>legend{padding:0 8px;font-weight:600;color:var(--ink);font-size:15px}
+.det.fp{display:flex;align-items:center;gap:10px;margin-top:8px}
+.identicon{width:40px;height:40px;flex:none;border-radius:4px;background:var(--line2);padding:3px;box-sizing:border-box}
 /* Nothing in a page may make it wider than the window: grid cells and flex items can shrink below
    their content, and a long path or name without spaces wraps anywhere */
 .tiles>*,.grid>*,.cols2>*,.guide>*,.libmodes>*,.pflib-grid>*,.estgrid>*,.stack>*{min-width:0}

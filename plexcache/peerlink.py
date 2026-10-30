@@ -20,11 +20,18 @@ of only leaving notes in the shared folders (peers.py).
   until Pair Now.
 * **Talking** — every request after pairing is signed with the shared key (HMAC-SHA256 over the
   method, path, time, a nonce and the body); a request older than MAX_AGE, or a nonce seen before, is
-  refused. A peer only reads: what it may ask here is the status and the file lists. Nothing it asks
-  changes a file or a setting.
+  refused. A peer reads: what it may ask here is the status and the file lists. The one thing it may
+  write is its own marker and claims under .plexcache (below), through the optimizer service.
+* **Carrying .plexcache** — each side's marker (peers.py) and the claims its optimizer makes
+  (optimize/claims.py) are what the folder sync carries between the sites. While the two are talking,
+  the link carries them itself (carry, POST /peer/v1/carry): the receiving side writes the same file
+  into the paired library's folders here, under the sender's instance name only, with the time the
+  sender gave — so a folder sync that also carries it finds the same file, and one that leaves out
+  .plexcache isn't needed. Claims settle in one round trip: the answer carries this side's live
+  claims on the file, and the earliest wins (Claims.take).
 * **Folder sync** — each side reports the markers it publishes and the ones it sees: ours not reaching
   the other side means claims don't either, so the two could optimize the same file (Mirror Checks
-  holds optimizing there until it's fixed or ignored).
+  holds optimizing there until it's fixed or ignored). The light says which channel carries them.
 
 Everything here is in the state (PeerLinks.snapshot), per mirrored server, as five lights, worked out by
 tick() every TICK_EVERY.
@@ -57,6 +64,9 @@ MAX_AGE = 300             # a signed request older (or newer) than this is refus
 SKEW_WARN = 120           # clocks further apart than this: a warning (claims and "ran 20 minutes ago" rely on time)
 QUIET_AFTER = 900         # paired, and no answer for this long: not talking
 LAG_WARN = 2 * 3600       # a marker taking longer than this to reach the other side: the sync is behind
+CARRIED_FRESH = 2 * 3600  # a marker carried over the link within this: the link is what carries .plexcache (published every half hour)
+CARRY_RETRY = 1800        # talking with nothing carried yet: our marker published (and carried) at most this often
+SYNC_ADVICE = M("Syncthing: turn on “Watch for Changes” on the folder and set its pull order to “Smallest First”, so the small .plexcache files go over before the media.")
 NEVER_AFTER = 3 * 3600    # published this long ago and never seen there: the folder sync doesn't carry .plexcache
 PROBE_TIMEOUT = 3
 
@@ -422,6 +432,12 @@ class PeerLinks:
             return 200, self.local_status()
         if path == "/peer/v1/files" and method == "GET":
             return 200, self.local_files(str(query.get("library") or ""))
+        if path == "/peer/v1/carry" and method == "POST":
+            try:
+                data = json.loads(body or b"{}")
+            except ValueError:
+                return 400, {"error": "invalid JSON"}
+            return 200, link.handle_carry(data if isinstance(data, dict) else {})
         if path == "/peer/v1/unpair" and method == "POST":
             with self.lock:
                 old, link.paired, link.status = link.paired, None, None
@@ -511,6 +527,9 @@ class PeerLink:
         self.window = 0.0          # until when Pair Now lets the other side pair with us
         self.found: dict | None = None  # the other side's hello, and where it answered: {"url", "hello", "at"}
         self.tried: list[str] = []  # the addresses tried last, for the light
+        self.carried: dict[str, float] = {}  # our library key -> when our marker last went over the link (carry)
+        self.received: dict[str, float] = {}  # our library key -> when theirs last came over it (handle_carry)
+        self.carry_tried = 0.0
         self.find_error = None      # why nothing was found (M), or why what answered isn't it
         self.pair_error = None      # why the last pairing didn't happen (M)
         self.last_ok = 0.0          # the last signed answer from the other side
@@ -948,7 +967,70 @@ class PeerLink:
             self.skew = float(st.get("time") or time.time()) - time.time()
             if st.get("name") and self.paired and st["name"] != self.paired.get("name"):
                 self.paired["name"] = st["name"]
+        if not self.carried and time.time() - self.carry_tried > CARRY_RETRY:  # (talking, nothing carried yet: our marker there now, not at the next half hour)
+            self.carry_tried = time.time()
+            from . import peers
+            try:
+                peers.publish(self.app)
+            except Exception:  # noqa: BLE001 — the service away: the half-hourly publish says so
+                log.debug("marker not carried to %s", self.server, exc_info=True)
         return True
+
+    # ------------------------------------------------------------ carrying .plexcache
+    def carry(self, key: str, marker: dict | None = None, claims: list | None = None) -> dict | None:
+        """Our marker for a library of ours, and claims on its files, carried to the other side (POST /peer/v1/carry): it
+        writes them into the paired library's folders there. Its answer ({"carried": True, "claims": {key: its live claims
+        on that file}}), or None when it couldn't (not talking, the library not paired, no service there)."""
+        there = self._pairs().get(str(key))
+        if there is None or not self.talking():
+            return None
+        try:
+            got = self.request("POST", "/peer/v1/carry", {"library": str(there.key), "mirrors": str(key), "marker": marker, "claims": claims or []}, timeout=20)
+        except (PeerError, OSError) as e:
+            log.debug("carry to %s failed: %s", self.server, e)
+            return None
+        if not got.get("carried"):
+            log.debug("carry to %s refused: %s", self.server, got.get("why"))
+            return None
+        if marker:
+            with self.lock:
+                self.carried[str(key)] = time.time()
+        return got
+
+    def handle_carry(self, data: dict) -> dict:
+        """The other side's marker and claims for the library here ("library") that its library ("mirrors") mirrors —
+        as this side's own pairs say, else refused — written into that library's folders under its instance name (the
+        pairing's, never the body's), with the time it gave, through the optimizer service, the one part that writes
+        there. {"carried", "claims": {key: the live claims here}, "why"}."""
+        client = getattr(getattr(self.app, "optimizing", None), "client", None)
+        if client is None or not getattr(client, "configured", False):
+            return {"carried": False, "why": "no optimizer service here to write it"}
+        key, theirs = str(data.get("library") or ""), str(data.get("mirrors") or "")
+        there = self._pairs().get(key)
+        if there is None or str(there.key) != theirs:
+            return {"carried": False, "why": "no library here is mirrored by that one"}
+        instance = str((self.paired or {}).get("instance") or "")
+        marker = data.get("marker") if isinstance(data.get("marker"), dict) else None
+        claims = [c for c in (data.get("claims") or [])[:50] if isinstance(c, dict) and isinstance(c.get("key"), str)]
+        from . import peers
+        answer: dict = {}
+        try:
+            for k, _plex, local in peers._folders(self.app):
+                if k != key:
+                    continue
+                if marker:
+                    at = marker.get("at")
+                    client.mark(local, instance, marker, at=float(at) if isinstance(at, (int, float)) else None)
+                for c in claims:
+                    at = c.get("at")
+                    got = client.claim(local, c["key"], instance, bool(c.get("release")), at=float(at) if isinstance(at, (int, float)) else None)
+                    answer[c["key"]] = [x for x in got.get("claims") or [] if isinstance(x, dict)]
+        except (OSError, ValueError, urllib.error.URLError) as e:
+            return {"carried": False, "why": str(e)}
+        if marker:
+            with self.lock:
+                self.received[key] = time.time()
+        return {"carried": True, "claims": answer}
 
     def talking(self) -> bool:
         return bool(self.paired) and time.time() - self.last_ok < QUIET_AFTER
@@ -956,9 +1038,11 @@ class PeerLink:
     # ------------------------------------------------------------ folder sync, per library
     def folder_sync(self) -> dict:
         """Per library of ours mirrored by this server: whether our markers reach the other side and theirs reach us —
-        {key: {"status": "ok" | "warn" | "fail" | "off", "out": seconds behind or None, "in": …, "text": M}}."""
+        {key: {"status": "ok" | "warn" | "fail" | "off", "out": seconds behind or None, "in": …, "link": carried over the link
+        lately}}. While the link is down, from its last status — and only theirs reaching us is judged (whether ours reach
+        them can't be seen from here then)."""
         out: dict = {}
-        st = self.status if self.talking() else None
+        st, talking = self.status, self.talking()
         if not st:
             return out
         published = dict(getattr(self.app, "published_markers", None) or {})
@@ -972,10 +1056,10 @@ class PeerLink:
         now = time.time()
         for key, there in self._pairs().items():
             t = (st.get("libraries") or {}).get(str(there.key)) or {}
-            row = {"status": "ok", "out": None, "in": None}
+            row = {"status": "ok", "out": None, "in": None, "link": max(self.carried.get(str(key), 0), self.received.get(str(key), 0)) > now - CARRIED_FRESH}
             # ours, there
             ours_at, seen_there = published.get(str(key)), (t.get("seen") or {}).get(mine)
-            if ours_at:
+            if ours_at and talking:
                 if seen_there is None:
                     if self._published_long_ago(str(key)):  # (never seen there, after hours of publishing)
                         row["status"] = "fail"
@@ -1034,8 +1118,7 @@ class PeerLink:
                                         why=self.find_error or "", tried=self.tried_summary() or "—")}
         if p:
             out["paired"] = {"status": "ok", "text": M("Paired with {name}", name=p.get("name") or p.get("instance")),
-                             "detail": M("Fingerprint {fp} · {how} {when}", fp=fingerprint(self.public(), p.get("public") or ""),
-                                         how=M("paired by itself") if p.get("how") == "auto" else M("paired with Pair Now"),
+                             "detail": M("Since {when}, {how}.", how=M("by itself through the synced folder") if p.get("how") == "auto" else M("by Pair Now pressed on both sides"),
                                          when=time.strftime("%Y-%m-%d %H:%M", time.localtime(p.get("at") or 0)))}
         elif f:
             out["paired"] = {"status": "warn", "text": M("Plex Cache found, but not paired"), "detail": self.pair_error or M("Pairing is tried every few minutes.")}
@@ -1053,7 +1136,11 @@ class PeerLink:
         return out
 
     def _folders_light(self) -> dict:
-        if not self.talking():
+        """Green while the two are talking: the link carries .plexcache itself, and what the folder sync hasn't brought is
+        only noted (with what helps). Yellow when the link is down and the folder sync is behind: nothing carries the
+        markers and claims in time then, and optimizing is held (mirrorhealth.hold)."""
+        talking = self.talking()
+        if not self.status:
             return {"status": "off", "text": M("Folder sync"), "detail": M("Checked once the two are talking.")}
         publishing = bool(getattr(getattr(self.app, "optimizing", None), "client", None) and self.app.optimizing.client.configured)
         if not publishing or not (self.status or {}).get("publishing", True):  # (grey: without it there's nothing to optimize, nor claims to carry)
@@ -1064,13 +1151,21 @@ class PeerLink:
         bad = {k: r for k, r in rows.items() if r["status"] in ("warn", "fail")}
         if not rows or all(r["status"] == "off" for r in rows.values()):
             return {"status": "off", "text": M("Folder sync"), "detail": M("No markers published yet: checked after the next one (every 30 minutes).")}
-        if bad:
-            worst = "fail" if any(r["status"] == "fail" for r in bad.values()) else "warn"
-            return {"status": worst, "text": M("The .plexcache folder doesn’t sync") if worst == "fail" else M("The folder sync is behind"),
-                    "detail": M("{libraries}: the markers and claims in .plexcache don’t reach the other side (in time). Optimizing there is held until it’s fixed or ignored on [Tools → Mirror Checks](/mirrorchecks).",
-                                libraries=", ".join(str(names.get(k, k)) for k in bad))}
+        never = any(r["status"] == "fail" for r in bad.values())
+        behind = M("{libraries}: the markers and claims in .plexcache {how} the other side by the folder sync. {advice}",
+                   libraries=", ".join(str(names.get(k, k)) for k in bad), how=M("never reach") if never else M("take hours to reach"), advice=SYNC_ADVICE) if bad else None
         lag = max([r["out"] or 0 for r in rows.values()] + [r["in"] or 0 for r in rows.values()])
-        return {"status": "ok", "text": M("Folder sync carries .plexcache"), "detail": M("Both ways, up to {minutes} minutes behind", minutes=int(lag // 60))}
+        if talking:
+            if any(r.get("link") for r in rows.values()):
+                return {"status": "ok", "text": M("The link carries .plexcache"),
+                        "detail": M("Markers and claims reach the other side over the link, at once: the folder sync needn’t carry them.") + (f" {behind}" if behind else "")}
+            if behind:
+                return {"status": "ok", "text": M("The link is up; the folder sync is behind"), "detail": behind}
+            return {"status": "ok", "text": M("Folder sync carries .plexcache"), "detail": M("Both ways, up to {minutes} minutes behind", minutes=int(lag // 60))}
+        if behind:  # (the link down: the sync is all that carries them, and it's behind)
+            return {"status": "warn", "text": M("The link is down and the .plexcache folder doesn’t sync") if never else M("The link is down and the folder sync is behind"),
+                    "detail": f"{behind} " + M("Optimizing there is held until the sync catches up, or the finding is ignored on [Tools → Mirror Checks](/mirrorchecks).")}
+        return {"status": "ok", "text": M("Folder sync carries .plexcache"), "detail": M("The other side’s markers arrive here up to {minutes} minutes behind.", minutes=int(lag // 60))}
 
     def _version_light(self) -> dict:
         st = self.status if self.talking() else None

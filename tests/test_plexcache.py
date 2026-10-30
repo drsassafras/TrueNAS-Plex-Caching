@@ -6437,11 +6437,11 @@ class FakeOptimizer:
         os.remove(path)
         return {"deleted": True}
 
-    def mark(self, folder, instance, info):
+    def mark(self, folder, instance, info, at=None):
         from plexcache.optimize import claims
         if not os.path.isdir(folder):  # (as the service: a library folder that's there — never one made at the machine's root, like /music)
             raise OSError("path is outside the media folders")
-        return {"marked": claims.mark(folder, instance, info)}
+        return {"marked": claims.mark(folder, instance, info, now=at)}
 
     def file_action(self, action, path, to="", root=""):
         from plexcache.optimize import convert, files
@@ -6450,12 +6450,12 @@ class FakeOptimizer:
                 "link": lambda: files.link(path, to), "unlink": lambda: files.unlink(path, to), "make_real": lambda: files.make_real(path),
                 "copy_from": lambda: files.copy_from(path, to), "remove_converted": lambda: convert.remove_converted(path, to)}[action]()
 
-    def claim(self, folder, key, instance, release=False):
+    def claim(self, folder, key, instance, release=False, at=None):
         mine = self.claims.setdefault(key, {})
         if release:
             mine.pop(instance, None)
         else:
-            mine.setdefault(instance, time.time())
+            mine.setdefault(instance, at or time.time())
         self.sent.append({"action": "claim", "key": key, "release": release})
         return {"claims": sorted(({"instance": i, "at": t} for i, t in mine.items()), key=lambda c: (c["at"], c["instance"])),
                 "peers": list(self.peers)}
@@ -8944,6 +8944,31 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual((job["optimized"], job["skipped"]), (1, 1))
         self.assertEqual([x["path"] for x in client.sent if x["action"] == "optimize"], [os.path.join(d, "b.mkv")])
         self.assertEqual(list(client.claims[a_key]), ["system-b"])                 # ours released, theirs left
+
+    def test_claims_settle_over_the_link(self):
+        """With the link to the other Plex Cache talking, a claim is carried there and its claims come back: the earliest
+        wins at once, with no waiting for the folder sync."""
+        app, op, client, d, state = self._app(names=("a.mkv", "b.mkv"))
+        app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "sync": False}}}})
+        op.survey()
+        a_key, me, carried = hashlib.sha1(b"a.mkv").hexdigest()[:24], op.instance(), []
+
+        class Link:
+            def talking(self):
+                return True
+
+            def carry(self, key, marker=None, claims=None):
+                carried.append((key, claims[0]))
+                c = claims[0]
+                theirs = [{"instance": "system-b", "at": c["at"] - 100}] if c["key"] == a_key else []  # (its claim on a.mkv came first)
+                return {"carried": True, "claims": {c["key"]: theirs + [{"instance": me, "at": c["at"]}]}}
+        t0 = time.time()
+        with mock.patch.object(app.peerlinks, "for_library", return_value=Link()):
+            job = run_job(op)["job"]
+        self.assertLess(time.time() - t0, 60)                                                        # (no two-minute wait)
+        self.assertEqual((job["optimized"], job["skipped"]), (1, 1))
+        self.assertEqual([x["path"] for x in client.sent if x["action"] == "optimize"], [os.path.join(d, "b.mkv")])
+        self.assertEqual({(k, c["key"] == a_key, bool(c.get("release"))) for k, c in carried}, {("1", True, False), ("1", True, True), ("1", False, False), ("1", False, True)})
 
     def test_conflict_copies(self):
         """Syncthing conflict copies we made are found and deleted; files aren't optimized twice."""
@@ -14089,8 +14114,10 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertEqual(h["counts"]["mirror_sync_files"], 1)
         self.assertGreater(app.library_health("1")["counts"]["mirror_only_here"], 0)
         self.assertGreater(app.health_counts["1"]["mirror"], 0)                                     # (the check page's tab, the Tools card)
-        # the folder sync not carrying .plexcache: optimizing and the file tools held, until the finding is ignored (Library
-        # Health's Ignore, on its item) or its check switched off
+        # the folder sync not carrying .plexcache while the link is down (up, the link carries it itself): optimizing and the
+        # file tools held, until the finding is ignored (Library Health's Ignore, on its item) or its check switched off
+        self.assertIsNone(app.mirror_health.hold("1"))
+        link.talking = lambda: False
         self.assertIn(".plexcache", en(jsonable(app.mirror_health.hold("1"))))
         libhealth.set_ignored(app, "1", ".plexcache", ["mirror_sync_files"])
         self.assertIsNone(app.mirror_health.hold("1"))
@@ -14103,6 +14130,7 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertIsNone(app.mirror_health.hold("1"))
         app.settings.update({"library_health": {"checks": {"mirror_sync_files": True}}})
         self.assertIsNotNone(app.mirror_health.hold("1"))
+        link.talking = lambda: True
         # Scan Folder, a finding's action: the mirror's Plex asked for a file it doesn't list, Plex here for a file it doesn't
         there = next(r for r in got["rows"] if r["kind"] == "not_listed_there")
         with self.assertRaises(ValueError):                                                        # (refused while the findings aren't of the data now: being worked out again)
@@ -14121,7 +14149,8 @@ class MirrorLinkTests(unittest.TestCase):
         asked = next(f["result"] for f in app.mirror_health.findings("1") if f["item"] == there["item"] and f["result"]["id"] == "mirror_not_listed_there")
         self.assertTrue(asked["action"]["done_at"])
         self.assertNotIn("action", next(f["result"] for f in app.mirror_health.findings("1") if f["result"]["id"] == "mirror_only_there"))
-        # the Health page: the hold, and the differences waiting
+        # the Health page: the hold (the link down again), and the differences waiting
+        link.talking = lambda: False
         app.library_health("1")
         said = [en(jsonable(i["title"])) for i in checks._mirror_items(app)]
         self.assertIn("Optimizing is held: Movies", said)
@@ -14206,8 +14235,9 @@ class MirrorLinkTests(unittest.TestCase):
         app.settings.update({"peer": {"enabled": False}})
         self.assertEqual(app.mirror_health.connection()["status"], "ok")                       # (none there: nothing to warn about)
         app.settings.update({"peer": {"enabled": True}})
-        # held: Optimize Now refused, and a file tool's Apply
-        link.talking = lambda: True
+        # held: Optimize Now refused, and a file tool's Apply — the link down (up, it carries .plexcache itself) and the sync not bringing it
+        link.talking = lambda: False
+        link.status = {"libraries": {}}
         link.folder_sync = lambda: {"1": {"status": "fail", "out": None, "in": None}}
         httpd = serve(app, "127.0.0.1", 0)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -14368,6 +14398,10 @@ class MirrorLinkTests(unittest.TestCase):
         for said in ("Plex Cache found on Cottage", "Plex Cache found, but not paired", "Not talking", "Pair by itself", "Its address", "Pair Now", "Test Again"):
             self.assertIn(said, card)
         self.assertNotIn("Unpair", card)                                                          # (nothing paired)
+        link.paired = {"instance": "cottage", "name": "Cottage", "url": "http://cottage:8642", "public": "ab" * 32, "at": time.time(), "how": "manual"}
+        html = pages._render(jsonable(app.state()), "system")["html"]
+        self.assertEqual((html.count("Fingerprint"), html.count('<svg class="identicon"')), (1, 1))  # (the fingerprint once, with its picture)
+        link.paired = None
         drawn = pages._render(st, "mirrorchecks")
         # the other site's files not compared (the link down): a red chip on top, leading to the link's card, in place of a
         # warning further down — and the checks that need them, their counts red
@@ -14652,9 +14686,12 @@ class CountStandardTests(unittest.TestCase):
         self.assertIn('mirror_size_differs: mirrorBlock(', self._js())
         # held while .plexcache doesn't reach the other site
         self.assertTrue(tool.held_by_folder_sync)
-        app.peerlinks.link("xyz").talking = lambda: True
+        app.peerlinks.link("xyz").talking = lambda: False                                      # (the link down: the sync is all that carries .plexcache)
         app.peerlinks.link("xyz").folder_sync = lambda: {"1": {"status": "fail"}}
         self.assertIsNotNone(app.mirror_health.hold("1"))
+        app.peerlinks.link("xyz").talking = lambda: True
+        self.assertIsNone(app.mirror_health.hold("1"))                                            # (up: it carries .plexcache itself — no hold)
+        app.peerlinks.link("xyz").talking = lambda: False
         got = dict(tool.analysis(data), library="1")
         with tool.lock:
             tool.scan_result = got
@@ -16129,6 +16166,44 @@ class PeerLinkEdgeTests(unittest.TestCase):
         self.assertEqual(a.peerlinks.local_files("1"), {"ready": True, "at": 1.0, "files": [["a.mkv", 1, 2.0]]})
         d.records_at = d.files_at = 0.0
 
+    def test_the_link_carries_plexcache(self):
+        """Our marker and claims written into the other side's folders over the link — the same files the folder sync would
+        bring, there at once — only from a paired side, into the library its own pairs map, under the pairing's name."""
+        from plexcache import peers
+        a, ua, b, ub = self._paired()
+        da, db = tempfile.mkdtemp(dir=TMP), tempfile.mkdtemp(dir=TMP)
+        a.libraries = [{"key": "1", "title": "Movies", "kind": "movie", "locations": [da]}]
+        b.libraries = [{"key": "7", "title": "Films", "kind": "movie", "locations": [db]}]
+        a.optimizing.client, b.optimizing.client = FakeOptimizer(), FakeOptimizer()
+        there_a = types.SimpleNamespace(key="7", title="Films", locations=[db], server="plexB")
+        there_b = types.SimpleNamespace(key="1", title="Movies", locations=[da], server="plexA")
+        me = a.peerlinks.instance()
+        with mock.patch.object(a.mirrors, "pairs", return_value={"1": there_a}), mock.patch.object(b.mirrors, "pairs", return_value={"7": there_b}):
+            self.assertEqual(peers.publish(a), 1)
+            mine, theirs = (os.path.join(d, ".plexcache", "systems", me + ".json") for d in (da, db))
+            with open(mine, encoding="utf-8") as f1, open(theirs, encoding="utf-8") as f2:
+                self.assertEqual(json.load(f1), json.load(f2))                                       # (the same file: the folder sync finds nothing to fight over)
+            self.assertEqual((list(a.mirror_link.carried), list(b.mirror_link.received)), (["1"], ["7"]))
+            self.assertIn(me, b.peerlinks.local_status()["libraries"]["7"]["seen"])                # (b sees a's marker at once)
+            self.assertTrue(a.mirror_link.talk())
+            self.assertTrue(a.mirror_link.folder_sync()["1"]["link"])
+            self.assertEqual(en(a.mirror_link._folders_light()["text"]), "The link carries .plexcache")
+            # a claim carried: the other side's optimizer sees it at once, and answers with its live claims on the file
+            k = "k" * 24
+            got = a.mirror_link.carry("1", claims=[{"key": k, "at": 5.0}])
+            self.assertEqual(got, {"carried": True, "claims": {k: [{"instance": me, "at": 5.0}]}})
+            self.assertEqual(b.optimizing.client.claims[k], {me: 5.0})
+            a.mirror_link.carry("1", claims=[{"key": k, "at": 5.0, "release": True}])
+            self.assertEqual(b.optimizing.client.claims[k], {})
+            # refused: a library of theirs no library here is paired with; a side with no optimizer service to write it
+            for body in ({"library": "9", "mirrors": "1"}, {"library": "7", "mirrors": "2"}, {"library": "7"}):
+                self.assertFalse(a.mirror_link.request("POST", "/peer/v1/carry", dict(body, marker={"at": 1.0}))["carried"], body)
+            b.optimizing.client.configured = False
+            self.assertIsNone(a.mirror_link.carry("1", marker={"at": 1.0}))
+            b.optimizing.client.configured = True
+        self.assertEqual(b.peerlinks.handle("POST", "/peer/v1/carry", {}, b"{}", "127.0.0.1")[0], 403)  # (not signed: refused)
+        self.assertIsNone(a.mirror_link.carry("9", marker={"at": 1.0}))                                   # (a library of ours not mirrored there)
+
     def test_folder_sync_rows_and_lights(self):
         from plexcache import peerlink as pl
         a, ua, b, ub = self._paired()
@@ -16141,20 +16216,36 @@ class PeerLinkEdgeTests(unittest.TestCase):
         link.status = {"name": "plexB", "api": pl.API, "version": a.version, "time": now, "publishing": True, "libraries": {"7": {"seen": {}, "published": now, "first": now - 4 * 3600}}}
         a.published_markers, a.first_published = {"1": now}, {"1": now - 4 * 3600}
         with mock.patch.object(a.mirrors, "pairs", return_value={"1": there, "2": None}), mock.patch("plexcache.peers.read", side_effect=RuntimeError("no")):
-            self.assertEqual(link.folder_sync(), {"1": {"status": "fail", "out": None, "in": None}})   # (neither side's markers ever reach the other)
+            self.assertEqual(link.folder_sync(), {"1": {"status": "fail", "out": None, "in": None, "link": False}})   # (neither side's markers ever reach the other)
         mine, theirs = link.instance(), link.paired["instance"]
         rows = {"1": {"seen": {mine: now - 3 * 3600}, "published": now, "first": now - 4 * 3600}}
         link.status["libraries"] = {"7": rows["1"]}
         with mock.patch.object(a.mirrors, "pairs", return_value={"1": there}), mock.patch("plexcache.peers.read", return_value={theirs: {"by_library": {"1": {"at": now - 3 * 3600}}}}):
             got = link.folder_sync()["1"]
             self.assertEqual((got["status"], int(got["out"]), int(got["in"])), ("warn", 3 * 3600, 3 * 3600))   # (behind, both ways)
-            self.assertEqual(link._folders_light()["status"], "warn")
+            light = link._folders_light()                                                           # (talking: green, the sync's lag only noted, with what helps)
+            self.assertEqual((light["status"], en(light["text"])), ("ok", "The link is up; the folder sync is behind"))
+            self.assertIn("Movies: the markers and claims in .plexcache take hours to reach the other side by the folder sync. Syncthing: turn on “Watch for Changes”", en(light["detail"]))
+            with mock.patch.object(link, "talking", return_value=False):                            # (the link down and the sync behind: yellow, and ours there isn't judged)
+                self.assertEqual(link.folder_sync()["1"]["out"], None)
+                light = link._folders_light()
+                self.assertEqual((light["status"], en(light["text"])), ("warn", "The link is down and the folder sync is behind"))
+                self.assertIn("held until the sync catches up", en(light["detail"]))
+                link.status["libraries"]["7"]["seen"][mine] = now
+                with mock.patch("plexcache.peers.read", return_value={theirs: {"by_library": {"1": {"at": now}}}}):
+                    light = link._folders_light()                                                   # (the link down, the sync keeping up: green)
+                    self.assertEqual((light["status"], en(light["text"])), ("ok", "Folder sync carries .plexcache"))
+                link.status["libraries"]["7"]["seen"][mine] = now - 3 * 3600
             with mock.patch.object(type(a.optimizing.client), "configured", mock.PropertyMock(return_value=False)):
                 self.assertEqual(link._folders_light()["status"], "off")                            # (not publishing here: can't be checked)
             link.status["libraries"]["7"]["seen"][mine] = now
             with mock.patch("plexcache.peers.read", return_value={theirs: {"by_library": {"1": {"at": now}}}}), mock.patch.object(type(a.optimizing.client), "configured", mock.PropertyMock(return_value=True)):
-                self.assertEqual(link.folder_sync()["1"], {"status": "ok", "out": 0.0, "in": 0.0})
+                self.assertEqual(link.folder_sync()["1"], {"status": "ok", "out": 0.0, "in": 0.0, "link": False})
                 self.assertEqual(en(link._folders_light()["text"]), "Folder sync carries .plexcache")
+                link.carried["1"] = now                                                             # (carried over the link lately: the link is what carries it)
+                self.assertTrue(link.folder_sync()["1"]["link"])
+                self.assertEqual(en(link._folders_light()["text"]), "The link carries .plexcache")
+                link.carried.clear()
             a.published_markers = {}
             link.status["libraries"]["7"] = {"seen": {}}
             self.assertEqual(link.folder_sync()["1"]["status"], "off")

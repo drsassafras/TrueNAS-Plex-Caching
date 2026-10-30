@@ -3,7 +3,8 @@ about the other so their settings don't fight.
 
 Each system marks itself in every library folder it shares — .plexcache/systems/<instance>.json,
 written by the optimizer service (the one part that may write there) and carried to the other
-site by the folder sync. The marker holds the settings that matter to the other side: whose edits
+site over the link between the two Plex Caches (peerlink.carry: the same file, written there at
+once) or, without it, by the folder sync. The marker holds the settings that matter to the other side: whose edits
 win in Sync Libraries (tools/sync.py), per library, the optimizer choices that change a file's content
 (cover art, tags, MKV layout, converting), and the tools lately run there.
 
@@ -73,18 +74,39 @@ def publish(app) -> int:
     n = 0
     published = getattr(app, "published_markers", None)
     first = getattr(app, "first_published", None)
+    bodies = getattr(app, "published_bodies", None)
     for key, _plex, local in _folders(app):
         try:
             body = info(app, key)
-            client.mark(local, app.optimizing.instance(), body)
+            client.mark(local, app.optimizing.instance(), body, at=body["at"])
             n += 1
         except Exception:  # noqa: BLE001 — a folder not writable, the service away: said by Health elsewhere
             continue
         if isinstance(published, dict):  # (when, so the other side can say whether it arrived: peerlink.folder_sync)
             published[key] = body["at"]
+        if isinstance(bodies, dict):
+            bodies[key] = body
         if isinstance(first, dict) and key not in first:
             first[key] = body["at"]
             app._save_json("published.json", first)
+    carry(app)
+    return n
+
+
+def carry(app) -> int:
+    """Our marker, as written here, carried to the Plex Cache at each mirror's site over the link (peerlink.carry), which
+    writes it into the paired library's folders there: the file the folder sync would bring, there at once. How many."""
+    links, bodies = getattr(app, "peerlinks", None), getattr(app, "published_bodies", None) or {}
+    if links is None:
+        return 0
+    n = 0
+    for key, body in list(bodies.items()):
+        try:
+            link = links.for_library(key)
+            if link is not None and link.talking() and link.carry(key, marker=body):
+                n += 1
+        except Exception:  # noqa: BLE001 — the link down: the folder sync still carries it
+            continue
     return n
 
 
@@ -100,7 +122,7 @@ def read(app) -> dict:
         except OSError:
             continue
         for n in names:
-            if not n.endswith(".json") or n[:-5] == mine:
+            if not n.endswith(".json") or n[:-5] == mine or ".sync-conflict-" in n:  # (a sync's conflict copy: not a system)
                 continue
             p = os.path.join(sdir, n)
             try:

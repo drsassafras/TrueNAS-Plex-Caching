@@ -3737,6 +3737,19 @@ PCI18N.ready.then(function () {
     var p2 = ST.plex2 || {}, p = (p2.pairs || {})[key], st = (p2.states || {})[key] || {};
     return (p && p.name) || st.name || T("the mirror");
   }
+  // A pairing's fingerprint as a picture, Syncthing's way: a 5×5 grid mirrored left to right, its cells and its colour read off
+  // the fingerprint's own bits — the same picture on both sides, compared at a glance before the code is.
+  function identicon(fp) {
+    var hex = String(fp || "").replace(/[^0-9A-Fa-f]/g, ""), bits = "";
+    for (var i = 0; i < hex.length; i++) bits += ("000" + parseInt(hex[i], 16).toString(2)).slice(-4);
+    if (bits.length < 24) return "";
+    var hue = parseInt(bits.slice(15, 24), 2) % 360, cells = "";
+    for (var r = 0; r < 5; r++) for (var c = 0; c < 3; c++) {
+      if (bits[r * 3 + c] !== "1") continue;
+      cells += '<rect x="' + c + '" y="' + r + '" width="1" height="1"/>' + (c < 2 ? '<rect x="' + (4 - c) + '" y="' + r + '" width="1" height="1"/>' : "");
+    }
+    return '<svg class="identicon" viewBox="0 0 5 5" shape-rendering="crispEdges" aria-hidden="true" style="color:hsl(' + hue + ',55%,42%)"><g fill="currentColor">' + cells + "</g></svg>";
+  }
   function peerServerBlock(lk, pe) {
     var lt = lk.lights || {}, sid = lk.server, url = ((S.peer || {}).servers || {})[sid] || {};
     var out = '<fieldset class="sub"><legend>' + esc(lk.name) + "</legend>" +
@@ -3745,7 +3758,7 @@ PCI18N.ready.then(function () {
       '<input id="s-peerurl-' + esc(sid) + '" type="text" value="' + esc(url.url || "") + '" placeholder="' + esc(lk.detected || "http://192.168.1.20:8642") + '" data-peerurl="' + esc(sid) + '">' +
       (url.url ? ' <button type="button" class="revert" data-peerurl-revert="' + esc(sid) + '" title="' + H("Back to the default ({value})", { value: T("found by itself") }) + '">↺</button>' : "") +
       '<div class="help">' + H("Found by itself. Enter it when the other one runs on another port, or is reached at another address.") + "</div></div></div>";
-    if (lk.paired) out += '<div class="det">' + H("Fingerprint {fp}: the other one shows the same when the two are paired with each other.", { fp: lk.fingerprint }) + "</div>";
+    if (lk.paired) out += '<div class="det fp">' + identicon(lk.fingerprint) + "<span>" + H("Fingerprint {fp}: the other one shows the same picture and code when the two are paired with each other.", { fp: lk.fingerprint }) + "</span></div>";
     if (lk.window) {  // (open here: a link to the other one's Pair Now, where it's known)
       var there = ((lk.paired || {}).url || lk.detected || url.url || "").replace(/\/+$/, "");
       out += '<div class="note">' + H("Pairing is open for {n} more minutes: press Pair Now on the other Plex Cache too.", { n: Math.max(1, Math.ceil(lk.window / 60)) }) +

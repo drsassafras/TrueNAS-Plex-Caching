@@ -148,8 +148,8 @@ class OptimizerClient:
         except (OSError, ValueError, urllib.error.URLError) as e:
             return {"error": str(getattr(e, "reason", e))}
 
-    def claim(self, folder: str, key: str, instance: str, release: bool = False) -> dict:
-        return self._call("/api/claim", {"dir": folder, "key": key, "instance": instance, "release": release})
+    def claim(self, folder: str, key: str, instance: str, release: bool = False, at: float | None = None) -> dict:
+        return self._call("/api/claim", {"dir": folder, "key": key, "instance": instance, "release": release, **({"at": at} if at else {})})
 
     def conflict(self, copy: str, original: str) -> dict:
         return self._call("/api/conflict", {"path": copy, "original": original})
@@ -166,9 +166,10 @@ class OptimizerClient:
     def delete_original(self, path: str, new: str) -> dict:
         return self._call("/api/folder", {"action": "delete_original", "path": path, "to": new}, timeout=60)
 
-    def mark(self, folder: str, instance: str, info: dict) -> dict:
-        """This system's marker in a library folder, with what it tells the other systems (peers.py)."""
-        return self._call("/api/folder", {"action": "mark", "path": folder, "instance": instance, "info": info}, timeout=30)
+    def mark(self, folder: str, instance: str, info: dict, at: float | None = None) -> dict:
+        """A system's marker in a library folder, with what it tells the other systems (peers.py): ours, or the other
+        Plex Cache's carried over the link (``at``: its time, so the file is the same as the one there)."""
+        return self._call("/api/folder", {"action": "mark", "path": folder, "instance": instance, "info": info, **({"at": at} if at else {})}, timeout=30)
 
     def file_action(self, action: str, path: str, to: str = "", root: str = "") -> dict:
         """The tools' file actions (optimize/files.py): "set_aside" / "restore" / "purge" (``root``: the
@@ -1309,33 +1310,61 @@ class OptimizeJob(Job):
 
 class Claims:
     """A job's claims on the files it remuxes, for systems sharing a library: each file is
-    claimed a few files ahead, so by the time its turn comes another system's claim would have
-    synced; the earliest claim wins. With no other system ever seen in the folder, nothing waits."""
+    claimed a few files ahead, and the claim carried to the Plex Cache at the mirror's site over
+    the link (peerlink.carry), which answers with its own claims on the file — the earliest wins,
+    at once. Without the link, by the time the file's turn comes another system's claim would have
+    synced over (WAIT). With no other system ever seen in the folder, nothing waits."""
 
     AHEAD = 10   # files claimed ahead of the one being done
-    WAIT = 120   # seconds a claim must be old before it's acted on, when other systems share the folder
+    WAIT = 120   # seconds a claim must be old before it's acted on, when other systems share the folder and the link doesn't carry it
 
     def __init__(self, op: Optimizing, items: list):
         self.op, self.items = op, items  # [(path, plex path)]
         self.at: dict[str, float] = {}
         self.peers: dict[str, bool] = {}
+        self.linked: dict[str, list | None] = {}  # path -> the other side's live claims on it, over the link (None: not carried)
         self.me = op.instance()
 
     def _key(self, plex_path: str, root_plex: str | None) -> str:
         rel = os.path.relpath(plex_path, root_plex)
         return hashlib.sha1(rel.encode()).hexdigest()[:24]
 
-    def _call(self, path: str, release: bool = False) -> dict | None:
+    def _library(self, plex: str) -> tuple[str | None, str | None]:
+        """(the library's key, its folder's Plex path) for a file's Plex path."""
+        for lib in getattr(self.op.app, "libraries", []) or []:
+            for loc in lib.get("locations") or []:
+                if plex.startswith(loc.rstrip("/") + "/"):
+                    return str(lib["key"]), loc.rstrip("/")
+        return None, None
+
+    def _call(self, path: str, release: bool = False, carry: bool = True) -> dict | None:
+        """The claim (or its release) made in the library folder here — and, while the link to the other Plex Cache
+        is talking, carried there: its answer (the other side's live claims on the file) kept for take()."""
         plex = dict(self.items).get(path)
         root = self.op.library_root(plex) if plex else None
         if not plex or not root:
             return None
-        root_plex = next((loc.rstrip("/") for lib in getattr(self.op.app, "libraries", []) or [] for loc in lib.get("locations") or []
-                          if plex.startswith(loc.rstrip("/") + "/")), None)
+        lib_key, root_plex = self._library(plex)
+        key = self._key(plex, root_plex)
         try:
-            return self.op.client.claim(root, self._key(plex, root_plex), self.me, release)
+            r = self.op.client.claim(root, key, self.me, release)
         except (OSError, ValueError, urllib.error.URLError):
             return None
+        if carry and lib_key:
+            self.linked[path] = self._carry(lib_key, key, r, release)
+        return r
+
+    def _carry(self, lib_key: str, key: str, r: dict | None, release: bool) -> list | None:
+        links = getattr(self.op.app, "peerlinks", None)
+        link = links.for_library(lib_key) if links is not None else None
+        if link is None or not link.talking():
+            return None
+        mine = next((c for c in (r or {}).get("claims") or [] if c.get("instance") == self.me), None)
+        got = link.carry(lib_key, claims=[{"key": key, "at": (mine or {}).get("at") or time.time(), "release": release}])
+        if not got:
+            return None
+        theirs = (got.get("claims") or {}).get(key)
+        return [c for c in theirs if isinstance(c, dict)] if isinstance(theirs, list) else []
 
     def _ahead(self, path: str) -> None:
         paths = [p for p, _ in self.items]
@@ -1344,19 +1373,22 @@ class Claims:
             if p not in self.at:
                 r = self._call(p)
                 self.at[p] = time.time()
-                self.peers[p] = bool(r and r.get("peers"))
+                self.peers[p] = bool(r and r.get("peers")) or self.linked.get(p) is not None
 
     def take(self, path: str) -> tuple[bool, str]:
         """Whether this system may remux the file now (waiting for its claim to settle if other
-        systems share the folder), and if not, why."""
+        systems share the folder and the link didn't carry it), and if not, why."""
         self._ahead(path)
         if not self.peers.get(path):
             return True, ""
-        left = self.WAIT - (time.time() - self.at[path])
-        if left > 0 and self.op._stop_event().wait(left):
-            return False, "stopped"
-        r = self._call(path)
-        first = ((r or {}).get("claims") or [{}])[0]
+        theirs = self.linked.get(path)
+        if theirs is None:  # (not carried over the link: the other side's claim comes by the folder sync, given time)
+            left = self.WAIT - (time.time() - self.at[path])
+            if left > 0 and self.op._stop_event().wait(left):
+                return False, "stopped"
+        r = self._call(path, carry=False)
+        claims = sorted(((r or {}).get("claims") or []) + (theirs or []), key=lambda c: (float(c.get("at") or 0), str(c.get("instance"))))
+        first = claims[0] if claims else {}
         if first.get("instance") not in (None, self.me):
             self.release(path)
             return False, "another system is optimizing it"

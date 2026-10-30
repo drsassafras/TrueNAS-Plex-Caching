@@ -231,6 +231,7 @@ class App:
         self.tool_runs: dict = self._load_json("tool-runs.json") or {}  # {library: {tool: when}} — told to the other Plex Cache (peers.py)
         self.peers_summary: dict | None = None
         self.published_markers: dict[str, float] = {}  # library -> when our marker was last written there (peers.publish)
+        self.published_bodies: dict[str, dict] = {}  # library -> the marker as written, for the link to carry (peers.carry)
         self.first_published: dict[str, float] = self._load_json("published.json") or {}  # library -> when first: for "never arrived"
         self.peerlinks = PeerLinks(self)  # the Plex Cache at each mirror's site: found, paired, asked (peerlink.py)
         self.mirror_health = MirrorHealth(self)  # Tools → Mirror Checks: the two sites' files and Plexes compared (mirrorhealth.py)

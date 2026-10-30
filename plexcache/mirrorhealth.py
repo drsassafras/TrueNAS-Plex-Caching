@@ -261,9 +261,9 @@ class MirrorHealth:
                     add("only_listed_there", _rel_there(path, there.locations))
             for r in rows["unlisted_here"]:  # (a file Plex here doesn't list that the mirror's does: Sync Libraries' to scan for, where the mirror's edits win)
                 r["listed_there"] = _norm(r["rel"]) in there_plex
-        # the folder sync of .plexcache
-        fs = (link.folder_sync() or {}).get(key) if link is not None and link.talking() else None
-        if fs and fs["status"] in ("warn", "fail"):
+        # the folder sync of .plexcache: a finding while the sync is behind and the link isn't carrying .plexcache itself
+        fs = (link.folder_sync() or {}).get(key) if link is not None else None
+        if fs and fs["status"] in ("warn", "fail") and not fs.get("link"):
             counts["sync_files"] += 1
             behind = fs.get("out") or fs.get("in")
             rows["sync_files"].append({"item": SYNC_ITEM, "label": SYNC_ITEM, "poster": "", "path": "", "kind": "sync_files", "rel": SYNC_ITEM, "file": "",
@@ -610,7 +610,7 @@ class MirrorHealth:
         if why:
             return why
         link = self.app.peerlinks.for_library(key)
-        if link is None or not link.talking():
+        if link is None or link.talking():  # (talking: the link carries .plexcache itself — claims settle over it)
             return None
         fs = link.folder_sync().get(str(key))
         if not fs or fs["status"] != "fail":
@@ -620,8 +620,8 @@ class MirrorHealth:
             return None
         if "mirror_sync_files" in ((libhealth.ignored(self.app).get(str(key)) or {}).get(SYNC_ITEM) or []):
             return None
-        return M("The .plexcache folder doesn’t reach the other site, so its Plex Cache wouldn’t see this side’s claims or markers: the two could optimize the same file, or sync their Plexes over each other. "
-                 "Fix the folder sync (Syncthing: don’t ignore .plexcache), or ignore the finding on Mirror Checks.")
+        return M("The link to the other Plex Cache is down, and the .plexcache folder doesn’t reach the other site, so its Plex Cache wouldn’t see this side’s claims or markers: the two could optimize the same file, or sync their Plexes over each other. "
+                 "Bring the link back (System → Mirror Plex Cache: while it’s up it carries .plexcache itself), fix the folder sync (Syncthing: don’t ignore .plexcache; “Watch for Changes” on, pull order “Smallest First”), or ignore the finding on Mirror Checks.")
 
     @staticmethod
     def waiting_note(waiting) -> dict:

@@ -188,6 +188,13 @@ class Service:
             self.current = None
 
 
+def _at(body: dict) -> float | None:
+    """A marker's or claim's time as given (one carried from the other Plex Cache, written here as the same file: nothing
+    for the folder sync to fight over), else now."""
+    at = body.get("at")
+    return float(at) if isinstance(at, (int, float)) and at > 0 else None
+
+
 def folder_action(svc: Service, body: dict) -> tuple[int, dict]:
     """/api/folder: the steps of turning a library folder into a dataset (optimize/migrate.py)."""
     action = body.get("action")
@@ -206,7 +213,7 @@ def folder_action(svc: Service, body: dict) -> tuple[int, dict]:
             info = body.get("info") if isinstance(body.get("info"), dict) else {}
             if len(json.dumps(info)) > 8192:
                 return 400, {"error": "too much to publish"}
-            return 200, {"marked": claims.mark(path, str(body.get("instance") or ""), info)}
+            return 200, {"marked": claims.mark(path, str(body.get("instance") or ""), info, now=_at(body))}
         if action == "make_real":  # a link made a file of its own (files.py)
             from . import files
             return 200, files.make_real(path)
@@ -299,7 +306,7 @@ def make_handler(svc: Service):
                     if not folder:
                         return self._send(403, {"error": "folder is outside the media folders"})
                     return self._send(200, claims.claim(folder, str(body.get("key") or ""), str(body.get("instance") or ""),
-                                                        bool(body.get("release"))))
+                                                        bool(body.get("release")), now=_at(body)))
                 path = svc.allowed(str(body.get("path") or ""))
                 images = body.get("images") or ("compress" if body.get("keep_images", True) else "remove")
                 force = bool(body.get("force", False))

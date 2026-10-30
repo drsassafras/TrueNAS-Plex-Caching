@@ -72,7 +72,7 @@ def claim(folder: str, key: str, instance: str, release: bool = False, now: floa
     claims = []
     cdir = os.path.join(base, "claims")
     for name in os.listdir(cdir) if os.path.isdir(cdir) else []:
-        if not (name.startswith(key + ".") and name.endswith(".json")):
+        if not (name.startswith(key + ".") and name.endswith(".json")) or ".sync-conflict-" in name:  # (a sync's conflict copy: not a claim)
             continue
         p = os.path.join(cdir, name)
         try:
@@ -91,7 +91,7 @@ def claim(folder: str, key: str, instance: str, release: bool = False, now: floa
     peers = []
     sdir = os.path.join(base, "systems")
     for name in os.listdir(sdir) if os.path.isdir(sdir) else []:
-        other = name[:-5] if name.endswith(".json") else None
+        other = name[:-5] if name.endswith(".json") and ".sync-conflict-" not in name else None
         if other and other != instance:
             try:
                 if now - os.stat(os.path.join(sdir, name)).st_mtime < PEER_DAYS * 86400:
