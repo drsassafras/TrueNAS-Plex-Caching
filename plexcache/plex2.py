@@ -190,10 +190,23 @@ class Mirrors:
         addresses (reconnect: a public address changes; the one that lasts is preferred)."""
         try:
             return fn(self.client(server, timeout))
-        except PlexError:
+        except PlexError as e:
             if not self.reconnect(server):
-                raise
-            return fn(self.client(server, timeout))
+                raise self._said(server, e) from None
+            try:
+                return fn(self.client(server, timeout))
+            except PlexError as e2:
+                raise self._said(server, e2) from None
+
+    def _said(self, server: str, e: PlexError) -> PlexError:
+        """A server's failure as the page says it: one only Plex's relay reaches from here (its address a relay's) gets the
+        reason and the way out instead of the relay's dropped connection."""
+        s = self.servers().get(server) or {}
+        if not s.get("relay"):
+            return e
+        return PlexError(M("Only Plex’s relay reaches {name} from here, and the relay doesn’t answer this app ({why}). Turn on Remote Access in "
+                           "{name}’s Plex settings, put a VPN between the sites, or enter an address this NAS can reach on the [Mirror page](/mirrors).",
+                           name=s.get("name") or self.name_of(server), why=str(e)))
 
     def _token(self) -> str:
         """The account's token: its own sign-in, else this server's."""

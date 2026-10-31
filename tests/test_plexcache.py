@@ -55,12 +55,17 @@ def en(v) -> str:
 # (no information); BlockSizeTests checks the real function and what Health makes of it.
 REAL_BLOCK_SIZES = zfs.block_sizes
 zfs.block_sizes = lambda paths: (lambda n: {"checked": n, "single": n, "sizes": {}})(len(list(paths)))
+from plexcache import peerlink as _peerlink  # noqa: E402
 from plexcache.app import App  # noqa: E402
 from plexcache.i18n import M, from_json, jsonable  # noqa: E402
 from plexcache.plex import PlexClient, PlexError  # noqa: E402
 from plexcache.reader import MiB, ReadResult, is_cache_hit, read_range  # noqa: E402
 from plexcache.truenas import TrueNASClient, TrueNASError, describe_pool, ws_url  # noqa: E402
 from plexcache.warmup import LibraryStats, WarmupRun, plan, preload_bytes  # noqa: E402
+
+# No scheduler ticks the links here, so the settling after a start (peerlink.settling: pages say they're connecting until the
+# first look) would never end: off for the suite, on in the test of it.
+_peerlink.SETTLE = 0
 
 PLEX = fakes.FakePlex(CAT)
 TRUENAS = fakes.FakeTrueNAS(workdir=TMP)
@@ -4868,6 +4873,13 @@ class PageStructureTests(unittest.TestCase):
         self.assertIn("Cabin answered through Plex’s relay, then stopped", self._render(app.state(), "mirrors")["text"])
         app.mirrors.libs["zzz"] = (None, time.time(), "EOF occurred in violation of protocol")
         self.assertIn("Plex’s relay to Cabin isn’t answering", self._render(app.state(), "mirrors")["text"])
+        # a read through it that fails says why, and the way out — not the relay's dropped connection alone
+        def dropped(c):
+            raise PlexError("Can’t reach Plex at https://1-2-3-4.abc.plex.direct:8443: EOF occurred in violation of protocol")
+        with mock.patch.object(app.mirrors, "reconnect", return_value=False), self.assertRaises(PlexError) as got:
+            app.mirrors.run("zzz", dropped)
+        self.assertIn("Only Plex’s relay reaches Cabin from here, and the relay doesn’t answer this app (Can’t reach Plex at", en(got.exception.args[0]))
+        self.assertIn("Turn on Remote Access in Cabin’s Plex settings", en(got.exception.args[0]))
         app.settings.update({"plex2": {"servers": {"xyz": {"name": "Starlit", "url": other.url, "token": "other-token"}}}})
         # a server forgotten while a library still names it: not reached, said so
         app.mirrors.forget("xyz")
@@ -4919,7 +4931,8 @@ class PageStructureTests(unittest.TestCase):
     # it knows; while it doesn't, the place says Checking… (or Reading…, Loading…) instead.
     VERDICTS = re.compile(r"not detected|not found|not accepted|not connected|not set up|not tested yet|not running|"
                           r"couldn.t (check|confirm)|needs attention|needs fixing|aren.t being cached|isn.t mounted|"
-                          r"No L2ARC found|No media pools|No library folders|No library of the kind|Upgrade your server|RAM only for now", re.I)
+                          r"No L2ARC found|No media pools|No library folders|No library of the kind|Upgrade your server|RAM only for now|"
+                          r"not heard from|through its marker only|Not answering", re.I)
     PAGES_DRAWN = ("health", "caching", "ssd", "library", "optimizer", "mkv", "dataset", "merge", "versions", "folders", "unlink", "sync", "mirror", "tools", "processes", "mirrors", "activity", "system")
 
     def test_pages_say_checking_before_the_checks_ran(self):
@@ -5444,9 +5457,9 @@ class PageStructureTests(unittest.TestCase):
                                    "total": {"s": "pending", "why": "Reading the library’s files…"}}
         html = self._render(st, "convert")["html"]
         self.assertRegex(html, r'data-tool="convert" data-key="' + k1 + r'">.*?<span class="count warn"[^>]*>1</span></button>')
-        self.assertRegex(html, r'data-tool="convert" data-key="' + k2 + r'">(?:(?!</button>).)*<span class="count busy"[^>]*><span class="spin"')
+        self.assertRegex(html, r'data-tool="convert" data-key="' + k2 + r'">(?:(?!</button>).)*<span class="count busy spinning"[^>]*>…</span>')
         tools = self._render(st, "tools")["html"]
-        self.assertRegex(tools, r'href="/convert" data-nav>[^<]*</a> <span class="count busy"')
+        self.assertRegex(tools, r'href="/convert" data-nav>[^<]*</a> <span class="count busy spinning"')
         # the option's line: what the scan found for it, on the right
         self.assertRegex(html, r'<div class="optgrid"><div class="chk lhchk optrow">')
         self.assertRegex(html, r'class="chk lhchk optrow">(?:(?!class="chk lhchk optrow").)*<span class="badge b-(warn|pass|off)">\d+</span></div>')
@@ -5468,10 +5481,10 @@ class PageStructureTests(unittest.TestCase):
         busy = {"s": "pending", "why": "Counting…", "progress": {"done": 250, "total": 1000}}
         st["counts"]["optimizer"] = {"libraries": {k: dict(busy) for k in st["counts"]["optimizer"]["libraries"]}, "total": dict(busy)}
         html = self._render(st, "optimizer")["html"]
-        self.assertIn('<span class="count busy"', html)
+        self.assertIn('<span class="count busy spinning"', html)
         self.assertIn("250 of 1,000 · 25%", html)
         self.assertIn('aria-valuenow="25"', html)
-        self.assertRegex(self._render(st, "tools")["html"], r'href="/optimizer" data-nav>[^<]*</a> <span class="count busy"')
+        self.assertRegex(self._render(st, "tools")["html"], r'href="/optimizer" data-nav>[^<]*</a> <span class="count busy spinning"')
         # a scan again: the last scan's findings shown, and said to be
         st["optimizer"]["libraries"] = {k1: {"files": 6, "mkv": 6, "mkv_done": 2, "todo": 2, "sync_todo": 1, "mkv_todo": 2, "why": {"new": 2}, "conflicts": [],
                                              "zfs": {"status": "pass", "issues": [], "rs": 1048576, "best": 1048576, "compression": "zstd-9"}}}
@@ -5644,7 +5657,7 @@ class PageStructureTests(unittest.TestCase):
             html = self._render(st2, name)["html"]
             self.assertRegex(html, r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count' + (' warn"[^>]*>3<' if cat == "file" else ' ok"[^>]*>0<'))  # (nothing found: green)
             st2["counts"][name]["libraries"]["1"] = {"s": "pending", "why": "Reading the library’s files…"}  # (read again: counted again)
-            self.assertRegex(self._render(st2, name)["html"], r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count busy"')
+            self.assertRegex(self._render(st2, name)["html"], r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count busy spinning"')
             # a page that doesn't apply to the library (Mirror Checks with no mirror watched): said so, greyed — no number,
             # not even a green 0, and none of the items
             st2["counts"][name]["libraries"]["1"] = {"s": "na", "why": "No mirror is watched: choose one on the [Mirror page](/mirrors)."}
@@ -9462,8 +9475,15 @@ class MigrateTests(unittest.TestCase):
             self.assertEqual(failing(), [])
             # an optimizer without propagation, started before the dataset: it can't see it until it's
             # restarted — which is done from here, through TrueNAS — and isn't asked for again meanwhile
-            opt["prop"] = False
+            # with propagation the dataset shows up by itself: waited for, and past the time that takes, red with Restart Now
             mounted.discard(folder + "-new")
+            (c,) = [x for x in mig.refresh()["checks"] if not x["ok"]]
+            self.assertEqual((c["id"], c["level"], en(c["doing"]), c["action"]), ("sees", "waiting", "Waiting", "restart"))
+            mig.waits["sees"] -= migrating.SEES_WAIT + 1
+            (c,) = [x for x in mig.refresh()["checks"] if not x["ok"]]
+            self.assertEqual((c["level"], c["action"]), ("error", "restart"))
+            self.assertIn("hasn’t seen " + folder + "-new after 2 minutes. Restart Now", en(c["detail"]))
+            opt["prop"] = False
             (c,) = [x for x in mig.refresh()["checks"] if not x["ok"]]
             self.assertEqual((c["id"], c["action"]), ("sees", "restart"))
             self.assertIn("propagation: rslave", c["cmd"])
@@ -9471,8 +9491,12 @@ class MigrateTests(unittest.TestCase):
                 mig.restart()
             self.assertEqual(calls, [("app.redeploy", ["plex-cache"])])
             c = next(x for x in mig.refresh()["checks"] if x["id"] == "sees")
-            self.assertEqual(c["action"], "")
+            self.assertEqual((c["action"], c["level"], en(c["doing"])), ("", "waiting", "Restarting"))
             self.assertIn("Restarting Plex Cache", en(c["detail"]))
+            mig.waits["sees"] -= migrating.RESTART_WAIT + 1                            # not back in the time a restart takes: red
+            c = next(x for x in mig.refresh()["checks"] if x["id"] == "sees")
+            self.assertEqual(c["level"], "error")
+            self.assertIn("asked to restart 5 minutes ago, and the optimizer hasn’t come back. Restart it in TrueNAS: Apps → plex-cache → Restart", en(c["detail"]))
             opt["since"] = time.time() + 1                                             # back, and it sees it
             mounted.add(folder + "-new")
             self.assertEqual(failing(), [])
@@ -9797,7 +9821,7 @@ class MirrorMigrationTests(unittest.TestCase):
         """A conversion of the library left partway at the other site: a warning before the switch here, an error from then
         on that keeps the old folder where it is (and turns the tool and Health red), until completed or reverted there;
         the other side holding its file jobs, confirmed over the link (said only, through the marker)."""
-        from plexcache import checks
+        from plexcache import checks, migrating as mg
         app, mig, d, folder, mounted, props = self._setup()
         self._ready_dataset(folder, mounted, props)
         partial = self._facts(converting={"step": "switch", "aside": True, "folder": "Books", "since": time.time() - 86400, "title": "Books"})
@@ -9814,6 +9838,9 @@ class MirrorMigrationTests(unittest.TestCase):
         c = self._by_id(mig.refresh())["mirror_partial"]
         self.assertEqual((c["ok"], c["level"], c["gate"]), (False, "error", "aside"))
         self.assertEqual({x["id"] for x in mig.blocking("aside")}, {"mirror_partial", "mirror_holding"})
+        c = self._by_id(mig.refresh())["mirror_holding"]
+        self.assertEqual((c["level"], en(c["doing"])), ("waiting", "Waiting"))                   # (nothing asked of the user: it completes by itself)
+        self.assertIn("within a minute.", en(c["detail"]))
         with self.assertRaises(ValueError):
             mig.pass_then_move()
         with self.assertRaises(ValueError):
@@ -9821,10 +9848,34 @@ class MirrorMigrationTests(unittest.TestCase):
         (h,) = checks._migration_items(app)
         self.assertEqual(h["status"], "fail")
         self.assertEqual(app._tools_red(dict(app.state(), migration=mig.snapshot()))["dataset"], ["9"])
-        # completed (or reverted) there, and holding its file jobs: the old folder can be set aside
+        # completed (or reverted) there, not yet holding: only the wait is left — Health says so as news, not as a step for you —
+        # and past the time it normally takes, red, with the way out
+        self.facts["v"] = self._facts(folders=[{"name": "Books", "state": "dataset", "rs": 512 * self.K}], holding=False)
+        ids = self._by_id(mig.refresh())
+        self.assertTrue(ids["mirror_partial"]["ok"] and ids["mirror_holding"]["level"] == "waiting")
+        (h,) = checks._migration_items(app)
+        self.assertEqual((h["status"], en(h["title"])), ("info", "Converting Books to a child dataset: Cabin holds its file jobs on Books"))
+        mig.waits["mirror_holding"] -= mg.HOLD_WAIT + 1
+        c = self._by_id(mig.refresh())["mirror_holding"]
+        self.assertEqual((c["level"], c["ok"]), ("error", False))
+        self.assertIn("Cabin hasn’t taken this up after 3 minutes. Check that the two Plex Caches are talking", en(c["detail"]))
+        self.assertEqual(checks._migration_items(app)[0]["status"], "fail")
+        self.assertEqual({x["id"] for x in mig.blocking("aside")}, {"mirror_holding"})
+        # the last pass's compare not there (it runs by itself when the copy ends): waited for, then red
+        saved = mig.state.pop("compare")
+        c = self._by_id(mig.refresh())["compare"]
+        self.assertEqual((c["level"], en(c["doing"])), ("waiting", "Comparing"))
+        mig.waits["compare"] -= mg.COMPARE_WAIT + 1
+        c = self._by_id(mig.refresh())["compare"]
+        self.assertEqual(c["level"], "error")
+        self.assertIn("after 2 minutes", en(c["detail"]))
+        self.assertIn("Press Copy Changes & Compare to run it again.", en(c["detail"]))
+        mig.state["compare"] = saved
+        # holding its file jobs: the old folder can be set aside
         self.facts["v"] = self._facts(folders=[{"name": "Books", "state": "dataset", "rs": 512 * self.K}], holding=True)
         ids = self._by_id(mig.refresh())
         self.assertTrue(ids["mirror_partial"]["ok"] and ids["mirror_holding"]["ok"])
+        self.assertEqual(mig.waits, {})                                                      # (done: no longer waited for)
         self.assertEqual(app._tools_red(dict(app.state(), migration=mig.snapshot()))["dataset"], [])
         mig.state["compare_at"] = time.time()
         mig.rename_old()
@@ -9991,7 +10042,7 @@ class MirrorMigrationTests(unittest.TestCase):
         got = mig._compare_with_mirror(st, lib)
         self.assertEqual((got["missing"], got["different"], got["extra"]), (["b.m4b"], ["a.m4b"], ["c.m4b"]))
         out = []
-        check = mig._collector(out)
+        check = mig._checker(out)
         mig._check_mirror_files(st, check, {"via": "link"}, "Cabin", lib, True)
         self.assertEqual((out[0]["id"], out[0]["ok"]), ("mirror_files", False))
         self.assertIn("b.m4b", en(out[0]["detail"]))
@@ -13981,7 +14032,7 @@ class MirrorLinkTests(unittest.TestCase):
         old = now - pl.MAX_AGE - 60
         self.assertEqual(send(old, "n3", pl.signature(a.mirror_link._key(), "GET", "/peer/v1/status", str(old), "n3", b""))[0], 403)
         with urllib.request.urlopen(ub + "/peer/v1/hello", timeout=10) as r:                    # (the hello is open: public facts only)
-            self.assertEqual(set(json.loads(r.read())), {"app", "api", "instance", "name", "version", "plex", "public", "time"})
+            self.assertEqual(set(json.loads(r.read())), {"app", "api", "commands", "instance", "name", "version", "plex", "public", "time"})
         # Unpair: both sides; not paired again by itself (the key pair stays: it's this side's, for every link)
         a.mirror_link.unpair()
         self.assertIsNone(a.mirror_link.paired)
@@ -14512,13 +14563,13 @@ class CountStandardTests(unittest.TestCase):
                         self.assertIn("countbox", html)                                           # (the placeholder where what was found goes)
                         self.assertNotIn('class="toolstats"', html)                               # (no stats: they're numbers)
                     if name == "pending":
-                        self.assertIn('class="count busy"', html) if page != "dataset" else None
+                        self.assertIn('class="count busy spinning"', html) if page != "dataset" else None
                         if page in tabbed or page in ("dataset", "library"):
                             self.assertIn("Reading the library’s records from Plex…", got["text"])
                             self.assertIn("3 of 12", got["text"])
                     elif name == "partial":                                                          # (the number so far, still turning)
                         if page != "dataset":
-                            self.assertRegex(html, r'<span class="count busy partial (?:warn|fail)"[^>]*>4 <span class="spin"')  # (coloured as what it holds)
+                            self.assertRegex(html, r'<span class="count busy partial (?:warn|fail) spinning"[^>]*>4</span>')  # (coloured as what it holds, its border turning)
                         if page in tabbed or page in ("dataset", "library"):
                             self.assertIn("4 found so far — still counting", got["text"])
                             self.assertIn("3 of 12", got["text"])
@@ -14532,10 +14583,10 @@ class CountStandardTests(unittest.TestCase):
             # the menu: the Tools menu's own count
             menu = drawn._render(st, "tools")["menu"]
             if name == "pending":
-                self.assertEqual((menu["hidden"], "busy" in menu["cls"], "spin" in menu["html"]), (False, True, True))
+                self.assertEqual((menu["hidden"], "busy" in menu["cls"], "spinning" in menu["cls"], menu["html"]), (False, True, True, "…"))
                 self.assertIn("Reading the library’s records", menu["title"])
             elif name == "partial":
-                self.assertEqual((menu["hidden"], "busy" in menu["cls"], menu["html"].startswith("4<span class=\"spin\"")), (False, True, True))
+                self.assertEqual((menu["hidden"], "busy" in menu["cls"], "spinning" in menu["cls"], menu["html"]), (False, True, True, "4"))
                 self.assertTrue("warn" in menu["cls"] or "fail" in menu["cls"], menu["cls"])
                 self.assertIn("4 found so far", menu["title"])
             elif name == "na":
@@ -14550,7 +14601,7 @@ class CountStandardTests(unittest.TestCase):
         lines = re.findall(r'<div class="chk lhchk lhtool[^"]*">.*?</div>', html)
         self.assertGreaterEqual(len(lines), len(pages) - 2, html[:3000])                           # (every tool, and the check pages, but the dataset's and the optimizer's)
         for line in lines:
-            self.assertIn('class="count busy"', line)
+            self.assertIn('class="count busy spinning"', line)
             self.assertNotRegex(line, r'class="badge b-(?:warn|pass)">\d')
         hrefs = re.findall(r'<div class="chk lhchk lhtool[^"]*">.*?<a href="/(\w+)"', html)
         self.assertTrue(hrefs and all(h in st["counts"] for h in hrefs), hrefs)                    # (a line's page always counts)
@@ -15973,6 +16024,11 @@ class PeerLinkEdgeTests(unittest.TestCase):
         b.mirror_link._marker_public = lambda inst: a.mirror_link.public()
         a.mirror_link.tick(force=True)
         self.assertTrue(a.mirror_link.talking())
+        for _ in range(200):  # (b, asked for its status before talking, looks at a in the background: settled before the test goes on)
+            if b.mirror_link.talking() and not a.peerlinks.busy and not b.peerlinks.busy:
+                break
+            time.sleep(0.05)
+        self.assertTrue(b.mirror_link.talking())
         return a, ua, b, ub
 
     def test_addresses_ports_and_candidates(self):
@@ -16204,6 +16260,134 @@ class PeerLinkEdgeTests(unittest.TestCase):
         self.assertEqual(b.peerlinks.handle("POST", "/peer/v1/carry", {}, b"{}", "127.0.0.1")[0], 403)  # (not signed: refused)
         self.assertIsNone(a.mirror_link.carry("9", marker={"at": 1.0}))                                   # (a library of ours not mirrored there)
 
+    def test_the_link_api_is_versioned(self):
+        """Every command of the link has a version and a recorded shape (tests/peer_api.json): a change of shape without a
+        bump fails here, and so does a shape that doesn't match what the two sides really send and answer."""
+        from plexcache import peerlink as pl
+        with open(os.path.join(os.path.dirname(__file__), "peer_api.json"), encoding="utf-8") as fh:
+            rec = json.load(fh)
+        how = "run `python3 dev/peer_api.py` to record it"
+        self.assertEqual(rec["api"], pl.API, f"the link's API number moved: {how}")
+        self.assertEqual(set(pl.API_SHAPES), set(pl.COMMANDS), "every link command has a version (COMMANDS) and a shape (API_SHAPES)")
+        for cmd, shape in pl.API_SHAPES.items():
+            r = rec["commands"].get(cmd)
+            self.assertIsNotNone(r, f"{cmd} is a new link command: {how}")
+            assert r is not None
+            if shape != {k: v for k, v in r.items() if k != "version"}:
+                self.assertGreater(pl.COMMANDS[cmd], r["version"], f"the link command {cmd} changed shape without a version bump: raise COMMANDS[{cmd!r}] in peerlink.py, then {how}")
+                self.fail(f"the link command {cmd} changed shape, version {pl.COMMANDS[cmd]}: {how}")
+            self.assertEqual(pl.COMMANDS[cmd], r["version"], f"the link command {cmd}'s version moved: {how}")
+        self.assertEqual(set(rec["commands"]), set(pl.COMMANDS), f"the link's commands changed: {how}")
+        # what the two sides really send and answer fits the shapes (no field unaccounted for), every command exercised
+        a, ua = self._side("plexA", "plexB")
+        b, ub = self._side("plexB", "plexA")
+        a.settings.update({"peer": {"servers": {"plexB": {"url": ub}}}})
+        b.settings.update({"peer": {"servers": {"plexA": {"url": ua}}, "remote_update": False}})
+        b.libraries = [{"key": "7", "title": "Films", "kind": "movie", "locations": ["/m"]}]
+        a.mirror_link._marker_public = lambda inst: b.mirror_link.public()
+        b.mirror_link._marker_public = lambda inst: a.mirror_link.public()
+        sent, got = {}, {}
+        real_req, real_post = a.mirror_link.request, a.mirror_link._post_open
+
+        def cmd_of(path):
+            return path.split("?")[0].rsplit("/", 1)[-1]
+
+        def req(method, path, body=None, timeout=30):
+            c = cmd_of(path)
+            sent.setdefault(c, set()).update(body or {})
+            if "?" in path:
+                sent[c].update(urllib.parse.parse_qs(path.split("?", 1)[1]))
+            ans = real_req(method, path, body, timeout)
+            got.setdefault(c, set()).update(ans)
+            return ans
+
+        def post(url, body):
+            sent.setdefault("pair", set()).update(body)
+            ans = real_post(url, body)
+            got.setdefault("pair", set()).update(ans)
+            return ans
+        with mock.patch.object(a.mirror_link, "request", req), mock.patch.object(a.mirror_link, "_post_open", post):
+            a.mirror_link.tick(force=True)                                                           # (hello, pair, status)
+            self.assertTrue(a.mirror_link.talking())
+            got.setdefault("hello", set()).update(a.mirror_link.probe(ub) or {})
+            got.setdefault("status", set()).update(a.mirror_link.status or {})
+            libs = {k for lib in (a.mirror_link.status or {}).get("libraries", {}).values() for k in lib}
+            a.mirror_link.files("7")
+            a.mirror_link.request("POST", "/peer/v1/carry", {"library": "7", "mirrors": "1", "marker": {"at": 1.0}, "claims": []})
+            a.mirror_link.request("POST", "/peer/v1/update", {"version": a.version, "commit": "", "channel": pl.CHANNEL})
+            a.mirror_link.unpair()
+        for c, fields in sent.items():
+            self.assertLessEqual(fields, set(pl.API_SHAPES[c]["request"]), f"{c} sends a field its shape doesn't name")
+        for c, fields in got.items():
+            self.assertLessEqual(fields, set(pl.API_SHAPES[c]["answer"]), f"{c} answers a field its shape doesn't name")
+        self.assertTrue(libs)
+        self.assertLessEqual(libs, set(pl.API_SHAPES["status"]["libraries"]))
+        self.assertEqual(set(sent) | set(got), set(pl.COMMANDS))                                      # (every command exercised)
+
+    def test_remote_update_over_the_link(self):
+        """A paired side that's newer asks this one to update — the update this side's own check finds, as Update Now would;
+        off with the switch — and this side asks only when it's current, the other behind, and the command there."""
+        from plexcache import __version__
+        from plexcache import peerlink as pl
+        a, ua, b, ub = self._paired()
+        link, blink = a.mirror_link, b.mirror_link
+        b.settings.update({"peer": {"remote_update": False}})
+        self.assertEqual(blink.handle_update({"channel": pl.CHANNEL})["why"], "updates from the other Plex Cache are off here")
+        b.settings.update({"peer": {"remote_update": True}})
+        self.assertIn("channels differ", blink.handle_update({"channel": "other"})["why"])
+        with mock.patch.object(b.updates, "check", return_value=True), mock.patch.object(b.updates, "available", return_value=False):
+            self.assertIn("no newer build", blink.handle_update({"channel": pl.CHANNEL})["why"])
+        with mock.patch.object(b.updates, "available", return_value=True), mock.patch.object(b, "update_now", side_effect=ValueError("no TrueNAS")):
+            self.assertEqual(blink.handle_update({"channel": pl.CHANNEL})["why"], "no TrueNAS")
+        with mock.patch.object(b.updates, "available", return_value=True), mock.patch.object(b, "update_now", return_value={"updating": True}) as upd:
+            got = link.request("POST", "/peer/v1/update", {"version": a.version, "commit": "", "channel": pl.CHANNEL})
+            self.assertEqual((got["started"], got["version"]), (True, b.version))
+            upd.assert_called_once()
+        asked = []
+        with mock.patch.object(link, "request", side_effect=lambda m, p, body=None, timeout=30: asked.append(p) or {"started": True, "why": ""}):
+            st = dict(link.status or {}, version="0.0.1", channel=pl.CHANNEL, commit="")
+            a.updates.checked, a.updates.latest, a.updates.latest_commit = time.time(), __version__, None   # (current here)
+            link._offer_update(dict(st, commands={}))                                                # (no update command there: not asked)
+            self.assertEqual(asked, [])
+            link._offer_update(st)
+            self.assertEqual(asked, ["/peer/v1/update"])
+            link._offer_update(st)                                                                   # (asked once per build seen there)
+            self.assertEqual(asked, ["/peer/v1/update"])
+            self.assertTrue(link.update_said and link.update_said[1])
+            self.assertIn("Asked it to update at", en(link._version_light()["detail"]))
+            link.update_asked = None
+            with mock.patch.object(a.updates, "available", return_value=True):
+                link._offer_update(st)                                                               # (not current here: not asked)
+            self.assertEqual(asked, ["/peer/v1/update"])
+            link._offer_update(dict(st, version=a.version))                                          # (the same build: not asked)
+            self.assertEqual(asked, ["/peer/v1/update"])
+
+    def test_the_link_looks_faster_when_it_matters(self):
+        """Every five minutes as a rule; every pass while Pair Now is open here or a conversion is under way on either side;
+        and at once when a paired side talks to us before we talk to it."""
+        from plexcache import peerlink as pl
+        a, ua, b, ub = self._paired()
+        link = a.mirror_link
+        self.assertEqual(link.tick_every(), pl.TICK_EVERY)
+        link.window = time.time() + 60
+        self.assertEqual(link.tick_every(), pl.TICK_FAST)                                            # (Pair Now open here)
+        link.window = 0.0
+        a.migration.state = {"step": "copy"}
+        self.assertEqual(link.tick_every(), pl.TICK_FAST)                                            # (a conversion under way here)
+        a.migration.state = None
+        link.status["libraries"] = {"7": {"converting": {"step": "switch"}}}
+        self.assertEqual(link.tick_every(), pl.TICK_FAST)                                            # (or there)
+        link.status["libraries"] = {}
+        self.assertEqual(link.tick_every(), pl.TICK_EVERY)
+        b.mirror_link.last_ok = 0.0
+        self.assertFalse(b.mirror_link.talking())
+        self.assertTrue(a.mirror_link.talk())                                                        # (a asks b: b, not talking yet, looks at a now)
+        for _ in range(200):
+            if b.mirror_link.talking():
+                break
+            time.sleep(0.05)
+        self.assertTrue(b.mirror_link.talking())
+
     def test_folder_sync_rows_and_lights(self):
         from plexcache import peerlink as pl
         a, ua, b, ub = self._paired()
@@ -16253,7 +16437,15 @@ class PeerLinkEdgeTests(unittest.TestCase):
         link.status.update(api=2, version="9.9")
         link.skew = 500
         light = link._version_light()
-        self.assertEqual((light["status"], light["detail"].count(";")), ("warn", 2))
+        self.assertEqual((light["status"], light["detail"].count(";")), ("warn", 3))             # (api, version, the commands it lacks, clocks)
+        self.assertIn("it doesn’t say which link commands it has", en(light["detail"]))            # (no table in its status: only the handshake)
+        self.assertEqual(link.commands_there(), {})
+        link.status["commands"] = {c: v for c, v in pl.COMMANDS.items() if c not in ("carry", "update")}
+        self.assertIn("it lacks the link commands carry, update", en(link._version_light()["detail"]))  # (a table without them)
+        link.status["commands"] = dict(pl.COMMANDS, carry=pl.COMMANDS["carry"] + 1)
+        self.assertIn("the link commands carry are of another version there", en(link._version_light()["detail"]))
+        self.assertFalse(link.can("carry"))
+        self.assertTrue(link.can("files"))
         a.settings.update({"peer": {"enabled": False}})
         self.assertEqual(en(link.lights()["found"]["text"]), "No Plex Cache at plexB’s site")
 
@@ -17482,6 +17674,37 @@ class MigratingEdgeTests2(unittest.TestCase):
     """More of the conversion's edges (migrating.py): the mirror's view when it's known through its marker only or
     not at all, the files compared with it when the link is quiet or still reading, and the copy job's end."""
 
+    def test_just_started_nothing_is_concluded_while_the_link_settles(self):
+        """Just after a start, before the first look at the other Plex Cache is done (peerlink.settling), no page concludes
+        from what isn't known yet: the Talking light checks, the dataset page's mirror light says it's connecting, its mirror
+        checks are one waiting check (Connecting) that holds the set-aside, and Mirror Checks' scan isn't due. The first
+        tick ends it, whatever it found — or SETTLE seconds since the start."""
+        from plexcache import peerlink as pl
+        app = _new_app()
+        mig = app.migration
+        lk = pl.PeerLink(app.peerlinks, "srv")
+        lk.wanted, lk.mirror_id = (lambda: True), (lambda: "srv")
+        lk.paired = {"instance": "x", "name": "Cabin", "url": "http://cabin:8642", "public": "", "at": 0}
+        self.enterContext(mock.patch.object(pl, "SETTLE", 180))
+        self.assertTrue(lk.settling())
+        self.assertEqual((lk.lights()["talking"]["status"], en(lk.lights()["talking"]["text"])), ("testing", "Connecting to Cabin…"))
+        with mock.patch.object(app.peerlinks, "for_library", return_value=lk), mock.patch.object(mig, "candidates", return_value=[{"library": "1", "folder": "/m/A"}]), \
+                mock.patch.object(mig, "_mirror_watched", return_value=True), mock.patch.object(mig, "_mirror", return_value=None):
+            got = mig.mirror_view()
+            self.assertEqual((got["status"], en(got["title"])), ("testing", "Mirror: the other server, connecting…"))
+            out = []
+            mig._check_mirror({"step": "switch", "library": "1", "folder": "/m/A"}, mig._checker(out))
+            self.assertEqual([(c["id"], c["level"], en(c["doing"]), c["gate"]) for c in out], [("mirror_link", "waiting", "Connecting", "aside")])
+            self.assertFalse(app.mirror_health.due_for("1"))
+            lk.tick()                                                                      # the first look done (nothing wanted here): what's known, said
+            self.assertFalse(lk.settling())
+            self.assertIn("not heard from", en(mig.mirror_view()["title"]))
+            self.assertEqual(lk.lights()["talking"]["status"], "fail")
+            self.assertTrue(app.mirror_health.due_for("1"))
+            lk.settled = False
+            app.peerlinks.started -= pl.SETTLE + 1                                        # or long enough since the start
+            self.assertFalse(lk.settling())
+
     def test_mirror_view_files_and_copy_end(self):
         from plexcache import migrating
         app = _new_app()
@@ -17679,7 +17902,7 @@ class MigratingEdgeTests3(unittest.TestCase):
         self.assertEqual(checks[-1][:2], ("api", False))
         mig._check_switch({"copying": True, "queued": True}, check)
         mig._check_switch({"compare": {"same": False, "missing": ["a.mkv"], "different": [], "extra": []}}, check)
-        self.assertEqual(checks[-2], ("compare", False, "Different: a.mkv"))
+        self.assertEqual(checks[-1], ("compare", False, "Different: a.mkv"))                      # (the "set aside" check comes last, after the ones gating its button)
         st = {"compare": {"same": True, "files": 1, "bytes": 1}, "old_path": "/m/.A.plexcache-old", "child": "tank/m/A", "folder": "/m/A"}
         with mock.patch.object(mig, "_props", return_value={"recordsize": 1}), mock.patch.object(mig, "_folder", return_value={"is_mount": False}), \
                 mock.patch.object(mig.client, "status", return_value={}), mock.patch.object(mig, "_sees") as sees:

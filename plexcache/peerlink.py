@@ -29,12 +29,23 @@ of only leaving notes in the shared folders (peers.py).
   sender gave — so a folder sync that also carries it finds the same file, and one that leaves out
   .plexcache isn't needed. Claims settle in one round trip: the answer carries this side's live
   claims on the file, and the earliest wins (Claims.take).
+* **Versions** — every command of the link has a version (COMMANDS), and the handshake says which the
+  other side has: its hello and its status carry its table, a side uses a command only when that table
+  has it at the same version (can), and the Version light says what the other side lacks. A side that is current (its own update check finds nothing newer)
+  asks a paired side on the same channel that is behind to update, once (POST /peer/v1/update): the
+  asked side applies the update its own checker finds on GitHub, as Update Now would — nothing named in
+  the request is installed — unless peer.remote_update is off there.
+* **Settling** — just after a start, until a link's first look at the other side is done (SETTLE seconds at most),
+  nothing is concluded from what isn't known yet: the Talking light, the dataset page's mirror light and checks and
+  Mirror Checks' scan say they're connecting instead (settling).
 * **Folder sync** — each side reports the markers it publishes and the ones it sees: ours not reaching
   the other side means claims don't either, so the two could optimize the same file (Mirror Checks
   holds optimizing there until it's fixed or ignored). The light says which channel carries them.
 
 Everything here is in the state (PeerLinks.snapshot), per mirrored server, as five lights, worked out by
-tick() every TICK_EVERY.
+tick() every TICK_EVERY — every TICK_FAST while Pair Now's window is open here or a conversion to a child
+dataset is under way on either side (PeerLink.tick_every), and at once when a paired side asks for our
+status before we're talking to it.
 """
 
 import hashlib
@@ -50,14 +61,36 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import CHANNEL, COMMIT
 from .i18n import M
 
 log = logging.getLogger("plexcache")
 
-API = 1
+API = 1                   # the link's language: a side with another number isn't talked to
+# Every command of the link, each with its version. The handshake is what says which commands the other side has: its
+# hello and its status carry this table, and a side uses a command only when the other side's table has it at the same
+# version (PeerLink.can) — nothing is inferred from its Plex Cache version. A side whose table doesn't list a command
+# is told so on the Version light, and asked to update (remote update), never sent a request it doesn't know; one that
+# sends no table at all is taken to have none beyond the handshake. A command's version moves when its request or its
+# answer changes shape — API_SHAPES names each one's fields, tests/peer_api.json records them, and
+# test_the_link_api_is_versioned fails a change without a bump (dev/peer_api.py records a bump).
+COMMANDS = {"hello": 1, "pair": 1, "status": 1, "files": 1, "unpair": 1, "carry": 1, "update": 1}
+API_SHAPES = {  # each command's request fields (its body, or its query) and its answer's, sorted
+    "hello": {"request": [], "answer": ["api", "app", "commands", "instance", "name", "plex", "public", "time", "version"]},
+    "pair": {"request": ["addresses", "instance", "manual", "name", "plex", "port", "public", "window"], "answer": ["paired", "public", "why"]},
+    "status": {"request": [], "answer": ["api", "channel", "commands", "commit", "instance", "libraries", "migration", "name", "platform", "publishing", "time", "truenas_api", "version"],
+               "libraries": ["converting", "first", "folders", "holding", "published", "seen", "title"]},
+    "files": {"request": ["library"], "answer": ["at", "files", "ready"]},
+    "unpair": {"request": [], "answer": ["ok"]},
+    "carry": {"request": ["claims", "library", "marker", "mirrors"], "answer": ["carried", "claims", "why"]},
+    "update": {"request": ["channel", "commit", "version"], "answer": ["started", "version", "why"]},
+}
+UPDATE_RETRY = 6 * 3600   # a side asked to update and still behind: asked again after this
+SETTLE = 180              # seconds after a start for which a link's first look is waited for before a page concludes anything from it (settling)
 PORT = 8642               # Plex Cache's own port, as compose.yaml publishes it
 PORTS = range(PORT, PORT + 8)  # the ports looked on besides the advertised ones and our own: one picked by hand is usually near the default
 TICK_EVERY = 300          # seconds between looks at the other side (found, paired, talking)
+TICK_FAST = 30            # …while Pair Now's window is open here, or a conversion is under way on either side (the scheduler's pass)
 FIND_EVERY = 3600         # while nothing is found: how often the addresses are tried again
 PAIR_WINDOW = 600         # seconds after Pair Now during which the other side's Pair Now pairs the two
 MAX_AGE = 300             # a signed request older (or newer) than this is refused: clocks must agree within it
@@ -163,6 +196,7 @@ class PeerLinks:
     def __init__(self, app):
         self.app = app
         self.lock = threading.Lock()
+        self.started = time.time()  # when this process started looking: PeerLink.settling
         keys = app._load_json("peer-key.json") or {}
         self.private = int(keys["private"], 16) if isinstance(keys.get("private"), str) and valid_public(keys.get("public")) else 0
         if not self.private:
@@ -334,7 +368,7 @@ class PeerLinks:
 
     def hello(self) -> dict:
         """The open answer: public facts only."""
-        return {"app": "plexcache", "api": API, "instance": self.instance(), "name": getattr(self.app, "plex_name", "") or "",
+        return {"app": "plexcache", "api": API, "commands": dict(COMMANDS), "instance": self.instance(), "name": getattr(self.app, "plex_name", "") or "",
                 "version": self.app.version, "plex": self.own_plex_id(), "public": self.public(), "time": time.time()}
 
     def local_status(self) -> dict:
@@ -357,6 +391,7 @@ class PeerLinks:
                     seen[inst] = float(m.get("at") or 0)
             libs[key] = dict({"title": lib.get("title") or "", "published": published.get(key), "first": first.get(key), "seen": seen}, **own_library(self.app, key))
         return dict({"instance": self.instance(), "name": getattr(self.app, "plex_name", "") or "", "version": self.app.version, "api": API,
+                     "commands": dict(COMMANDS), "channel": CHANNEL, "commit": COMMIT[:7],
                      "time": time.time(), "publishing": bool(getattr(getattr(self.app, "optimizing", None), "client", None) and self.app.optimizing.client.configured),
                      "libraries": libs}, **own_facts(self.app))
 
@@ -428,16 +463,19 @@ class PeerLinks:
             link = self.verify(headers, method, raw_path, body)
         except PeerError as e:
             return 403, {"error": str(e)}
+        if not link.talking():  # (a paired side talks to us before we talk to it — just paired, say: looked at now, not at the next pass)
+            self.tick_async(force=True)
         if path == "/peer/v1/status" and method == "GET":
             return 200, self.local_status()
         if path == "/peer/v1/files" and method == "GET":
             return 200, self.local_files(str(query.get("library") or ""))
-        if path == "/peer/v1/carry" and method == "POST":
+        if path in ("/peer/v1/carry", "/peer/v1/update") and method == "POST":
             try:
                 data = json.loads(body or b"{}")
             except ValueError:
                 return 400, {"error": "invalid JSON"}
-            return 200, link.handle_carry(data if isinstance(data, dict) else {})
+            data = data if isinstance(data, dict) else {}
+            return 200, link.handle_carry(data) if path == "/peer/v1/carry" else link.handle_update(data)
         if path == "/peer/v1/unpair" and method == "POST":
             with self.lock:
                 old, link.paired, link.status = link.paired, None, None
@@ -482,7 +520,7 @@ class PeerLinks:
     def tick_async(self, force: bool = False) -> None:
         if self.busy:
             return
-        links = [lk for lk in self.used() if force or time.time() - lk.ticked >= TICK_EVERY]
+        links = [lk for lk in self.used() if force or time.time() - lk.ticked >= lk.tick_every()]
         if not links:
             return
         self.busy = True
@@ -530,6 +568,8 @@ class PeerLink:
         self.carried: dict[str, float] = {}  # our library key -> when our marker last went over the link (carry)
         self.received: dict[str, float] = {}  # our library key -> when theirs last came over it (handle_carry)
         self.carry_tried = 0.0
+        self.update_asked: tuple | None = None  # ((their version, their commit), when): asked to update, once per build seen there
+        self.update_said: tuple | None = None   # (when, started, why): how the ask went, for the Version light
         self.find_error = None      # why nothing was found (M), or why what answered isn't it
         self.pair_error = None      # why the last pairing didn't happen (M)
         self.last_ok = 0.0          # the last signed answer from the other side
@@ -540,6 +580,7 @@ class PeerLink:
         self.found_at = 0.0
         self.find_at = 0.0          # when find() last ran from tick()
         self.ticked = 0.0
+        self.settled = False       # the first tick since the start done, whatever it found (settling)
         self._hosts: tuple[float, list[str]] = (0.0, [])  # the mirror Plex's addresses from plex.tv, kept an hour
 
     # ------------------------------------------------------------ what this link is to
@@ -571,6 +612,12 @@ class PeerLink:
         """Whether a Plex Cache is known to run at the mirror's site: one paired with, or found answering there — what a
         check that needs it is red for when it can't run (Mirror Checks), rather than merely not run."""
         return self.wanted() and bool(self.paired or self.found)
+
+    def settling(self) -> bool:
+        """Whether what this link knows is still being worked out, just after a start: a Plex Cache is looked for at the
+        mirror's site and the first look (tick) hasn't finished — for at most SETTLE seconds after the start. The pages say
+        they're connecting meanwhile, rather than concluding from what isn't known yet."""
+        return self.wanted() and not self.settled and time.time() - self.links.started < SETTLE
 
     def save(self) -> None:
         self.links.save()
@@ -931,10 +978,32 @@ class PeerLink:
         return self.request("GET", "/peer/v1/files?" + urllib.parse.urlencode({"library": their_key}), timeout=120)
 
     # ------------------------------------------------------------ the regular look
+    def tick_every(self) -> float:
+        """How often this link is looked at: every pass of the scheduler (TICK_FAST) while Pair Now's window is open here,
+        or while a conversion to a child dataset is under way on either side (its holds and facts travel over the link,
+        and waiting minutes for them is what the conversion's steps would feel); else TICK_EVERY."""
+        if self.window_open():
+            return TICK_FAST
+        from .migrating import UNDER_WAY
+        mig = getattr(self.app, "migration", None)
+        if mig is not None and (getattr(mig, "state", None) or {}).get("step") in UNDER_WAY:
+            return TICK_FAST
+        theirs = (self.status or {}).get("libraries") or {}
+        if any(isinstance(lib, dict) and (lib.get("converting") or {}).get("step") in UNDER_WAY for lib in theirs.values()):
+            return TICK_FAST
+        return TICK_EVERY
+
     def tick(self, force: bool = False) -> None:
         """Found, paired, talking: each step tried in turn. While nothing answers, the addresses are tried again only
-        every FIND_EVERY (or when asked: Pair Now, Test Again)."""
+        every FIND_EVERY (or when asked: Pair Now, Test Again). Whatever it finds, the first
+        tick since the start ends the settling."""
         self.ticked = time.time()
+        try:
+            self._tick(force)
+        finally:
+            self.settled = True
+
+    def _tick(self, force: bool) -> None:
         if not self.wanted():
             return
         if self.paired:
@@ -967,6 +1036,7 @@ class PeerLink:
             self.skew = float(st.get("time") or time.time()) - time.time()
             if st.get("name") and self.paired and st["name"] != self.paired.get("name"):
                 self.paired["name"] = st["name"]
+        self._offer_update(st)
         if not self.carried and time.time() - self.carry_tried > CARRY_RETRY:  # (talking, nothing carried yet: our marker there now, not at the next half hour)
             self.carry_tried = time.time()
             from . import peers
@@ -976,13 +1046,76 @@ class PeerLink:
                 log.debug("marker not carried to %s", self.server, exc_info=True)
         return True
 
+    # ------------------------------------------------------------ the other side's commands
+    def commands_there(self, st: dict | None = None) -> dict:
+        """The link commands the other side says it has, each with its version (its status, or the one given): what its
+        handshake carries and nothing more — a side that sends no table has none beyond the handshake."""
+        c = ((self.status if st is None else st) or {}).get("commands")
+        return {str(k): int(v) for k, v in c.items() if isinstance(v, int)} if isinstance(c, dict) else {}
+
+    def can(self, command: str, st: dict | None = None) -> bool:
+        """Whether the other side speaks a command as this side does (the same version): used before every one but the
+        ones every side has."""
+        return self.commands_there(st).get(command) == COMMANDS.get(command)
+
+    def _offer_update(self, st: dict) -> None:
+        """The other side behind this one on the same channel, while this one is current (its own update check found
+        nothing newer): asked once to update (POST /peer/v1/update), when it has the command. How it went: update_said,
+        for the Version light. Never the other way round: the side that's behind doesn't ask."""
+        up = getattr(self.app, "updates", None)
+        if up is None or not self.can("update", st) or st.get("channel") != CHANNEL:
+            return
+        theirs = (str(st.get("version") or ""), str(st.get("commit") or "")[:7])
+        ours = (str(self.app.version), COMMIT[:7])
+        behind = theirs[0] != ours[0] or (CHANNEL == "dev" and bool(theirs[1]) and bool(ours[1]) and theirs[1] != ours[1])
+        if not behind or not getattr(up, "checked", None) or up.available():
+            return
+        if self.update_asked and self.update_asked[0] == theirs and time.time() - self.update_asked[1] < UPDATE_RETRY:
+            return
+        self.update_asked = (theirs, time.time())
+        try:
+            got = self.request("POST", "/peer/v1/update", {"version": ours[0], "commit": ours[1], "channel": CHANNEL}, timeout=60)
+        except (PeerError, OSError) as e:
+            got = {"started": False, "why": str(e)}
+        with self.lock:
+            self.update_said = (time.time(), bool(got.get("started")), str(got.get("why") or ""))
+        name = (self.paired or {}).get("name") or self.name()
+        if got.get("started"):
+            self.app.activity.event("update", M("The Plex Cache on {name} ({theirs}) was asked to update to {ours}, and is", name=name, theirs=theirs[0], ours=ours[0]))
+        else:
+            self.app.activity.event("update", M("The Plex Cache on {name} ({theirs}) was asked to update to {ours}, and couldn’t: {why}", name=name, theirs=theirs[0], ours=ours[0], why=got.get("why") or "?"))
+
+    def handle_update(self, data: dict) -> dict:
+        """The other side, newer, asks this one to update (POST /peer/v1/update): the update this side's own checker finds on
+        GitHub for its channel, applied as Update Now would (App.update_now) — nothing named in the request is installed.
+        Off with peer.remote_update. {"started", "why", "version": this side's}."""
+        answer = lambda why: {"started": False, "why": str(why), "version": self.app.version}  # noqa: E731
+        if not self.settings().get("remote_update", True):
+            return answer("updates from the other Plex Cache are off here")
+        if str(data.get("channel") or "") != CHANNEL:
+            return answer(f"channels differ ({CHANNEL} here)")
+        up = getattr(self.app, "updates", None)
+        if up is None:
+            return answer("this side doesn’t check for updates")
+        if not up.available():
+            up.check()
+        if not up.available():
+            return answer("no newer build found on GitHub for this channel")
+        try:
+            self.app.update_now()
+        except ValueError as e:
+            return answer(e)
+        self.app.activity.event("update", M("The Plex Cache on {name} asked this one to update: TrueNAS is pulling the newer image", name=(self.paired or {}).get("name") or self.name()))
+        return {"started": True, "why": "", "version": self.app.version}
+
     # ------------------------------------------------------------ carrying .plexcache
     def carry(self, key: str, marker: dict | None = None, claims: list | None = None) -> dict | None:
         """Our marker for a library of ours, and claims on its files, carried to the other side (POST /peer/v1/carry): it
         writes them into the paired library's folders there. Its answer ({"carried": True, "claims": {key: its live claims
-        on that file}}), or None when it couldn't (not talking, the library not paired, no service there)."""
+        on that file}}), or None when it couldn't (not talking, the other side without the command, the library not paired,
+        no service there)."""
         there = self._pairs().get(str(key))
-        if there is None or not self.talking():
+        if there is None or not self.talking() or not self.can("carry"):
             return None
         try:
             got = self.request("POST", "/peer/v1/carry", {"library": str(there.key), "mirrors": str(key), "marker": marker, "claims": claims or []}, timeout=20)
@@ -1118,7 +1251,7 @@ class PeerLink:
                                         why=self.find_error or "", tried=self.tried_summary() or "—")}
         if p:
             out["paired"] = {"status": "ok", "text": M("Paired with {name}", name=p.get("name") or p.get("instance")),
-                             "detail": M("Since {when}, {how}.", how=M("by itself through the synced folder") if p.get("how") == "auto" else M("by Pair Now pressed on both sides"),
+                             "detail": M("Since {when}, {how}.", how=M("paired by itself through the synced folder") if p.get("how") == "auto" else M("paired manually"),
                                          when=time.strftime("%Y-%m-%d %H:%M", time.localtime(p.get("at") or 0)))}
         elif f:
             out["paired"] = {"status": "warn", "text": M("Plex Cache found, but not paired"), "detail": self.pair_error or M("Pairing is tried every few minutes.")}
@@ -1128,6 +1261,8 @@ class PeerLink:
             out["talking"] = off(M("Not talking"), M("Waiting for the pairing."))
         elif self.talking():
             out["talking"] = {"status": "ok", "text": M("Talking"), "detail": M("Last answer {when} ({ms} ms)", when=time.strftime("%H:%M", time.localtime(self.last_ok)), ms=self.last_ms)}
+        elif self.settling():
+            out["talking"] = {"status": "testing", "text": M("Connecting to {name}…", name=p.get("name") or p.get("instance")), "detail": ""}
         else:
             out["talking"] = {"status": "fail", "text": M("Not answering"),
                               "detail": M("{url}: {why}", url=p.get("url") or "", why=self.last_error or M("no answer yet"))}
@@ -1159,9 +1294,10 @@ class PeerLink:
             if any(r.get("link") for r in rows.values()):
                 return {"status": "ok", "text": M("The link carries .plexcache"),
                         "detail": M("Markers and claims reach the other side over the link, at once: the folder sync needn’t carry them.") + (f" {behind}" if behind else "")}
+            cant = "" if self.can("carry") else " " + M("The link can’t carry .plexcache: Plex Cache there ({version}) is older.", version=(self.status or {}).get("version") or "?")
             if behind:
-                return {"status": "ok", "text": M("The link is up; the folder sync is behind"), "detail": behind}
-            return {"status": "ok", "text": M("Folder sync carries .plexcache"), "detail": M("Both ways, up to {minutes} minutes behind", minutes=int(lag // 60))}
+                return {"status": "ok", "text": M("The link is up; the folder sync is behind"), "detail": f"{behind}{cant}"}
+            return {"status": "ok", "text": M("Folder sync carries .plexcache"), "detail": M("Both ways, up to {minutes} minutes behind.", minutes=int(lag // 60)) + cant}
         if behind:  # (the link down: the sync is all that carries them, and it's behind)
             return {"status": "warn", "text": M("The link is down and the .plexcache folder doesn’t sync") if never else M("The link is down and the folder sync is behind"),
                     "detail": f"{behind} " + M("Optimizing there is held until the sync catches up, or the finding is ignored on [Tools → Mirror Checks](/mirrorchecks).")}
@@ -1176,11 +1312,24 @@ class PeerLink:
             problems.append(M("the link’s version differs ({theirs} there, {ours} here)", theirs=st.get("api"), ours=API))
         if str(st.get("version") or "") != str(self.app.version):
             problems.append(M("Plex Cache {theirs} there, {ours} here", theirs=st.get("version") or "?", ours=self.app.version))
+        theirs = self.commands_there()
+        lacks = [c for c in COMMANDS if c not in theirs]
+        differ = [c for c in COMMANDS if c in theirs and theirs[c] != COMMANDS[c]]
+        if not isinstance(st.get("commands"), dict):
+            problems.append(M("it doesn’t say which link commands it has, so only the handshake is used"))
+        elif lacks:
+            problems.append(M("it lacks the link commands {list}", list=", ".join(lacks)))
+        if differ:
+            problems.append(M("the link commands {list} are of another version there", list=", ".join(differ)))
         if abs(self.skew) > SKEW_WARN:
             problems.append(M("the clocks are {n} seconds apart", n=int(abs(self.skew))))
+        said = self.update_said
+        asked = "" if not said else " " + (M("Asked it to update at {when}: TrueNAS there is pulling the newer image.", when=time.strftime("%H:%M", time.localtime(said[0]))) if said[1]
+                                          else M("Asked it to update at {when}; it couldn’t: {why}", when=time.strftime("%H:%M", time.localtime(said[0])), why=said[2]))
         if problems:
-            return {"status": "warn", "text": M("Versions or clocks differ"), "detail": "; ".join(str(p) for p in problems)}
-        return {"status": "ok", "text": M("Same version, clocks agree"), "detail": M("Plex Cache {version} on both sides, clocks within {n} seconds", version=self.app.version, n=max(1, int(abs(self.skew))))}
+            return {"status": "warn", "text": M("Versions, link commands or clocks differ"), "detail": "; ".join(str(p) for p in problems) + "." + asked}
+        return {"status": "ok", "text": M("Same version and link commands, clocks agree"),
+                "detail": M("Plex Cache {version} on both sides, every link command at the same version, clocks within {n} seconds.", version=self.app.version, n=max(1, int(abs(self.skew)))) + asked}
 
     def health(self) -> str:
         """The link's worst light: "ok", "warn", "fail" or "off" (nothing looked for). What Mirror Checks warn on."""

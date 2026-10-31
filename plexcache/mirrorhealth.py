@@ -216,6 +216,8 @@ class MirrorHealth:
                     disk_why = (M("The other Plex Cache is still reading this library’s files: they’re compared at the next scan."), None)
             except Exception as e:  # noqa: BLE001
                 disk_why = (M("The other site’s files couldn’t be read: {why}", why=str(e)), PEER_CARD)
+        elif link is not None and link.settling():  # (just after a start: Scan Again pressed before the first look)
+            disk_why = (M("The other Plex Cache isn’t reached yet, just after a start: compared at the next scan."), None)
         elif link is not None and link.known():
             bad = "; ".join(str(v["text"]) for v in link.lights().values() if v["status"] in ("warn", "fail"))
             disk_why = (M("The link to the Plex Cache at the other site isn’t working: {lights}.", lights=bad) if bad
@@ -322,7 +324,12 @@ class MirrorHealth:
 
     def due_for(self, key: str) -> bool:
         """A library compared again every few hours — and at once while its last scan is from before FORMAT, which didn't
-        record the checks it couldn't run (its red would be missing)."""
+        record the checks it couldn't run (its red would be missing). Not while the link to the other Plex Cache is settling,
+        just after a start: a scan then would hold what isn't known yet for hours."""
+        links = getattr(self.app, "peerlinks", None)
+        link = links.for_library(str(key)) if links is not None else None
+        if link is not None and link.settling():
+            return False
         with self.lock:
             res = self.results.get(str(key)) or {}
         if not res.get("at"):

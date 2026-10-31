@@ -1,0 +1,111 @@
+{
+  "api": 1,
+  "commands": {
+    "carry": {
+      "answer": [
+        "carried",
+        "claims",
+        "why"
+      ],
+      "request": [
+        "claims",
+        "library",
+        "marker",
+        "mirrors"
+      ],
+      "version": 1
+    },
+    "files": {
+      "answer": [
+        "at",
+        "files",
+        "ready"
+      ],
+      "request": [
+        "library"
+      ],
+      "version": 1
+    },
+    "hello": {
+      "answer": [
+        "api",
+        "app",
+        "commands",
+        "instance",
+        "name",
+        "plex",
+        "public",
+        "time",
+        "version"
+      ],
+      "request": [],
+      "version": 1
+    },
+    "pair": {
+      "answer": [
+        "paired",
+        "public",
+        "why"
+      ],
+      "request": [
+        "addresses",
+        "instance",
+        "manual",
+        "name",
+        "plex",
+        "port",
+        "public",
+        "window"
+      ],
+      "version": 1
+    },
+    "status": {
+      "answer": [
+        "api",
+        "channel",
+        "commands",
+        "commit",
+        "instance",
+        "libraries",
+        "migration",
+        "name",
+        "platform",
+        "publishing",
+        "time",
+        "truenas_api",
+        "version"
+      ],
+      "libraries": [
+        "converting",
+        "first",
+        "folders",
+        "holding",
+        "published",
+        "seen",
+        "title"
+      ],
+      "request": [],
+      "version": 1
+    },
+    "unpair": {
+      "answer": [
+        "ok"
+      ],
+      "request": [],
+      "version": 1
+    },
+    "update": {
+      "answer": [
+        "started",
+        "version",
+        "why"
+      ],
+      "request": [
+        "channel",
+        "commit",
+        "version"
+      ],
+      "version": 1
+    }
+  }
+}

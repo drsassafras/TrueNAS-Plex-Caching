@@ -54,7 +54,13 @@ from .i18n import M
 from .jobs import Job
 
 FRESH_COMPARE = 120  # seconds a comparison counts as just made, for setting the old folder aside
-RESTART_WAIT = 300  # seconds a restart asked for here is waited for before it's asked for again
+RESTART_WAIT = 300  # seconds a restart asked for here normally takes: the optimizer back and seeing the dataset
+# How long each step that completes by itself normally takes (a "waiting" check): past it, the check turns red and says the
+# way out (Migration._checker)
+SEES_WAIT = 90      # a dataset showing up in the optimizer's media volume, with propagation
+HOLD_WAIT = 180     # the other side holding its file jobs once this one switches (its link tick is 30 seconds meanwhile)
+COMPARE_WAIT = 120  # the last pass's compare, run by itself when the copy is done
+FILES_WAIT = 600    # the other side reading its files for Verify
 
 STEPS = ("create", "copy", "switch", "verify", "done")
 STATE = "migration.json"
@@ -74,6 +80,7 @@ class Migration:
         self.state: dict | None = app._load_json(STATE) or None
         self.checks: list[dict] = []
         self.checked_at: float | None = None  # when the current step's conditions were last looked at
+        self.waits: dict[str, float] = {}  # a check that completes by itself: when it was first seen waiting (its id)
         self._cand: tuple[float, list] | None = None
         app.jobs.holds.append(self.hold)
         # a folder copy cut short by a restart is started again by the shared jobs, where it was
@@ -270,14 +277,8 @@ class Migration:
             self.checks = []
             return self.snapshot()
         step = st.get("step")
-        checks = []
-
-        def check(cid, ok, title, detail="", cmd="", action="", level="", gate=""):
-            # level: "" a step to do, "warn" said but stopping nothing, "error" something wrong that stops the step (red);
-            # gate: what it stops besides the step's own button ("aside": setting the old folder aside)
-            checks.append({"id": cid, "ok": ok, "title": title, "detail": detail, "cmd": cmd, "action": action, "level": level, "gate": gate})
-            return ok
-
+        checks: list[dict] = []
+        check = self._checker(checks)
         self._reconcile(st)
         step = st.get("step")
         if step == "create":
@@ -291,9 +292,14 @@ class Migration:
         if step in UNDER_WAY:
             self._check_mirror(st, check, force)  # (the mirror first: chosen, or not, decides what the folder sync is asked)
             self._check_sync(st, check)
+        if step == "switch" and not st.get("copying") and not st.get("old_path"):
+            # last, after the checks that gate step 3's button: Next points at what's in the way, not at a button that won't press
+            check("renamed", False, M("The old folder set aside"),
+                  M("Waiting for you: Compare, Then Set the Old Folder Aside (step 3, below). It opens once every check above is done."))
         with self.lock:
             self.checks = checks
             self.checked_at = time.time()
+            self.waits = {k: v for k, v in self.waits.items() if any(c["id"] == k and not c["ok"] and c["since"] for c in checks)}
         self._save()
         told = (step, bool(st.get("old_path")))
         if told != getattr(self, "_told", None):  # where it is, told to the other side (its marker) as it changes
@@ -359,11 +365,20 @@ class Migration:
         root = next((r for r in props if path.startswith(r.rstrip("/") + "/")), None)
         since, asked = status.get("since"), st.get("restart_asked")
         snippet, action = "", ""
-        if asked and time.time() - asked < RESTART_WAIT and not (since and since > asked):
-            detail = M("Restarting Plex Cache… this is checked again once it’s back (a minute or so).")
-        elif root and props.get(root):
-            detail = M("Its media volume passes new datasets on: it should show up by itself in a few seconds.")
-        elif since and since > seen:
+        if asked and not (since and since > asked):
+            check("sees", False, M("The optimizer sees the new dataset"), M("Restarting Plex Cache… this is checked again once it’s back (a minute or so)."),
+                  level="waiting", doing=M("Restarting"), within=RESTART_WAIT,
+                  late=lambda waited: M("Plex Cache was asked to restart {waited} ago, and the optimizer hasn’t come back. Restart it in TrueNAS: "
+                                        "Apps → {app} → Restart, then check again.", waited=waited, app=self._app_name() or "plex-cache"))
+            return False
+        if root and props.get(root):
+            check("sees", False, M("The optimizer sees the new dataset"), M("Its media volume passes new datasets on: it should show up by itself in a few seconds."),
+                  action="restart", level="waiting", doing=M("Waiting"), within=SEES_WAIT,
+                  late=lambda waited: M("Its media volume passes new datasets on, yet the optimizer hasn’t seen {path} after {waited}. Restart Now restarts "
+                                        "Plex Cache (both its containers, a minute or so); if it still isn’t seen, the dataset has to be inside the folder "
+                                        "mounted there.", path=path, waited=waited))
+            return False
+        if since and since > seen:
             detail = M("The optimizer was started after the dataset appeared, yet doesn’t see it at {path}: the dataset has to be inside the folder mounted there.",
                        path=path)
         else:
@@ -453,15 +468,18 @@ class Migration:
         if st.get("copying"):
             return
         cmp = st.get("compare")
-        check("compare", bool(cmp and cmp.get("same")), M("Both copies the same, file by file"),
-              M("{files} files, {size}.", files=cmp.get("files"), size=_gb(cmp.get("bytes"))) if cmp and cmp.get("same") else
-              (M("Not compared yet: the last pass runs by itself once the copy is done.") if not cmp else
-               M("Different: {list}", list=", ".join((cmp.get("missing") or []) + (cmp.get("different") or []) + (cmp.get("extra") or []))[:300])))
-        check("renamed", bool(st.get("old_path")), M("The old folder set aside"),
-              M("Now {path}.", path=os.path.basename(st["old_path"])) if st.get("old_path")
-              else M("Waiting for you: Compare, Then Set the Old Folder Aside (step 3, below)."))
+        if not cmp:  # the last pass runs by itself when the copy is done, and compares; not there: it didn't start, or didn't finish
+            check("compare", False, M("Both copies the same, file by file"), M("Not compared yet: the last pass runs by itself once the copy is done."),
+                  level="waiting", doing=M("Comparing"), within=COMPARE_WAIT,
+                  late=lambda waited: M("The last pass hasn’t compared the two after {waited} (the copy ended: {result}). Press Copy Changes & Compare "
+                                        "to run it again.", waited=waited, result=(st.get("copy") or {}).get("result") or "?"))
+        else:
+            check("compare", bool(cmp.get("same")), M("Both copies the same, file by file"),
+                  M("{files} files, {size}.", files=cmp.get("files"), size=_gb(cmp.get("bytes"))) if cmp.get("same") else
+                  M("Different: {list}", list=", ".join((cmp.get("missing") or []) + (cmp.get("different") or []) + (cmp.get("extra") or []))[:300]))
         if not st.get("old_path"):
-            return
+            return  # (the "set aside" check comes after the ones that gate step 3's button: _run_checks)
+        check("renamed", True, M("The old folder set aside"), M("Now {path}.", path=os.path.basename(st["old_path"])))
         props = self._props(st["child"])
         f = self._folder("probe", path=st["folder"])
         named = isinstance(props, dict) and bool(f.get("is_mount"))
@@ -521,10 +539,24 @@ class Migration:
             st["corrected"] = said
             self._released()
 
-    @staticmethod
-    def _collector(into: list):
-        def check(cid, ok, title, detail="", cmd="", action="", level="", gate=""):
-            into.append({"id": cid, "ok": ok, "title": title, "detail": detail, "cmd": cmd, "action": action, "level": level, "gate": gate})
+    def _checker(self, into: list):
+        """A function that adds a check to ``into`` and returns whether it's done.
+
+        level: "" a step to do; "waiting" one that completes by itself, nothing asked of the user — ``doing`` is the word on
+        its chip (Restarting, Reading…), ``within`` how many seconds it normally takes, and ``late(waited)`` what to say once
+        it has taken longer: the check turns red with the way out; "warn" said but stopping nothing; "error" something wrong
+        that stops the step (red). gate: what it stops besides the step's own button ("aside": setting the old folder aside).
+        A waiting check's ``since`` is when it was first seen waiting (self.waits), kept while it's not done."""
+        def check(cid, ok, title, detail="", cmd="", action="", level="", gate="", doing=None, within=0, late=None):
+            since = None
+            if level == "waiting" and not ok:
+                since = self.waits.setdefault(cid, time.time())
+                if within and time.time() - since > within:
+                    level = "error"
+                    if late is not None:
+                        detail = late(_waited(time.time() - since))
+            into.append({"id": cid, "ok": ok, "title": title, "detail": detail, "cmd": cmd, "action": action, "level": level, "gate": gate,
+                         "doing": doing or "", "since": since})
             return ok
         return check
 
@@ -532,7 +564,7 @@ class Migration:
         """What stops the set-aside looked at again by itself (the folder sync, the other site), the step's other checks as
         they were."""
         st, new = self.state or {}, []
-        check = self._collector(new)
+        check = self._checker(new)
         self._check_sync(st, check)
         self._check_mirror(st, check)
         ids = {c["id"] for c in new}
@@ -649,6 +681,14 @@ class Migration:
                 check("mirror_chosen", False, M("The library’s mirror chosen"), self._seen_text(seen))
             return
         step, key = st.get("step"), str(st.get("library") or "")
+        links = getattr(self.app, "peerlinks", None)
+        link = links.for_library(key) if links is not None else None
+        if link is not None and link.settling():  # just after a start: nothing concluded from what isn't known yet
+            name = self._mirror_name(None, key)
+            check("mirror_link", False, M("Connecting to the Plex Cache at {name}’s site…", name=name),
+                  M("Plex Cache just started: what {name} says is asked for first, normally within a minute.", name=name),
+                  level="waiting", doing=M("Connecting"), gate="aside")
+            return
         f = self._mirror(fresh=True, library=key)
         name = self._mirror_name(f, key)
         lib = ((f or {}).get("libraries") or {}).get(key) or {}
@@ -699,8 +739,10 @@ class Migration:
             holding = lib.get("holding")
             if f and f.get("via") == "link" and holding is not None:
                 check("mirror_holding", bool(holding), M("{name} holds its file jobs on {library}", name=name, library=title),
-                      "" if holding else M("It looks every 5 minutes, and holds optimizing, the file tools and Sync Libraries there once it sees this side "
-                                           "switching (since the copy finished). This is checked again by itself."), gate="aside")
+                      "" if holding else M("Normally completes automatically: {name} takes this up within a minute.", name=name),
+                      level="waiting", doing=M("Waiting"), within=HOLD_WAIT, gate="aside",
+                      late=lambda waited: M("{name} hasn’t taken this up after {waited}. Check that the two Plex Caches are talking and run the same version "
+                                            "(System → Mirror Plex Cache, the Talking and Version lights), then press Check Again.", name=name, waited=waited))
             else:
                 check("mirror_holding", False, M("{name} holds its file jobs on {library}", name=name, library=title),
                       M("Can’t be confirmed: the two Plex Caches aren’t talking (System → Mirror Plex Cache). Don’t run its file tools or the optimizer "
@@ -744,7 +786,9 @@ class Migration:
             cached = self._mf = (st["folder"], time.time(), got)
         got = cached[2]
         if got.get("pending"):
-            check("mirror_files", False, title, M("Reading the files on both sides…"))
+            check("mirror_files", False, title, M("Reading the files on both sides…"), level="waiting", doing=M("Reading"), within=FILES_WAIT,
+                  late=lambda waited: M("Still reading after {waited}. Check that the two Plex Caches are talking (System → Mirror Plex Cache), "
+                                        "then press Check Again.", waited=waited))
         elif got.get("error"):
             check("mirror_files", False, title, M("Not compared: {why}", why=got["error"]), level="warn")
         else:
@@ -825,8 +869,8 @@ class Migration:
 
     def mirror_view(self) -> dict:
         """For the page: whether a mirror is watched, and how its Plex Cache is heard from — its light ("off": no mirror,
-        only this server; "ok": talking directly, over the link; "warn": only its marker, carried by the folder sync, or
-        not heard from at all), what that means for the conversion; with a mirror, its name and page, and each candidate
+        only this server; "testing": just started, not asked yet; "ok": talking directly, over the link; "warn": only its
+        marker, carried by the folder sync, or not heard from at all), what that means for the conversion; with a mirror, its name and page, and each candidate
         folder as it is there."""
         libs = [(self.state or {}).get("library")] if (self.state or {}).get("step") in UNDER_WAY else \
             list(dict.fromkeys(c["library"] for c in self.candidates()))
@@ -853,7 +897,10 @@ class Migration:
         how = M("This server goes first, then {name} (or this one only: chosen before the copy). Before the copy, {name} must run "
                 "TrueNAS, with room for its own copy, and nothing left partway there. While this one switches, the folder sync is "
                 "paused here and {name} holds its file jobs on the library; after, the files here are compared with {name}’s.", name=name)
-        if via == "link":
+        if link is not None and link.settling():
+            status, title = "testing", M("Mirror: {name}, connecting…", name=name)
+            detail = how
+        elif via == "link":
             status, title = "ok", M("Mirror: {name}, talking directly", name=name)
             detail = how
         elif via == "marker":
@@ -1149,6 +1196,13 @@ def their_folder(rows, name: str) -> dict | None:
 
 def _gb(n) -> str:
     return f"{(n or 0) / 1e9:,.1f} GB"
+
+
+def _waited(seconds: float) -> M:
+    """How long a check has been waiting, in round words: "40 seconds", "6 minutes"."""
+    if seconds < 90:
+        return M("{n} seconds", n=int(seconds), one="{n} second")
+    return M("{n} minutes", n=int(round(seconds / 60)), one="{n} minute")
 
 
 def _rs(n) -> str:

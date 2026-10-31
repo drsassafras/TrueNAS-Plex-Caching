@@ -772,7 +772,11 @@ def _migration_items(app) -> list[dict]:
     failing = [c for c in (mig.checks if mig else []) if not c.get("ok")]
     todo = next((c for c in failing if c.get("level") == "error"), None) or \
         next((c for c in failing if c.get("level") != "warn"), None) or \
-        next(iter(failing), None)  # (something wrong first, then a step to do; a warning when nothing else is left)
+        next(iter(failing), None)  # (something wrong first, then what the page's Next names: the first step to do, or one completing by itself)
+    title = st.get("title") or st.get("folder")
+    if todo and todo.get("level") == "waiting":  # nothing asked of you: said as news, not as a step
+        return [dict(item("info", M("Converting {title} to a child dataset: {what}", title=title, what=todo["title"]), todo.get("detail") or ""),
+                     link={"href": "/dataset", "text": M("Its Tools page")})]
     if todo:
         what, more = todo["title"], todo.get("detail") or ""
     elif st["step"] == "switch":
@@ -780,7 +784,7 @@ def _migration_items(app) -> list[dict]:
     else:
         return []
     level = "fail" if todo and todo.get("level") == "error" else "warn"  # (something wrong that stops it: red)
-    return [dict(item(level, M("Action needed to finish converting {title} to a child dataset", title=st.get("title") or st.get("folder")),
+    return [dict(item(level, M("Action needed to finish converting {title} to a child dataset", title=title),
                       M("Next: {what}. {more}", what=what, more=more),
                       help=M("Turning a library folder into a dataset of its own goes step by step, and some steps are yours — in "
                              "TrueNAS, or a button on the Optimizer page. Until then nothing moves on; the folder and Plex are as they were.")),

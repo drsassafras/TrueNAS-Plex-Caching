@@ -213,7 +213,41 @@ PCI18N.ready.then(function () {
     var open = key in openDetails ? openDetails[key] : !!openByDefault;
     return '<details data-key="' + esc(key) + '" data-def="' + (openByDefault ? 1 : 0) + '"' + (open ? " open" : "") + "><summary>" + summary + "</summary>" + body + "</details>";
   }
-  function badge(status, text) { return '<span class="badge b-' + esc(status) + '">' + esc(text) + "</span>"; }
+  // Something being worked out (.spinning: a count still to come, a badge for a step completing by itself, a button whose
+  // check runs) has a comet run along its edge: drawn here after every render, an SVG measured to the element (app.css
+  // .comet) — its path the element's outline, half over it and half outside, a drop-shaped head and a tail half the
+  // path long thinning and fading to nothing. One pace for every element (COMET_SPEED, in pixels along the edge), and the
+  // clock sets the phase, so a redraw — the page drawn again every few seconds — leaves it where it was.
+  var COMET_SPEED = 60, COMET_LAYERS = 40, COMET_HEAD = 2.56;  // px per second along the edge; strokes in the tail (enough that it reads as one gradient); the head's width
+  function comets() {
+    if (typeof document === "undefined" || !document.querySelectorAll) return;
+    var els = document.querySelectorAll(".spinning");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.querySelector("svg.comet")) continue;
+      var w = el.offsetWidth, h = el.offsetHeight;
+      if (!w || !h) continue;
+      var r = Math.min(parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0, h / 2, w / 2);
+      var P = 2 * (w + h) - 8 * r + 2 * Math.PI * r, tail = P / 2, period = P / COMET_SPEED;
+      var svg = '<svg class="comet" aria-hidden="true" width="' + w + '" height="' + h + '" style="--P:' + P.toFixed(2) + 'px;--period:' + period.toFixed(3) + 's">';
+      for (var k = 0; k < COMET_LAYERS; k++) {
+        // the head: a round dot (the shortest dash, its round caps). The tail begins at the back of the dot, a radius behind
+        // the head's front, narrower than the dot so the dot reads as a ball; each dash longer than the last and a little
+        // thinner and fainter, the last nothing. --front is how far behind the comet's front a dash begins.
+        var head = k === 0, f = k / (COMET_LAYERS - 1), len = head ? 0.1 : tail * Math.pow(f, 1.6),
+          front = head ? 0 : COMET_HEAD / 2, width = head ? COMET_HEAD : COMET_HEAD * (0.75 - 0.65 * f), alpha = head ? 1 : Math.pow(1 - f, 1.5);
+        svg += '<rect x="0" y="0" width="' + w + '" height="' + h + '" rx="' + r.toFixed(2) + '" style="--front:' + (len + front).toFixed(2) + 'px;stroke-width:' + width.toFixed(2) + ';opacity:' + alpha.toFixed(3) +
+          ';stroke-dasharray:' + len.toFixed(2) + ' ' + (P - len).toFixed(2) + '"/>';
+      }
+      el.insertAdjacentHTML("beforeend", svg + "</svg>");
+      // every comet's animation started at the document's time zero: its place on the edge is the clock's, so one drawn
+      // again (or drawn later, on another element) is where the last one was
+      var drawn = el.lastElementChild, anims = drawn && drawn.getAnimations ? drawn.getAnimations({ subtree: true }) : [];
+      for (var j = 0; j < anims.length; j++) anims[j].startTime = 0;
+    }
+  }
+  // spinning: the badge's border turns — something being worked out (a step completing by itself; always for "running")
+  function badge(status, text, spinning) { return '<span class="badge b-' + esc(status) + (spinning || status === "running" ? " spinning" : "") + '">' + esc(text) + "</span>"; }
   // Event log categories (the server sends the English key).
   var EVENT_KINDS = { settings: N("settings"), "warm-up": N("warm-up"), "record size": N("record size"), benchmark: N("benchmark"), mqtt: N("mqtt"),
     playback: N("playback"), "now-playing": N("now-playing"), "next-episode": N("prefetch"), nowplaying: N("now-playing"), nextepisode: N("prefetch"), update: N("update"),
@@ -253,7 +287,7 @@ PCI18N.ready.then(function () {
     var c = h.counts;
     var out = top(T("Health"),
       H("Checks run on startup, every 6 hours, and whenever settings change. Last run {when}.", { when: ago(h.at) }),
-      '<button class="btn pri" data-act="recheck"' + (ST.checking ? " disabled" : "") + ">" + (ST.checking ? H("Checking…") : H("Re-run All Checks")) + "</button>");
+      '<button class="btn pri' + (ST.checking ? " spinning" : "") + '" data-act="recheck"' + (ST.checking ? " disabled" : "") + ">" + (ST.checking ? H("Checking…") : H("Re-run All Checks")) + "</button>");
     out += banner(h.summary, false);
     var hj = ST.job;
     if (hj && hj.running) {
@@ -375,7 +409,7 @@ PCI18N.ready.then(function () {
       var cmd = it.fix_cmd ? it.fix_cmd.split("{APP}").join(location.origin) : "";
       out += '<div class="fix">' + links(it.fix);
       if (cmd) out += '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) + '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button>" +
-        '<button class="btn" type="button" data-act="recheck"' + (ST.checking ? " disabled" : "") + ">" + (ST.checking ? H("Checking…") : H("Re-test")) + "</button></div>";
+        '<button class="btn' + (ST.checking ? " spinning" : "") + '" type="button" data-act="recheck"' + (ST.checking ? " disabled" : "") + ">" + (ST.checking ? H("Checking…") : H("Re-test")) + "</button></div>";
       out += "</div>";
     }
     if (it.link && it.link.job) out += '<div class="det"><button class="link" type="button" data-act="proc-failed" data-job="' + esc(it.link.job) + '">' + esc(it.link.text) + "</button></div>";
@@ -1332,16 +1366,20 @@ PCI18N.ready.then(function () {
   // The steps (migrating.py): Create → Copy → Switch → Verify. Each step's checks come from the
   // server; this shows them, what to do (shell and TrueNAS web UI), and the buttons.
   var MIG_CONFIRM_DELETE = false;
+  var MIG_CHECKING = false;  // Check Again pressed, its answer not in yet: the badges keep what they last said, their borders turning
   // A word for the shell, quoted so nothing in it (a folder named with $ or quotes) can run as a command
   function shq(v) { return "'" + String(v).replace(/'/g, "'\\''") + "'"; }
   function cmdBox(cmd) {
     return '<div class="cmd"><code style="white-space:pre-wrap">' + esc(cmd) + '</code><button class="btn" data-copy="' + esc(cmd) + '">' + H("Copy") + "</button></div>";
   }
-  // A check's badge: done; a step to do; a warning (said, stopping nothing); an error (something wrong that stops the step: red)
+  // A check's badge: done; a step to do; one that completes by itself (what it's doing: Waiting, Restarting, Reading…);
+  // a warning (said, stopping nothing); an error (something wrong that stops the step: red)
   function migBadge(c) {
-    if (c.ok) return badge("pass", T("Done"));
-    if (c.level === "error") return badge("fail", T("Error"));
-    return badge("warn", c.level === "warn" ? T("Warning") : T("To do"));
+    var again = MIG_CHECKING;
+    if (c.ok) return badge("pass", T("Done"), again);
+    if (c.level === "error") return badge("fail", T("Error"), again);
+    if (c.level === "waiting") return badge("info", c.doing || T("Waiting"), true);
+    return badge("warn", c.level === "warn" ? T("Warning") : T("To do"), again);
   }
   // done, or only a warning: what lets the step go ahead (migrating.py: blocking)
   function migClear(c) { return c.ok || c.level === "warn"; }
@@ -1361,7 +1399,7 @@ PCI18N.ready.then(function () {
     var at = (ST.migration || {}).checked_at;
     return '<div class="note"><strong>' + H("Next:") + "</strong> " + esc(first.title) + (first.detail ? '<div class="det">' + links(first.detail) + "</div>" : "") +
       (first.cmd ? cmdBox(first.cmd) : "") + migAction(first) +
-      '<div class="det muted">' + (at ? H("Looked at {when}: not done yet. Plex Cache looks again by itself every 30 seconds, and this moves on once it is.", { when: ago(at) })
+      '<div class="det muted">' + (MIG_CHECKING ? H("Checking again…") : at ? H("Looked at {when}: not done yet. Plex Cache looks again by itself every 30 seconds, and this moves on once it is.", { when: ago(at) })
         : H("Plex Cache looks by itself every 30 seconds, and this moves on once it’s done.")) + "</div></div>";
   }
   // a check the app can put right itself: its button
@@ -1540,10 +1578,12 @@ PCI18N.ready.then(function () {
     if (st.corrected) out += '<div class="note">' + esc(st.corrected) + "</div>";
     if (st.step !== "copy") out += migNext(checks);
     var optBusy = !!((ST.job || {}).running);  // one file job at a time
-    var btn = function (act, label, pri, disabled) {
+    var btn = function (act, label, pri, disabled, spinning) {
       var blocked = optBusy && ["copy", "catchup", "pass_then_move", "rename_old", "undo_rename", "delete_old", "ask_delete"].indexOf(act) >= 0;
-      return '<button class="btn' + (pri ? " pri" : "") + '" type="button" data-act="mig" data-mig="' + act + '"' + (disabled || blocked ? " disabled" : "") + ">" + label + "</button> ";
+      return '<button class="btn' + (pri ? " pri" : "") + (spinning ? " spinning" : "") + '" type="button" data-act="mig" data-mig="' + act + '"' + (disabled || blocked ? " disabled" : "") + ">" + label + "</button> ";
     };
+    // Check Again: Checking…, its border turning, until the answer is in
+    var checkBtn = function () { return MIG_CHECKING ? btn("check", H("Checking…"), false, true, true) : btn("check", H("Check Again")); };
     var temp = st.temp, rs = rsOr(st.rs), owner = st.owner || {};
     var made = checks.some(function (c) { return c.id === "dataset" && c.ok; });
     if (st.step === "create" && made) {  // created: what's left is in Next and the list
@@ -1551,7 +1591,7 @@ PCI18N.ready.then(function () {
       out += migChecks(checks);
       var ready0 = checks.length && checks.every(migClear);
       var gateM = readinessPanel(String(st.library), 0, "dataset", T("the old folder itself: set aside once the copy is checked, deleted only when you say"), 0);
-      out += gateM.html + '<div style="margin-top:10px">' + btn("check", H("Check Again")) + btn("copy", H("Start Copying"), true, !ready0 || !gateM.ready) + btn("cancel", H("Cancel")) + "</div>";
+      out += gateM.html + '<div style="margin-top:10px">' + checkBtn() + btn("copy", H("Start Copying"), true, !ready0 || !gateM.ready) + btn("cancel", H("Cancel")) + "</div>";
     } else if (st.step === "create") {
       out += '<p class="help">' + H("Create the new dataset next to the folder, with these settings. It’s checked before anything is copied.") + "</p>";
       out += '<div class="fix"><strong>' + H("In the TrueNAS shell") + "</strong>" + cmdBox("sudo zfs create -o recordsize=" + rs + " -o compression=zstd " + shq(temp) + "\n" +
@@ -1562,7 +1602,7 @@ PCI18N.ready.then(function () {
         "<li>" + H("Select it → Edit Permissions: owner {uid}, group {gid} (the folder’s). Save.", { uid: owner.uid != null ? owner.uid : 568, gid: owner.gid != null ? owner.gid : 568 }) + "</li></ol></div>";
       out += migChecks(checks);
       var ready = checks.length && checks.every(migClear);
-      out += '<div style="margin-top:10px">' + btn("check", H("Check Again")) + btn("copy", H("Start Copying"), true, !ready) + btn("cancel", H("Cancel")) + "</div>";
+      out += '<div style="margin-top:10px">' + checkBtn() + btn("copy", H("Start Copying"), true, !ready) + btn("cancel", H("Cancel")) + "</div>";
     } else if (st.step === "copy" || (st.step === "switch" && st.copying)) {
       // the copy runs as the file job: its progress, Pause and Cancel are in the card above
       if (st.copying && st.queued) out += '<p class="help">' + H("Waiting in the queue: it starts when the file jobs before it are done.") + "</p>" +
@@ -1594,11 +1634,11 @@ PCI18N.ready.then(function () {
           (st.move_error ? '<div class="det bad">' + esc(st.move_error) + "</div>" : "")) +
         stepRow("", H("<strong>Rename the new dataset</strong> to the folder’s name, in the TrueNAS shell:") + cmdBox("sudo zfs rename " + shq(temp) + " " + shq(st.child)) +
           '<div class="det">' + H("Or in the TrueNAS web UI, if your version offers it: Datasets → select {name} → Rename.", { name: temp.split("/").pop() }) + "</div>") +
-        "</ol>" + migChecks(checks) + '<div style="margin-top:10px">' + btn("check", H("Check Again")) + (st.old_path ? "" : btn("cancel", H("Cancel"))) + "</div>";
+        "</ol>" + migChecks(checks) + '<div style="margin-top:10px">' + checkBtn() + (st.old_path ? "" : btn("cancel", H("Cancel"))) + "</div>";
     } else if (st.step === "verify") {
       out += '<p class="help">' + H("Now restart Plex (TrueNAS: Apps → Plex → Restart) so it sees the dataset, and let it scan. Then check again.") + "</p>" + migChecks(checks);
       var ok = checks.length && checks.every(migClear);
-      out += '<div style="margin-top:10px">' + btn("check", H("Check Again"));
+      out += '<div style="margin-top:10px">' + checkBtn();
       if (MIG_CONFIRM_DELETE) out += '<span class="det">' + H("Delete {path} for good?", { path: (st.old_path || "").split("/").pop() }) + "</span> " + btn("delete_old", H("Delete"), true) +
         '<button class="link" type="button" data-act="mig-nodelete">' + H("Cancel") + "</button>";
       else out += btn("ask_delete", H("Delete the Old Copy"), true, !ok);
@@ -2692,12 +2732,14 @@ PCI18N.ready.then(function () {
     if (only) checksHtml = [only].map(function (cat) {
       var all = d.checks[cat] || [], byId = {};
       all.forEach(function (c) { byId[c.id] = c; });
-      var row = function (c) {
+      // (while the page's count is worked out again — a scan, a restart — each check keeps the number it had, its border turning)
+    var again = !ready && !!cnt.last;
+    var row = function (c) {
         var n = counts[c.id] || 0, sub = !!c.of;
         var rv = dflt[c.id] !== undefined && c.on !== dflt[c.id] ? ' <button type="button" class="revert" data-lhcheck-revert="' + c.id + '" title="' + H("Back to the default ({value})", { value: dflt[c.id] ? T("on") : T("off") }) + '">↺</button>' : "";
         var help = richText(msg(c.help)) + (c.link ? '<p><a href="' + esc(c.link) + '" target="_blank" rel="noopener">' + H("The research behind it ↗") + "</a></p>" : "");
         return '<div class="chk lhchk optrow' + (sub ? " lhsub" : "") + '">' + info(help, msg(c.name)) + '<label><input type="checkbox" data-lhcheck="' + c.id + '"' + (c.on ? " checked" : "") + ">" + esc(msg(c.name)) + "</label>" + rv +
-          (!ready ? "" : sub ? (c.on && n ? badge("warn", fmtNum(n)) : "") : c.on ? (notRun[c.id] ? statChip("fail", fmtNum(n), T("Not checked: {why}", { why: msg(notRun[c.id].why) })) : n ? badge("warn", fmtNum(n)) : badge("pass", "0")) : "") +
+          (!ready && !again ? "" : sub ? (c.on && n ? badge("warn", fmtNum(n), again) : "") : c.on ? (notRun[c.id] ? statChip("fail", fmtNum(n), T("Not checked: {why}", { why: msg(notRun[c.id].why) })) : n ? badge("warn", fmtNum(n), again) : badge("pass", "0", again)) : "") +
           (c.id === "subtitles_language" ? '<div class="lhlang"><span>' + H("Language") + "</span>" + langSel +
             (d.language !== ((ST.library_health_defaults || {}).subtitle_language || "en") ? ' <button type="button" class="revert" data-lhlang-revert title="' + H("Back to the default ({value})", { value: "English" }) + '">↺</button>' : "") + "</div>" : "") +
           (c.id === "audio_low_bitrate" && c.on ? '<div class="lhlang"><span>' + H("Quality level") + "</span>" + qualSel +
@@ -3765,9 +3807,10 @@ PCI18N.ready.then(function () {
         (there ? ' <a href="' + esc(there) + '/system#peer" target="_blank" rel="noopener">' + H("Open Pair Now on the other one ↗") + "</a>" : "") + "</div>";
     }
     var asked = !!((pe.asked || {})[sid]);
-    out += '<div class="acts"><button class="btn' + ((lt.found && lt.found.status === "ok" && !lk.paired) || asked ? " pri" : "") + '" type="button" data-act="peer-pair" data-server="' + esc(sid) + '"' + (lk.window ? " disabled" : "") + ">" + H("Pair Now") + "</button>" +
-      info(H("Opens pairing for 10 minutes, without waiting for the synced folder or the mirror’s address: press it on both, then compare the fingerprints. For when pairing by itself can’t, or is off."), T("Pair Now")) +
-      (lk.paired ? ' <button class="link" type="button" data-act="peer-unpair" data-server="' + esc(sid) + '" title="' + H("Forgets the pairing on both sides. Neither pairs again by itself: Pair Now on both does.") + '">' + H("Unpair") + "</button>" : "") + "</div>";
+    // one pairing per server: Pair Now while there's none (or the other side asks for a new one), Unpair while there is
+    out += '<div class="acts">' + (!lk.paired || asked ? '<button class="btn' + ((lt.found && lt.found.status === "ok" && !lk.paired) || asked ? " pri" : "") + '" type="button" data-act="peer-pair" data-server="' + esc(sid) + '"' + (lk.window ? " disabled" : "") + ">" + H("Pair Now") + "</button>" +
+      info(H("Opens pairing for 10 minutes, without waiting for the synced folder or the mirror’s address: press it on both, then compare the fingerprints. For when pairing by itself can’t, or is off."), T("Pair Now")) : "") +
+      (lk.paired ? '<button class="link" type="button" data-act="peer-unpair" data-server="' + esc(sid) + '" title="' + H("Forgets the pairing on both sides. Neither pairs again by itself: Pair Now on both does.") + '">' + H("Unpair") + "</button>" : "") + "</div>";
     return out + "</fieldset>";
   }
   function peerCard() {
@@ -3783,13 +3826,16 @@ PCI18N.ready.then(function () {
     out += checkbox("peer", "auto_pair", T("Pair by itself"),
       { s: H("When the other one answers from the mirror’s address with the key the synced folder carried."),
         more: H("Off: the two pair only when you press Pair Now on both, within 10 minutes of each other. Then compare the fingerprints the two show: they’re the same when each is paired with the other.") });
+    out += checkbox("peer", "remote_update", T("The other Plex Cache may start updates here"),
+      { s: H("When it runs a newer build, it asks this one to update: the same update this page’s Update Now makes, from GitHub, through the TrueNAS API."),
+        more: H("The two must speak the same language: every command of the link has a version, and the Version light says when the other side lacks one. The side that is up to date asks the one that is behind, once per build; nothing named in its request is installed — only what this side’s own update check finds on GitHub for its channel.") });
     out += '<div class="grid">' + number("peer", "port", T("The port this one answers on"), 0, 65535,
       { s: own.port ? H("0 works it out: {port} now.", { port: String(own.port) }) : H("0 works it out."),
         more: H("The port the other Plex Cache reaches this one on, told to it through the synced folder. 0 works it out: from TrueNAS’s settings for this app, or the port this page is open on. Set it when a port mapping or a proxy changes it.") }) + "</div>";
     if ((own.addresses || []).length) out += '<div class="det">' + H("This one answers at {addresses}, port {port}.", { addresses: own.addresses.join(", "), port: String(own.port) }) + "</div>";
     if (!links.length) return out + '<div class="det muted">' + H("No library is mirrored yet: the Plex Cache at a mirror’s site is looked for once one is (<a href=\"/mirrors\" data-nav>Mirror</a>).") + "</div></section>";
     out += links.map(function (lk) { return peerServerBlock(lk, pe); }).join("") +
-      '<div class="acts"><button class="btn" type="button" data-act="peer-test"' + (pe.busy ? " disabled" : "") + ">" + (pe.busy ? H("Testing…") : H("Test Again")) + "</button></div>";
+      '<div class="acts"><button class="btn' + (pe.busy ? " spinning" : "") + '" type="button" data-act="peer-test"' + (pe.busy ? " disabled" : "") + ">" + (pe.busy ? H("Testing…") : H("Test Again")) + "</button></div>";
     return out + "</section>";
   }
   // Mirrored Libraries: one row per library here, its mirror chosen from a list — not decided (nothing assumed), no mirror,
@@ -3955,7 +4001,7 @@ PCI18N.ready.then(function () {
   function pageSystem() {
     var c = ST.connections || {}, testing = ST.testing;
     var out = top(T("System"), H("Connections and system-wide options. Stored in the app’s config folder, so they survive updates."),
-      '<button class="btn" data-act="retest"' + (testing ? " disabled" : "") + ">" + (testing ? H("Testing…") : H("Re-test Settings")) + "</button>");
+      '<button class="btn' + (testing ? " spinning" : "") + '" data-act="retest"' + (testing ? " disabled" : "") + ">" + (testing ? H("Testing…") : H("Re-test Settings")) + "</button>");
     out += banner(settingsSummary(c.summary), testing);
     out += '<div class="stack" style="max-width:980px">';
 
@@ -4065,7 +4111,7 @@ PCI18N.ready.then(function () {
     var stage = updateStage(u);
     var build = '<span class="muted" style="font-size:13px">' + (u.channel === "dev" ? H("Dev build v{version}{commit}.", { version: ST.version, commit: u.commit ? " (" + u.commit + ")" : "" }) : H("Stable build v{version}.", { version: ST.version })) + "</span> ";
     if (stage === "updating") return build + '<span class="muted" style="font-size:13px">' + H("Updating: TrueNAS is pulling the newer image and restarting the app. This page comes back by itself.") + "</span>";
-    var btn = ' <button class="btn sm" type="button" data-act="updates-check"' + (u.checking || stage === "checking" ? " disabled" : "") + ">" + (u.checking || stage === "checking" ? H("Checking…") : H("Check Now")) + "</button>" +
+    var btn = ' <button class="btn sm' + (u.checking || stage === "checking" ? " spinning" : "") + '" type="button" data-act="updates-check"' + (u.checking || stage === "checking" ? " disabled" : "") + ">" + (u.checking || stage === "checking" ? H("Checking…") : H("Check Now")) + "</button>" +
       (stage === "button" ? ' <button class="btn sm pri" type="button" data-act="updates-apply">' + H("Update Now") + "</button>" : "");
     var line = "";
     if (stage === "checking") line = H("Checking GitHub…");
@@ -4160,7 +4206,7 @@ PCI18N.ready.then(function () {
     var g = S.general, b = ST.benchmark, speeds = g.disk_speeds || {};
     var ds = (ST.zfs.datasets || []).filter(function (d) { return d.keys.length; });
     var out = '<section class="card" id="disk-speed"><div class="head"><h2>' + H("Disk Speed") + '</h2><span style="flex:1"></span>' +
-      '<button class="btn" data-act="benchmark"' + (b.running || !ds.length ? " disabled" : "") + ">" +
+      '<button class="btn' + (b.running ? " spinning" : "") + '" data-act="benchmark"' + (b.running || !ds.length ? " disabled" : "") + ">" +
       (b.running ? (b.progress ? H("Measuring {n} of {total}…", { n: b.progress.done + 1, total: b.progress.total }) : H("Measuring…")) : H("Benchmark Now")) + "</button></div>" +
       '<p class="hint">' + H("How fast each dataset reads when nothing is cached.") + info(H("The app uses it to tell a cache hit from a disk read " +
       "(a read at least 4× faster came from cache) — that’s how warm-up reports what was already cached — to time Now Playing Cache’s automatic start, and to work out how hard background " +
@@ -4327,7 +4373,7 @@ PCI18N.ready.then(function () {
   // page of the Tools menu — and the Library page — its count for each library and over them all ("tools": the menu's),
   // each in one of four states: done {s, n}; pending {s, why, progress?, partial?}: not in yet — a placeholder, never a
   // number, not even 0 — but for a count that grows as it's read (partial: File Checks while the files are inspected),
-  // what's been found so far with the turning wheel beside it — or, worked out again ("last": a check page after a
+  // what's been found so far, its border turning — or, worked out again ("last": a check page after a
   // restart, Mirror Checks scanning again), what was found last time, its findings shown meanwhile; na {s, why}: the page doesn't apply there (not set up) —
   // a grey dash, information rather than a result; failed {s, why}: couldn't be worked out — red. Drawn
   // by countChip (the tabs, the Tools page's cards, the menu, the Library page's lines) and countBox (in place of what a
@@ -4345,7 +4391,7 @@ PCI18N.ready.then(function () {
       : P(c.partial, "{n} found so far, still counting.", "{n} found so far, still counting.", { n: fmtNum(c.partial) })) + " " + w;
     return p && p.total ? w + " " + T("{done} of {total} · {pct}%", { done: fmtNum(p.done || 0), total: fmtNum(p.total), pct: Math.round(100 * (p.done || 0) / p.total) }) : w;
   }
-  // A count as a chip, one way everywhere: a turning wheel while it's still to come — beside what's been found so far, for
+  // A count as a chip, one way everywhere: its border turning while it's still to come — around what's been found so far, for
   // a count that grows as it's read (partial); a grey dash where the page doesn't apply; a red ! where it couldn't be
   // worked out; else the number — red (bad: toolBad) while something red on the page stops part of it, whatever the
   // number; yellow with something to do; green at 0. What's been found so far takes the colour of what it holds the same
@@ -4358,8 +4404,8 @@ PCI18N.ready.then(function () {
   function countChip(c, bad) {
     c = c || { s: "pending" };
     var why = esc(countWhy(c)), tone = partialTone(c, bad);
-    if (c.s === "pending") return ' <span class="count busy' + (c.partial != null ? " partial" : "") + (tone ? " " + tone : "") + '" role="status" title="' + why + '" aria-label="' + why + '">' +
-      (c.partial != null ? fmtNum(c.partial) + " " : "") + '<span class="spin" aria-hidden="true"></span></span>';
+    if (c.s === "pending") return ' <span class="count busy' + (c.partial != null ? " partial" : "") + (tone ? " " + tone : "") + ' spinning" role="status" title="' + why + '" aria-label="' + why + '">' +
+      (c.partial != null ? fmtNum(c.partial) : "…") + "</span>";
     if (c.s === "na") return ' <span class="count na" title="' + why + '" aria-label="' + why + '">–</span>';
     if (c.s === "failed") return ' <span class="count fail" title="' + why + '" aria-label="' + why + '">!</span>';
     if (bad) return ' <span class="count fail" title="' + H("Something red on its page stops part of it, or couldn’t be checked") + '">' + fmtNum(c.n || 0) + "</span>";
@@ -4408,7 +4454,7 @@ PCI18N.ready.then(function () {
     return libTabs({ tool: name, libs: libs, key: u.key, attrs: function (l) { return 'data-act="tool-lib" data-tool="' + name + '" data-key="' + esc(l.key) + '"'; } });
   }
   // ---- The library tabs, drawn one way on every tool's page and the check pages: a tab per library — its icon, its name,
-  // and the page's count there (countOf, drawn by countChip: the number, a turning wheel while it's still to come, a grey
+  // and the page's count there (countOf, drawn by countChip: the number, its border turning while it's still to come, a grey
   // dash where the page doesn't apply; red while something red on the page stops part of it there: toolBad).
   // o: {tool (the page), libs, key (the library open), attrs(l) (the tab's data-act and its own)}
   function libTabs(o) {
@@ -5394,18 +5440,19 @@ PCI18N.ready.then(function () {
   }
   window.addEventListener("resize", fitPosters);
   // The count beside Tools in the menu: what the tools have found to do, over every page (the state's "tools" count, as
-  // countChip draws one) — a turning wheel while any page's is still to come (beside what's been found so far, coloured as
+  // countChip draws one) — its border turning while any page's is still to come (around what's been found so far, coloured as
   // countChip colours it: partialTone), a red ! where one couldn't be worked out, red
   // while something red on a tool's page stops part of it (shown even at 0: bad), nothing at 0
   function menuCount(el, c, bad) {
     if (!el) return;
-    var busy = c.s === "pending", html = busy ? (c.partial ? fmtNum(c.partial) : "") + '<span class="spin" aria-hidden="true"></span>' : c.s === "failed" ? "!" : c.s === "done" && (c.n || bad) ? fmtNum(c.n) : "";
-    if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }  // (the wheel not started again with every state)
+    var busy = c.s === "pending", html = busy ? (c.partial ? fmtNum(c.partial) : "…") : c.s === "failed" ? "!" : c.s === "done" && (c.n || bad) ? fmtNum(c.n) : "";
+    if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }
     el.hidden = !html;
-    var tone = partialTone(c, bad);
+    var tone = partialTone(c, bad), failNow = tone === "fail" || (!busy && (bad || c.s === "failed"));
     el.classList.toggle("busy", busy);
-    el.classList.toggle("warn", tone === "warn");
-    el.classList.toggle("fail", tone === "fail" || (!busy && (bad || c.s === "failed")));
+    el.classList.toggle("spinning", busy);  // (its border turns while the count is still to come)
+    el.classList.toggle("warn", tone === "warn" || (!busy && !failNow && c.s === "done" && !!c.n));
+    el.classList.toggle("fail", failNow);
     var why = busy || c.s === "failed" ? countWhy(c) : "";
     if (why) { el.setAttribute("title", why); el.setAttribute("aria-label", why); } else { el.removeAttribute("title"); el.removeAttribute("aria-label"); }
   }
@@ -5467,6 +5514,7 @@ PCI18N.ready.then(function () {
     fitPosters();
     reattachInfo();
     stickHeights();
+    comets();
   }
   // Library Health's legend stays at the top of the window, and the table's column names just under it
   function stickHeights() {
@@ -5935,8 +5983,10 @@ PCI18N.ready.then(function () {
       if (m === "ask_delete") { MIG_CONFIRM_DELETE = true; render(); return; }
       MIG_CONFIRM_DELETE = false;
       el.disabled = true;
+      if (m === "check") { MIG_CHECKING = true; render(); }
+      var checked = function () { if (m === "check") { MIG_CHECKING = false; render(); } };
       api("/api/migration", { action: m, library: el.dataset.lib, folder: el.dataset.folder, scope: el.dataset.scope })
-        .then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
+        .then(function () { return load(); }).catch(function (e) { toast(e.message, true); return load(); }).then(checked, checked);
     }
     else if (act === "queue-remove") {
       el.disabled = true;

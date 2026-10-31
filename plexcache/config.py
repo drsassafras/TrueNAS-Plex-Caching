@@ -44,8 +44,9 @@ DEFAULTS: dict = {
     "truenas": {"url": "", "api_key": "", "verify_tls": False},
     # The other Plex Cache, at the mirror's site (peerlink.py: System → Mirror Plex Cache). "enabled": looked for (off: there's
     # none there); "auto_pair": paired by itself when it's safe; "port": the port the other side reaches this one on (0: worked
-    # out); "servers": per mirrored server (its machine id) -> {"url": the Plex Cache's address at its site ("": found by itself)}.
-    "peer": {"enabled": True, "auto_pair": True, "port": 0, "servers": {}},
+    # out); "remote_update": a paired Plex Cache that's newer may start this one's update (the one its own check finds);
+    # "servers": per mirrored server (its machine id) -> {"url": the Plex Cache's address at its site ("": found by itself)}.
+    "peer": {"enabled": True, "auto_pair": True, "remote_update": True, "port": 0, "servers": {}},
     "general": {
         "poll_seconds": 5,
         "update_check": True,  # ask GitHub every few hours whether there's a newer version
