@@ -1131,6 +1131,11 @@ class PeerLink:
         c = ((self.status if st is None else st) or {}).get("commands")
         return {str(k): int(v) for k, v in c.items() if isinstance(v, int)} if isinstance(c, dict) else {}
 
+    def commands_behind(self, st: dict | None = None) -> list[str]:
+        """The link commands this side has that the other hasn't (or has at an older version): it's behind on them."""
+        theirs = self.commands_there(st)
+        return [c for c, v in COMMANDS.items() if c != "hello" and theirs.get(c, 0) < v]
+
     def can(self, command: str, st: dict | None = None) -> bool:
         """Whether the other side speaks a command as this side does (the same version): used before every one but the
         ones every side has."""
@@ -1148,7 +1153,7 @@ class PeerLink:
             return
         theirs = (str(st.get("version") or ""), str(st.get("commit") or "")[:7])
         ours = (str(self.app.version), COMMIT[:7])
-        behind = theirs[0] != ours[0] or (CHANNEL == "dev" and bool(theirs[1]) and bool(ours[1]) and theirs[1] != ours[1])
+        behind = theirs[0] != ours[0] or (CHANNEL == "dev" and bool(theirs[1]) and bool(ours[1]) and theirs[1] != ours[1]) or bool(self.commands_behind(st))
         if not behind or not getattr(up, "checked", None):
             return
         if newer(theirs[0], ours[0]) or up.available():
@@ -1405,9 +1410,33 @@ class PeerLink:
         theirs = self.commands_there()
         version = M("Dionysus {version}", version=st.get("version") or "?")
         if not isinstance(st.get("commands"), dict):
-            return api_light([f"{c} (v{v} here, none there)" for c, v in COMMANDS.items() if c != "hello"], [], len(COMMANDS), version, "commands")
-        gone = [f"{c} (v{v} here, {'v' + str(theirs[c]) if c in theirs else 'none'} there)" for c, v in COMMANDS.items() if theirs.get(c) != v]
-        return api_light(gone, [], len(COMMANDS), version, "commands")
+            gone = [f"{c} (v{v} here, none there)" for c, v in COMMANDS.items() if c != "hello"]
+        else:
+            gone = [f"{c} (v{v} here, {'v' + str(theirs[c]) if c in theirs else 'none'} there)" for c, v in COMMANDS.items() if theirs.get(c) != v]
+        got = api_light(gone, [], len(COMMANDS), version, "commands")
+        if gone:
+            got["detail"] = M("{gone} {update}", gone=got["detail"], update=self._update_state(st))
+        return got
+
+    def _update_state(self, st: dict) -> M:
+        """What brings the two sides' commands in line, for the API light: an update — this side's, when its own check found
+        one (or the other side has commands this one hasn't); else the other side's, asked for over the link (_offer_update),
+        with how that went."""
+        up = getattr(self.app, "updates", None)
+        ours_newer = {c: v for c, v in self.commands_there(st).items() if v > COMMANDS.get(c, 0)}
+        if ours_newer or (up is not None and up.available()):
+            return M("This Dionysus is the one behind: update it (System → Updates → Update Now).")
+        said = self.update_said
+        if said and said[1]:
+            return M("The Dionysus there was asked to update at {when}, and TrueNAS there is pulling the newer image.", when=time.strftime("%H:%M", time.localtime(said[0])))
+        if said:
+            why = M("This build isn’t on GitHub yet (copied here by hand), so there’s nothing for it to update to until it’s pushed.") if "no newer build" in said[2] else said[2]
+            return M("The Dionysus there was asked to update at {when}, and couldn’t: {why}", when=time.strftime("%H:%M", time.localtime(said[0])), why=why)
+        if not self.can("update", st):
+            return M("The Dionysus there is older than this one and can’t be asked to update over the link: update it on its own System page (Updates → Update Now).")
+        if st.get("channel") != CHANNEL:
+            return M("The Dionysus there follows the {theirs} channel, this one {ours}: put both on the same channel, then update the one behind.", theirs=st.get("channel") or "?", ours=CHANNEL)
+        return M("The Dionysus there is behind this one: it’s asked to update once this side’s update check has run (System → Updates).")
 
     def _version_light(self) -> dict:
         st = self.status if self.talking() else None

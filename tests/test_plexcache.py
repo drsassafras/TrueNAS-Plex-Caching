@@ -13180,7 +13180,8 @@ class IntegrationStandardTests(unittest.TestCase):
             self.assertRegex(card, r'class="card hasfp" id="' + name + r'"><div class="fpmark own"><div class="fpstack"><svg class="identicon".*?<span class="fpcode" title="[^"]+">' + short + "</span>")
         self.assertEqual(en(integrations.api_light([], [], 9, "v1")["text"]), "API compatibility: all 9 calls known")
         self.assertEqual(en(integrations.api_light(["status (v2 here, v1 there)"], [], 7, "Dionysus 0.16.21", "commands")["text"]), "API compatibility: 1 of 7 commands missing")
-        self.assertIn("learns the new commands", en(integrations.api_light(["x"], [], 7, "v", "commands")["detail"]))
+        self.assertIn("until both sides run the same version", en(integrations.api_light(["x"], [], 7, "v", "commands")["detail"]))
+        self.assertNotIn("GitHub", en(integrations.api_light(["x"], [], 7, "v", "commands")["detail"]))  # (the link's: the side behind updates, nothing to report)
         # the link's: every command of the link against the table the other side sent
         link = app.peerlinks.link("xyz")
         link.talking = lambda: True
@@ -13193,6 +13194,19 @@ class IntegrationStandardTests(unittest.TestCase):
         self.assertEqual((got["status"], en(got["text"])), ("warn", f"API compatibility: 2 of {len(pl.COMMANDS)} commands missing"))
         self.assertIn(f"status (v{pl.COMMANDS['status']} here, v{pl.COMMANDS['status'] - 1} there)", en(got["detail"]))
         self.assertIn("carry (v1 here, none there)", en(got["detail"]))
+        self.assertEqual(link.commands_behind(), ["status", "carry"])
+        # what brings them in line, after the update check: the other side asked to update, and how that went
+        link.status["channel"] = pl.CHANNEL
+        self.assertIn("it’s asked to update once this side’s update check has run", en(link.lights()["api"]["detail"]))
+        link.update_said = (time.time(), False, "no newer build to update to")
+        self.assertIn("asked to update at", en(link.lights()["api"]["detail"]))
+        self.assertIn("isn’t on GitHub yet", en(link.lights()["api"]["detail"]))
+        link.update_said = (time.time(), True, "")
+        self.assertIn("TrueNAS there is pulling the newer image", en(link.lights()["api"]["detail"]))
+        link.update_said = None
+        link.status["commands"]["files"] = pl.COMMANDS["files"] + 1  # (a command newer there: this side is the one behind)
+        self.assertIn("This Dionysus is the one behind", en(link.lights()["api"]["detail"]))
+        link.status["commands"]["files"] = pl.COMMANDS["files"]
         self.assertEqual(en(link.lights()["version"]["text"]), "Dionysus 0.16.21 there" if False else en(link.lights()["version"]["text"]))  # (version and clocks: a light of its own)
         self.assertIn("Dionysus 0.16.21 there", en(link.lights()["version"]["detail"]))
         del link.status["commands"]

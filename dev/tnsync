@@ -21,7 +21,9 @@
 # If the project's .tnsync has TN_TEST, that command runs in the code being
 # copied: by default after the copy and restart (so the app is ready sooner),
 # or first with --tests-first. With TN_FUTURE too (the suite on the next
-# Python, say), that runs straight after — only once the current tests pass.
+# Python, say), that runs at the same time; the current tests' result comes
+# as soon as they finish, then the future tests' output (stopped if the
+# current tests failed).
 # The run ends in one big box: green when every test run passed, red when
 # the current tests failed, green above and red below when only the future
 # ones did — each run (current, future) on its own line. Pressing Enter while
@@ -63,7 +65,7 @@ warn() { printf '%sWarning:%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
 die()  { printf '%stnsync:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 
 usage() {
-    sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,41p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -229,6 +231,8 @@ TMP=""
 SSH_CTL="/tmp/tnsync-$(id -u)-%C"
 cleanup() {
     if [ -n "$TMP" ]; then rm -rf "$TMP"; fi
+    if [ -n "${FUTURE_PID:-}" ]; then stop_future; fi   # (tnsync ended while they ran: they go too)
+    if [ -n "${FUTURE_LOG:-}" ]; then rm -f "$FUTURE_LOG"; fi
     ssh -o ControlPath="$SSH_CTL" -O exit -p "$TN_PORT" "$TN_USER@$TN_HOST" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -341,44 +345,70 @@ last_tests_not_passed() {
 }
 
 # ----------------------------------------------------------------- tests
-# run_tests before|after|insync — runs TN_TEST in the code being copied, then
-# TN_FUTURE once it passes. Ends in one big box: green when every run passed,
-# red when the current tests failed, green over red when only the future ones
-# did (each run on its own line, and what that means for the NAS). Returns
-# non-zero when a run failed. Sets TESTS_RAN=1 if it ran them.
+# run_tests before|after|insync — runs TN_TEST in the code being copied, and TN_FUTURE alongside it (started
+# together, so the two take as long as the slower one, not both added up). The current tests' result is said as
+# soon as they finish; the future tests' output is kept aside until then, and shown from there. If the current
+# tests fail, the future ones are stopped (nothing is learned from them then). Ends in one big box: green when
+# every run passed, red when the current tests failed, green over red when only the future ones did (each run on
+# its own line, and what that means for the NAS). Returns non-zero when a run failed. Sets TESTS_RAN=1 if it ran them.
 TESTS_RAN=0
 FUTURE_RESULT="none"   # pass | fail | none — what the state file keeps of the future tests
-ABORTED=0   # set when Enter stopped the run in progress (run_in_src returns 130)
-run_in_src() {   # run_in_src <command> — in the code being copied (for master/dev/release/beta
-    # that's the exported copy, not your folder). Python's bytecode cache is kept out of the
-    # project. Straight to the terminal (not through a pipe), so a test runner can draw a progress bar.
-    # At a terminal, Enter stops the run: the command runs as a job of its own (its process group), the
-    # keyboard is watched meanwhile, and the whole group is ended on Enter (ABORTED=1, exit 130): SIGTERM first
-    # (tests/run.py then says how far it got), SIGKILL if it's still there 2 s later.
-    ABORTED=0
-    if [ ! -t 0 ]; then
-        ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$1" )
-        return $?
-    fi
-    say "  ${C_DIM}(press Enter to stop the tests and come back to the prompt)${C_OFF}"
+ABORTED=0        # set when Enter stopped the run in progress (watch_job returns 130)
+JOB_PID=""       # the job start_in_src started last
+FUTURE_PID=""    # the future tests, while they run
+FUTURE_LOG=""    # their output, kept aside while the current tests have the terminal
+FUTURE_SHOWN=0   # how much of FUTURE_LOG has been shown (bytes)
+start_in_src() {   # start_in_src <command> [log] — in the code being copied (for master/dev/release/beta that's
+    # the exported copy, not your folder), as a job of its own (its own process group, so it can be stopped
+    # whole), with Python's bytecode cache kept out of the project. Without a log it goes straight to the
+    # terminal (not through a pipe), so a test runner can draw a progress bar. Sets JOB_PID.
     set -m
-    ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$1" ) < /dev/null &
-    local pid=$!
+    if [ -n "${2:-}" ]; then
+        ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$1" ) < /dev/null > "$2" 2>&1 &
+    else
+        ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$1" ) < /dev/null &
+    fi
+    JOB_PID=$!
     set +m
-    local rc line
+}
+stop_job() {   # stop_job <pid> — SIGTERM to its process group (tests/run.py then says how far it got),
+    # SIGKILL 2 s later if anything in it is still there
+    local pid="$1" waited=0
+    [ -n "$pid" ] || return 0
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 20 ]; do sleep 0.1; waited=$((waited + 1)); done
+    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+stop_future() { stop_job "$FUTURE_PID"; FUTURE_PID=""; }
+show_future_log() {   # prints what the future tests have written since the last call
+    local size
+    [ -n "$FUTURE_LOG" ] && [ -f "$FUTURE_LOG" ] || return 0
+    size=$(wc -c < "$FUTURE_LOG" | tr -d ' ')
+    if [ "$size" -gt "$FUTURE_SHOWN" ]; then
+        tail -c "+$((FUTURE_SHOWN + 1))" "$FUTURE_LOG" | head -c "$((size - FUTURE_SHOWN))" || true
+        FUTURE_SHOWN=$size
+    fi
+}
+watch_job() {   # watch_job <pid> [follow] — waits for the job and returns its exit code. At a terminal, Enter
+    # stops it and the future tests (ABORTED=1, returns 130). follow: shows the future tests' output as it comes.
+    local pid="$1" follow="${2:-}" line rc=0
+    ABORTED=0
     while kill -0 "$pid" 2>/dev/null; do
-        if read -r -t 1 line; then
-            ABORTED=1
-            kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
-            # A runner that ignores the stop (a handler left behind, a stuck child) gets 2 s, then is killed.
-            local waited=0
-            while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 20 ]; do sleep 0.1; waited=$((waited + 1)); done
-            kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
-            break
+        if [ -n "$follow" ]; then show_future_log; fi
+        if [ -t 0 ]; then
+            if read -r -t 1 line; then
+                ABORTED=1
+                stop_job "$pid"
+                stop_future
+                return 130
+            fi
+        else
+            sleep 1
         fi
     done
-    wait "$pid" 2>/dev/null; rc=$?
-    [ "$ABORTED" = 1 ] && return 130
+    wait "$pid" 2>/dev/null || rc=$?
+    if [ -n "$follow" ]; then show_future_log; fi
     return $rc
 }
 # What Enter leaves: a yellow box saying the tests were stopped and where that leaves the NAS; nothing is recorded
@@ -405,39 +435,56 @@ run_tests() {
         say "  ${C_DIM}No TN_TEST in .tnsync, so no tests were run.${C_OFF}"
         return 0
     fi
-    info "Running the current tests: $TN_TEST"
     TESTS_RAN=1
-    if run_in_src "$TN_TEST"; then
-        ok "Current tests passed"
-        current="passed"
-    elif [ "$ABORTED" = 1 ]; then
-        abort_banner "TESTS" "$when"
-        return 2
-    else
-        current="FAILED"
-    fi
     FUTURE_RESULT="none"
     future_cmd=""   # (shown beside the result only when they ran)
+    future=""
     if [ -z "$TN_FUTURE" ]; then
         future="not set up (TN_FUTURE in .tnsync)"
     elif [ "$SKIP_FUTURE" = 1 ]; then
         future="not run (--skip-future)"
-    elif [ "$current" != "passed" ]; then
-        future="not run: the current tests failed"
     else
-        future_cmd="$TN_FUTURE"
-        info "Running the future tests: $TN_FUTURE"
-        run_in_src "$TN_FUTURE"; frc=$?
-        if [ "$frc" -eq 0 ]; then
-            ok "Future tests passed"
-            future="passed"; FUTURE_RESULT="pass"
-        elif [ "$ABORTED" = 1 ]; then
-            abort_banner "FUTURE TESTS" "$when"
-            return 2
-        elif [ "$frc" -eq 3 ]; then   # (exit 3: the run couldn't be set up — a download failed — so nothing is known: grey, not red)
-            future="NOT RUN"; FUTURE_RESULT="none"
+        FUTURE_LOG="$(mktemp "${TMPDIR:-/tmp}/tnsync-future.XXXXXX")"; FUTURE_SHOWN=0
+        start_in_src "$TN_FUTURE" "$FUTURE_LOG"; FUTURE_PID=$JOB_PID
+    fi
+    info "Running the current tests: $TN_TEST"
+    if [ -n "$FUTURE_PID" ]; then
+        say "  ${C_DIM}(the future tests run alongside them: $TN_FUTURE — shown once these are done)${C_OFF}"
+    fi
+    if [ -t 0 ]; then say "  ${C_DIM}(press Enter to stop the tests and come back to the prompt)${C_OFF}"; fi
+    start_in_src "$TN_TEST"
+    crc=0; watch_job "$JOB_PID" || crc=$?
+    if [ "$ABORTED" = 1 ]; then
+        abort_banner "TESTS" "$when"
+        return 2
+    fi
+    if [ "$crc" -eq 0 ]; then
+        ok "Current tests passed"
+        current="passed"
+    else
+        printf '%s✘%s %s\n' "$C_RED" "$C_OFF" "Current tests FAILED (the failures are listed above)"
+        current="FAILED"
+    fi
+    if [ -n "$FUTURE_PID" ]; then
+        if [ "$current" != "passed" ]; then
+            stop_future
+            future="stopped: the current tests failed"
         else
-            future="FAILED"; FUTURE_RESULT="fail"
+            future_cmd="$TN_FUTURE"
+            info "The future tests (running since the current ones started): $TN_FUTURE"
+            frc=0; watch_job "$FUTURE_PID" follow || frc=$?
+            FUTURE_PID=""
+            if [ "$ABORTED" = 1 ]; then
+                abort_banner "FUTURE TESTS" "$when"
+                return 2
+            elif [ "$frc" -eq 0 ]; then
+                ok "Future tests passed"
+                future="passed"; FUTURE_RESULT="pass"
+            elif [ "$frc" -eq 3 ]; then   # (exit 3: the run couldn't be set up — a download failed — so nothing is known: grey, not red)
+                future="NOT RUN"; FUTURE_RESULT="none"
+            else
+                future="FAILED"; FUTURE_RESULT="fail"
+            fi
         fi
     fi
     if [ "$future" = "NOT RUN" ]; then
@@ -567,7 +614,7 @@ if [ -z "$CHANGES" ]; then
                   "" \
                   "$why" \
                   "Nothing will be copied and $TN_APP won't be restarted."
-    run_tests insync; rc=$?
+    rc=0; run_tests insync || rc=$?
     if [ "$rc" = 0 ]; then record_tests pass; exit 0; fi
     if [ "$rc" = 2 ]; then record_tests aborted; exit 2; fi
     record_tests fail
@@ -575,7 +622,7 @@ if [ -z "$CHANGES" ]; then
 fi
 
 if [ "$TESTS_FIRST" = 1 ]; then
-    run_tests before; rc=$?
+    rc=0; run_tests before || rc=$?
     if [ "$rc" = 2 ]; then exit 2; fi
     [ "$rc" = 0 ] || exit 1
 fi
@@ -611,7 +658,7 @@ finish() {   # the tests, unless they already ran first
         [ "$DRY_RUN" = 1 ] || record_tests pass
         exit 0
     fi
-    run_tests after; rc=$?
+    rc=0; run_tests after || rc=$?
     if [ "$rc" = 0 ]; then
         [ "$DRY_RUN" = 1 ] || record_tests pass
         exit 0

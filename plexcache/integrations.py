@@ -37,9 +37,12 @@ def api_light(gone: list, untried: list, total: int, version: str, kind: str = "
     would have to learn — method "names" (TrueNAS) or "paths" (REST)."""
     unit = M("commands") if kind == "commands" else M("calls")
     if gone:
+        if kind == "commands":  # (the link's: both sides are Dionysus, so the side that's behind updates — nothing to report)
+            return {"status": "warn", "text": M("API compatibility: {n} of {total} {unit} missing", n=len(gone), total=total, unit=unit),
+                    "detail": M("{version} hasn’t got: {what}. The features that need them won’t work until both sides run the same version.", version=version or "?", what="; ".join(gone))}
         return {"status": "warn", "text": M("API compatibility: {n} of {total} {unit} missing", n=len(gone), total=total, unit=unit),
                 "detail": M("{version} hasn’t got: {what}. The features that need them won’t work until the app learns the new {kind} — please report this version and these calls on GitHub.",
-                            version=version or "?", what="; ".join(gone), kind=M("names") if kind == "names" else M("commands") if kind == "commands" else M("paths"))}
+                            version=version or "?", what="; ".join(gone), kind=M("names") if kind == "names" else M("paths"))}
     if untried:
         return {"status": "ok", "text": M("API compatibility: {n} of {total} {unit} known", n=total - len(untried), total=total, unit=unit),
                 "detail": M("Not tried yet, since there’s nothing to try them on: {what}.", what="; ".join(untried))}
