@@ -1,9 +1,9 @@
-"""Two Plex Caches on servers that share library folders (synced both ways): what each must know
+"""Two Dionysus instances on servers that share library folders (synced both ways): what each must know
 about the other so their settings don't fight.
 
 Each system marks itself in every library folder it shares — .plexcache/systems/<instance>.json,
 written by the optimizer service (the one part that may write there) and carried to the other
-site over the link between the two Plex Caches (peerlink.carry: the same file, written there at
+site over the link between the two Dionysus instances (peerlink.carry: the same file, written there at
 once) or, without it, by the folder sync. The marker holds the settings that matter to the other side: whose edits
 win in Sync Libraries (tools/sync.py), per library, the optimizer choices that change a file's content
 (cover art, tags, MKV layout, converting), and the tools lately run there.
@@ -53,7 +53,7 @@ def info(app, key: str) -> dict:
             "sync": {"source": _source(app, key), "mirror": app.mirrors.server_of(str(key)), "mirrors": app.mirrors.state_of(str(key))},  # (the library's mirror (its server) and state here: unset, none or mirror)
             "optimizer": {k: opts.get(k) for k in CONTENT},
             "tools": {name: at for name, at in tools.items() if time.time() - at < 7 * 86400},
-            **({"peer": link.advert(), "plex": link.own_plex_id()} if link is not None else {}),  # (how the other Plex Cache finds and pairs with this one: peerlink.py)
+            **({"peer": link.advert(), "plex": link.own_plex_id()} if link is not None else {}),  # (how the other Dionysus finds and pairs with this one: peerlink.py)
             # what it runs on, and a folder being converted to a child dataset (migrating.py): for the other side even unpaired
             **_conversion_facts(app, key)}
 
@@ -94,7 +94,7 @@ def publish(app) -> int:
 
 
 def carry(app) -> int:
-    """Our marker, as written here, carried to the Plex Cache at each mirror's site over the link (peerlink.carry), which
+    """Our marker, as written here, carried to the Dionysus at each mirror's site over the link (peerlink.carry), which
     writes it into the paired library's folders there: the file the folder sync would bring, there at once. How many."""
     links, bodies = getattr(app, "peerlinks", None), getattr(app, "published_bodies", None) or {}
     if links is None:
@@ -159,7 +159,7 @@ def sync_conflict(app, key: str, found: dict | None = None) -> M | None:
             continue
         other = marker.get("sync") or {}
         ran = (marker.get("tools") or {}).get("sync")
-        if not (ran and time.time() - float(ran) < SYNC_DAYS * 86400) and other.get("mode") != "apply":  # (an older Plex Cache: applying on a timer)
+        if not (ran and time.time() - float(ran) < SYNC_DAYS * 86400) and other.get("mode") != "apply":  # (an older Dionysus: applying on a timer)
             continue
         if other.get("source") == mine:
             return M("{name} syncs this library too, with the same side’s edits winning: the two would send edits back and forth. One side’s edits must win on both — set Whose edits win to {fix} here, or stop syncing it there.",

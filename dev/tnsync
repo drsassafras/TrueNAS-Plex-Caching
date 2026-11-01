@@ -24,7 +24,9 @@
 # Python, say), that runs straight after — only once the current tests pass.
 # The run ends in one big box: green when every test run passed, red when
 # the current tests failed, green above and red below when only the future
-# ones did — each run (current, future) on its own line.
+# ones did — each run (current, future) on its own line. Pressing Enter while
+# the tests run stops them (a yellow box says so; nothing is recorded), so a
+# newer version can be uploaded without waiting: run tnsync again.
 # TNSYNC_MODE (local, master, dev, release, beta) tells the tests which was asked for.
 #
 # If the NAS already has exactly these files, nothing is copied or restarted.
@@ -50,8 +52,9 @@ if [ -t 1 ]; then
     C_BAD=$'\033[1;97;41m'   # bold white on red
     C_GOOD=$'\033[1;97;42m'  # bold white on green
     C_MEH=$'\033[1;30;43m'   # bold black on yellow
+    C_GREY=$'\033[1;97;100m' # bold white on grey: a run that couldn't be set up, not one that failed
 else
-    C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_DIM=""; C_OFF=""; C_BAD=""; C_GOOD=""; C_MEH=""
+    C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_DIM=""; C_OFF=""; C_BAD=""; C_GOOD=""; C_MEH=""; C_GREY=""
 fi
 say()  { printf '%s\n' "$*"; }
 info() { printf '%s==>%s %s\n' "$C_BLU" "$C_OFF" "$*"; }
@@ -75,12 +78,14 @@ banner() {   # banner <colour> <line>...
     printf '\n'
 }
 red_banner()    { banner "$C_BAD" "$@" >&2; }
-split_banner() {   # split_banner <green line>... -- <red line>...: one box, green above the separator, red below it
-    local line colour="$C_GOOD"
+split_banner() {   # split_banner <green line>... -- <red line>... [--grey]: one box, green above the separator, red (or grey) below it
+    local line colour="$C_GOOD" lower="$C_BAD" args=()
+    for line in "$@"; do [ "$line" = "--grey" ] && lower="$C_GREY" || args+=("$line"); done
+    set -- "${args[@]}"
     printf '\n'
     printf '%s  %-66s  %s\n' "$colour" "" "$C_OFF"
     for line in "$@"; do
-        if [ "$line" = "--" ]; then colour="$C_BAD"; continue; fi
+        if [ "$line" = "--" ]; then colour="$lower"; continue; fi
         printf '%s  %-66s  %s\n' "$colour" "$line" "$C_OFF"
     done
     printf '%s  %-66s  %s\n' "$colour" "" "$C_OFF"
@@ -307,7 +312,7 @@ say ""
 STATE_FILE="$STATE_DIR/$(printf '%s' "$TN_HOST:$TN_DEST" | tr -c 'A-Za-z0-9._-' '_')"
 state_get() { [ -f "$STATE_FILE" ] && sed -n "s/^$1=//p" "$STATE_FILE" | head -n 1; true; }
 state_clear() { rm -f "$STATE_FILE"; }
-record_tests() {   # record_tests pass|fail — only if the tests actually ran
+record_tests() {   # record_tests pass|fail|aborted — only if the tests actually ran (aborted: stopped with Enter; tested again next time)
     if [ "$TESTS_RAN" != 1 ]; then state_clear; return 0; fi
     mkdir -p "$STATE_DIR" 2>/dev/null || return 0
     printf 'result=%s\nmode=%s\nwhen=%s\ntest=%s\nfuture=%s\nfuture_test=%s\n' "$1" "$MODE" "$(date '+%Y-%m-%d %H:%M')" "$TN_TEST" "$FUTURE_RESULT" "$FUTURE_CMD" \
@@ -322,6 +327,8 @@ last_tests_not_passed() {
     result="$(state_get result)"; when="$(state_get when)"
     if [ -z "$result" ]; then
         say "tnsync has no test result for this code yet."
+    elif [ "$result" = "aborted" ]; then
+        say "The last test run was stopped with Enter ($when)."
     elif [ "$result" != "pass" ]; then
         say "The last test run failed ($when)."
     elif [ "$(state_get test)" != "$TN_TEST" ]; then
@@ -341,13 +348,50 @@ last_tests_not_passed() {
 # non-zero when a run failed. Sets TESTS_RAN=1 if it ran them.
 TESTS_RAN=0
 FUTURE_RESULT="none"   # pass | fail | none — what the state file keeps of the future tests
+ABORTED=0   # set when Enter stopped the run in progress (run_in_src returns 130)
 run_in_src() {   # run_in_src <command> — in the code being copied (for master/dev/release/beta
     # that's the exported copy, not your folder). Python's bytecode cache is kept out of the
     # project. Straight to the terminal (not through a pipe), so a test runner can draw a progress bar.
-    ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$1" )
+    # At a terminal, Enter stops the run: the command runs as a job of its own (its process group), the
+    # keyboard is watched meanwhile, and the whole group is ended on Enter (ABORTED=1, exit 130).
+    ABORTED=0
+    if [ ! -t 0 ]; then
+        ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$1" )
+        return $?
+    fi
+    say "  ${C_DIM}(press Enter to stop the tests and come back to the prompt)${C_OFF}"
+    set -m
+    ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$1" ) < /dev/null &
+    local pid=$!
+    set +m
+    local rc line
+    while kill -0 "$pid" 2>/dev/null; do
+        if read -r -t 1 line; then
+            ABORTED=1
+            kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+            break
+        fi
+    done
+    wait "$pid" 2>/dev/null; rc=$?
+    [ "$ABORTED" = 1 ] && return 130
+    return $rc
+}
+# What Enter leaves: a yellow box saying the tests were stopped and where that leaves the NAS; nothing is recorded
+# (the next run tests again). abort_banner <which> <when>
+abort_banner() {
+    local where
+    case "$2" in
+        insync) where="$TN_APP is running this code (nothing was copied)." ;;
+        before) where="Nothing was copied to $TN_HOST: $TN_APP still runs the code it had." ;;
+        *) where="$TN_APP has this code$( [ "$RESTART" = "yes" ] && printf ' and was restarted' ); its tests haven't run to the end." ;;
+    esac
+    yellow_banner "$1 STOPPED  -  YOU PRESSED ENTER" \
+                  "" \
+                  "$where" \
+                  "Run 'tnsync $MODE' again to test it (or upload a newer version first)." >&2
 }
 run_tests() {
-    local when="$1" current future future_cmd title
+    local when="$1" current future future_cmd title frc
     if [ "$SKIP_TESTS" = 1 ]; then
         warn "--skip-tests: the tests weren't run"
         return 0
@@ -361,6 +405,9 @@ run_tests() {
     if run_in_src "$TN_TEST"; then
         ok "Current tests passed"
         current="passed"
+    elif [ "$ABORTED" = 1 ]; then
+        abort_banner "TESTS" "$when"
+        return 2
     else
         current="FAILED"
     fi
@@ -375,12 +422,27 @@ run_tests() {
     else
         future_cmd="$TN_FUTURE"
         info "Running the future tests: $TN_FUTURE"
-        if run_in_src "$TN_FUTURE"; then
+        run_in_src "$TN_FUTURE"; frc=$?
+        if [ "$frc" -eq 0 ]; then
             ok "Future tests passed"
             future="passed"; FUTURE_RESULT="pass"
+        elif [ "$ABORTED" = 1 ]; then
+            abort_banner "FUTURE TESTS" "$when"
+            return 2
+        elif [ "$frc" -eq 3 ]; then   # (exit 3: the run couldn't be set up — a download failed — so nothing is known: grey, not red)
+            future="NOT RUN"; FUTURE_RESULT="none"
         else
             future="FAILED"; FUTURE_RESULT="fail"
         fi
+    fi
+    if [ "$future" = "NOT RUN" ]; then
+        split_banner "CURRENT TESTS PASSED" \
+                     "$(printf 'Current  %-10s %s' "$current" "$TN_TEST")" \
+                     -- \
+                     "FUTURE TESTS NOT RUN  -  A DOWNLOAD THE BUILD NEEDS FAILED" \
+                     "$(printf 'Future   %-10s %s' "not run" "$future_cmd")" \
+                     "" "Nothing is known from this run. Run 'tnsync $MODE' again." --grey >&2
+        return 0
     fi
     # The one box that says it all: both runs, then where that leaves the NAS.
     if [ "$current" = "passed" ] && [ "$future" != "FAILED" ]; then
@@ -500,13 +562,17 @@ if [ -z "$CHANGES" ]; then
                   "" \
                   "$why" \
                   "Nothing will be copied and $TN_APP won't be restarted."
-    if run_tests insync; then record_tests pass; exit 0; fi
+    run_tests insync; rc=$?
+    if [ "$rc" = 0 ]; then record_tests pass; exit 0; fi
+    if [ "$rc" = 2 ]; then record_tests aborted; exit 2; fi
     record_tests fail
     exit 1
 fi
 
 if [ "$TESTS_FIRST" = 1 ]; then
-    run_tests before || exit 1
+    run_tests before; rc=$?
+    if [ "$rc" = 2 ]; then exit 2; fi
+    [ "$rc" = 0 ] || exit 1
 fi
 
 # The NAS is about to get different code, so the last test result no longer applies.
@@ -540,9 +606,14 @@ finish() {   # the tests, unless they already ran first
         [ "$DRY_RUN" = 1 ] || record_tests pass
         exit 0
     fi
-    if run_tests after; then
+    run_tests after; rc=$?
+    if [ "$rc" = 0 ]; then
         [ "$DRY_RUN" = 1 ] || record_tests pass
         exit 0
+    fi
+    if [ "$rc" = 2 ]; then
+        [ "$DRY_RUN" = 1 ] || record_tests aborted
+        exit 2
     fi
     [ "$DRY_RUN" = 1 ] || record_tests fail
     exit 1

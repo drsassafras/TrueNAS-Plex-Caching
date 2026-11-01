@@ -244,6 +244,7 @@ class PlaybackMonitor:
         self._plex_cache: dict[tuple, tuple[float, Any]] = {}  # album/artist lookups, briefly
         self._retention: list[tuple[float, Job]] = []  # (when to check, job) still-cached checks
         self._disk_mark: tuple[float, dict] | None = None
+        self.disk_busy: float | None = None  # the media pools' disks' busy share over the last poll, while something plays (else None): syncthing.py's throttle reads it
         self.thread = threading.Thread(target=self._loop, name="playback", daemon=True)
 
     def start(self):
@@ -374,6 +375,7 @@ class PlaybackMonitor:
                     new = True
                 else:
                     new = False
+                info["local"], info["kbps"] = s.local, s.kbps  # (whether Plex calls the player local, and the stream's bandwidth: syncthing.py's give-way)
                 if s.state == "buffering":
                     self.last_buffering = (time.time(), M("{title} on {player}", title=s.label, player=s.player)
                                            if s.player else M("{title} on a player", title=s.label))
@@ -495,11 +497,13 @@ class PlaybackMonitor:
         now, after = time.monotonic(), zfs.disk_busy_ms()
         self._disk_mark = (now, after)
         if before is None or not self.sessions:
+            self.disk_busy = None
             return
         z = self.app.zfs or {}
         pools = {d["pool"] for d in z.get("datasets", []) if d.get("keys") and d.get("pool")}
         disks = [d for p in pools for d in (z.get("pools", {}).get(p) or {}).get("disks", [])]
         pct = busy_percent(before[1], after, (now - before[0]) * 1000, disks)
+        self.disk_busy = pct
         if pct is None:
             return
         with self._lock:

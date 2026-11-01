@@ -37,9 +37,9 @@ def config_problem(config_dir: str) -> str | None:
 def _problem_server(host: str, port: int, message: str) -> ThreadingHTTPServer:
     """A one-page server that explains what's wrong, until it's fixed."""
     body = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
-            "<title>Plex Cache – setup needed</title>"
+            "<title>Dionysus – setup needed</title>"
             "<body style='font:16px/1.5 system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 16px'>"
-            "<h1>Plex Cache can’t start yet</h1><p>" + html.escape(message) + "</p>"
+            "<h1>Dionysus can’t start yet</h1><p>" + html.escape(message) + "</p>"
             "<p style='color:#666'>This page reloads itself.</p>"
             f"<script>setTimeout(function(){{location.reload()}},{RETRY_SECONDS * 1000})</script>").encode()
 

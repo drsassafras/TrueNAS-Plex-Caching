@@ -9,6 +9,7 @@ import time
 import ssl
 import struct
 import tempfile
+import urllib.parse
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from xml.sax.saxutils import quoteattr
@@ -115,6 +116,7 @@ class FakePlex:
     def __init__(self, cat: dict, token: str = "good-token", music_path: str = "/music", report_root: str | None = None):
         self.cat = cat
         self.token = token
+        self.prefs = {"LanNetworksBandwidth": ""}  # (Settings → Network → LAN Networks, as /:/prefs gives and takes it)
         # Pretend Plex sees the media under a different folder (like /data inside its own app).
         self.report_root = report_root
         # Names shown in the UI (the demo swaps in nicer ones for screenshots).
@@ -219,6 +221,10 @@ class FakePlex:
         q = parse_qs(u.query)
         parts = u.path.split("/")
         self.puts = getattr(self, "puts", []) + [(u.path, {k: v if len(v) > 1 else v[0] for k, v in q.items()})]
+        if u.path == "/:/prefs":
+            for k, v in q.items():
+                self.prefs[k] = v[0]
+            return True
         if u.path.startswith("/library/sections/") and u.path.endswith("/all") and q.get("id"):  # an edit
             m = next((m for m in self.cat["movies"] if m["key"] == q["id"][0]), None)
             if m is None:
@@ -292,6 +298,8 @@ class FakePlex:
         q = parse_qs(u.query)
         if u.path == "/":
             return '<MediaContainer friendlyName="Test Server" version="1.41.0" machineIdentifier="abc"/>'
+        if u.path == "/:/prefs":
+            return "<MediaContainer>" + "".join(f'<Setting id="{k}" type="text" value="{v}"/>' for k, v in self.prefs.items()) + "</MediaContainer>"
         if u.path == "/library/sections":
             dirs = "".join(
                 f'<Directory key="{k}" title="{t}" type="{ty}" contentChangedAt="{getattr(self, "changed_at", "1")}">'
@@ -513,12 +521,14 @@ class FakeTrueNAS:
                     self._send(conn, "this is not json")
                     continue
                 elif req["method"] == "core.get_methods":  # (every method this TrueNAS has, by name; methods_missing: left out)
-                    have = ["auth.login_with_api_key", "system.version", "pool.query", "pool.dataset.query", "zfs.dataset.query", "disk.query",
+                    have = ["auth.login_with_api_key", "system.version", "system.host_id", "pool.query", "pool.dataset.query", "zfs.dataset.query", "disk.query",
                             "app.query", "app.pull_images", "app.redeploy", "core.get_methods"] + \
                            [getattr(self, "snapshot_api", "pool.snapshot") + x for x in (".query", ".create", ".delete", ".rollback")]
                     result = {m: {"description": ""} for m in have if m not in getattr(self, "methods_missing", ())}
                 elif req["method"] == "system.version":
                     result = "TrueNAS-25.10.0"
+                elif req["method"] == "system.host_id":
+                    result = "d41d8cd98f00b204e9800998ecf8427e"
                 elif req["method"] == "pool.query":
                     result = [self.pool_data]
                 elif req["method"] == "pool.dataset.query":
@@ -859,3 +869,151 @@ class FakeMQTTBroker:
                 pass
             with self.lock:
                 self.active -= 1
+
+
+# ---------------------------------------------------------------------------
+# Fake Syncthing REST API
+# ---------------------------------------------------------------------------
+
+ST_MY_ID = "AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH"
+ST_OTHER_ID = "ZZZZZZZ-YYYYYYY-XXXXXXX-WWWWWWW-VVVVVVV-UUUUUUU-TTTTTTT-SSSSSSS"
+
+
+class FakeSyncthing:
+    """Syncthing's REST API as far as the app asks it (plexcache/syncthing.py): the system's status and version, the
+    config's folders and devices, the connections, a folder's status and ignore patterns — and what the app may change:
+    a folder's settings (PATCH /rest/config/folders/<id>), its ignore patterns (POST /rest/db/ignores), a scan. Any key
+    but its own is refused (403, as Syncthing does). ``folders``: as Syncthing's config lists them; ``plain``: answers
+    HTML instead of JSON (something else at the address)."""
+
+    def __init__(self, api_key: str = "st-key", folders: list | None = None, my_id: str = ST_MY_ID, other_id: str = ST_OTHER_ID):
+        self.api_key, self.my_id, self.other_id = api_key, my_id, other_id
+        self.devices = [{"deviceID": my_id, "name": "Starlit NAS"}, {"deviceID": other_id, "name": "Cottage NAS"}]
+        self.folders: list[dict] = folders if folders is not None else []
+        self.connected: dict[str, bool] = {other_id: True}
+        self.connections_address: dict[str, str] = {}  # device -> "host:port" it's connected from
+        self.ignores: dict[str, list[str]] = {}
+        self.folder_status: dict[str, dict] = {}
+        self.listing: dict[str, list[str]] = {}  # folder id -> the names at its top level (/rest/db/browse)
+        self.need: dict[str, list[str]] = {}  # folder id -> files still to come here (/rest/db/need)
+        self.remote_need: dict[tuple[str, str], list[str]] = {}  # (folder id, device) -> files that device still needs (/rest/db/remoteneed)
+        self.calls: list[tuple[str, str]] = []
+        self.plain = False
+        self.missing: set[str] = set()  # paths this release "hasn't got" (404), for the API compatibility light
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _reply(self, data, code=200):
+                body = json.dumps(data).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _route(self):
+                path, _, q = self.path.partition("?")
+                params = dict(urllib.parse.parse_qsl(q))
+                fake.calls.append((self.command, path))
+                if fake.plain:
+                    body = b"<html>not syncthing</html>"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.command == "GET" and path == "/rest/noauth/health":  # (no key needed: how a Syncthing is found)
+                    return self._reply({"status": "OK"})
+                if self.headers.get("X-API-Key") != fake.api_key:
+                    body = b"Not Authorized"
+                    self.send_response(403)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                n = int(self.headers.get("Content-Length") or 0)
+                data = json.loads(self.rfile.read(n) or b"{}") if n else {}
+                if any(path == m or (m.endswith("/") and path.startswith(m)) for m in fake.missing):
+                    return self._reply({"error": "404 page not found"}, 404)
+                folder = next((f for f in fake.folders if f.get("id") == params.get("folder")), None)
+                if folder is not None and folder.get("paused") and path in ("/rest/db/need", "/rest/db/remoteneed", "/rest/db/browse", "/rest/folder/errors"):
+                    body = b"no such folder\n"  # (as Syncthing answers for a paused folder: its database isn't running)
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.command == "GET" and path == "/rest/system/status":
+                    return self._reply({"myID": fake.my_id, "uptime": 100})
+                if self.command == "GET" and path == "/rest/system/version":
+                    return self._reply({"version": "v1.29.2", "os": "linux", "arch": "amd64"})
+                if self.command == "GET" and path == "/rest/config":
+                    return self._reply({"version": 37, "folders": fake.folders, "devices": fake.devices})
+                if self.command == "GET" and path == "/rest/system/connections":
+                    return self._reply({"connections": {d: {"connected": on, "address": fake.connections_address.get(d, "")} for d, on in fake.connected.items()}})
+                if self.command == "GET" and path == "/rest/db/status":
+                    if folder is None:
+                        return self._reply({"error": "no such folder"}, 404)
+                    return self._reply(fake.folder_status.get(folder["id"]) or {"state": "idle", "needFiles": 0, "needBytes": 0, "globalFiles": 3})
+                if path == "/rest/db/ignores":
+                    if folder is None:
+                        return self._reply({"error": "no such folder"}, 404)
+                    if self.command == "POST":
+                        fake.ignores[folder["id"]] = list(data.get("ignore") or [])
+                    return self._reply({"ignore": fake.ignores.get(folder["id"]) or [], "expanded": []})
+                if self.command == "GET" and path == "/rest/db/browse":
+                    if folder is None:
+                        return self._reply({"error": "no such folder"}, 404)
+                    return self._reply([{"name": n, "type": "FILE_INFO_TYPE_DIRECTORY", "modTime": "2026-01-01T00:00:00Z"} for n in fake.listing.get(folder["id"]) or []])
+                if self.command == "GET" and path == "/rest/db/need":
+                    if folder is None:
+                        return self._reply({"error": "no such folder"}, 404)
+                    names = fake.need.get(folder["id"]) or []
+                    return self._reply({"progress": [{"name": n} for n in names[:1]], "queued": [{"name": n} for n in names[1:]], "rest": [], "page": 1, "perpage": 500})
+                if self.command == "GET" and path == "/rest/db/remoteneed":
+                    if folder is None:
+                        return self._reply({"error": "no such folder"}, 404)
+                    return self._reply({"files": [{"name": n} for n in fake.remote_need.get((folder["id"], params.get("device", ""))) or []], "page": 1, "perpage": 500})
+                if self.command == "POST" and path == "/rest/db/scan":
+                    return self._reply({})
+                if self.command == "POST" and path == "/rest/config/folders":
+                    fake.folders.append(dict(data))
+                    return self._reply({})
+                if self.command == "PATCH" and path.startswith("/rest/config/folders/"):
+                    fid = urllib.parse.unquote(path.rsplit("/", 1)[1])
+                    f = next((f for f in fake.folders if f.get("id") == fid), None)
+                    if f is None:
+                        return self._reply({"error": "no such folder"}, 404)
+                    f.update(data)
+                    return self._reply({})
+                if self.command == "PATCH" and path.startswith("/rest/config/devices/"):
+                    did = urllib.parse.unquote(path.rsplit("/", 1)[1])
+                    d = next((d for d in fake.devices if d.get("deviceID") == did), None)
+                    if d is None:
+                        return self._reply({"error": "no such device"}, 404)
+                    d.update(data)
+                    return self._reply({})
+                return self._reply({"error": "unknown"}, 404)
+
+            do_GET = do_POST = do_PATCH = _route
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def folder(self, fid: str, path: str, label: str = "", **more) -> dict:
+        """A folder added to the config, shared with the other device, set up as Dionysus likes it unless ``more`` says."""
+        f = {"id": fid, "label": label or fid, "path": path, "paused": False, "order": "smallestFirst", "fsWatcherEnabled": True, "rescanIntervalS": 3600,
+             "devices": [{"deviceID": self.my_id}, {"deviceID": self.other_id}]}
+        f.update(more)
+        self.folders.append(f)
+        return f
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()

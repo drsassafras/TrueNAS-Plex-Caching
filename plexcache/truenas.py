@@ -23,6 +23,7 @@ class TrueNASError(Exception):
 METHODS = {
     "signing in": ("auth.login_with_api_key",),
     "the TrueNAS version": ("system.version",),
+    "the host's id": ("system.host_id",),
     "the pool's layout and cache devices": ("pool.query",),
     "the cache devices' sizes": ("disk.query",),
     "a dataset's settings": ("zfs.dataset.query", "pool.dataset.query"),  # (zfs.dataset.* went in 25.10; pool.dataset.query has them too)
@@ -50,6 +51,26 @@ def ws_url(url: str) -> str:
         # TrueNAS revokes API keys that are sent over unencrypted connections.
         raise TrueNASError(M("Use an https:// address for TrueNAS. API keys sent over plain http get revoked by TrueNAS."))
     return urllib.parse.urlunparse(("wss", u.netloc, "/api/current", "", "", ""))
+
+
+def cert_fingerprint(url: str, timeout: float = 5) -> str:
+    """The SHA-256 of the certificate TrueNAS's web UI presents at ``url`` (hex), read with no key; "" when nothing answers.
+    The host's id (host_id) is the identity to prefer: the certificate is regenerated more often."""
+    import hashlib
+    import socket
+    import ssl
+    u = urllib.parse.urlsplit(url)
+    if not u.hostname or u.scheme != "https":
+        return ""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((u.hostname, u.port or 443), timeout=timeout) as s, ctx.wrap_socket(s, server_hostname=u.hostname) as t:
+            der = t.getpeercert(binary_form=True)
+    except (OSError, ssl.SSLError, ValueError):
+        return ""
+    return hashlib.sha256(der).hexdigest() if der else ""
 
 
 def probe(url: str, timeout: float = 5) -> bool:
@@ -117,6 +138,13 @@ class TrueNASClient:
     def version(self) -> str:
         try:
             return str(self.call("system.version"))
+        except TrueNASError:
+            return ""
+
+    def host_id(self) -> str:
+        """TrueNAS's own id for this host (system.host_id): the same across reinstalls of the apps, so this server's identity."""
+        try:
+            return str(self.call("system.host_id") or "")
         except TrueNASError:
             return ""
 

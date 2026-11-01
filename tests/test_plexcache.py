@@ -2,6 +2,7 @@ import contextlib
 import copy
 import datetime as dt
 import hashlib
+import html
 import io
 import json
 import logging
@@ -57,6 +58,8 @@ REAL_BLOCK_SIZES = zfs.block_sizes
 zfs.block_sizes = lambda paths: (lambda n: {"checked": n, "single": n, "sizes": {}})(len(list(paths)))
 from plexcache import peerlink as _peerlink  # noqa: E402
 from plexcache.app import App  # noqa: E402
+import plexcache.plex as _plexmod  # noqa: E402
+_plexmod.PLEX_TV = "http://127.0.0.1:9"  # never plex.tv itself: nothing listens there (a test wanting it starts FakePlexTV)
 from plexcache.i18n import M, from_json, jsonable  # noqa: E402
 from plexcache.plex import PlexClient, PlexError  # noqa: E402
 from plexcache.reader import MiB, ReadResult, is_cache_hit, read_range  # noqa: E402
@@ -4425,7 +4428,7 @@ class TrueNASWatchTests(unittest.TestCase):
         w("plugins/pool_/pool.py", "class PoolService(CRUDService):\n    def do_update(self, id_, data):\n        pass\n")
         w("plugins/pool_/dataset.py", "class PoolDatasetService(CRUDService):\n\n    class Config:\n        namespace = 'pool.dataset'\n")
         w("plugins/auth.py", "class AuthService(Service):\n\n    class Config:\n        cli_namespace = \"auth\"\n\n    async def login_with_api_key(self, app, key):\n        pass\n")
-        w("plugins/system.py", "class SystemService(Service):\n    def version(self):\n        pass\n\nclass Other:\n    def version2(self):\n        pass\n")
+        w("plugins/system.py", "class SystemService(Service):\n    def version(self):\n        pass\n\n    def host_id(self):\n        pass\n\nclass Other:\n    def version2(self):\n        pass\n")
         w("plugins/disk.py", "class DiskService(CRUDService):\n    pass\n")
         w("plugins/apps.py", "class AppService(GenericCRUDService[AppEntry, str]):\n\n    class Config:\n        namespace = 'app'\n\n"
           "    @job()\n    def redeploy(self, job, name):\n        pass\n\n    def pull_images(self, job, name, options):\n        pass\n")
@@ -4433,7 +4436,7 @@ class TrueNASWatchTests(unittest.TestCase):
         have = truenas_api.services(d)
         self.assertEqual(have["pool.snapshot"], {"create", "delete", "query", "rollback"})
         self.assertEqual(have["pool"], {"update", "query"})
-        self.assertEqual((have["auth"], have["system"], have["core"]), ({"login_with_api_key"}, {"version"}, {"get_methods"}))
+        self.assertEqual((have["auth"], have["system"], have["core"]), ({"login_with_api_key"}, {"version", "host_id"}, {"get_methods"}))
         self.assertNotIn("other", have)
         found, missing = truenas_api.check(d)
         self.assertEqual(missing, {})
@@ -4544,7 +4547,7 @@ class DataLayerTests(unittest.TestCase):
                 self.assertEqual(tool.page, "/" + name)
                 self.assertTrue(en(tool.flag_help), "no help for its chip on Library Health")
                 self.assertTrue(set(tool.applies) <= {"movie", "tv", "audio"} and tool.applies, "applies: which library kinds")
-                self.assertRegex(js, r'\["' + name + r'", N\("', "not on the Tools page's cards")
+                self.assertRegex(js, r'\{ page: "' + name + r'", name: N\("', "not on the Tools page's cards")
                 self.assertIn(name + ": 1", js[js.index("var TOOL_PAGES"):js.index("\n", js.index("var TOOL_PAGES"))])
                 self.assertIsInstance(tool.flag_lines([]), list)
                 # its options, per library: each for some of its kinds, a switch (true/false) or a choice among values
@@ -4765,7 +4768,7 @@ class PageStructureTests(unittest.TestCase):
         mirror, or a library of one of the account's servers (the ones in use first, then those found by looking, each with
         how many of a sample of its files are here), each named with its server — with what looking found for it beside, and
         ↺ back to not decided; above, a light per server in use (whether it answers, its libraries read) and one for the
-        Plex Cache at its site. No mirrored server: any server for any library, so no card of servers, nothing to watch."""
+        Dionysus at its site. No mirrored server: any server for any library, so no card of servers, nothing to watch."""
         tt = ToolsTests()
         app, plex, client, cat, other = tt._app(mirror=True)
         app.settings.update({"plex2": {"libraries": {"1": {"state": "mirror", "server": "xyz", "key": ""}, "2": {"state": "none"}}}})
@@ -4776,7 +4779,7 @@ class PageStructureTests(unittest.TestCase):
         app.mirrors.read_all()
         got = self._render(app.state(), "mirrors")
         html, text = got["html"], got["text"]
-        for word in ("Mirrored Libraries", "Starlit answers", "Looking for the Plex Cache at Starlit’s site", "Mirrored by", "Not decided", "No mirror", "Looks like a mirror",
+        for word in ("Mirrored Libraries", "Starlit answers", "Looking for the Dionysus at Starlit’s site", "Mirrored by", "Not decided", "No mirror", "Looks like a mirror",
                      "9 of 10 files there", "Look for Mirrors", "Far: can’t be reached", "Movies on Starlit", "files not compared yet"):
             self.assertIn(word, text, word)
         for word in ("Mirrored Server", "Stop Watching", "server watched", "Servers Found", "Mark as Mirror", "Use as the Mirrored Server", "Undo", "Choose the Server", "Watch It", "Ignore",
@@ -4841,12 +4844,12 @@ class PageStructureTests(unittest.TestCase):
         app.sync.candidates.pop()
         app.mirrors.compare_errors.clear()
         app.mirrors.libs["xyz"] = (app.mirrors.libs["xyz"][0], time.time(), None)
-        # Pair Now pressed on the Plex Cache at a mirror's site: every page here says it asks and where to press — or that no
+        # Pair Now pressed on the Dionysus at a mirror's site: every page here says it asks and where to press — or that no
         # library here is mirrored by that server yet; and pressed here, the note links to the other one's Pair Now
         st = copy.deepcopy(app.state())
         st["peer"]["asked"] = {"xyz": {"name": "Cabin box", "server": "Starlit", "why": "Pairing by itself is off", "left": 540, "wanted": True}}
         got = self._render(st, "health")
-        self.assertIn("The Plex Cache on Cabin box asks to pair: press Pair Now on System → Mirror Plex Cache within 9 minutes.", got["text"])
+        self.assertIn("The Dionysus on Cabin box asks to pair: press Pair Now on System → Mirror Dionysus within 9 minutes.", got["text"])
         self.assertIn('<a href="/system#peer" data-nav>', got["html"])
         st["peer"]["asked"]["xyz"].update(wanted=False)
         self.assertIn("asks to pair, but no library here is mirrored by Starlit: choose one on the Mirror page", self._render(st, "tools")["text"])
@@ -5061,12 +5064,13 @@ class PageStructureTests(unittest.TestCase):
                 self.assertNotIn("Nothing found", text)
                 self.assertNotIn("Why:", text, "an explanation on the page itself")
                 # the long explanation: How it works on the card's heading, the Caching cards' toggle — not an ⓘ
-                self.assertRegex(html, r'<div class="head"><h2>[^<]*</h2><span style="flex:1"></span><button class="link" type="button" data-guide="tool-' + name + '" aria-expanded="false">How it works</button>')
+                # (its heading starts with the tool's icon, the one the Tools page, the menu, Processes and the events draw for it)
+                self.assertRegex(html, r'<div class="head"><h2><svg class="ico pic" viewBox="0 0 24 24" aria-hidden="true">.*?</svg>[^<]+</h2><span style="flex:1"></span><button class="link" type="button" data-guide="tool-' + name + '" aria-expanded="false">How it works</button>')
                 self.assertNotIn('class="guide toolguide"', html, "the long explanation shows before How it works is pressed")
                 # a row whose record is one of a film's several (Merge Duplicates' rows): a red box saying to merge first
                 if name == "merge":
                     self.assertIn("<h1>Merge Duplicate Plex Records</h1>", html, "the merge page's own title")
-                    self.assertIn("<h2>Merge Duplicate Plex Records</h2>", html)
+                    self.assertRegex(html, r"</svg>Merge Duplicate Plex Records</h2>")
                     self.assertNotIn("Framed:", text)                                          # (no header over the rows)
                     self.assertIn('<div class="mgdrop"><div class="mgdroplbl">Metadata lost</div><div class="mgdim">', html)  # (the folded record: red, greyed inside)
                     self.assertNotIn(">More than 1 Plex record<", html)
@@ -5459,7 +5463,7 @@ class PageStructureTests(unittest.TestCase):
         self.assertRegex(html, r'data-tool="convert" data-key="' + k1 + r'">.*?<span class="count warn"[^>]*>1</span></button>')
         self.assertRegex(html, r'data-tool="convert" data-key="' + k2 + r'">(?:(?!</button>).)*<span class="count busy spinning"[^>]*>…</span>')
         tools = self._render(st, "tools")["html"]
-        self.assertRegex(tools, r'href="/convert" data-nav>[^<]*</a> <span class="count busy spinning"')
+        self.assertRegex(tools, r'href="/convert" data-nav><svg[^>]*>.*?</svg>[^<]*</a> <span class="count busy spinning"')
         # the option's line: what the scan found for it, on the right
         self.assertRegex(html, r'<div class="optgrid"><div class="chk lhchk optrow">')
         self.assertRegex(html, r'class="chk lhchk optrow">(?:(?!class="chk lhchk optrow").)*<span class="badge b-(warn|pass|off)">\d+</span></div>')
@@ -5484,7 +5488,7 @@ class PageStructureTests(unittest.TestCase):
         self.assertIn('<span class="count busy spinning"', html)
         self.assertIn("250 of 1,000 · 25%", html)
         self.assertIn('aria-valuenow="25"', html)
-        self.assertRegex(self._render(st, "tools")["html"], r'href="/optimizer" data-nav>[^<]*</a> <span class="count busy spinning"')
+        self.assertRegex(self._render(st, "tools")["html"], r'href="/optimizer" data-nav><svg[^>]*>.*?</svg>[^<]*</a> <span class="count busy spinning"')
         # a scan again: the last scan's findings shown, and said to be
         st["optimizer"]["libraries"] = {k1: {"files": 6, "mkv": 6, "mkv_done": 2, "todo": 2, "sync_todo": 1, "mkv_todo": 2, "why": {"new": 2}, "conflicts": [],
                                              "zfs": {"status": "pass", "issues": [], "rs": 1048576, "best": 1048576, "compression": "zstd-9"}}}
@@ -5555,7 +5559,7 @@ class PageStructureTests(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         menu = js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES")]
-        pages = re.findall(r'^    \["(\w+)", N\(', menu, re.M)
+        pages = re.findall(r'^    \{ page: "(\w+)", name: N\(', menu, re.M)
         self.assertGreaterEqual(len(pages), 10)
         # one function for every tool: a lookup of the server's word, nothing worked out per tool
         body = js[js.index("  function toolBad(name, key) {"):]
@@ -5570,8 +5574,8 @@ class PageStructureTests(unittest.TestCase):
         self.assertIn("countChip(countOf(o.tool, l.key), toolBad(o.tool, l.key))", tabs)
         self.assertEqual(set(re.findall(r"libTabs\(\{ (\w+):", js)), {"tool"}, "a libTabs call that doesn't name its page")
         self.assertEqual(len(re.findall(r"libTabs\(\{", js)), len(re.findall(r"libTabs\(\{ tool: ", js)))
-        self.assertIn("countChip(countOf(t[0]), toolBad(t[0]))", js)
-        self.assertIn("TOOLS.some(function (t) { return toolBad(t[0]); })", js)
+        self.assertIn("countChip(countOf(t.page), toolBad(t.page))", js)
+        self.assertIn("TOOLS.some(function (t) { return toolBad(t.page); })", js)
         # the server says it for every page of the Tools menu
         app, tt = self._tools_library()
         st = jsonable(app.state())
@@ -5592,7 +5596,7 @@ class PageStructureTests(unittest.TestCase):
                 if c["s"] != "na":                                                                  # (the page's count is the tool's)
                     self.assertEqual(c, {"s": "done", "n": st["tool_counts"][name]["libraries"]["1"]})
                 chip = lambda c: "fail" if stopped else "na" if c["s"] == "na" else "warn" if c["n"] else "ok"  # (red over the number; grey where it doesn't apply)
-                self.assertRegex(tools, r'<a href="/' + name + r'" data-nav>[^<]*</a> <span class="count ' + chip(tot) + '"')
+                self.assertRegex(tools, r'<a href="/' + name + r'" data-nav><svg[^>]*>.*?</svg>[^<]*</a> <span class="count ' + chip(tot) + '"')
                 self.assertRegex(html, r'(?s)data-tool="' + name + r'" data-key="1">(?:(?!</button>).)*<span class="count ' + chip(c) + '"')
                 reds += bool(stopped)
         self.assertTrue(reds, "no row a red chip stops in this library: the red isn't shown to reach anything")
@@ -5602,11 +5606,11 @@ class PageStructureTests(unittest.TestCase):
         self.assertEqual(got, {"optimizer": ["1"], "dataset": [], "filechecks": [], "plexchecks": [], "mirrorchecks": ["1"]})
         self.assertEqual(app._tools_red({"tool_counts": {}, "health_counts": {}, "optimizer": {"configured": True, "libraries": {"1": {"todo": 3}}}})["optimizer"], [])
         st["tools_red"]["optimizer"] = ["1"]
-        self.assertRegex(self._render(st, "tools")["html"], r'<a href="/optimizer" data-nav>[^<]*</a> <span class="count fail"')
+        self.assertRegex(self._render(st, "tools")["html"], r'<a href="/optimizer" data-nav><svg[^>]*>.*?</svg>[^<]*</a> <span class="count fail"')
         # nothing to do and nothing red: green, not grey
         st = counted(st, {"unlink": dict.fromkeys(st["counts"]["unlink"]["libraries"], 0)})
         st["tools_red"]["unlink"] = []
-        self.assertRegex(self._render(st, "tools")["html"], r'<a href="/unlink" data-nav>[^<]*</a> <span class="count ok"')
+        self.assertRegex(self._render(st, "tools")["html"], r'<a href="/unlink" data-nav><svg[^>]*>.*?</svg>[^<]*</a> <span class="count ok"')
 
     def test_check_pages_show_only_what_they_flag(self):
         """Every check page (File Checks, Plex Checks, Mirror Checks) shows only the items its checks flag — an orange chip, or a grey one (ignored) —
@@ -5888,7 +5892,7 @@ class PageStructureTests(unittest.TestCase):
                 self.assertIn("Only this server’s Plex records", said)
                 self.assertIn(says, said)
                 self.assertEqual("warnbox" in said[:60], warn)
-        # a mirror that isn't watched (another Plex Cache sharing the folders): merged there by hand
+        # a mirror that isn't watched (another Dionysus sharing the folders): merged there by hand
         app.settings.update({"plex2": {"libraries": {}}})
         app.peers_summary = {"systems": [{"name": "Cabin", "libraries": ["1"]}]}
         tt._run(app.tools["merge"], app.tools["merge"].scan_async("1"))
@@ -5995,6 +5999,52 @@ class PageStructureTests(unittest.TestCase):
             self.assertFalse(desc.startswith('""') or desc.startswith("''"), f"{name} opens without a description")
             self.assertTrue(desc.startswith(("H(", "T(", "esc(", "(", "LIB.", "libs", "S.", "ST.", "op.", "sy.")) or '"' in desc, f"{name}: {desc[:60]}")
 
+    def test_tool_icons_come_from_their_definitions(self):
+        """Every tool has an icon, in its definition (TOOLS in app.js, with its page, name and text) and nowhere else: not in
+        the ICONS map, not drawn by a page. One function draws it (icon(name), from the definition), and the tool is
+        shown with it wherever it is named: its card on the Tools page, the Tools menu, the heading of its own page,
+        its jobs on Processes (and so on its own page's history and on Health, which draw the same cards: jobIcon),
+        and its events. A tool without one, or with another tool's, fails here; so does a place that names a tool
+        without it. No tool or place is let off without the maintainer's express permission (CLAUDE.md)."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
+        defs = js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES = ")]
+        tools = re.findall(r'\n    \{ page: "(\w+)", name: N\("((?:[^"\\]|\\.)*)"\),(?: short: N\("([^"]*)"\),)? icon: \'((?:[^\'\\]|\\.)+)\',', defs)
+        nav = set(re.findall(r"(\w+): 1", re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)))
+        self.assertEqual({t[0] for t in tools}, nav, "a page under the Tools nav whose definition has no icon")
+        self.assertEqual(len({t[3] for t in tools}), len(tools), "two tools share a drawing")
+        icons = re.search(r"\n  var ICONS = \{\n(.*?)\n  \};", js[js.index("The icons of the app's own places"):], re.S).group(1)
+        for page, _n, _s, drawing in tools:
+            self.assertNotRegex(icons, r"^    " + page + ": ", f"{page}'s icon is in ICONS as well as in its definition")
+            self.assertNotIn(drawing, icons, f"{page}'s drawing is in ICONS too")
+            self.assertEqual(js.count(drawing), 1, f"{page}'s drawing appears outside its definition")
+        self.assertRegex(js, r"\n  function icon\(name\) \{\n    var t = toolOf\(name\), d = t \? t\.icon : ICONS\[name\];")
+        self.assertEqual(js.count('<svg class="ico pic" viewBox="0 0 24 24" aria-hidden="true">'), 1, "a place draws an icon without icon()")
+        # the jobs: every card and row of one starts with its icon (jobIcon: the tool's for a tool's job)
+        self.assertIn('function jobIcon(job) { return icon(job.kind === "tool" ? job.tool : job.kind === "copy" ? "dataset" : "optimizer"); }', js)
+        for call in ("heading(jobIcon(job) + esc(jobTitle(", "jobIcon(titleJob) + esc(jobTitle(titleJob))", "jobIcon(hj) + \"<strong>\" + esc(jobTitle(hj))", "jobIcon(item) + esc(jobTitle(item))"):
+            self.assertIn(call, js, f"a job drawn without its icon: {call}")
+        for line in re.findall(r"[^\n]*esc\(jobTitle\([^\n]*", js):                                 # (no title of a job drawn without its icon before it)
+            self.assertIn("jobIcon(", line, line.strip())
+        self.assertIn('tools: "tools"', js[js.index("  var EVENT_ICONS = "):js.index("  var STATUS_TEXT")])
+        # as drawn, from one state: the card, the menu and the page's heading each start with the tool's drawing
+        app, tt = self._tools_library(mirror=True)
+        rows = app.state()["tools"]["unlink"]["scan"]["rows"]
+        tt._run(app.tools["unlink"], app.tools["unlink"].apply_async([rows[0]["id"]]))
+        st = jsonable(app.state())
+        st["_proc"] = {"job": app.jobs.snapshot(), "queue": app.jobs.queued(), "jobs": app.jobs.log.jobs()}
+        drawn = self._render(st, "tools")
+        for page, name, short, drawing in tools:
+            with self.subTest(tool=page):
+                svg = '<svg class="ico pic" viewBox="0 0 24 24" aria-hidden="true">' + drawing.replace("\\'", "'") + "</svg>"
+                self.assertIn('<h2><a href="/' + page + '" data-nav>' + svg + html.escape(name, quote=False) + "</a>", drawn["html"], "the Tools page's card")
+                self.assertIn('href="/' + page + '" data-nav>' + svg + html.escape(short or name, quote=False) + "</a>", drawn["menu"]["sub"], "the Tools menu")
+                own = self._render(st, page)
+                self.assertRegex(own["html"], r'<h2>' + re.escape(svg) + r'[^<]+(</h2>|<button type="button" class="info")', "the page's heading")
+                self.assertIn('class="subnav on" href="/' + page + '" data-nav aria-current="page">' + svg, own["menu"]["sub"], "the Tools menu on its page")
+                if page == "unlink":
+                    self.assertIn('<div class="what">' + svg + "Unlink Files in Movies Library</div>", self._render(st, "processes")["html"], "its job on Processes")
+
     def test_tool_pages_open_with_their_card_text(self):
         """Every page under the Tools nav opens with what the tool does, in a sentence or two — the very text of its card on
         the Tools page (toolBlurb, from the TOOLS list), so the two can't drift apart and a new tool can't open without one.
@@ -6002,7 +6052,7 @@ class PageStructureTests(unittest.TestCase):
         toolBlurb("<page>") to top()."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
-        tools = re.findall(r'\n    \["(\w+)", N\("((?:[^"\\]|\\.)*)"\), N\("((?:[^"\\]|\\.)*)"\)', js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES = ")])
+        tools = re.findall(r'\n    \{ page: "(\w+)", name: N\("((?:[^"\\]|\\.)*)"\),[^\n]*\n      blurb: N\("((?:[^"\\]|\\.)*)"\)', js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES = ")])
         nav = set(re.findall(r"(\w+): 1", re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)))
         self.assertEqual({t[0] for t in tools}, nav, "every page under the Tools nav has a card (name and text) on the Tools page")
         for name, title, text in tools:
@@ -6011,7 +6061,7 @@ class PageStructureTests(unittest.TestCase):
         # the templates take the card's text, and no tool page brings a description of its own
         self.assertIn('out = top(T(spec.title), toolBlurb(name), "")', js[js.index("  function toolPage("):js.index("  function toolKind(")])
         self.assertIn('top(T(title), toolBlurb(name), "")', js[js.index("  function checksPage("):js.index("  function pageFilechecks(")])
-        self.assertNotIn("blurb:", js, "a tool page with a description of its own: the page takes its card's text (toolBlurb)")
+        self.assertEqual(js.count("blurb:"), len(tools), "a tool page with a description of its own: the page takes its card's text (toolBlurb)")
         for name, _title, _text in tools:
             body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S).group(1)
             if not re.search(r"\b(toolPage\(\{|checksPage\()", body):
@@ -6806,7 +6856,7 @@ class OptimizerTests(unittest.TestCase):
         there (its folder to scan), another match, edited fields, posters chosen by hand, collections, labels, editions —
         read through the data layer (both servers' items, each one's own page where the two differ). Whose edits win, per
         library, turns every row round over the same data, nothing read; each other option says whether rows about it are
-        live. The mirror choice gates converting; the mirror's discovery and the other Plex Caches seen in the folders."""
+        live. The mirror choice gates converting; the mirror's discovery and the other Dionysus instances seen in the folders."""
         from plexcache import checks, sync
         from plexcache.plex import Library
         app, op, client, d, state = self._app(names=("film.mkv",))
@@ -6855,7 +6905,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual((rows["B"]["kinds"], rows["C"]["kinds"]), (["match"], ["match"]))      # another entry; unmatched here, matched there
         self.assertEqual(next(c for c in rows["A"]["changes"] if c["kind"] == "edits"), {"kind": "edits", "from": "title: A!", "to": "title: A"})
         self.assertEqual((rows["A"]["src"]["label"], rows["A"]["dst"]["key"], rows["A"]["src"]["art"], rows["A"]["rks"]), ("A", "70", ["thumb"], ["10"]))
-        # the file not listed there: its folder there, to scan — whether it's on that disk can't be told (no Plex Cache there)
+        # the file not listed there: its folder there, to scan — whether it's on that disk can't be told (no Dionysus there)
         self.assertEqual((rows["A"]["scan"], rows["A"]["scan_files"], rows["A"]["unknown"], m["disk"]), (["/srv/Movies/A"], ["A/a2.mkv"], ["A/a2.mkv"], False))
         # C is unmatched here with no description, matched there: bringing it over would replace metadata with none
         self.assertEqual((rows["C"]["warn"], rows["A"]["warn"], rows["B"]["warn"]), (True, False, False))
@@ -6909,7 +6959,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(tool.analysis(data)["rows"], m2["rows"])
         self.assertEqual(sorted(r["title"] for r in tool.live("1", m2["rows"])), ["B", "C"])
         app.settings.update({"tools": {"sync": {"1": {}}}})
-        # another Plex Cache, seen by its marker in a library folder
+        # another Dionysus, seen by its marker in a library folder
         sdir = os.path.join(d, ".plexcache", "systems")
         os.makedirs(sdir, exist_ok=True)
         with open(os.path.join(sdir, "otherbox1.json"), "w") as fh:
@@ -7186,7 +7236,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual((view["summary"]["mix"]["files"], view["summary"]["mix"]["round_disk"]), (1, 0))
 
     def test_two_plex_caches_sharing_folders(self):
-        """Two Plex Caches on servers sharing library folders (peers.py): each publishes its settings in
+        """Two Dionysus instances on servers sharing library folders (peers.py): each publishes its settings in
         the folder's marker (through the optimizer service), and the other refuses what would fight —
         Sync Libraries run on both sides with the same side's edits winning, optimizer choices that differ, a file tool
         just run there — saying so on Health. A claim's hourly refresh keeps the marker's content."""
@@ -7212,7 +7262,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertIn("back and forth", en(peers.sync_conflict(app, "1")))
         claims.mark(d, "system-b", dict(other, sync={"source": "mirror"}, tools={"sync": time.time() - (peers.SYNC_DAYS + 1) * 86400}))
         self.assertIsNone(peers.sync_conflict(app, "1"))                                             # (not run there lately)
-        claims.mark(d, "system-b", dict(other, sync={"mode": "apply", "source": "mirror"}))          # an older Plex Cache, applying on a timer
+        claims.mark(d, "system-b", dict(other, sync={"mode": "apply", "source": "mirror"}))          # an older Dionysus, applying on a timer
         self.assertIn("back and forth", en(peers.sync_conflict(app, "1")))
         claims.mark(d, "system-b", dict(other, sync={"mode": "compare", "source": "mirror"}))
         self.assertIsNone(peers.sync_conflict(app, "1"))
@@ -7754,7 +7804,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(opt.resolve_conflict(notes_copy, notes)["reason"], "not Matroska")
         for p in (original, copy):
             build_mkv(p, pgs_algo=0)
-        self.assertEqual(opt.resolve_conflict(copy, original)["reason"], "not both optimized by Plex Cache")
+        self.assertEqual(opt.resolve_conflict(copy, original)["reason"], "not both optimized by Dionysus")
 
     def test_check(self):
         from plexcache.optimize import mkv
@@ -7923,7 +7973,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(opt.resolve_conflict(copy, keep)["result"], "deleted")
         self.assertFalse(os.path.exists(copy))
         shutil.copy2(src, copy)                                                # not optimized by us
-        self.assertEqual(opt.resolve_conflict(copy, keep), {"result": "kept", "reason": "not both optimized by Plex Cache"})
+        self.assertEqual(opt.resolve_conflict(copy, keep), {"result": "kept", "reason": "not both optimized by Dionysus"})
         self.assertTrue(os.path.exists(copy))
 
     def test_rewrite_file(self):
@@ -8959,7 +9009,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(list(client.claims[a_key]), ["system-b"])                 # ours released, theirs left
 
     def test_claims_settle_over_the_link(self):
-        """With the link to the other Plex Cache talking, a claim is carried there and its claims come back: the earliest
+        """With the link to the other Dionysus talking, a claim is carried there and its claims come back: the earliest
         wins at once, with no waiting for the folder sync."""
         app, op, client, d, state = self._app(names=("a.mkv", "b.mkv"))
         app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "sync": False}}}})
@@ -9492,7 +9542,7 @@ class MigrateTests(unittest.TestCase):
             self.assertEqual(calls, [("app.redeploy", ["plex-cache"])])
             c = next(x for x in mig.refresh()["checks"] if x["id"] == "sees")
             self.assertEqual((c["action"], c["level"], en(c["doing"])), ("", "waiting", "Restarting"))
-            self.assertIn("Restarting Plex Cache", en(c["detail"]))
+            self.assertIn("Restarting Dionysus", en(c["detail"]))
             mig.waits["sees"] -= migrating.RESTART_WAIT + 1                            # not back in the time a restart takes: red
             c = next(x for x in mig.refresh()["checks"] if x["id"] == "sees")
             self.assertEqual(c["level"], "error")
@@ -9628,7 +9678,7 @@ class MirrorMigrationTests(unittest.TestCase):
                 return {"ok": True}
         app.optimizing.client = Client()
         self.facts = {"v": None}
-        if mirror:  # (every library mirrored by Cabin — not answering, and plex.tv not asked for another address — the Plex Cache at its site as said)
+        if mirror:  # (every library mirrored by Cabin — not answering, and plex.tv not asked for another address — the Dionysus at its site as said)
             app.settings.update({"plex2": {"servers": {"plexB": {"name": "Cabin", "url": "http://127.0.0.1:1", "token": "t"}},
                                            "libraries": {"*": {"state": "mirror", "server": "plexB", "key": ""}}}})
             app.mirrors._reconnected = {"plexB": time.time() + 1e9}
@@ -9748,20 +9798,20 @@ class MirrorMigrationTests(unittest.TestCase):
         self.assertTrue(self._by_id(mig2.refresh())["sync_checked"]["ok"])
 
     def test_the_other_side_runs_truenas(self):
-        """The other side must say TrueNAS for certain: not reached (each reason said), an older Plex Cache that doesn't say,
+        """The other side must say TrueNAS for certain: not reached (each reason said), an older Dionysus that doesn't say,
         not TrueNAS, TrueNAS not detected for certain — each stops the copy, with what to do."""
         app, mig, d, folder, mounted, props = self._setup()
         self._ready_dataset(folder, mounted, props)
         mig.plan("9", folder)
         mig.confirm("sync_checked")
         check = lambda: self._by_id(mig.refresh())["mirror_truenas"]  # noqa: E731
-        self.assertIn("pair the two Plex Caches", en(check()["detail"]))
+        self.assertIn("pair the two Dionysus instances", en(check()["detail"]))
         app.peerlinks.link("plexB").wanted = lambda: False
-        self.assertIn("there’s no Plex Cache at the mirror’s site", en(check()["detail"]))
+        self.assertIn("there’s no Dionysus at the mirror’s site", en(check()["detail"]))
         del app.peerlinks.link("plexB").wanted
         f = self._facts()
         self.facts["v"] = dict(f, platform=None)
-        self.assertIn("older Plex Cache", en(check()["detail"]))
+        self.assertIn("older Dionysus", en(check()["detail"]))
         self.facts["v"] = dict(f, platform={"name": "linux", "truenas": False, "label": "Linux without ZFS"})
         self.assertIn("It says: Linux without ZFS", en(check()["detail"]))
         self.facts["v"] = dict(f, platform={"name": "linux-zfs", "truenas": None, "label": "Linux with ZFS — TrueNAS not detected"})
@@ -9799,7 +9849,7 @@ class MirrorMigrationTests(unittest.TestCase):
         self.assertEqual(en(ids["scope"]["title"]), "This server only: Cabin keeps its folder as it is")
         self.assertEqual(mig.blocking(), [])
         mig.set_scope("both")
-        self.facts["v"] = self._facts(folders=[{"name": "Books", "state": "folder"}])  # (an older Plex Cache: room not said)
+        self.facts["v"] = self._facts(folders=[{"name": "Books", "state": "folder"}])  # (an older Dionysus: room not said)
         c = self._by_id(mig.refresh())["mirror_room"]
         self.assertEqual((c["ok"], c["level"]), (False, "warn"))
         self.assertEqual(mig.blocking(), [])                                            # (a warning stops nothing)
@@ -9858,7 +9908,7 @@ class MirrorMigrationTests(unittest.TestCase):
         mig.waits["mirror_holding"] -= mg.HOLD_WAIT + 1
         c = self._by_id(mig.refresh())["mirror_holding"]
         self.assertEqual((c["level"], c["ok"]), ("error", False))
-        self.assertIn("Cabin hasn’t taken this up after 3 minutes. Check that the two Plex Caches are talking", en(c["detail"]))
+        self.assertIn("Cabin hasn’t taken this up after 3 minutes. Check that the two Dionysus instances are talking", en(c["detail"]))
         self.assertEqual(checks._migration_items(app)[0]["status"], "fail")
         self.assertEqual({x["id"] for x in mig.blocking("aside")}, {"mirror_holding"})
         # the last pass's compare not there (it runs by itself when the copy ends): waited for, then red
@@ -10080,7 +10130,7 @@ class MirrorMigrationTests(unittest.TestCase):
 
 
 class OptimizerSetupTests(unittest.TestCase):
-    """Setting the optimizer up: as little to edit as possible, and Health → Plex Cache says how."""
+    """Setting the optimizer up: as little to edit as possible, and Health → Dionysus says how."""
 
     def test_optimizer_check(self):
         from plexcache import checks
@@ -11428,7 +11478,7 @@ class MQTTTests(unittest.TestCase):
         self.assertEqual(_verdict(rep), "Last 7 days: Preloads aren’t staying in RAM (22% still cached); 1 next episode not ready in time")
         self.assertEqual(_verdict({"verdict": {"status": "ok", "text": "All good."}}), "All good.")
         self.assertEqual(_health_text({"summary": {"status": "fail"}, "counts": {"fail": 1, "warn": 2}}),
-                         "1 problem to fix and 2 warnings — open Health in Plex Cache for the details.")
+                         "1 problem to fix and 2 warnings — open Health in Dionysus for the details.")
         self.assertEqual(_health_text({"summary": {"status": "ok", "text": "Everything is OK."}}), "Everything is OK.")
         for text in (_verdict(rep), _health_text({"summary": {"status": "warn"}, "counts": {"warn": 1}})):
             self.assertNotIn("below", text)
@@ -11533,19 +11583,19 @@ class MQTTTests(unittest.TestCase):
         health = next(v for t, v in disc.items() if t.endswith("/health/config"))
         self.assertEqual(health["state_topic"], "plexcache/state")
         self.assertEqual(health["availability_topic"], "plexcache/availability")
-        self.assertEqual(health["device"]["name"], "Plex Cache")
+        self.assertEqual(health["device"]["name"], "Dionysus")
         components = {t.split("/")[1] for t in disc}
         self.assertEqual(components, {"sensor", "binary_sensor", "switch", "button", "number", "select", "update"})
         # Grouped under a main device and three linked ones
         devices = {}
         for t, v in disc.items():
             devices.setdefault(v["device"]["name"], set()).add(t.split("/")[3])
-        self.assertEqual(set(devices), {"Plex Cache", "Plex Cache Metrics", "Plex Cache Warm-up", "Plex Cache RAM & ZFS"})
-        self.assertIn("skips", devices["Plex Cache Metrics"])
-        self.assertIn("warmup_progress", devices["Plex Cache Warm-up"])
-        self.assertIn("arc_size", devices["Plex Cache RAM & ZFS"])
-        self.assertIn("run_warmup", devices["Plex Cache"])  # controls stay together
-        sub = next(v for t, v in disc.items() if v["device"]["name"] == "Plex Cache Metrics")
+        self.assertEqual(set(devices), {"Dionysus", "Dionysus Metrics", "Dionysus Warm-up", "Dionysus RAM & ZFS"})
+        self.assertIn("skips", devices["Dionysus Metrics"])
+        self.assertIn("warmup_progress", devices["Dionysus Warm-up"])
+        self.assertIn("arc_size", devices["Dionysus RAM & ZFS"])
+        self.assertIn("run_warmup", devices["Dionysus"])  # controls stay together
+        sub = next(v for t, v in disc.items() if v["device"]["name"] == "Dionysus Metrics")
         self.assertEqual(sub["device"]["via_device"], health["device"]["identifiers"][0])
         self.assertFalse(any("_device" in v for v in disc.values()))
         self.assertEqual(next(v for t, v in disc.items() if "/health_passed/" in t)["entity_category"], "diagnostic")
@@ -11573,7 +11623,7 @@ class MQTTTests(unittest.TestCase):
         self.assertEqual(st["update"]["installed_version"], self.app.version)
         upd = next(v for t, v in disc.items() if t.startswith("homeassistant/update/"))
         self.assertEqual(upd["release_url"], "https://github.com/drsassafras/TrueNAS-Plex-Caching")
-        # ...installable from Home Assistant when Plex Cache can do the update (here: TrueNAS, its key accepted, control allowed)
+        # ...installable from Home Assistant when Dionysus can do the update (here: TrueNAS, its key accepted, control allowed)
         self.assertTrue(st["update_installable"])
         self.assertEqual((upd["command_topic"], upd["payload_install"]), ("plexcache/set/update", "install"))
         # Home Assistant reads the versions straight from their own topic (no template)
@@ -11712,7 +11762,7 @@ class MQTTTests(unittest.TestCase):
         with mock.patch.object(app, "state", lambda: dict(real(), health=long)):
             self.assertEqual(len(ha.build_state(app)["health_text"]), 250)
         self.assertEqual(en(ha._health_text({"summary": {"status": "fail"}, "counts": {"fail": 2}})),
-                         "2 problems to fix — open Health in Plex Cache for the details.")
+                         "2 problems to fix — open Health in Dionysus for the details.")
         self.assertIsNone(ha._iso("not a time"))
         self.assertTrue(ha._iso("2026-10-14T03:00").startswith("2026-10-14T03:00"))
         self.assertEqual(ha.describe("no_such_entity"), "")
@@ -11781,12 +11831,12 @@ class MQTTTests(unittest.TestCase):
                 seen_ids.add(conf["unique_id"])
                 self.assertTrue(conf["device"].get("identifiers") and conf["device"].get("name"))
                 # origin: which software sent it (its name is required)
-                self.assertEqual(conf["origin"]["name"], "Plex Cache")
+                self.assertEqual(conf["origin"]["name"], "Dionysus")
                 # default_entity_id (object_id no longer sets the entity ID)
                 self.assertNotIn("object_id", conf)
                 self.assertRegex(conf["default_entity_id"], r"^" + comp + r"\.[a-z0-9_]+$")
                 # availability: a topic or a list, not both; the payloads as published. A control that applies only
-                # sometimes: Plex Cache online AND its condition, read from the state message
+                # sometimes: Dionysus online AND its condition, read from the state message
                 self.assertFalse("availability_topic" in conf and "availability" in conf)
                 oid = m.group(3)
                 if oid in ha.AVAILABLE_WHEN:
@@ -12230,7 +12280,7 @@ class CacheModeTests(unittest.TestCase):
         titles = lambda: {en(i["title"]): i["status"] for i in checks.check_cache_mode(app)["items"]}
         self.assertEqual(titles(), {"L2ARC caching": "pass", "Choices that need an SSD cache": "pass", "No sign-in": "info",
                                     "Optimizer": "info"})
-        self.assertEqual(en(checks.check_cache_mode(app)["title"]), "Plex Cache")
+        self.assertEqual(en(checks.check_cache_mode(app)["title"]), "Dionysus")
         app.fallbacks.note("x", M("Prefetch"), "Whole library", "Whole season")
         group = checks.check_cache_mode(app)
         fell = [i for i in group["items"] if en(i["title"]) == "Choices that need an SSD cache"][0]
@@ -12400,6 +12450,808 @@ class MQTTStandardsTests(unittest.TestCase):
         for n, size in ((0, 1), (127, 1), (128, 2), (16383, 2), (16384, 3), (2097151, 3), (2097152, 4)):
             self.assertEqual(len(_packet(0x30, b"x" * n)) - 1 - n, size, n)
 
+
+class SyncthingTests(unittest.TestCase):
+    """Syncthing read and asked through its API (syncthing.py): System → Syncthing's lights and this device's picture,
+    Mirror Checks' findings on the folder over each mirrored library and their fixes, and Convert Folder to Child
+    Dataset's pause, resume and ignore patterns through it."""
+
+    def _fake(self, **kw):
+        st = fakes.FakeSyncthing(**kw)
+        self.addCleanup(st.close)
+        return st
+
+    def test_client(self):
+        """The few calls the app makes, each refused with a wrong key, nothing at the address, or something else there."""
+        from plexcache.syncthing import SyncthingClient, SyncthingError
+        st = self._fake()
+        st.folder("media", "/mnt/tank/media", "Media", order="random")
+        c = SyncthingClient(st.url, "st-key")
+        self.assertEqual(c.status()["myID"], fakes.ST_MY_ID)
+        self.assertEqual(c.version()["version"], "v1.29.2")
+        self.assertEqual([f["id"] for f in c.config()["folders"]], ["media"])
+        self.assertTrue(c.connections()["connections"][fakes.ST_OTHER_ID]["connected"])
+        self.assertEqual(c.folder_status("media")["state"], "idle")
+        self.assertEqual(c.ignores("media"), [])
+        c.set_ignores("media", ["/Books-new"])
+        self.assertEqual(c.ignores("media"), ["/Books-new"])
+        c.patch_folder("media", {"order": "smallestFirst", "paused": True})
+        self.assertEqual((st.folders[0]["order"], st.folders[0]["paused"]), ("smallestFirst", True))
+        c.scan("media", "Books")
+        self.assertIn(("POST", "/rest/db/scan"), st.calls)
+        self.assertEqual(config.normalize_url("syncthing", "192.168.1.10"), "http://192.168.1.10:8384")  # (its port filled in)
+        with self.assertRaises(SyncthingError) as got:
+            SyncthingClient(st.url, "wrong").status()
+        self.assertEqual(got.exception.code, "auth")
+        with self.assertRaises(SyncthingError) as got:
+            SyncthingClient("http://127.0.0.1:1", "st-key", timeout=2).status()
+        self.assertEqual(got.exception.code, "reach")
+        st.plain = True
+        with self.assertRaises(SyncthingError) as got:
+            c.status()
+        self.assertEqual(got.exception.code, "answer")
+        self.assertIn("isn’t Syncthing", en(got.exception.why))
+
+    def test_covering_and_patterns(self):
+        """Which folder in Syncthing is a library's: by path (the folder, or one above, the nearest), in any form the
+        folder is known by; by name when Syncthing mounts it elsewhere. Its ignore patterns read as Syncthing does.
+        Syncthing's picture of a device, cell for cell."""
+        from plexcache.syncthing import covering, ignored_by, st_cells
+        folders = [{"id": "a", "path": "/mnt/tank/plexfiles"}, {"id": "b", "path": "/mnt/tank/plexfiles/Movies"}, {"id": "c", "path": "/sync/tv"}]
+        self.assertEqual(covering(folders, ["/mnt/tank/plexfiles/Movies"]), (folders[1], ""))
+        self.assertEqual(covering(folders, ["/mnt/tank/plexfiles/Music/Jazz"]), (folders[0], "Music/Jazz"))
+        self.assertEqual(covering(folders, ["/data/TV", "/media/tv/Shows", None]), (folders[2], ""))  # (by name: the nearest, /data/TV being the folder itself)
+        self.assertEqual(covering(folders, ["/media/tv/Shows", None]), (folders[2], "Shows"))
+        self.assertEqual(covering(folders, ["/data/Books"]), (None, ""))
+        self.assertEqual(covering([{"id": "root", "path": "/"}], ["/data/Books"]), (None, ""))
+        self.assertTrue(ignored_by(["/Books-new"], "Books-new"))
+        self.assertFalse(ignored_by(["/Books-new"], "x/Books-new"))
+        self.assertTrue(ignored_by(["Books-new"], "x/Books-new"))
+        self.assertTrue(ignored_by(["(?d).plexcache"], ".plexcache/claims/a"))
+        self.assertTrue(ignored_by(["**/.plexcache"], "Movies/.plexcache"))
+        self.assertFalse(ignored_by(["!.plexcache", "*"], ".plexcache"))
+        self.assertTrue(ignored_by(["(?i)/books-NEW"], "Books-new"))
+        self.assertFalse(ignored_by(["// a comment", "#include other"], "Books-new"))
+        cells = st_cells(fakes.ST_MY_ID)
+        self.assertTrue(cells and all(0 <= r < 5 and 0 <= c < 5 for r, c in cells))
+        self.assertEqual({(r, 4 - c) for r, c in cells}, set(cells))  # (mirrored left to right)
+        self.assertNotEqual(set(cells), set(st_cells(fakes.ST_OTHER_ID)))
+        self.assertEqual(set(st_cells("GAEALE5-IUWJBCI-C7KNKOW-UXWTUAW-TXK7N5T-HNSRXRJ-LBHZHF3-XSEEAAA")), {(0, 2), (1, 2), (4, 0), (4, 4)})  # (as Syncthing's GUI draws it)
+        # held to Syncthing's own source (a copy, tests/syncthing_identicon.js; the weekly check reads the live one): node runs it
+        if shutil.which("node"):
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            sys.path.insert(0, os.path.join(root, "dev"))
+            try:
+                import syncthing_api
+            finally:
+                sys.path.pop(0)
+            theirs = syncthing_api.identicon_cells(os.path.join(root, "tests", "syncthing_identicon.js"))
+            for i in syncthing_api.SAMPLE_IDS:
+                self.assertEqual(set(st_cells(i)), theirs[i], i)
+            d = tempfile.mkdtemp(dir=TMP)
+            os.makedirs(os.path.join(d, os.path.dirname(syncthing_api.IDENTICON)))
+            shutil.copy(os.path.join(root, "tests", "syncthing_identicon.js"), os.path.join(d, syncthing_api.IDENTICON))
+            self.assertEqual(syncthing_api.check_identicon(d), [])
+            with open(os.path.join(d, syncthing_api.IDENTICON), "a", encoding="utf-8") as fh:
+                pass
+            src = _read(os.path.join(d, syncthing_api.IDENTICON), encoding="utf-8").replace("% 2);", "% 3);")
+            with open(os.path.join(d, syncthing_api.IDENTICON), "w", encoding="utf-8") as fh:
+                fh.write(src)
+            self.assertTrue(syncthing_api.check_identicon(d))  # (a changed rule shows)
+        # a folder known by its name or label, plain: /plexfilesSyncthing labelled "Plex Files" covers /mnt/tank/plexfiles/Movies
+        pf = [{"id": "pf", "path": "/plexfilesSyncthing", "label": "Plex Files"}]
+        self.assertEqual(covering(pf, ["/data/Movies", "/mnt/tank/plexfiles/Movies"]), (pf[0], "Movies"))
+        self.assertEqual(covering([{"id": "x", "path": "/syncthing/Plex-Files"}], ["/mnt/tank/plexfiles/TV/Show"]), ({"id": "x", "path": "/syncthing/Plex-Files"}, "TV/Show"))
+        self.assertEqual(covering(pf, ["/data/Movies"]), (None, ""))
+
+    def _mirrored(self, st, **folder):
+        """An app with Movies mirrored (its twin on the mirror) and Syncthing set up, its folder over the library folder's parent."""
+        tt = ToolsTests()
+        self.addCleanup(tt.doCleanups)  # (its fakes closed with this test)
+        app, _plex, _client, cat, _other = tt._app(mirror=True)
+        app.settings.update({"syncthing": {"url": st.url, "api_key": "st-key"}})
+        st.folder("plexfiles", cat["root"], "Plex Files", **folder)
+        app.syncthing.refresh()
+        return app, cat
+
+    def test_system_card(self):
+        """System → Syncthing: four lights from the last answer, the address and key (the key never shown again, seeded from
+        the environment on first run), Test Again, and this device as Syncthing names and draws it."""
+        from plexcache.syncthing import st_cells
+        st = self._fake()
+        app, _cat = self._mirrored(st)
+        sy = app.syncthing
+        self.assertTrue(sy.talking())
+        lights = sy.lights()
+        self.assertEqual([lights[k]["status"] for k in ("found", "server", "key", "api", "folders", "devices", "throttle")], ["ok", "ok", "ok", "ok", "warn", "ok", "ok"])  # (Music is elsewhere; the throttle watches from the start)
+        self.assertEqual(en(lights["throttle"]["text"]), "Watching: nobody is playing")
+        self.assertEqual(en(lights["found"]["text"]), "Syncthing’s address set by hand")
+        self.assertEqual(en(lights["api"]["text"]), "API compatibility: all 12 calls known")
+        self.assertEqual(sy.status["api"]["asking for a scan"], True)  # (not tried: known with the folder calls)
+        self.assertEqual(en(lights["folders"]["text"]), "1 mirrored library without a Syncthing folder")
+        self.assertIn("Not covered by any folder in Syncthing: Music.", en(lights["folders"]["detail"]))
+        self.assertIn("v1.29.2", en(lights["server"]["detail"]))
+        self.assertIn("Starlit NAS", en(lights["server"]["detail"]))
+        self.assertIn("Movies, TV Shows, Audiobooks: “Plex Files”", en(lights["folders"]["detail"]))
+        self.assertEqual(en(lights["devices"]["text"]), "Connected to Cottage NAS")
+        self.assertEqual(sy.status["libraries"]["1"][0]["rel"], "Movies")
+        pub = app.settings.public()["syncthing"]
+        self.assertEqual((pub["api_key"], pub["api_key_set"]), (config.SECRET_MASK, True))
+        snap = jsonable(app.state())["syncthing"]
+        self.assertEqual((snap["ok"], snap["device"]["name"], snap["folders"][0]["libraries"]), (True, "Starlit NAS", ["1", "2", "3"]))
+        self.assertNotIn("ignores", snap["folders"][0])
+        pages = PageStructureTests()
+        got = pages._render(jsonable(app.state()), "system")
+        html = got["html"][got["html"].index('id="syncthing"'):]
+        html = html[:html.index("</section>")]
+        self.assertIn('<svg class="brandmark"', html)
+        for t in ("Syncthing’s address set by hand", "Syncthing answers", "Syncthing API key accepted", "API compatibility: all 12 calls known", "Watching: nobody is playing", "Hold Syncthing back while people watch", 'data-set="syncthing.throttle_kbps"', "1 mirrored library without a Syncthing folder", "Connected to Cottage NAS", "Test Again", "How to find the API key"):
+            self.assertIn(t, html)
+        self.assertIn('data-set="syncthing.url"', html)
+        self.assertIn('data-secret="syncthing.api_key"', html)
+        self.assertIn('data-act="syncthing-test"', html)
+        mark = re.search(r'<div class="fpmark own"><div class="fpstack"><svg class="identicon"[^>]*><g fill="currentColor">(.*?)</g></svg><span class="fpcode" title="[^"]+">AAAAAAA</span><span class="fpname">Starlit NAS</span>', html)
+        self.assertIsNotNone(mark)
+        drawn = {(int(m.group(2)), int(m.group(1))) for m in re.finditer(r'<rect x="(\d)" y="(\d)"', mark.group(1))}
+        self.assertEqual(drawn, set(st_cells(fakes.ST_MY_ID)))  # (the page draws Syncthing's picture cell for cell as st_cells says)
+        app.settings.update({"syncthing": {"api_key": "wrong"}})
+        sy.refresh()
+        lights = sy.lights()
+        self.assertEqual((lights["server"]["status"], lights["key"]["status"], lights["api"]["status"], lights["folders"]["status"]), ("ok", "fail", "off", "off"))
+        # a release without one of the calls: the API light names it, as TrueNAS's does
+        st.missing.add("/rest/system/connections")
+        app.settings.update({"syncthing": {"api_key": "st-key"}})
+        sy.refresh()
+        api = sy.lights()["api"]
+        self.assertEqual((api["status"], en(api["text"])), ("warn", "API compatibility: 1 of 12 calls missing"))
+        self.assertIn("the connections (GET /rest/system/connections)", en(api["detail"]))
+        self.assertTrue(sy.talking())  # (the rest still read)
+        st.missing.clear()
+        st.folder("music", "/music", "Music")
+        app.settings.update({"syncthing": {"api_key": "st-key"}})
+        sy.refresh()
+        self.assertEqual(en(sy.lights()["folders"]["text"]), "Every mirrored library has a Syncthing folder")
+        app.settings.update({"syncthing": {"url": "http://127.0.0.1:1"}})
+        sy.refresh()
+        self.assertEqual(sy.lights()["server"]["status"], "fail")
+        # no address: looked for by itself (TrueNAS's apps, port 8384 on the TrueNAS and Plex hosts) — none here, said; found, filled in
+        sy.candidates = lambda: ["http://127.0.0.1:1"]
+        app.settings.update({"syncthing": {"url": ""}})
+        sy.refresh()
+        self.assertEqual(sy.status, {})
+        lights = sy.lights()
+        self.assertEqual((lights["found"]["status"], en(lights["found"]["text"]), lights["server"]["status"]), ("warn", "Syncthing not found on this network", "warn"))
+        self.assertIn("not set up", en(lights["server"]["text"]))
+        self.assertIn("http://127.0.0.1:1", en(lights["found"]["detail"]))
+        sy.candidates = lambda: ["http://127.0.0.1:1", st.url]
+        sy.discover(force=True)
+        sy.refresh()
+        self.assertEqual(app.settings.get()["syncthing"]["url"], st.url)
+        self.assertEqual(en(sy.lights()["found"]["text"]), f"Syncthing found at {st.url} by itself")
+        self.assertTrue(sy.talking())
+        self.assertTrue(any("Syncthing found at" in str(e["message"]) for e in app.activity.snapshot()["events"]))
+        # where it's looked for: TrueNAS's app named for it (its published web port), then port 8384 on the hosts
+        from types import SimpleNamespace
+        class TN:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                pass
+            def apps(self):
+                return [{"name": "syncthing", "active_workloads": {"used_ports": [{"container_port": 8384, "host_ports": [{"host_port": 20910}]}, {"container_port": 22000, "host_ports": [{"host_port": 22000}]}]}},
+                        {"name": "plex", "active_workloads": {"used_ports": [{"container_port": 8384, "host_ports": [{"host_port": 1}]}]}}]
+        del sy.candidates
+        app.truenas = lambda: TN()
+        app.settings.update({"truenas": {"url": "https://192.168.50.222", "api_key": "k"}, "plex": {"url": "http://192.168.50.10:32400"}})
+        self.assertEqual(sy.candidates(), ["http://192.168.50.222:20910", "http://192.168.50.222:8384", "http://192.168.50.10:8384"])
+        del SimpleNamespace
+        with mock.patch.dict(os.environ, {"SYNCTHING_URL": "nas.local", "SYNCTHING_API_KEY": "abc"}):
+            fresh = App(tempfile.mkdtemp(dir=TMP))
+        self.assertEqual({k: v for k, v in fresh.settings.get()["syncthing"].items() if k in ("url", "api_key")}, {"url": "http://nas.local:8384", "api_key": "abc"})
+
+    def test_folder_found_by_its_listing_and_the_throttle(self):
+        """A Syncthing folder mounted under another name in its container (/plexfiles for the libraries' parent): no path form
+        matches, so the folder's own top-level listing names the library folders, and they're covered. The throttle: while
+        something plays and the media pool's disks are busy past the mark for half a minute, the folders' devices are held to
+        the rate (their own limits kept); let go when the disks calm for a minute or nobody watches, or it's switched off;
+        a restart lets go of what it held."""
+        from plexcache.syncthing import Syncthing
+        st = self._fake()
+        tt = ToolsTests()
+        self.addCleanup(tt.doCleanups)
+        app, _plex, _client, cat, _other = tt._app(mirror=True)
+        app.settings.update({"syncthing": {"url": st.url, "api_key": "st-key"}})
+        st.folder("plexfiles", "/plexfiles", "Plex Files")
+        st.listing["plexfiles"] = ["Movies", "TV", "Audiobooks", ".stfolder"]
+        st.devices[1]["maxRecvKbps"] = 50000  # (the mirror's own limit, kept and put back)
+        sy = app.syncthing
+        sy.refresh()
+        self.assertEqual({k: (e[0]["rel"], e[0]["how"]) for k, e in sy.status["libraries"].items()}, {"1": ("Movies", "listing"), "2": ("TV", "listing"), "3": ("Audiobooks", "listing")})
+        self.assertEqual(en(sy.lights()["folders"]["text"]), "1 mirrored library without a Syncthing folder")  # (Music: not in the listing either)
+        self.assertEqual(sy.status["api"]["a folder's top-level entries"], True)
+        # chosen by hand: over whatever is found, the library folder's own name as its place in it; the Mirror page offers the choice
+        app.settings.update({"syncthing": {"folders": {"4": {"folder": "plexfiles"}}}})
+        sy.refresh()
+        self.assertEqual((sy.status["libraries"]["4"][0]["rel"], sy.status["libraries"]["4"][0]["how"]), ("music", "chosen"))
+        self.assertEqual(en(sy.lights()["folders"]["text"]), "Every mirrored library has a Syncthing folder")
+        html = PageStructureTests()._render(jsonable(app.state()), "mirrors")["html"]
+        self.assertIn('<select data-stfolder="4"', html)
+        self.assertIn('<option value="plexfiles" selected>Plex Files (/plexfiles)</option>', html)
+        self.assertIn("chosen by hand", html)
+        app.settings.update({"syncthing": {"folders": {}}})
+        # the mirror's identity when the Dionysus there doesn't say: the device connected from its address
+        link = app.peerlinks.link("xyz")
+        self.assertIsNone(link.other_identity())
+        st.connected[fakes.ST_OTHER_ID] = True
+        sy.refresh()
+        self.assertIsNone(link.other_identity())  # (no address known for the device)
+        st_addr = fakes.ST_OTHER_ID
+        st.connections_address = {st_addr: "192.168.60.222:22000"}
+        sy.refresh()
+        app.settings.update({"peer": {"servers": {"xyz": {"url": "http://192.168.60.222:8642"}}}})
+        self.assertEqual((link.other_identity() or {}).get("source"), "syncthing-device")
+        self.assertEqual(link.snapshot()["identity"]["short"], "ZZZZZZZ")
+        # the throttle, on from the start
+        self.assertEqual(config.DEFAULTS["syncthing"]["throttle"], True)
+        light = lambda: sy.lights()["throttle"]  # noqa: E731
+        app.settings.update({"syncthing": {"throttle": False}})
+        app.settings.update({"syncthing": {"giveway": False}})
+        self.assertEqual((light()["status"], en(light()["text"])), ("off", "Not held back for the disks or the internet"))
+        app.settings.update({"syncthing": {"throttle": True}})
+        app.monitor.sessions = {}
+        sy.throttle_tick()
+        self.assertEqual((light()["status"], en(light()["text"])), ("ok", "Watching: nobody is playing"))
+        app.monitor.sessions = {"a": {"jobs": []}}
+        app.monitor.disk_busy = 85.0
+        sy.throttle_tick()
+        self.assertIsNone(sy.throttled)  # (not yet: half a minute over the mark first)
+        self.assertEqual(en(light()["text"]), "Watching: 1 playing (0 remote), disks 85% busy")
+        sy._hot_since -= 31
+        sy.throttle_tick()
+        self.assertEqual((sy.throttled["kbps"], sorted(sy.throttled["devices"])), (2000, [fakes.ST_OTHER_ID]))
+        self.assertEqual((st.devices[1]["maxRecvKbps"], st.devices[1]["maxSendKbps"]), (2000, 2000))
+        self.assertEqual((light()["status"], en(light()["text"])), ("warn", "Syncthing held to 2000 KB/s"))
+        self.assertIn("1 stream playing and the disks 85% busy", en(light()["detail"]))
+        self.assertEqual(app._load_json("syncthing-throttle.json")["kbps"], 2000)
+        app.monitor.disk_busy = 55.0  # (between the marks: held)
+        sy.throttle_tick()
+        self.assertIsNotNone(sy.throttled)
+        app.monitor.disk_busy = 20.0
+        sy.throttle_tick()
+        self.assertIsNotNone(sy.throttled)  # (a minute under the mark first)
+        sy._calm_since -= 61
+        sy.throttle_tick()
+        self.assertIsNone(sy.throttled)
+        self.assertEqual((st.devices[1]["maxRecvKbps"], st.devices[1]["maxSendKbps"]), (50000, 0))  # (its own limits back)
+        events = [str(e["message"]) for e in app.activity.snapshot()["events"]]
+        self.assertTrue(any("held to 2000 KB/s with Cottage NAS" in m for m in events), events[-4:])
+        self.assertTrue(any("let go" in m and "the disks are calm" in m for m in events), events[-4:])
+        # the last stream ending lets go at once; switching the throttle off does too; a restart lets go of what was held
+        app.monitor.disk_busy = 90.0
+        sy._hot_since = time.time() - 40
+        sy.throttle_tick()
+        self.assertIsNotNone(sy.throttled)
+        app.monitor.sessions = {}
+        sy.throttle_tick()
+        self.assertIsNone(sy.throttled)
+        app.monitor.sessions = {"a": {"jobs": []}}
+        sy._hot_since = time.time() - 40
+        sy.throttle_tick()
+        self.assertIsNotNone(sy.throttled)
+        again = Syncthing(app)
+        self.assertEqual(again.throttled["kbps"], 2000)  # (read back from disk)
+        app.settings.update({"syncthing": {"throttle": False}})
+        again.throttle_tick()
+        self.assertIsNone(again.throttled)
+        self.assertEqual(st.devices[1]["maxRecvKbps"], 50000)
+        self.assertEqual(app._load_json("syncthing-throttle.json"), {})
+        snap = jsonable(again.snapshot())["throttle"]
+        self.assertEqual((snap["on"], snap["active"]), (False, None))
+        # the internet give-way: a stream to a player Plex calls remote holds the devices reached over the internet — not the LAN
+        # ones — to the floor (the upload unknown), sending only; with the upload known, to what's left of it; let go a minute
+        # after the last remote stream; receiving too only when asked
+        sy = app.syncthing
+        app.settings.update({"syncthing": {"throttle": False, "giveway": True, "giveway_floor_kbps": 500, "giveway_up_mbps": 0}})
+        st.folders[0]["devices"].append({"deviceID": "LANLANL-" + fakes.ST_OTHER_ID[8:]})
+        st.devices.append({"deviceID": "LANLANL-" + fakes.ST_OTHER_ID[8:], "name": "Laptop"})
+        st.connected["LANLANL-" + fakes.ST_OTHER_ID[8:]] = True
+        st.connections_address = {fakes.ST_OTHER_ID: "192.168.60.222:22000", "LANLANL-" + fakes.ST_OTHER_ID[8:]: "192.168.50.101:22000"}
+        app.web_url = "http://192.168.50.222:8642"
+        sy.refresh()
+        self.assertEqual([str(n) for n in sy.own_networks()], ["192.168.50.0/24"])
+        self.assertTrue(sy.is_lan("192.168.50.101:22000") and not sy.is_lan("192.168.60.222:22000") and not sy.is_lan("100.101.102.103:22000"))
+        app.monitor.sessions = {"r": {"jobs": [], "local": False, "kbps": 4000}, "l": {"jobs": [], "local": True, "kbps": 20000}}
+        sy.throttle_tick()
+        self.assertEqual(sorted(sy.throttled["devices"]), [fakes.ST_OTHER_ID])
+        self.assertEqual((st.devices[1]["maxSendKbps"], st.devices[1]["maxRecvKbps"]), (500, 50000))  # (sending held; receiving its own)
+        self.assertIn("1 remote stream at 4.0 Mbit/s", en(light()["detail"]))
+        app.settings.update({"syncthing": {"giveway_up_mbps": 20, "giveway_both": True}})
+        sy.throttle_tick()
+        self.assertEqual((st.devices[1]["maxSendKbps"], st.devices[1]["maxRecvKbps"]), (1900, 1900))  # (20 Mbit/s = 2500 KB/s, less 4000 kbit/s × 1.2 / 8)
+        self.assertEqual(sy.net_rate({"giveway_floor_kbps": 500, "giveway_up_mbps": 20}, 19000), 500)  # (never under the floor)
+        app.monitor.sessions = {"l": {"jobs": [], "local": True, "kbps": 20000}}
+        sy.throttle_tick()
+        self.assertIsNotNone(sy.throttled)  # (a minute's grace)
+        sy._net_last -= 61
+        sy.throttle_tick()
+        self.assertIsNone(sy.throttled)
+        self.assertEqual((st.devices[1]["maxSendKbps"], st.devices[1]["maxRecvKbps"]), (0, 50000))  # (its own limits back)
+        self.assertTrue(any("remote stream" in m for m in (str(e["message"]) for e in app.activity.snapshot()["events"])))
+
+    def test_identity_is_syncthings_device_id(self):
+        """One identity for this server, wherever it's shown: Syncthing's device ID through its API; else read off the
+        certificate its sync port presents to anyone (no key); else this app's own key. Carried over the link, so each side
+        shows the other's; and checked against the devices the folder is shared with."""
+        from plexcache import peerlink as pl
+        from plexcache.syncthing import cert_device_id, device_id_from_cert, luhn32, ALPHA32
+        did = device_id_from_cert(b"a certificate")
+        groups = did.split("-")
+        self.assertEqual([len(g) for g in groups], [7] * 8)
+        self.assertTrue(all(c in ALPHA32 for g in groups for c in g))
+        flat = did.replace("-", "")
+        for i in range(0, 56, 14):  # (every 14th character is the check character of the 13 before it: Syncthing's luhn)
+            self.assertEqual(flat[i + 13], luhn32(flat[i:i + 13]))
+        self.assertNotEqual(did, device_id_from_cert(b"another"))
+        # the certificate on a sync port, read with no key
+        import ssl
+        d = tempfile.mkdtemp(dir=TMP)
+        cert, key = fakes.self_signed_cert(d)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(2)
+        self.addCleanup(srv.close)
+
+        def serve():
+            for _ in range(2):
+                try:
+                    conn, _a = srv.accept()
+                    with ctx.wrap_socket(conn, server_side=True) as t:
+                        t.recv(1)
+                except Exception:  # noqa: BLE001
+                    pass
+        threading.Thread(target=serve, daemon=True).start()
+        with open(cert, "rb") as fh:
+            der = ssl.PEM_cert_to_DER_cert(fh.read().decode())
+        port = srv.getsockname()[1]
+        self.assertEqual(cert_device_id("127.0.0.1", port), device_id_from_cert(der))
+        self.assertIsNone(cert_device_id("127.0.0.1", 1))
+        # the sources, in order: API, certificate, this app's own key
+        st = self._fake()
+        app, _cat = self._mirrored(st)
+        idn = app.peerlinks.identity()
+        self.assertEqual((idn["id"], idn["short"], idn["source"], idn["name"]), (fakes.ST_MY_ID, "AAAAAAA", "syncthing", "Starlit NAS"))
+        self.assertEqual(jsonable(app.state())["peer"]["own"]["identity"]["short"], "AAAAAAA")
+        self.assertEqual(jsonable(app.state())["syncthing"]["identity"]["source"], "syncthing")
+        app.settings.update({"syncthing": {"api_key": "wrong"}})
+        app.syncthing.refresh()
+        app.syncthing._published_port = lambda inside: port
+        app.syncthing.candidates = lambda: ["http://127.0.0.1:" + str(port)]
+        idn = app.peerlinks.identity()
+        self.assertEqual((idn["id"], idn["source"]), (device_id_from_cert(der), "certificate"))
+        app.settings.update({"syncthing": {"url": ""}})
+        app.syncthing.refresh()
+        app.syncthing._cert_id = (0.0, None)
+        app.syncthing.candidates = lambda: []
+        idn = app.peerlinks.identity()
+        self.assertEqual((idn["id"], idn["source"]), (pl.fingerprint(app.peerlinks.public()), "own"))
+        # over the link: in the hello and the status; the other side's shown, and checked against the folder's devices
+        self.assertEqual(app.peerlinks.hello()["identity"], idn)
+        self.assertEqual(app.peerlinks.local_status()["identity"], idn)
+        app.settings.update({"syncthing": {"url": st.url, "api_key": "st-key"}})
+        app.syncthing.refresh()
+        link = app.peerlinks.link("xyz")
+        self.assertIsNone(link.other_identity())
+        link.found = {"url": "http://127.0.0.1:1", "hello": {"identity": {"id": fakes.ST_OTHER_ID, "short": "ZZZZZZZ", "source": "syncthing", "name": "Cottage NAS"}}, "at": time.time()}
+        self.assertEqual(link.other_identity()["short"], "ZZZZZZZ")
+        self.assertEqual(link.snapshot()["identity"]["short"], "ZZZZZZZ")
+        ids = {f["result"]["id"] for f in app.syncthing.findings("1")}
+        self.assertNotIn("mirror_syncthing_other_device", ids)  # (the mirror's device is one the folder is shared with)
+        link.found["hello"]["identity"] = {"id": "QQQQQQQ-" + fakes.ST_OTHER_ID[8:], "short": "QQQQQQQ", "source": "syncthing", "name": "Elsewhere"}
+        found = {f["result"]["id"]: f for f in app.syncthing.findings("1")}
+        self.assertIn("mirror_syncthing_other_device", found)
+        self.assertIn("QQQQQQQ (Elsewhere)", en(found["mirror_syncthing_other_device"]["result"]["text"]))
+        # the page draws every identity Syncthing's way, and the menu's mark is the identity
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
+        self.assertIn("return stIdenticon(id).replace(", js[js.index("  function identicon(id, size)"):])
+        self.assertIn('ownId = (((ST.peer || {}).own || {}).identity || {}).id', js)
+
+    def test_files_on_their_way_and_the_mirror_page(self):
+        """Files Syncthing is still carrying, in or out, are a Mirror Checks finding on their item (an item of its own where the
+        data layer doesn't know the file) that stops Sync Libraries' row; the Mirror page says each mirrored library's folder
+        and how it stands; Health says when Syncthing is set up but not answering, or its key is still to paste."""
+        from plexcache import checks, mirrorhealth
+        st = self._fake()
+        app, cat = self._mirrored(st)
+        st.need["plexfiles"] = ["Movies/Film 9 (2019)/Film 9 (2019).mkv", "TV/Show/ep.mkv"]
+        st.remote_need[("plexfiles", fakes.ST_OTHER_ID)] = ["Movies/Film 1 (2011)/Film 1 (2011).mkv"]
+        app.syncthing.refresh()
+        tr = app.syncthing.transit("1")
+        self.assertEqual(tr["in"], {"Film 9 (2019)/Film 9 (2019).mkv": "Plex Files"})
+        self.assertEqual(tr["out"], {"Film 1 (2011)/Film 1 (2011).mkv": ["Cottage NAS"]})
+        self.assertEqual(app.syncthing.transit("2")["in"], {"Show/ep.mkv": "Plex Files"})
+        found = [f for f in app.mirror_health.findings("1") if f["result"]["id"] == "mirror_syncthing_transit"]
+        self.assertEqual(len(found), 2)
+        texts = sorted(en(line) for f in found for line in f["result"]["lines"])
+        self.assertTrue(any(t.startswith("On its way here through Syncthing (Plex Files): Film 9") for t in texts), texts)
+        self.assertTrue(any(t.startswith("Still being sent to Cottage NAS through Syncthing: Film 1") for t in texts), texts)
+        self.assertIn("mirror_syncthing_transit", mirrorhealth.BLOCK_IDS)
+        blocks = app.mirror_health.blocks("1")
+        known = [f for f in found if not f["item"].startswith("transit:")]
+        for f in known:  # (a file the data layer knows: its record's row stopped in Sync Libraries)
+            self.assertEqual(blocks[f["item"]][0]["id"], "mirror_syncthing_transit")
+        # the Mirror page's line per mirrored library
+        snap = jsonable(app.state())
+        self.assertEqual((snap["syncthing"]["folders"][0]["need_n"], snap["syncthing"]["folders"][0]["out_n"]), (2, 1))
+        html = PageStructureTests()._render(snap, "mirrors")["html"]
+        self.assertIn("Syncthing: “Plex Files” · 2 files on their way here", html)
+        st.need.clear()
+        st.remote_need.clear()
+        app.syncthing.refresh()
+        html = PageStructureTests()._render(jsonable(app.state()), "mirrors")["html"]
+        self.assertIn("Syncthing: “Plex Files” · up to date", html)
+        # Health
+        self.assertEqual(checks._syncthing_items(app), [])
+        app.settings.update({"syncthing": {"api_key": "wrong"}})
+        app.syncthing.refresh()
+        items = checks._syncthing_items(app)
+        self.assertEqual((items[0]["status"], en(items[0]["title"])), ("fail", "Syncthing didn’t accept the API key"))
+        app.settings.update({"syncthing": {"url": "http://127.0.0.1:1", "api_key": "st-key"}})
+        app.syncthing.refresh()
+        items = checks._syncthing_items(app)
+        self.assertEqual((items[0]["status"], en(items[0]["title"])), ("warn", "Syncthing isn’t answering"))
+        self.assertIn("Open System", en(items[0]["link"]["text"]))
+        self.assertTrue(any(en(i["title"]) == "Syncthing isn’t answering" for i in checks.run_all(app)["items"]) if isinstance(checks.run_all(app), dict) and "items" in checks.run_all(app) else True)
+        # where paths are on the host, from TrueNAS's mounts of the two apps
+        app.syncthing._mounts = (time.time(), {"syncthing": [("/mnt/tank/plexfiles", "/plexfiles")], "mine": [("/mnt/tank/plexfiles", "/media")]})
+        self.assertEqual(app.syncthing.host_of("/plexfiles/Movies", "syncthing"), "/mnt/tank/plexfiles/Movies")
+        self.assertEqual(app.syncthing.host_of("/media", "mine"), "/mnt/tank/plexfiles")
+        self.assertIsNone(app.syncthing.host_of("/elsewhere", "mine"))
+        from plexcache.syncthing import covering
+        self.assertEqual(covering([{"id": "p", "path": "/plexfiles", "host_path": "/mnt/tank/plexfiles"}], ["/media/Movies", None, "/mnt/tank/plexfiles/Movies"])[1], "Movies")
+
+    def test_mirror_checks_findings_and_fixes(self):
+        """Mirror Checks' findings on the Syncthing folder over a mirrored library — paused, not watched, not smallest
+        first, .plexcache ignored, no device connected — each a check of Library Health's, on an item of the folder's,
+        with the fix as its action where the API can make it; nothing answering and no folder said too; a note while
+        files are on their way, and while Syncthing isn't set up."""
+        from plexcache import libhealth
+        from plexcache.libhealth import library_health
+        st = self._fake()
+        app, _cat = self._mirrored(st, paused=True, order="random", fsWatcherEnabled=False)
+        st.ignores["plexfiles"] = ["/Movies/.plexcache", "*.tmp"]
+        st.connected[fakes.ST_OTHER_ID] = False
+        app.syncthing.refresh()
+        ids = {"mirror_syncthing_paused", "mirror_syncthing_not_watched", "mirror_syncthing_order", "mirror_syncthing_ignores", "mirror_syncthing_disconnected"}
+        # (paused: Syncthing answers "no such folder" for its listing and need calls — the folder's state, never a call the release lacks)
+        self.assertEqual(app.syncthing.lights()["api"]["status"], "ok")
+        self.assertFalse([w for w, ok in app.syncthing.status["api"].items() if ok is False], app.syncthing.status["api"])
+        found = {f["result"]["id"]: f for f in app.mirror_health.findings("1") if f["result"]["id"].startswith("mirror_syncthing_")}
+        self.assertEqual(set(found), ids)
+        self.assertTrue(all(f["item"] == "syncthing:plexfiles" and en(f["label"]) == "Syncthing folder “Plex Files”" for f in found.values()))
+        self.assertEqual(en(found["mirror_syncthing_paused"]["result"]["action"]["label"]), "Resume Folder")
+        self.assertIn("in random order", en(found["mirror_syncthing_order"]["result"]["text"]))
+        self.assertEqual(found["mirror_syncthing_ignores"]["result"]["lines"], ["/Movies/.plexcache"])
+        self.assertNotIn("action", found["mirror_syncthing_ignores"]["result"])
+        self.assertIn("Cottage NAS", en(found["mirror_syncthing_disconnected"]["result"]["text"]))
+        self.assertTrue(ids | {"mirror_syncthing_down", "mirror_syncthing_no_folder"} <= {c["id"] for c in libhealth.CHECKS["mirror"]})
+        h = library_health(app, "1")
+        item = next(it for it in h["items"] if it["key"] == "syncthing:plexfiles")
+        self.assertEqual({r["id"] for r in item["results"]}, ids)
+        self.assertEqual(h["counts"]["mirror_syncthing_paused"], 1)
+        before = app.mirror_health.stamp("1")
+        self.assertEqual(en(libhealth.act(app, "1", "syncthing:plexfiles", "mirror_syncthing_paused")), "Syncthing asked to resume the folder")
+        self.assertFalse(st.folders[0]["paused"])
+        libhealth.act(app, "1", "syncthing:plexfiles", "mirror_syncthing_not_watched")
+        libhealth.act(app, "1", "syncthing:plexfiles", "mirror_syncthing_order")
+        self.assertEqual((st.folders[0]["fsWatcherEnabled"], st.folders[0]["order"]), (True, "smallestFirst"))
+        self.assertNotEqual(app.mirror_health.stamp("1"), before)
+        left = {f["result"]["id"] for f in app.mirror_health.findings("1") if f["result"]["id"].startswith("mirror_syncthing_")}
+        self.assertEqual(left, {"mirror_syncthing_ignores", "mirror_syncthing_disconnected"})
+        with self.assertRaises(ValueError):
+            libhealth.act(app, "1", "syncthing:plexfiles", "mirror_syncthing_ignores")  # (no fix from here: a pattern you wrote)
+        events = [str(e["message"]) for e in app.activity.snapshot()["events"]]
+        self.assertTrue(any("Syncthing asked to resume the folder" in m for m in events), events[-5:])
+        st.folder_status["plexfiles"] = {"state": "syncing", "needFiles": 3, "needBytes": 2_500_000_000}
+        st.connected[fakes.ST_OTHER_ID] = True
+        app.syncthing.refresh()
+        notes = [en(n["text"]) for n in app.mirror_health.notes("1")]
+        self.assertTrue(any(n.startswith("Syncthing: 3 files still to come here into “Plex Files”") for n in notes), notes)
+        evaluated(app, "1")  # (the page shows the library's findings once its counts are in)
+        state = jsonable(app.state())
+        state["_health"] = jsonable(library_health(app, "1"))
+        page = PageStructureTests()._render(state, "mirrorchecks")
+        for t in ("Syncthing folder “Plex Files”", "Syncthing ignores .plexcache", "3 files still to come"):
+            self.assertIn(t, page["text"])
+        st.folders.clear()
+        app.syncthing.refresh()
+        self.assertEqual([f["result"]["id"] for f in app.syncthing.findings("1")], ["mirror_syncthing_no_folder"])
+        app.settings.update({"syncthing": {"url": "http://127.0.0.1:1"}})
+        app.syncthing.refresh()
+        self.assertEqual([f["result"]["id"] for f in app.syncthing.findings("1")], ["mirror_syncthing_down"])
+        app.settings.update({"syncthing": {"url": ""}})
+        app.syncthing.refresh()
+        self.assertEqual(app.syncthing.findings("1"), [])
+        self.assertIn("Syncthing isn’t connected", en(app.mirror_health.notes("1")[-1]["text"]))
+
+    def test_child_dataset_through_the_api(self):
+        """Convert Folder to Child Dataset with Syncthing connected: the folder over the library folder known from its API
+        (no .stfolder needed), the ignore patterns added from a button, the folder paused before the set-aside and resumed
+        after — each through the API, logged — in place of doing them in Syncthing and saying so."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
+        for a in ("sync_ignore", "sync_pause", "sync_resume"):
+            self.assertIn('b("' + a + '", H(', js, f"no button for {a}")
+        st = self._fake()
+        mm = MirrorMigrationTests()
+        self.addCleanup(mm.doCleanups)  # (its patches — zfs.mounts among them — undone with this test, not left for the suite)
+        app, mig, d, folder, mounted, props = mm._setup(mirror=False)                    # (no mirror: the folder sync is asked for Syncthing's sake alone)
+        app.settings.update({"syncthing": {"url": st.url, "api_key": "st-key"}})
+        st.folder("media", d, "Media")
+        app.syncthing.refresh()
+        self.assertEqual(app.syncthing.folder_over(folder), (app.syncthing.status["folders"][0], "Books"))
+        mm._ready_dataset(folder, mounted, props)
+        mig.plan("9", folder)
+        c = mm._by_id(mig.refresh())["sync_ignore"]
+        self.assertEqual((c["ok"], c["action"], c["cmd"]), (False, "sync_ignore", "/Books-new\n/.Books.plexcache-old"))
+        self.assertIn("“Media”", en(c["detail"]))
+        self.assertIn("Add Them in Syncthing", en(c["detail"]))
+        self.assertEqual([x["id"] for x in mig.blocking()], ["sync_ignore"])
+        mig.confirm("sync_ignore")
+        self.assertEqual(st.ignores["media"], ["/Books-new", "/.Books.plexcache-old"])
+        self.assertTrue(mm._by_id(mig.refresh())["sync_ignore"]["ok"])
+        mig.confirm("sync_ignore")                                                       # (again: nothing added twice)
+        self.assertEqual(st.ignores["media"], ["/Books-new", "/.Books.plexcache-old"])
+        mig.state.update(step="switch", compare={"same": True}, compare_at=time.time())
+        c = mm._by_id(mig.refresh())["sync_paused"]
+        self.assertEqual((c["ok"], c["action"], c["gate"]), (False, "sync_pause", "aside"))
+        with self.assertRaises(ValueError):
+            mig.rename_old()
+        with self.assertRaises(ValueError):
+            mig.confirm("sync_resume")                                                   # (not before the dataset is in place)
+        mig.confirm("sync_pause")
+        self.assertTrue(st.folders[0]["paused"])
+        self.assertTrue(mm._by_id(mig.refresh())["sync_paused"]["ok"])
+        mig.state["compare_at"] = time.time()
+        mig.rename_old()
+        self.assertTrue(os.path.isdir(os.path.join(d, ".Books.plexcache-old")))
+        shutil.copytree(os.path.join(d, ".Books.plexcache-old"), folder + "-new", symlinks=True, dirs_exist_ok=True)
+        os.rename(folder + "-new", folder)
+        mounted.add(folder)
+        props["tank/media/Books"] = props.pop("tank/media/Books-new")
+        self.assertEqual(mig.refresh()["state"]["step"], "verify")
+        c = mm._by_id(mig.refresh())["sync_resumed"]
+        self.assertEqual((c["ok"], c["action"]), (False, "sync_resume"))
+        with self.assertRaises(ValueError):
+            mig.delete_old()
+        mig.confirm("sync_resume")
+        self.assertFalse(st.folders[0]["paused"])
+        self.assertIn(("POST", "/rest/db/scan"), st.calls)  # (the dataset in the folder's place scanned now)
+        self.assertEqual(mig.delete_old()["state"]["step"], "done")
+        events = [str(e["message"]) for e in app.activity.snapshot()["events"]]
+        for what in ("pause the folder media", "resume the folder media", "ignore patterns for media"):
+            self.assertTrue(any(what in m for m in events), (what, events[-6:]))
+        # the folder itself in Syncthing: nothing to add, said so
+        app2, mig2, d2, folder2, mounted2, props2 = mm._setup(mirror=False)
+        app2.settings.update({"syncthing": {"url": st.url, "api_key": "st-key"}})
+        st.folders.clear()
+        st.folder("books", folder2, "Books")
+        app2.syncthing.refresh()
+        mm._ready_dataset(folder2, mounted2, props2)
+        mig2.plan("9", folder2)
+        ids = mm._by_id(mig2.refresh())
+        self.assertTrue(ids["sync_root"]["ok"])
+        self.assertIn("“Books” is the library folder itself", en(ids["sync_root"]["title"]))
+        self.assertNotIn("sync_ignore", ids)
+
+
+class IntegrationStandardTests(unittest.TestCase):
+    """Every service the app connects to is held to one standard (integrations.py): the same lights in the same order —
+    found, server, key, API compatibility, then its own — a table of the calls it makes behind the API light, each step it
+    hasn't got declared as an exception with its reason, one snapshot shape in the state, and its System card drawn by
+    the one function (integrationLights). MQTT is not one, by design. A new service fails here until it follows the
+    standard or declares its exceptions."""
+
+    def test_every_integration_follows_the_standard(self):
+        from plexcache import integrations
+        from plexcache.integrations import ALL, STEPS
+        self.assertEqual([c.name for c in ALL], ["plex", "truenas", "syncthing", "peer"])
+        app, tt = PageStructureTests()._tools_library(mirror=True)
+        app.test_connections()
+        snap = jsonable(app.state())["integrations"]
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
+        for cls in ALL:
+            with self.subTest(integration=cls.name):
+                ig = cls(app)
+                self.assertTrue(cls.title and cls.calls, "a title and the calls it makes")
+                for step, why in cls.exceptions.items():
+                    self.assertTrue(step in STEPS or step == "card", f"an exception for something that isn't a step: {step}")
+                    self.assertGreater(len(why), 20, f"the exception for {step} needs its reason")
+                steps = ig.steps()
+                self.assertEqual(steps[:len(steps) - len(cls.own)], [s for s in STEPS if s not in cls.exceptions], "the standard steps first, in their order")
+                self.assertIn("api", steps, "every integration checks its calls against the release that answered")
+                lights = ig.lights()
+                self.assertEqual(list(lights), steps)
+                for step, r in lights.items():
+                    self.assertIn(r["status"], integrations.STATUSES, (step, r))
+                    self.assertTrue(r["text"], (step, "a light says what it is"))
+                self.assertEqual(set(snap[cls.name]), {"title", "steps", "lights", "labels", "exceptions", "calls", "identity"})
+                self.assertEqual(snap[cls.name]["steps"], steps)
+                # every integration names its server by a key the service holds, never an address: an identity with its source
+                idn = snap[cls.name]["identity"]
+                if lights.get("server", {}).get("status") == "ok" or cls.name == "peer":  # (connected: it has one; the link's is this server's own)
+                    self.assertIsNotNone(idn, f"{cls.name} has no identity once connected")
+                    self.assertEqual(set(idn), {"id", "short", "source", "name"})
+                    self.assertTrue(idn["id"] and (idn["short"] == (idn["id"].split("-")[0] if "-" in idn["id"] else idn["id"][:7].upper()) or cls.name == "peer"), idn)
+                if "card" not in cls.exceptions:
+                    self.assertIn('integrationMark("' + cls.name + '"', js[js.index('id="' + cls.name + '"') - 400:js.index('id="' + cls.name + '"')], "the card's mark comes from integrationMark")
+                # the card: its lights drawn by the one function, in the standard's order — or its exception for that
+                if "card" in cls.exceptions:
+                    self.assertNotIn('integrationLights("' + cls.name + '"', js)
+                else:
+                    card = js[js.index('id="' + cls.name + '"'):]
+                    card = card[:card.index("</section>")]
+                    self.assertIn('integrationLights("' + cls.name + '", testing, { api: info(', card, "the card's lights come from integrationLights, with the API light's ⓘ")
+                    self.assertNotIn("lightFor(c.", card, "a light drawn beside the standard's")
+        # the words of the API light are one function's, whatever the service
+        self.assertEqual((snap["plex"]["identity"]["id"], snap["plex"]["identity"]["short"], snap["plex"]["identity"]["source"]), ("abc", "ABC", "plex"))
+        self.assertEqual((snap["truenas"]["identity"]["id"], snap["truenas"]["identity"]["source"]), ("d41d8cd98f00b204e9800998ecf8427e", "truenas"))
+        html = PageStructureTests()._render(jsonable(app.state()), "system")["html"]
+        for name, short in (("plex", "ABC"), ("truenas", "D41D8CD")):
+            card = html[html.index('id="' + name + '"') - 20:]
+            card = card[:card.index("</section>")]
+            self.assertRegex(card, r'class="card hasfp" id="' + name + r'"><div class="fpmark own"><div class="fpstack"><svg class="identicon".*?<span class="fpcode" title="[^"]+">' + short + "</span>")
+        self.assertEqual(en(integrations.api_light([], [], 9, "v1")["text"]), "API compatibility: all 9 calls known")
+        self.assertEqual(en(integrations.api_light(["x (GET /a)"], [], 9, "v1", "paths")["text"]), "API compatibility: 1 of 9 calls missing")
+        self.assertIn("learns the new paths", en(integrations.api_light(["x (GET /a)"], [], 9, "v1", "paths")["detail"]))
+        self.assertIn("learns the new names", en(integrations.api_light(["x (a.b)"], [], 9, "v1")["detail"]))
+        self.assertEqual(en(integrations.api_light([], ["y"], 9, "v1")["text"]), "API compatibility: 8 of 9 calls known")
+        # MQTT is no integration of the standard's, by design (nothing to find, no API to verify)
+        self.assertNotIn("mqtt", [c.name for c in ALL])
+        self.assertIn("MQTT is not one of these by design", integrations.__doc__ or "")
+
+    def test_plex_api_light(self):
+        """Plex publishes no API list, so each read the app makes is tried: green when all answer; orange naming a path a
+        release hasn't got; the item reads not tried on an empty server."""
+        from plexcache.plex import CALLS, PlexClient
+        app = _new_app()
+        c = app.test_connections()
+        self.assertEqual((c["plex_api"]["status"], en(c["plex_api"]["text"])), ("ok", f"API compatibility: all {len(CALLS)} calls known"))
+        self.assertIn("Plex Media Server", en(c["plex_api"]["detail"]))
+        tried = PlexClient(PLEX.url, "good-token").verify_api()
+        self.assertEqual(set(tried), set(CALLS))
+        self.assertTrue(all(v is True for v in tried.values()), tried)
+        from plexcache import plex as plex_mod
+        from plexcache.i18n import M as _M
+        real = PlexClient._request
+
+        def gone(self, path, *a, **k):  # (a release without one of the paths)
+            if path == "/status/sessions":
+                raise plex_mod.PlexError(_M("gone"), 404)
+            return real(self, path, *a, **k)
+        with mock.patch.object(PlexClient, "_request", gone):
+            tried = PlexClient(PLEX.url, "good-token").verify_api()
+        self.assertEqual(tried["what's playing"], False)
+        # the System page: the three standard lights on the Plex card, server, sign-in, API
+        html = PageStructureTests()._render(jsonable(app.state()), "system")["html"]
+        card = html[html.index('id="plex"'):]
+        card = card[:card.index("</section>")]
+        for t in ("Plex server found", "Signed in to Plex", f"API compatibility: all {len(CALLS)} calls known", "Plex’s LAN networks leave out", "100.64.0.0/10", 'data-act="plex-lan"'):
+            self.assertIn(t, card)
+        self.assertEqual((c["plex_lan"]["status"], en(c["plex_lan"]["text"])), ("warn", "Plex’s LAN networks leave out 100.64.0.0/10"))  # (no own network known in the tests: the tailnet alone)
+        PLEX.prefs["LanNetworksBandwidth"] = "10.0.0.0/8"
+        self.assertEqual(app.plex_add_lan_networks(), ["10.0.0.0/8", "100.64.0.0/10"])
+        self.assertEqual(PLEX.prefs["LanNetworksBandwidth"], "10.0.0.0/8,100.64.0.0/10")
+        c = app.test_connections()
+        self.assertEqual((c["plex_lan"]["status"], en(c["plex_lan"]["text"])), ("ok", "Plex’s LAN networks cover the networks Plex answers on"))
+        self.assertEqual(app.plex_add_lan_networks(), ["10.0.0.0/8", "100.64.0.0/10"])  # (nothing missing: nothing set)
+        PLEX.prefs["LanNetworksBandwidth"] = ""
+        self.assertIn("Add Subnets to Plex LAN sets Settings → Network → LAN Networks to 100.64.0.0/10", en(app._lan_light("", "abc")["detail"]))
+        self.assertIn("wasn’t checked", en(app._lan_light("", "abc")["detail"]))  # (plex.tv not reached: the tailnet not told, so offered)
+        # Plex reached on the subnets: what plex.tv says Plex publishes, each address tried as this Plex (its /identity)
+        import ipaddress
+        mine = {"id": "abc", "connections": [{"uri": "http://100.101.102.103:32400", "relay": False}, {"uri": "https://relay.plex.direct:8443", "relay": True}]}
+        with mock.patch.object(_plexmod, "servers", lambda cid, tok: [mine]), mock.patch.object(App, "_plex_answers", staticmethod(lambda url, mid: "100.101.102.103" in url)):
+            self.assertEqual(app.plex_reach([ipaddress.ip_network("100.64.0.0/10")], "abc"), {"100.64.0.0/10": {"status": "ok", "address": "100.101.102.103"}})
+            r = app._lan_light("", "abc")
+            self.assertEqual((r["status"], r["add"]), ("warn", ["100.64.0.0/10"]))
+            self.assertIn("Plex answers at 100.101.102.103 (100.64.0.0/10).", en(r["detail"]))
+            app.test_connections()
+            html = PageStructureTests()._render(jsonable(app.state()), "system")["html"]  # (the button in the check's row, beside it)
+            row = html[html.index("Plex’s LAN networks leave out"):]
+            row = row[:row.index("</section>")].split('class="lightrow"')[0]
+            self.assertRegex(row, r'</div></div><button class="btn" type="button" data-act="plex-lan" title="[^"]+">Add Subnets to Plex LAN</button></div>')
+        with mock.patch.object(_plexmod, "servers", lambda cid, tok: [mine]), mock.patch.object(App, "_plex_answers", staticmethod(lambda url, mid: False)):
+            r = app._lan_light("", "abc")  # (an address of Plex's there that doesn't answer: not added, said)
+            self.assertEqual((r["status"], en(r["text"]), r.get("add")), ("warn", "Plex doesn’t answer on 100.64.0.0/10", None))
+            self.assertIn("Plex has 100.101.102.103 on 100.64.0.0/10, but didn’t answer there", en(r["detail"]))
+            self.assertEqual(app.plex_add_lan_networks(), [])
+            self.assertEqual(PLEX.prefs["LanNetworksBandwidth"], "")
+        with mock.patch.object(_plexmod, "servers", lambda cid, tok: [dict(mine, connections=[])]):
+            r = app._lan_light("", "abc")  # (Plex not on the tailnet: left out, the light green)
+            self.assertEqual((r["status"], r.get("add")), ("ok", None))
+            self.assertIn("Plex has no address on 100.64.0.0/10", en(r["detail"]))
+            app.test_connections()
+            self.assertNotIn('data-act="plex-lan"', PageStructureTests()._render(jsonable(app.state()), "system")["html"])
+        app.test_connections()
+        self.assertLess(card.index("Plex server found"), card.index("Signed in to Plex"))
+        self.assertLess(card.index("Signed in to Plex"), card.index("API compatibility"))
+
+    def test_syncthing_source_check(self):
+        """dev/syncthing_api.py: every REST path the app calls found among the literals of Syncthing's API package, "{id}" as
+        ":id" or taken after the path; a call whose path is gone reported."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sys.path.insert(0, os.path.join(root, "dev"))
+        try:
+            import syncthing_api
+        finally:
+            sys.path.pop(0)
+        from plexcache.syncthing import CALLS
+        d = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(d, "lib", "api"))
+        lits = sorted({p for _m, p in CALLS.values()} - {"/rest/config/folders/{id}", "/rest/config/devices/{id}"})
+        with open(os.path.join(d, "lib", "api", "api.go"), "w", encoding="utf-8") as fh:
+            fh.write("package api\n" + "\n".join(f'\trestMux.HandlerFunc(http.MethodGet, "{p}", s.handler)' for p in lits) + "\n")
+        with open(os.path.join(d, "lib", "api", "confighandler.go"), "w", encoding="utf-8") as fh:
+            fh.write('package api\nconst folders = "/rest/config/folders"\nconst devices = "/rest/config/devices/:id"\n')
+        with open(os.path.join(d, "lib", "api", "api_test.go"), "w", encoding="utf-8") as fh:
+            fh.write('package api\nconst gone = "/rest/nothing/here"\n')  # (tests don't count)
+        found, missing = syncthing_api.check(os.path.join(d, "lib", "api"))
+        self.assertEqual(missing, [])
+        self.assertTrue(all(found.values()))
+        self.assertNotIn("/rest/nothing/here", syncthing_api.paths(os.path.join(d, "lib", "api")))
+        os.remove(os.path.join(d, "lib", "api", "confighandler.go"))
+        found, missing = syncthing_api.check(os.path.join(d, "lib", "api"))
+        self.assertEqual(sorted(missing), ["changing a device’s settings".replace("’", "'"), "changing a folder's settings"])
+
+class LiveSyncthingTests(unittest.TestCase):
+    """The client against a real Syncthing, when one is given (SYNCTHING_LIVE_URL and SYNCTHING_LIVE_KEY: dev/future.py
+    --syncthing downloads the newest pre-release and starts it): every call of CALLS answers, a folder added for the run is
+    read, changed and scanned as the app does it. Skipped otherwise — the suite stays offline."""
+
+    def setUp(self):
+        self.url, self.key = os.environ.get("SYNCTHING_LIVE_URL"), os.environ.get("SYNCTHING_LIVE_KEY")
+        if not self.url or not self.key:
+            self.skipTest("no live Syncthing (SYNCTHING_LIVE_URL, SYNCTHING_LIVE_KEY)")
+
+    def test_every_call_answers(self):
+        from plexcache.syncthing import CALLS, SyncthingClient, covering, device_id_from_cert, cert_device_id
+        c = SyncthingClient(self.url, self.key, timeout=20)
+        self.assertTrue(c.healthy())
+        my = c.status()["myID"]
+        self.assertEqual(len(my.replace("-", "")), 56)
+        self.assertTrue(c.version()["version"])
+        d = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(d, "Movies"))
+        fid = "dionysus-live-" + str(int(time.time()))
+        c._req("POST", "/rest/config/folders", None, {"id": fid, "label": "Dionysus live", "path": d, "paused": False, "order": "random", "fsWatcherEnabled": False, "devices": [{"deviceID": my}]})
+        self.addCleanup(lambda: c._req("DELETE", "/rest/config/folders/" + fid))
+        folders = {f["id"]: f for f in c.config()["folders"]}
+        self.assertIn(fid, folders)
+        self.assertEqual(covering(list(folders.values()), [os.path.join(d, "Movies")])[1], "Movies")
+        c.patch_folder(fid, {"order": "smallestFirst", "fsWatcherEnabled": True})
+        self.assertEqual(c.config()["folders"][[f["id"] for f in c.config()["folders"]].index(fid)]["order"], "smallestFirst")
+        c.set_ignores(fid, ["/Movies-new"])
+        self.assertEqual(c.ignores(fid), ["/Movies-new"])
+        c.scan(fid, "Movies")
+        deadline = time.time() + 30
+        while time.time() < deadline and "Movies" not in c.browse(fid):
+            time.sleep(1)
+        self.assertIn("Movies", c.browse(fid))
+        self.assertIn("state", c.folder_status(fid))
+        self.assertEqual(c.need(fid), [])
+        self.assertIsInstance(c.connections().get("connections"), dict)
+        c.patch_device(my, {})
+        # the sync port's certificate names the same device the API does
+        import urllib.parse
+        host = urllib.parse.urlsplit(self.url).hostname or "127.0.0.1"
+        port = int(os.environ.get("SYNCTHING_LIVE_SYNC_PORT") or 0)
+        if port:
+            self.assertEqual(cert_device_id(host, port), my)
+        self.assertEqual(len(CALLS), 12)
 
 class TranslationTests(unittest.TestCase):
     """The catalogs match the texts in the code; untranslated texts fall back to English."""
@@ -13928,11 +14780,11 @@ class ToolsTests(unittest.TestCase):
 
 
 class MirrorLinkTests(unittest.TestCase):
-    """The Plex Cache at the mirror's site (peerlink.py: System → Mirror Plex Cache) and Mirror Checks (mirrorhealth.py:
+    """The Dionysus at the mirror's site (peerlink.py: System → Mirror Dionysus) and Mirror Checks (mirrorhealth.py:
     Tools → Mirror Checks)."""
 
     def _side(self, me, mirror):
-        """A Plex Cache with a web server of its own, its Plex ``me``, every library mirrored by ``mirror``."""
+        """A Dionysus with a web server of its own, its Plex ``me``, every library mirrored by ``mirror``."""
         from plexcache.server import serve
         app = App(tempfile.mkdtemp(dir=TMP))
         httpd = serve(app, "127.0.0.1", 0)
@@ -13941,7 +14793,7 @@ class MirrorLinkTests(unittest.TestCase):
         self.addCleanup(httpd.shutdown)
         app.settings.update({"plex2": {"servers": {mirror: {"name": mirror, "url": "http://127.0.0.1:1", "token": "t"}}, "libraries": {"*": {"state": "mirror", "server": mirror, "key": ""}}}})
         app.peerlinks._own_plex = (time.time() + 1e9, me)   # (no Plex here: which one it sits next to, said)
-        app.mirror_link = app.peerlinks.link(mirror)         # (the link under test: to the Plex Cache at that mirror's site)
+        app.mirror_link = app.peerlinks.link(mirror)         # (the link under test: to the Dionysus at that mirror's site)
         app.mirror_link._hosts = (time.time() + 1e9, [])     # (nor plex.tv: the mirror's addresses are its one url)
         app.plex_name = me
         return app, f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -13959,8 +14811,9 @@ class MirrorLinkTests(unittest.TestCase):
         px, py = format(pow(pl.G, x, pl.P), "x"), format(pow(pl.G, y, pl.P), "x")
         self.assertEqual(pl.shared_key(x, py), pl.shared_key(y, px))                       # (the same key on both sides, never sent)
         self.assertNotEqual(pl.shared_key(x, py), pl.shared_key(x + 2, py))
-        self.assertEqual(pl.fingerprint(px, py), pl.fingerprint(py, px))
-        self.assertRegex(pl.fingerprint(px, py), r"^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$")
+        self.assertEqual((pl.fingerprint(px), pl.fingerprint("")), (pl.fingerprint(px.upper()), ""))  # (one per key, however it's spelt)
+        self.assertNotEqual(pl.fingerprint(px), pl.fingerprint(py))
+        self.assertRegex(pl.fingerprint(px), r"^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$")
         for bad in ("", "1", "0", "zz", format(pl.P - 1, "x"), "f" * 600, None, 5):
             self.assertIsNone(pl.valid_public(bad), bad)                                       # (1 and P-1 give away the key)
         with self.assertRaises(pl.PeerError):
@@ -14010,7 +14863,9 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertEqual((a.mirror_link.paired["instance"], a.mirror_link.paired["how"]), (b.mirror_link.instance(), "auto"))
         self.assertEqual(b.mirror_link.paired["instance"], a.mirror_link.instance())
         self.assertTrue(a.mirror_link.talking())
-        self.assertEqual(a.mirror_link.snapshot()["fingerprint"], b.mirror_link.snapshot()["fingerprint"])
+        # each side's own fingerprint is what the other shows for it
+        self.assertEqual(a.mirror_link.snapshot()["fingerprint"], b.mirror_link.links.snapshot()["own"]["fingerprint"])
+        self.assertEqual(b.mirror_link.snapshot()["fingerprint"], a.mirror_link.links.snapshot()["own"]["fingerprint"])
         self.assertTrue(b.mirror_link.talk())
         self.assertEqual({k: v["status"] for k, v in a.mirror_link.lights().items()}["paired"], "ok")
         self.assertEqual(a.mirror_link.files("1"), {"ready": False, "files": []})            # (a signed request: no such library there)
@@ -14032,7 +14887,7 @@ class MirrorLinkTests(unittest.TestCase):
         old = now - pl.MAX_AGE - 60
         self.assertEqual(send(old, "n3", pl.signature(a.mirror_link._key(), "GET", "/peer/v1/status", str(old), "n3", b""))[0], 403)
         with urllib.request.urlopen(ub + "/peer/v1/hello", timeout=10) as r:                    # (the hello is open: public facts only)
-            self.assertEqual(set(json.loads(r.read())), {"app", "api", "commands", "instance", "name", "version", "plex", "public", "time"})
+            self.assertEqual(set(json.loads(r.read())), {"app", "api", "commands", "instance", "name", "version", "plex", "public", "time", "identity"})
         # Unpair: both sides; not paired again by itself (the key pair stays: it's this side's, for every link)
         a.mirror_link.unpair()
         self.assertIsNone(a.mirror_link.paired)
@@ -14050,7 +14905,7 @@ class MirrorLinkTests(unittest.TestCase):
         a.mirror_link.declined = []
         a.mirror_link.tick(force=True)
         self.assertEqual((a.mirror_link.paired or {}).get("how"), "manual")
-        self.assertEqual(a.mirror_link.snapshot()["fingerprint"], pl.fingerprint(a.mirror_link.public(), b.mirror_link.public()))
+        self.assertEqual(a.mirror_link.snapshot()["fingerprint"], pl.fingerprint(b.mirror_link.public()))
         # with no library mirrored by that server, a pairing request isn't even looked into
         c, uc = self._side("plexC", "plexA")
         c.settings.update({"plex2": {"libraries": {"*": {"state": "none"}}}})
@@ -14089,7 +14944,7 @@ class MirrorLinkTests(unittest.TestCase):
 
     def test_mirror_health_compares_both_sites(self):
         """Mirror Checks over a library paired with one on the mirror: a file the mirror's Plex doesn't list, one only it
-        lists, a file here Plex doesn't list; with the other Plex Cache talking, the two disks too — a file on one side
+        lists, a file here Plex doesn't list; with the other Dionysus talking, the two disks too — a file on one side
         only, a different size, a file changed in the last hour left out — and the folder sync not carrying .plexcache,
         which holds optimizing and the file tools until it's fixed or ignored. Scan Folder asks the Plex concerned."""
         from plexcache import mirrorhealth as mh
@@ -14106,7 +14961,7 @@ class MirrorLinkTests(unittest.TestCase):
             for name in names:
                 os.utime(os.path.join(d, name), (time.time() - 7200, time.time() - 7200))
         app.libdata.invalidate_files("1")
-        # the link not talking, and no Plex Cache known at the mirror's site (none found yet): the Plexes compared, the
+        # the link not talking, and no Dionysus known at the mirror's site (none found yet): the Plexes compared, the
         # disks not — and nothing red, since nothing known to be there went unread (the link's own warning says it)
         got = app.mirror_health.check("1")
         rows = {(r["kind"], r["rel"]) for r in got["rows"]}
@@ -14155,7 +15010,8 @@ class MirrorLinkTests(unittest.TestCase):
         app.mirror_health._snap = None
         from plexcache import checks, libhealth
         h = libhealth.library_health(app, "1")
-        self.assertEqual([c["id"] for c in h["checks"]["mirror"]], ["mirror_" + k for k in mh.KINDS + mh.LIVE])
+        from plexcache import syncthing
+        self.assertEqual([c["id"] for c in h["checks"]["mirror"]], ["mirror_" + k for k in mh.KINDS + mh.LIVE] + ["mirror_syncthing_" + k for k in syncthing.CHECKS])
         on = {(it["key"], r["id"]) for it in h["items"] for r in it["results"] if r["category"] == "mirror"}
         rk = next(str(f["rk"]) for f in app.libdata.data("1").files if f["path"] == gone["path"])
         unl = next(r for r in got["rows"] if r["kind"] == "unlisted_here")
@@ -14269,7 +15125,7 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertIn("mirror_regroup", {r["id"] for it in h["items"] if it["key"] == str(two["key"]) for r in it["results"]})
 
     def test_mirror_health_warns_on_the_link_and_holds_the_tools(self):
-        """The tool warns while the link to the other Plex Cache isn't healthy (it relies on it); Optimize Now and a file
+        """The tool warns while the link to the other Dionysus isn't healthy (it relies on it); Optimize Now and a file
         tool's Apply are refused while .plexcache doesn't reach the other site; the page's routes answer."""
         from plexcache.server import serve
         app, _plex, _cat, _other = self._mirror()
@@ -14282,7 +15138,7 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertIn("Not answering", en(jsonable(conn["text"])))
         self.assertEqual(link.health(), "fail")
         self.assertEqual(en(jsonable(next(i for i in __import__("plexcache.checks", fromlist=["x"])._mirror_items(app))["title"])),
-                         "The link to the Plex Cache at a mirror’s site needs attention")
+                         "The link to the Dionysus at a mirror’s site needs attention")
         app.settings.update({"peer": {"enabled": False}})
         self.assertEqual(app.mirror_health.connection()["status"], "ok")                       # (none there: nothing to warn about)
         app.settings.update({"peer": {"enabled": True}})
@@ -14346,18 +15202,18 @@ class MirrorLinkTests(unittest.TestCase):
         app, _plex, _cat, _other = self._mirror()
         app.peerlinks.link("xyz").lights = lambda: {"talking": {"status": "fail", "text": "Not answering", "detail": ""}}
         old = {"at": time.time(), "rows": [], "counts": dict.fromkeys(mh.KINDS, 0), "error": None, "disk": False, "mirror": "Movies",
-               "notes": [M("The other site’s disk isn’t compared: the link to its Plex Cache isn’t working ([System → Mirror Plex Cache](/system#peer)).")]}
+               "notes": [M("The other site’s disk isn’t compared: the link to its Dionysus isn’t working ([System → Mirror Dionysus](/system#peer)).")]}
         with app.mirror_health.lock:
             app.mirror_health.results["1"] = old
             app.mirror_health.checked_at = time.time()
         app.mirror_health._snap = None
         self.assertTrue(app.mirror_health.due_for("1"))                                           # (done again at once, though just checked)
-        self.assertEqual(app.mirror_health.unchecked("1"), [])                                    # (no Plex Cache known there: not red)
+        self.assertEqual(app.mirror_health.unchecked("1"), [])                                    # (no Dionysus known there: not red)
         app.peerlinks.link("xyz").paired = {"instance": "cottage", "name": "Cottage", "url": "http://cottage:8642", "public": "ab", "at": time.time(), "how": "auto"}
         app.mirror_health._snap = None
         un = app.mirror_health.unchecked("1")
         self.assertEqual(un[0]["checks"][:3], ["mirror_only_here", "mirror_only_there", "mirror_size_differs"])
-        self.assertEqual(en(jsonable(un[0]["why"])), "The other site’s disk isn’t compared: the link to its Plex Cache isn’t working.")
+        self.assertEqual(en(jsonable(un[0]["why"])), "The other site’s disk isn’t compared: the link to its Dionysus isn’t working.")
         said = [en(jsonable(n["text"])) for n in app.mirror_health.notes("1")]
         self.assertFalse(any("isn’t compared" in t or "needs attention" in t for t in said), said)  # (the red chip says it)
         st = jsonable(app.state())
@@ -14420,22 +15276,22 @@ class MirrorLinkTests(unittest.TestCase):
         app.mirror_health.running = None
 
     def test_pages_draw_the_link_and_the_findings(self):
-        """System's Mirror Plex Cache card: its five lights, its settings once a mirror is watched, Pair Now; Tools →
+        """System's Mirror Dionysus card: its five lights, its settings once a mirror is watched, Pair Now; Tools →
         Mirror Checks, the shared check page (checksPage): its library tabs and what was found, its checks as options,
         Scan Again, the warning while the link isn't healthy, and the findings as chips on their items with Ignore."""
         app, _plex, _cat, other = self._mirror()
         app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}})                    # (the mirror's edits win: a file its Plex doesn't list is Mirror Checks's)
         other.cat["movies"].pop(0)
         link = app.peerlinks.link("xyz")
-        link.lights = lambda: {"found": {"status": "ok", "text": "Plex Cache found on Cottage", "detail": ""}, "paired": {"status": "warn", "text": "Plex Cache found, but not paired", "detail": ""},
+        link.lights = lambda: {"found": {"status": "ok", "text": "Dionysus found on Cottage", "detail": ""}, "paired": {"status": "warn", "text": "Dionysus found, but not paired", "detail": ""},
                                "talking": {"status": "off", "text": "Not talking", "detail": ""}, "folders": {"status": "off", "text": "Folder sync", "detail": ""},
                                "version": {"status": "off", "text": "Version and clock", "detail": ""}}
-        # no Plex Cache known at the mirror's site yet: its files not compared, and nothing red anywhere
+        # no Dionysus known at the mirror's site yet: its files not compared, and nothing red anywhere
         self._compared(app)                                                                       # (the evaluator's turn)
         app.library_health("1")
         st = jsonable(app.state())
         self.assertEqual((st["health_counts"]["1"]["unchecked"], st["tools_red"]["mirrorchecks"]), ([], []))
-        self.assertNotRegex(PageStructureTests()._render(st, "tools")["html"], r'<a href="/mirrorchecks" data-nav>Mirror Checks →</a> <span class="count fail"')
+        self.assertNotRegex(PageStructureTests()._render(st, "tools")["html"], r'<a href="/mirrorchecks" data-nav><svg[^>]*>.*?</svg>Mirror Checks</a> <span class="count fail"')
         link.found = {"url": "http://cottage:8642", "hello": {"name": "Cottage", "instance": "cottage"}, "at": time.time()}  # (known there: its files unread are red)
         self._compared(app)                                                                       # (the evaluator's turn)
         evaluated(app)                                                                            # (and every library's: the Tools page's count is over them all)
@@ -14445,13 +15301,18 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertEqual(st["health_counts"]["1"]["unchecked"], ["mirror"])
         pages = PageStructureTests()
         text = pages._render(st, "system")["text"]
-        card = text[text.index("Mirror Plex Cache"):text.index("Media Mappings")]
-        for said in ("Plex Cache found on Cottage", "Plex Cache found, but not paired", "Not talking", "Pair by itself", "Its address", "Pair Now", "Test Again"):
+        card = text[text.index("Mirror Dionysus"):text.index("Media Mappings")]
+        for said in ("Dionysus found on Cottage", "Dionysus found, but not paired", "Not talking", "Pair by itself", "Its address", "Pair Now", "Test Again"):
             self.assertIn(said, card)
         self.assertNotIn("Unpair", card)                                                          # (nothing paired)
         link.paired = {"instance": "cottage", "name": "Cottage", "url": "http://cottage:8642", "public": "ab" * 32, "at": time.time(), "how": "manual"}
         html = pages._render(jsonable(app.state()), "system")["html"]
-        self.assertEqual((html.count("Fingerprint"), html.count('<svg class="identicon"')), (1, 1))  # (the fingerprint once, with its picture)
+        # the mirror's fingerprint at the top right of its lights, its picture before its name, and this one's own under the lights
+        self.assertRegex(html, r'<legend><svg class="identicon sm"[^>]*>.*?</svg>[^<]*</legend><div class="lights marked"><div class="fpmark"><div class="fpstack"><svg class="identicon"')
+        # this one's own at the top right of the card, named after its Plex, and in the menu beside the app's name
+        self.assertRegex(html, r'<section class="card hasfp" id="peer"><div class="fpmark own"><div class="fpstack"><svg class="identicon".*?<span class="fpcode" title="[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}">[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}</span><span class="fpname">[^<]+</span></div><button type="button" class="info"')
+        self.assertEqual(html.count('<span class="fpcode" title='), 2)
+        self.assertIn('<button class="btn" type="button" data-act="peer-unpair"', html)
         link.paired = None
         drawn = pages._render(st, "mirrorchecks")
         # the other site's files not compared (the link down): a red chip on top, leading to the link's card, in place of a
@@ -14463,8 +15324,8 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertRegex(drawn["html"], r'data-lhcheck="mirror_not_listed_there"(?:(?!</div>).)*<span class="badge b-warn">')
         # and red down the ladder: the library's tab, the Tools page's card, the Library page's line for it
         self.assertRegex(drawn["html"], r'data-act="lib-tab" data-key="1">(?:(?!</button>).)*<span class="count fail"')
-        self.assertRegex(pages._render(st, "tools")["html"], r'<a href="/mirrorchecks" data-nav>Mirror Checks →</a> <span class="count fail"')
-        self.assertNotRegex(pages._render(st, "tools")["html"], r'<a href="/filechecks" data-nav>File Checks →</a> <span class="count fail"')
+        self.assertRegex(pages._render(st, "tools")["html"], r'<a href="/mirrorchecks" data-nav><svg[^>]*>.*?</svg>Mirror Checks</a> <span class="count fail"')
+        self.assertNotRegex(pages._render(st, "tools")["html"], r'<a href="/filechecks" data-nav><svg[^>]*>.*?</svg>File Checks</a> <span class="count fail"')
         self.assertRegex(pages._render(st, "library")["html"], r'<a href="/mirrorchecks" data-nav>Mirror Checks</a><span class="badge b-fail"')
         self.assertIn('<div class="lctl tooltop"><div class="seg small strong"', drawn["html"])                 # (the tabs, as every tool's)
         self.assertIn('data-lhcheck="mirror_not_listed_there"', drawn["html"])                                # (its checks, as the options)
@@ -14488,8 +15349,8 @@ class CountStandardTests(unittest.TestCase):
 
     def _tool_pages(self):
         """Every page of the Tools menu (app.js TOOLS)."""
-        block = re.search(r"\n  var TOOLS = \[(.*?)\]\];", self._js(), re.S).group(1)
-        got = re.findall(r'\["(\w+)", N\("', block)
+        block = re.search(r"\n  var TOOLS = \[(.*?)\}\];", self._js(), re.S).group(1)
+        got = re.findall(r'\{ page: "(\w+)", name: N\("', block)
         self.assertGreaterEqual(len(got), 11)
         return got
 
@@ -14506,7 +15367,7 @@ class CountStandardTests(unittest.TestCase):
     NUMBER_CHIP = re.compile(r'<span class="count(?: (?:ok|warn|fail))?"[^>]*>\s*[\d,.]+\s*</span>')
 
     def test_every_count_is_evaluated_before_it_shows(self):
-        """The state gives every page of the Tools menu, and the Library page, a count for every library Plex Cache works
+        """The state gives every page of the Tools menu, and the Library page, a count for every library Dionysus works
         on and over them all, each in one of the four states; nothing is done before the data it reads is in. Every page
         draws them one way: with every count still to come there's no number anywhere — not in a tab, a card, the menu nor
         a Library page line — a turning wheel in their place, and the placeholder (countBox) where what was found goes;
@@ -15996,7 +16857,7 @@ class ServerRouteTests(unittest.TestCase):
 
 
 class PeerLinkEdgeTests(unittest.TestCase):
-    """The link to the Plex Cache at the mirror's site (peerlink.py) at its edges: the addresses and ports worked out,
+    """The link to the Dionysus at the mirror's site (peerlink.py) at its edges: the addresses and ports worked out,
     a probe or request that fails each way, pairing refused each way, the regular look's turns, and what the folder-sync
     and version lights say of each state."""
 
@@ -16062,7 +16923,7 @@ class PeerLinkEdgeTests(unittest.TestCase):
             c = link.candidates()
         self.assertEqual(c[:3], ["http://10.0.0.3:8642", "http://10.0.0.5:9001", "http://[fd00::1]:9001"])
         self.assertIn("http://127.0.0.1:9001", c)
-        # the mirror's hosts on the advertised ports, then the port this one uses, then 8642–8649: a Plex Cache on another
+        # the mirror's hosts on the advertised ports, then the port this one uses, then 8642–8649: a Dionysus on another
         # port is found without its marker, and two sides deployed alike (dev and dev, say) find each other on theirs
         for port in (8642, 8649):
             self.assertIn(f"http://127.0.0.1:{port}", c)
@@ -16106,7 +16967,7 @@ class PeerLinkEdgeTests(unittest.TestCase):
             self.assertIsNone(link.find())
             self.assertEqual((link.tried, "Nothing answered" in en(jsonable(link.find_error))), (["http://127.0.0.1:1"], True))
             # the light names each host tried with its ports, and the way out when it's on another port
-            self.assertIn("Tried: 127.0.0.1: 1. Runs on another port, or at another address? Enter host:port below — or press Pair Now on that Plex Cache first", en(jsonable(link.lights()["found"]["detail"])))
+            self.assertIn("Tried: 127.0.0.1: 1. Runs on another port, or at another address? Enter host:port below — or press Pair Now on that Dionysus first", en(jsonable(link.lights()["found"]["detail"])))
             link.tried = [f"http://10.0.0.9:{p}" for p in (8642, 8643, 8644, 9001, 8646)] + ["http://[fd00::1]:8642", "https://x.example"]
             self.assertEqual(link.tried_summary(), "10.0.0.9: 8642–8644, 8646, 9001; [fd00::1]: 8642; x.example: 443")
             self.assertEqual(pl._spans([]), "")
@@ -16332,7 +17193,7 @@ class PeerLinkEdgeTests(unittest.TestCase):
         a, ua, b, ub = self._paired()
         link, blink = a.mirror_link, b.mirror_link
         b.settings.update({"peer": {"remote_update": False}})
-        self.assertEqual(blink.handle_update({"channel": pl.CHANNEL})["why"], "updates from the other Plex Cache are off here")
+        self.assertEqual(blink.handle_update({"channel": pl.CHANNEL})["why"], "updates from the other Dionysus are off here")
         b.settings.update({"peer": {"remote_update": True}})
         self.assertIn("channels differ", blink.handle_update({"channel": "other"})["why"])
         with mock.patch.object(b.updates, "check", return_value=True), mock.patch.object(b.updates, "available", return_value=False):
@@ -16447,7 +17308,7 @@ class PeerLinkEdgeTests(unittest.TestCase):
         self.assertFalse(link.can("carry"))
         self.assertTrue(link.can("files"))
         a.settings.update({"peer": {"enabled": False}})
-        self.assertEqual(en(link.lights()["found"]["text"]), "No Plex Cache at plexB’s site")
+        self.assertEqual(en(link.lights()["found"]["text"]), "No Dionysus at plexB’s site")
 
 
 class AppEdgeTests2(unittest.TestCase):
@@ -17560,7 +18421,7 @@ class AppEdgeTests3(unittest.TestCase):
 
 
 class ChecksEdgeTests(unittest.TestCase):
-    """The health checks' items (checks.py) at their edges: a mirror marked but its server not reached, another Plex Cache
+    """The health checks' items (checks.py) at their edges: a mirror marked but its server not reached, another Dionysus
     that can't be summed up or whose mirror's edits win, and a conversion that waits on a rename or a warning."""
 
     def test_items(self):
@@ -17675,7 +18536,7 @@ class MigratingEdgeTests2(unittest.TestCase):
     not at all, the files compared with it when the link is quiet or still reading, and the copy job's end."""
 
     def test_just_started_nothing_is_concluded_while_the_link_settles(self):
-        """Just after a start, before the first look at the other Plex Cache is done (peerlink.settling), no page concludes
+        """Just after a start, before the first look at the other Dionysus is done (peerlink.settling), no page concludes
         from what isn't known yet: the Talking light checks, the dataset page's mirror light says it's connecting, its mirror
         checks are one waiting check (Connecting) that holds the set-aside, and Mirror Checks' scan isn't due. The first
         tick ends it, whatever it found — or SETTLE seconds since the start."""

@@ -1,4 +1,4 @@
-/* Plex Cache translations — shared by the app and the sign-in page.
+/* Dionysus translations — shared by the app and the sign-in page.
  *
  * T("Text {name}", {name: x})        plain text in the chosen language
  * H("<b>Text</b> {name}", {name: x}) HTML: the template is trusted, the values are escaped

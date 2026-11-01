@@ -10,11 +10,14 @@ folder (the same at both sites: the folders are synced; one Unicode form and one
   (Scan Folder asks Plex here to look), in Plex but not on disk.
 * **The mirror's Plex** — what it lists against what Plex here lists (plex2.index): a file it doesn't list (Scan
   Folder asks it to look: its sign-in is the Mirror page's), or one only it lists.
-* **The other site's disk** — with the other Plex Cache paired and talking (peerlink.py): its files against ours —
+* **The other site's disk** — with the other Dionysus paired and talking (peerlink.py): its files against ours —
   only here, only there, a different size. A file changed in the last hour is left out: it may still be syncing.
 * **The folder sync itself** — whether the markers and claims in .plexcache reach the other side (peerlink.folder_sync).
   While they don't, the two could optimize the same file: optimizing, the file tools and Sync Libraries are held in that
   library (hold()) until it's fixed, or the finding is ignored, or its check switched off.
+* **Syncthing** (syncthing.py, live from its API where it's connected: System → Syncthing) — that it answers, a folder of
+  it covers the library, that folder isn't paused, watches for changes, sends the smallest files first, doesn't ignore
+  .plexcache, and a device it's shared with is connected; the fixes the API can make are the findings' actions.
 * **What Sync Libraries can't do** — it brings the two Plexes in line (tools/sync.py); what that covers isn't listed
   here (sync_handles: a file the other side's Plex doesn't list, from the side whose edits win, is its to scan for), and
   what it can't is (the items grouped another way: several on the winning side that are one on the other, or files shared
@@ -25,8 +28,8 @@ The comparing is slow (the other Plex, the other site's files), so it's done in 
 library's data changes, every few hours, and on Scan Again — and kept (mirrorhealth.json); Library Health reads what was
 found (findings(), notes()). What it finds on an item's files stops Sync Libraries' row on it (blocks()). What a
 scan couldn't check is said at the top of the page (unchecked()): a red chip for each reason — the other site's files
-not compared while the link to a Plex Cache known to be there (paired, or found) isn't working, the mirror's Plex not
-read — and those checks' counts red. With no Plex Cache known at the mirror's site, the disks aren't compared and
+not compared while the link to a Dionysus known to be there (paired, or found) isn't working, the mirror's Plex not
+read — and those checks' counts red. With no Dionysus known at the mirror's site, the disks aren't compared and
 nothing is red: nothing known to be there went unread.
 """
 
@@ -48,7 +51,7 @@ RECHECK_AFTER = 90       # seconds after Scan Folder before the library is check
 # the findings on an item's files that stop Sync Libraries' row on it (Tool.blocking_sources): the files aren't the same at
 # the two sites, so bringing what Plex lists of them in line would be over files that differ
 BLOCKS = ("only_here", "only_there", "size_differs", "missing_here")
-BLOCK_IDS = tuple("mirror_" + k for k in BLOCKS)  # (their Library Health ids: Tool.block_ids)
+BLOCK_IDS = tuple("mirror_" + k for k in BLOCKS) + ("mirror_syncthing_transit",)  # (their Library Health ids: Tool.block_ids; the last: a file Syncthing is still carrying, syncthing.blocks)
 
 # the kinds of finding, each a check of Library Health's ("mirror_<kind>": its name and help are there). What Sync Libraries
 # brings in line isn't one (sync_handles); what it can't of the items' grouping is (LIVE: from its analysis, as it stands)
@@ -56,10 +59,10 @@ KINDS = ("sync_files", "only_here", "only_there", "size_differs", "not_listed_th
 LIVE = ("regroup",)  # worked out as Library Health asks (regroup), not by a scan
 ACTION = {"not_listed_there": "there", "unlisted_here": "here"}  # the kinds Scan Folder applies to, and on which Plex
 SYNC_ITEM = ".plexcache"  # the item the folder sync's finding is on (a library's, not a file's)
-PEER_CARD = "/system#peer"  # System → Mirror Plex Cache: where the link is seen to
+PEER_CARD = "/system#peer"  # System → Mirror Dionysus: where the link is seen to
 FORMAT = 2  # what a scan records ("v"): a scan saved before (no record of the checks it couldn't run) is done again at once
 # what a scan before FORMAT 2 said, as a line under its findings, when it couldn't compare the other site's files
-OLD_DISK_NOTES = ("The other site’s disk isn’t compared", "The other Plex Cache is still reading", "The other site’s files couldn’t be read")
+OLD_DISK_NOTES = ("The other site’s disk isn’t compared", "The other Dionysus is still reading", "The other site’s files couldn’t be read")
 
 
 def _norm(rel: str) -> str:
@@ -202,7 +205,7 @@ class MirrorHealth:
             rel = rel_of(d, f.get("local") or "")
             if rel:
                 here_plex[_norm(rel)] = f
-        # the other site's disk, through the other Plex Cache
+        # the other site's disk, through the other Dionysus
         there = self.app.mirrors.pairs().get(key)
         if there is None:
             raise ValueError(M("This library isn’t paired with one on the mirror ([Mirror page](/mirrors))."))
@@ -213,17 +216,17 @@ class MirrorHealth:
                 if got.get("ready"):
                     there_disk = {_norm(r): (r, int(s or 0), float(m or 0)) for r, s, m in got.get("files") or []}
                 else:
-                    disk_why = (M("The other Plex Cache is still reading this library’s files: they’re compared at the next scan."), None)
+                    disk_why = (M("The other Dionysus is still reading this library’s files: they’re compared at the next scan."), None)
             except Exception as e:  # noqa: BLE001
                 disk_why = (M("The other site’s files couldn’t be read: {why}", why=str(e)), PEER_CARD)
         elif link is not None and link.settling():  # (just after a start: Scan Again pressed before the first look)
-            disk_why = (M("The other Plex Cache isn’t reached yet, just after a start: compared at the next scan."), None)
+            disk_why = (M("The other Dionysus isn’t reached yet, just after a start: compared at the next scan."), None)
         elif link is not None and link.known():
             bad = "; ".join(str(v["text"]) for v in link.lights().values() if v["status"] in ("warn", "fail"))
-            disk_why = (M("The link to the Plex Cache at the other site isn’t working: {lights}.", lights=bad) if bad
-                        else M("The link to the Plex Cache at the other site isn’t working."), PEER_CARD)
+            disk_why = (M("The link to the Dionysus at the other site isn’t working: {lights}.", lights=bad) if bad
+                        else M("The link to the Dionysus at the other site isn’t working."), PEER_CARD)
         elif link is None or not link.wanted():  # (none there, or none found yet: nothing that should have been compared wasn't — not red)
-            notes.append(M("The other site’s files aren’t compared: System → Mirror Plex Cache is set to say there’s no Plex Cache there."))
+            notes.append(M("The other site’s files aren’t compared: System → Mirror Dionysus is set to say there’s no Dionysus there."))
         if disk_why:  # (the checks that need the other site's files, and the folder sync's, which needs the link)
             unchecked.append({"checks": ["mirror_only_here", "mirror_only_there", "mirror_size_differs"] + ([] if link is not None and link.talking() else ["mirror_sync_files"]),
                               "label": M("Other site’s files not compared"), "why": disk_why[0], "link": disk_why[1]})
@@ -324,7 +327,7 @@ class MirrorHealth:
 
     def due_for(self, key: str) -> bool:
         """A library compared again every few hours — and at once while its last scan is from before FORMAT, which didn't
-        record the checks it couldn't run (its red would be missing). Not while the link to the other Plex Cache is settling,
+        record the checks it couldn't run (its red would be missing). Not while the link to the other Dionysus is settling,
         just after a start: a scan then would hold what isn't known yet for hours."""
         links = getattr(self.app, "peerlinks", None)
         link = links.for_library(str(key)) if links is not None else None
@@ -418,6 +421,8 @@ class MirrorHealth:
         for r in rows:
             if r.get("kind") in BLOCKS and r.get("item"):
                 out.setdefault(str(r["item"]), []).append({"key": str(r["item"]), "id": "mirror_" + r["kind"], "title": r.get("label") or "", "text": _said(r)})
+        for item, blocks in self.app.syncthing.blocks(key).items():  # (a file still on its way through Syncthing)
+            out.setdefault(str(item), []).extend(blocks)
         return out
 
     # ------------------------------------------------------------ what Sync Libraries does instead
@@ -498,7 +503,7 @@ class MirrorHealth:
                 res["action"] = {"label": M("Scan Folder"), "done_at": scanned.get(key + "/" + r["item"] + "/" + res["id"]),
                                  "tip": M("Asks the mirror’s Plex to look at this file’s folder.") if ACTION[kind] == "there" else M("Asks Plex here to look at this file’s folder.")}
             out.append({"item": r["item"], "label": r.get("label") or r["item"], "poster": r.get("poster") or "", "result": res})
-        return out + self.regroup(key)
+        return out + self.regroup(key) + self.app.syncthing.findings(key)  # (and Syncthing's, live: syncthing.py)
 
     def notes(self, key: str) -> list[dict]:
         """What the page says above the findings, each {"status": "warn" | "info", "text"}: the link not healthy, the library
@@ -527,6 +532,7 @@ class MirrorHealth:
             if res.get("mirror"):
                 out.append({"status": "info", "text": M("Compared with {library} on the mirror.", library=res["mirror"])})
             out.extend({"status": "info", "text": n} for n in res.get("notes") or [] if not _old_disk_note(n))  # (an old scan's: the red chip says it)
+        out.extend(self.app.syncthing.notes(key))
         return out
 
     def unchecked(self, key: str) -> list[dict]:
@@ -538,7 +544,7 @@ class MirrorHealth:
             return []
         with self.lock:
             res = dict(self.results.get(key) or {})
-        if res.get("v") == FORMAT or not res.get("at"):  # (the other site's files red only while its Plex Cache is known: said to be there since, or found)
+        if res.get("v") == FORMAT or not res.get("at"):  # (the other site's files red only while its Dionysus is known: said to be there since, or found)
             return [u for u in res.get("unchecked") or [] if u.get("link") != PEER_CARD or snap["known"]]
         if not snap["known"]:
             return []
@@ -560,11 +566,13 @@ class MirrorHealth:
         if str(key) not in snap["libraries"]:
             return (False, bool(snap["libraries"]), snap["waiting"])
         return ((snap["at"] or {}).get(str(key)), snap["connection"]["status"], snap["known"], str(key) in snap["held"],
-                sum(1 for k in self.scanned if k.startswith(str(key) + "/")), tuple(sorted(self.sync_on(key).items())), self.app.libdata.data(str(key)).stamp)
+                sum(1 for k in self.scanned if k.startswith(str(key) + "/")), tuple(sorted(self.sync_on(key).items())), self.app.libdata.data(str(key)).stamp, self.app.syncthing.stamp(key))
 
     def act(self, key: str, item: str, check: str) -> M:
         """Scan Folder on an item's finding: the Plex that doesn't list its files asked to look at their folders. What was
         asked."""
+        if check.startswith("mirror_syncthing_"):  # (Syncthing's findings: their fixes through its API)
+            return self.app.syncthing.act(key, item, check)
         key, kind = str(key), check[len("mirror_"):] if check.startswith("mirror_") else ""
         with self.lock:
             rows = [r for r in (self.results.get(key) or {}).get("rows") or [] if r.get("item") == str(item) and r.get("kind") == kind]
@@ -594,7 +602,7 @@ class MirrorHealth:
 
     # ------------------------------------------------------------ the hold, the link, the state
     def converting(self, key: str) -> M | None:
-        """Why this library waits while the Plex Cache at the other site converts its folder to a child dataset: past its
+        """Why this library waits while the Dionysus at the other site converts its folder to a child dataset: past its
         copy (Switch, Verify), its folder about to be set aside, or set aside, and its folder sync paused — anything changed
         here meanwhile would reach it the wrong way round. Told by the link, or the marker (peerlink.facts). None otherwise."""
         link = self.app.peerlinks.for_library(key)
@@ -627,8 +635,8 @@ class MirrorHealth:
             return None
         if "mirror_sync_files" in ((libhealth.ignored(self.app).get(str(key)) or {}).get(SYNC_ITEM) or []):
             return None
-        return M("The link to the other Plex Cache is down, and the .plexcache folder doesn’t reach the other site, so its Plex Cache wouldn’t see this side’s claims or markers: the two could optimize the same file, or sync their Plexes over each other. "
-                 "Bring the link back (System → Mirror Plex Cache: while it’s up it carries .plexcache itself), fix the folder sync (Syncthing: don’t ignore .plexcache; “Watch for Changes” on, pull order “Smallest First”), or ignore the finding on Mirror Checks.")
+        return M("The link to the other Dionysus is down, and the .plexcache folder doesn’t reach the other site, so its Dionysus wouldn’t see this side’s claims or markers: the two could optimize the same file, or sync their Plexes over each other. "
+                 "Bring the link back (System → Mirror Dionysus: while it’s up it carries .plexcache itself), fix the folder sync (Syncthing: don’t ignore .plexcache; “Watch for Changes” on, pull order “Smallest First”), or ignore the finding on Mirror Checks.")
 
     @staticmethod
     def waiting_note(waiting) -> dict:
@@ -647,12 +655,12 @@ class MirrorHealth:
         if not self.libraries():
             return {"status": "off", "text": M("No library is mirrored: choose a library’s mirror on the [Mirror page](/mirrors)."), "lights": []}
         if not links.wanted():
-            return {"status": "ok", "text": M("No Plex Cache at the mirrors’ sites: the disks aren’t compared."), "lights": []}
+            return {"status": "ok", "text": M("No Dionysus at the mirrors’ sites: the disks aren’t compared."), "lights": []}
         bad = [v["text"] for lk in links.used() if lk.wanted() for v in lk.lights().values() if v["status"] in ("warn", "fail")]
         if bad:
-            return {"status": "warn", "text": M("The link to the other Plex Cache needs attention ([System → Mirror Plex Cache](/system#peer)): {lights}. Mirror Checks rely on it, so some checks are left out.",
+            return {"status": "warn", "text": M("The link to the other Dionysus needs attention ([System → Mirror Dionysus](/system#peer)): {lights}. Mirror Checks rely on it, so some checks are left out.",
                                                  lights="; ".join(str(b) for b in bad)), "lights": bad}
-        return {"status": "ok", "text": M("Talking to the other Plex Cache."), "lights": []}
+        return {"status": "ok", "text": M("Talking to the other Dionysus."), "lights": []}
 
     def snapshot(self) -> dict:
         """For the state and Library Health (small): what's running, when each library was last checked, the libraries

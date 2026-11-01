@@ -1,7 +1,7 @@
 // The sign-in form (kept out of login.html so the page can forbid inline scripts).
 var T = PCI18N.T;
 PCI18N.ready.then(function () {
-  document.title = T("Plex Cache – Sign In");
+  document.title = T("Dionysus – Sign In");
   document.getElementById("langslot").appendChild(PCI18N.picker());
 });
 function showHelp(open) {
@@ -29,5 +29,5 @@ document.getElementById("login").addEventListener("submit", function (e) {
         if (r.status === 403) showHelp(true);
       });
     })
-    .catch(function () { err.textContent = T("Can’t reach Plex Cache."); err.hidden = false; btn.disabled = false; });
+    .catch(function () { err.textContent = T("Can’t reach Dionysus."); err.hidden = false; btn.disabled = false; });
 });

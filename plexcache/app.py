@@ -32,6 +32,9 @@ from .converting import Conversions
 from .plex2 import Mirrors
 from .peerlink import PeerLinks
 from .mirrorhealth import MirrorHealth
+from .syncthing import Syncthing
+from . import integrations
+from .integrations import api_light
 from .sync import Sync
 from .trash import Trash
 from .tools.merge import MergeDuplicates
@@ -51,7 +54,7 @@ from .reader import MiB, benchmark_file
 from . import platform as platform_mod
 from . import peers, plexbackup, safety
 from .scheduler import TIMED, due, next_run
-from .truenas import METHODS as TRUENAS_METHODS, TrueNASClient, TrueNASError, describe_pool, missing_methods, probe as probe_truenas
+from .truenas import METHODS as TRUENAS_METHODS, TrueNASClient, TrueNASError, describe_pool, missing_methods, probe as probe_truenas, cert_fingerprint as truenas_cert_fingerprint
 from . import libdata
 from .warmup import KIND_SECONDS, KINDS, L2ARC_RATE_SHARE, NEXT_DAY, next_day_check, LibraryStats, WarmupRun, plan, resolve_schedule
 
@@ -170,6 +173,14 @@ def _closing_errors():
         raise
 
 
+def _sentences(parts: list) -> M | str:
+    """Sentences (each an M) as one text, a space between each."""
+    out: M | str = ""
+    for part in parts:
+        out = part if not out else M("{first} {then}", first=out, then=part)
+    return out
+
+
 class App:
     def __init__(self, config_dir: str):
         self.config_dir = config_dir
@@ -228,13 +239,14 @@ class App:
         self.mirrors = Mirrors(self)  # the mirrors: other Plex servers with the same files, chosen per library (plex2.py)
         self.sync = Sync(self)  # the mirror: whether there's one, and the servers that may be (sync.py; Sync Libraries is a tool)
         self.trash = Trash(self)  # files the tools set aside, purged once Plex (here and mirrored) no longer lists them
-        self.tool_runs: dict = self._load_json("tool-runs.json") or {}  # {library: {tool: when}} — told to the other Plex Cache (peers.py)
+        self.tool_runs: dict = self._load_json("tool-runs.json") or {}  # {library: {tool: when}} — told to the other Dionysus (peers.py)
         self.peers_summary: dict | None = None
         self.published_markers: dict[str, float] = {}  # library -> when our marker was last written there (peers.publish)
         self.published_bodies: dict[str, dict] = {}  # library -> the marker as written, for the link to carry (peers.carry)
         self.first_published: dict[str, float] = self._load_json("published.json") or {}  # library -> when first: for "never arrived"
-        self.peerlinks = PeerLinks(self)  # the Plex Cache at each mirror's site: found, paired, asked (peerlink.py)
+        self.peerlinks = PeerLinks(self)  # the Dionysus at each mirror's site: found, paired, asked (peerlink.py)
         self.mirror_health = MirrorHealth(self)  # Tools → Mirror Checks: the two sites' files and Plexes compared (mirrorhealth.py)
+        self.syncthing = Syncthing(self)  # System → Syncthing: the folder sync on this server, read through its API (syncthing.py)
         self.libdata = libdata.Gatherer(self)  # the library data layer: records and files, gathered once, read by every check and tool
         self.tools = {t.name: t for t in (MergeDuplicates(self), DuplicateVersions(self), OrganizeFolders(self), UnlinkFiles(self), ConvertToMkv(self), SyncLibraries(self))}  # the Tools pages
         from .tools import ToolJob
@@ -359,7 +371,9 @@ class App:
             if time.time() - last_publish > peers.PUBLISH_EVERY and self.libraries:  # our marker in the shared folders (peers.py)
                 last_publish = time.time()
                 threading.Thread(target=self.publish_peers, name="peers", daemon=True).start()
-            self.peerlinks.tick_async()  # the Plex Cache at each mirror's site: found, paired, asked how its side is (every few minutes)
+            self.peerlinks.tick_async()  # the Dionysus at each mirror's site: found, paired, asked how its side is (every few minutes)
+            self.syncthing.tick_async()  # Syncthing asked how it is, every couple of minutes while it's set up (syncthing.py)
+            self.syncthing.throttle_tick()  # (and held back while people watch and the disks are busy, if asked: Syncthing.throttle_tick)
             self.evaluator.kick()  # (what's due again: Mirror Checks every few hours)
             if self.libdata.started:  # the library data layer: a changed library (Plex's stamp, a folder's mtime) gathered again
                 threading.Thread(target=self.libdata.tick, name="libdata-tick", daemon=True).start()
@@ -448,12 +462,16 @@ class App:
                 res["plex_server"] = {"status": "ok", "text": M("Plex server found"),
                                       "detail": M("Plex Media Server {version} at {url} ({ms} ms)",
                                                   version=ident["version"], url=p["url"], ms=ident["ms"])}
+                if ident.get("machine_id"):  # (its identity: the machine identifier Plex gives everyone, stable across moves)
+                    res["plex_identity"] = {"id": ident["machine_id"], "short": ident["machine_id"][:7].upper(), "source": "plex", "name": ""}
             except PlexError as e:
                 if "127.0.0.1" in p["url"] or "localhost" in p["url"]:
                     detail = M("{why}. Use your NAS’s IP, not 127.0.0.1 — inside this app that means the app itself.", why=msg(e))
                 else:
                     detail = M("{why}.", why=msg(e))
                 res["plex_server"] = {"status": "fail", "text": M("No Plex server found"), "detail": detail}
+        res["plex_api"] = {"status": "off", "text": M("API compatibility"), "detail": M("Checked once you’re signed in.")}
+        res["plex_lan"] = {"status": "off", "text": M("LAN networks"), "detail": M("Checked once you’re signed in.")}
         if res["plex_server"]["status"] != "ok":
             res["plex_token"] = {"status": "off", "text": M("Plex sign-in: waiting for the server"),
                                  "detail": M("Sign-in is checked once the server is found.")}
@@ -466,10 +484,23 @@ class App:
             try:
                 info = self.plex(timeout=10).ping()
                 self.plex_name = info["name"]  # (how Plex names this server: beside the mirror's, on the Mirror page)
+                if res.get("plex_identity"):
+                    res["plex_identity"]["name"] = info["name"]
                 n = len(self.plex(timeout=10).libraries())
                 res["plex_token"] = {"status": "ok", "text": M("Signed in to Plex"),
                                      "detail": M("Token accepted by “{name}” · {n} libraries visible",
                                                  one="Token accepted by “{name}” · {n} library visible", name=info["name"], n=n)}
+                from .plex import CALLS as PLEX_CALLS
+                try:
+                    tried = self.plex(timeout=10).verify_api()
+                except PlexError:
+                    tried = {}
+                res["plex_api"] = api_light([f"{w} ({PLEX_CALLS[w]})" for w, ok in tried.items() if ok is False], [w for w in PLEX_CALLS if tried.get(w) is None],
+                                            len(PLEX_CALLS), f"Plex Media Server {info['version']}" if info.get("version") else "Plex", "paths")
+                try:
+                    res["plex_lan"] = self._lan_light(self.plex(timeout=10).prefs().get("LanNetworksBandwidth", ""), info.get("machine_id", ""))
+                except PlexError as e:
+                    res["plex_lan"] = {"status": "off", "text": M("LAN networks"), "detail": msg(e)}
             except PlexError as e:
                 bad = "token" in str(e).lower()
                 res["plex_token"] = {"status": "fail", "text": M("Plex token rejected") if bad else M("Couldn’t check Plex sign-in"),
@@ -500,11 +531,22 @@ class App:
                     with self.truenas() as tn:
                         v = tn.version()
                         known = tn.known_methods()
+                        hid = tn.host_id()
+                    if hid:  # (its identity: TrueNAS's id for the host; else, below, its web certificate)
+                        res["truenas_identity"] = {"id": hid, "short": hid[:7].upper(), "source": "truenas", "name": "TrueNAS"}  # (named plainly: the id outlives every version)
                     res["truenas_key"] = {"status": "ok", "text": M("TrueNAS API key accepted"), "detail": v or M("Connected")}
                     res["truenas_api"] = self._api_compatibility(known, v)
                 except TrueNASError as e:
                     res["truenas_key"] = {"status": "fail", "text": M("TrueNAS API key not accepted"), "detail": msg(e)}
                     res["truenas_api"] = {"status": "off", "text": M("API compatibility"), "detail": ""}
+        if t["url"] and res["truenas_server"]["status"] == "ok" and not res.get("truenas_identity"):
+            fp = truenas_cert_fingerprint(t["url"])  # (no key, or no host id: the web certificate names the host)
+            if fp:
+                res["truenas_identity"] = {"id": fp, "short": fp[:7].upper(), "source": "certificate", "name": "TrueNAS"}
+        try:
+            self.syncthing.refresh()  # (its card's lights: System → Syncthing)
+        except Exception:  # noqa: BLE001
+            log.exception("syncthing")
         problems = [k for k in ("plex_server", "plex_token") if res[k]["status"] != "ok"]
         optional = [k for k in ("truenas_server", "truenas_key", "truenas_api") if res[k]["status"] in ("warn", "fail")]
         if problems:
@@ -518,6 +560,123 @@ class App:
             self.connections = res
         return res
 
+    def lan_networks(self, value: str) -> tuple[list[str], list[str]]:
+        """Plex's LAN Networks setting read against what should be in it: this NAS's own networks (syncthing.own_networks) and
+        Tailscale's range, so a viewer at home or on your tailnet is never taken for remote. (what Plex has, what's missing)"""
+        import ipaddress
+        from .syncthing import TAILNET
+        have = []
+        for part in (value or "").split(","):
+            try:
+                have.append(ipaddress.ip_network(part.strip(), strict=False))
+            except ValueError:
+                continue
+        wanted = list(self.syncthing.own_networks()) + [TAILNET]
+        missing = [str(w) for w in wanted if not any(w.subnet_of(h) for h in have if h.version == w.version)]
+        return [str(h) for h in have], missing
+
+    def plex_addresses(self, machine_id: str) -> tuple[list[str], bool]:
+        """Every address Plex may be reached at, as http(s)://host:port: the one it's set up at here, this NAS's others (the
+        browser's) on Plex's port, then the ones Plex itself publishes through plex.tv (its relay left out). (addresses, whether
+        plex.tv told them)."""
+        from .plex import direct_uri, servers
+        p = self.settings.section("plex")
+        u = urllib.parse.urlsplit(p["url"] or "")
+        scheme, port = u.scheme or "http", u.port or PLEX_DEFAULT_PORT
+        out = [f"{scheme}://{u.hostname}:{port}"] if u.hostname else []
+        for h in (self.peerlinks.own_addresses() if getattr(self, "peerlinks", None) is not None else []):
+            url = f"{scheme}://{f'[{h}]' if ':' in h else h}:{port}"
+            if url not in out:
+                out.append(url)
+        try:
+            found = next((x for x in servers(self.settings.section("general")["client_id"], p["token"]) if x["id"] == machine_id), None) if machine_id else None
+        except PlexError:
+            return out, False
+        for c in (found or {}).get("connections") or []:
+            url = direct_uri(c["uri"], lan_only=True)
+            if not c.get("relay") and url not in out:
+                out.append(url)
+        return out, found is not None
+
+    def plex_reach(self, nets: list, machine_id: str) -> dict[str, dict]:
+        """Whether Plex answers on each of ``nets`` (ip_network): {str(net): {"status", "address"}} — "ok" it answered as itself
+        (``machine_id``) at the address, "silent" it has an address there that didn't, "none" it has none there, "unknown"
+        plex.tv couldn't be asked for the addresses Plex publishes, and none known here is on the network."""
+        urls, told = self.plex_addresses(machine_id)
+        out: dict[str, dict] = {}
+        for net in nets:
+            there = []
+            for url in urls:
+                try:
+                    if ipaddress.ip_address(urllib.parse.urlsplit(url).hostname or "") in net:
+                        there.append(url)
+                except ValueError:
+                    continue
+            got = {"status": "none" if told else "unknown", "address": ""}
+            for url in there:
+                host = urllib.parse.urlsplit(url).hostname or ""
+                got = {"status": "silent", "address": host}
+                if self._plex_answers(url, machine_id):
+                    got = {"status": "ok", "address": host}
+                    break
+            out[str(net)] = got
+        return out
+
+    @staticmethod
+    def _plex_answers(url: str, machine_id: str) -> bool:
+        """Whether this Plex (``machine_id``) answers at ``url`` (its /identity, which needs no token)."""
+        try:
+            return PlexClient(url, "", timeout=4).identity().get("machine_id") == machine_id
+        except PlexError:
+            return False
+
+    def lan_plan(self, value: str, machine_id: str) -> dict:
+        """Plex's LAN Networks (``value``) read against this NAS's networks and the tailnet, each tried for Plex (plex_reach):
+        {"have", "missing", "add" (the missing ones Plex answers on, or that couldn't be told), "reach"}."""
+        from .syncthing import TAILNET
+        have, missing = self.lan_networks(value)
+        reach = self.plex_reach(list(self.syncthing.own_networks()) + [TAILNET], machine_id)
+        add = [m for m in missing if reach.get(m, {}).get("status") not in ("none", "silent")]
+        return {"have": have, "missing": missing, "add": add, "reach": reach}
+
+    def _lan_light(self, value: str, machine_id: str = "") -> dict:
+        plan = self.lan_plan(value, machine_id)
+        have, add, reach = plan["have"], plan["add"], plan["reach"]
+        said = []
+        ok = [f"{r['address']} ({n})" for n, r in reach.items() if r["status"] == "ok"]
+        if ok:
+            said.append(M("Plex answers at {addresses}.", addresses=", ".join(ok)))
+        silent = [n for n, r in reach.items() if r["status"] == "silent"]
+        for n in silent:
+            said.append(M("Plex has {address} on {net}, but didn’t answer there: check Settings → Network → Preferred network interface in Plex, and the firewall.",
+                          address=reach[n]["address"], net=n))
+        for n, r in reach.items():
+            if r["status"] == "none":
+                said.append(M("Plex has no address on {net}, so it’s left out: a viewer there can’t reach Plex directly. For the tailnet, run Tailscale on this NAS.", net=n))
+            elif r["status"] == "unknown":
+                said.append(M("Plex’s addresses couldn’t be had from plex.tv, so whether it answers on {net} wasn’t checked.", net=n))
+        if add:
+            return {"status": "warn", "text": M("Plex’s LAN networks leave out {nets}", nets=", ".join(add)), "add": add,
+                    "detail": _sentences([M("Plex marks a stream to a player on these as remote, so Syncthing would give way for a viewer at home or on your tailnet, and Plex may send them through its relay. "
+                                      "Add Subnets to Plex LAN sets Settings → Network → LAN Networks to {merged}.", merged=", ".join(have + add))] + said)}
+        if silent:
+            return {"status": "warn", "text": M("Plex doesn’t answer on {nets}", nets=", ".join(silent)), "detail": _sentences(said)}
+        return {"status": "ok", "text": M("Plex’s LAN networks cover the networks Plex answers on"),
+                "detail": _sentences(([M("{nets}.", nets=", ".join(have))] if have else []) + said)}
+
+    def plex_add_lan_networks(self) -> list[str]:
+        """Plex's LAN Networks given this NAS's networks and the tailnet — those Plex answers on (lan_plan) — keeping what it
+        has, then the connections tested again."""
+        client = self.plex(timeout=10)
+        machine_id = client.identity().get("machine_id", "")
+        plan = self.lan_plan(client.prefs().get("LanNetworksBandwidth", ""), machine_id)
+        merged = plan["have"] + [m for m in plan["add"] if m not in plan["have"]]
+        if plan["add"]:
+            client.set_pref("LanNetworksBandwidth", ",".join(merged))
+            self.activity.event("settings", M("Plex’s LAN networks given {nets}", nets=", ".join(plan["add"])))
+        self.test_connections_async(then_checks=False)
+        return merged
+
     @staticmethod
     def _api_compatibility(known, version: str) -> dict:
         """The API compatibility light (System → TrueNAS): every call the app makes (truenas.METHODS) against
@@ -528,12 +687,7 @@ class App:
             return {"status": "warn", "text": M("API compatibility: not checked"),
                     "detail": M("This TrueNAS wouldn’t list its API methods (core.get_methods), so the app’s {n} calls couldn’t be checked against it. Please report the TrueNAS version ({version}) on GitHub.", n=total, version=version or "?")}
         gone = missing_methods(known)
-        if gone:
-            return {"status": "warn", "text": M("API compatibility: {n} of {total} calls missing", n=len(gone), total=total),
-                    "detail": M("{version} hasn’t got: {what}. The features that need them won’t work until the app learns the new names — please report this TrueNAS version and these calls on GitHub.",
-                                version=version or "?", what="; ".join(f"{what} ({', '.join(names)})" for what, names in gone.items()))}
-        return {"status": "ok", "text": M("API compatibility: all {total} calls known", total=total),
-                "detail": M("Every call the app makes has a name {version} offers.", version=version or "")}
+        return api_light([f"{what} ({', '.join(names)})" for what, names in gone.items()], [], total, version, "names")
 
     def test_connections_async(self, then_checks: bool = True, rescan: bool = False):
         with self.lock:
@@ -1073,7 +1227,7 @@ class App:
         self.peers_summary = peers.summary(self)
 
     def note_tool_run(self, library: str, tool: str) -> None:
-        """A tool ran on a library here: told to the other Plex Cache in the folder's marker."""
+        """A tool ran on a library here: told to the other Dionysus in the folder's marker."""
         self.tool_runs.setdefault(str(library), {})[tool] = time.time()
         self._save_json("tool-runs.json", self.tool_runs)
         threading.Thread(target=self.publish_peers, name="peers", daemon=True).start()
@@ -1088,7 +1242,7 @@ class App:
         except Exception:  # noqa: BLE001
             name = None
         if not name:
-            raise ValueError(M("Plex Cache can’t update itself without the TrueNAS API ([System → TrueNAS](/system#truenas), with a key allowed to manage apps). Update it in TrueNAS: Apps → plex-cache → Update."))
+            raise ValueError(M("Dionysus can’t update itself without the TrueNAS API ([System → TrueNAS](/system#truenas), with a key allowed to manage apps). Update it in TrueNAS: Apps → plex-cache → Update."))
         try:
             with self.truenas() as tn:
                 try:
@@ -1869,8 +2023,10 @@ class App:
             "reports": self.reports(),
             "mqtt": dict(self.ha.status),
             "updates": self.updates.status(),
-            "peers": self.peers_summary,  # the other Plex Caches sharing library folders, and what fights (peers.py)
-            "peer": self.peerlinks.snapshot(),  # the Plex Cache at each mirror's site: System → Mirror Plex Cache (peerlink.py)
+            "peers": self.peers_summary,  # the other Dionysus instances sharing library folders, and what fights (peers.py)
+            "peer": self.peerlinks.snapshot(),  # the Dionysus at each mirror's site: System → Mirror Dionysus (peerlink.py)
+            "syncthing": self.syncthing.snapshot(),  # the folder sync on this server: System → Syncthing (syncthing.py)
+            "integrations": integrations.snapshot(self),  # every service's lights, the standard way (integrations.py): the System cards draw these
             "health_scans": libhealth_scans(self),  # the checks that scan by themselves (Mirror Checks): what's running, when each library was checked
         }
         out["tools_red"] = self._tools_red(out)  # each tool page's red, per library: its card on the Tools page, its tabs, the menu

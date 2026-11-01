@@ -1,4 +1,4 @@
-/* Plex Cache web UI — plain JS, no build step. Text goes through i18n.js (T, H, P...). */
+/* Dionysus web UI — plain JS, no build step. Text goes through i18n.js (T, H, P...). */
 PCI18N.ready.then(function () {
   "use strict";
 
@@ -198,10 +198,11 @@ PCI18N.ready.then(function () {
       });
     });
   }
-  function light(status, title, detail, testing) {
+  // act: a button for what the check found (its HTML), beside it — left out while it's being checked
+  function light(status, title, detail, testing, act) {
     var st = testing ? "testing" : status;
     return '<div class="lightrow"><span class="light l-' + esc(st) + '" aria-hidden="true"></span><div class="grow"><div class="what">' +
-      esc(testing ? T("Checking…") : title) + '</div>' + (detail && !testing ? '<div class="det">' + links(detail) + "</div>" : "") + "</div></div>";
+      esc(testing ? T("Checking…") : title) + '</div>' + (detail && !testing ? '<div class="det">' + links(detail) + "</div>" : "") + "</div>" + (act && !testing ? act : "") + "</div>";
   }
   function banner(sum, testing) {
     if (testing) return '<div class="banner bn-testing" role="status"><span class="light l-testing" aria-hidden="true"></span>' + H("Checking your settings…") + "</div>";
@@ -219,6 +220,7 @@ PCI18N.ready.then(function () {
   // path long thinning and fading to nothing. One pace for every element (COMET_SPEED, in pixels along the edge), and the
   // clock sets the phase, so a redraw — the page drawn again every few seconds — leaves it where it was.
   var COMET_SPEED = 60, COMET_LAYERS = 40, COMET_HEAD = 2.56;  // px per second along the edge; strokes in the tail (enough that it reads as one gradient); the head's width
+  var COMET_FADE = 0.85, COMET_CURVE = 1.7;  // how solid the tail is where it leaves the head, and how fast it fades to nothing (1: evenly; more: sooner)
   function comets() {
     if (typeof document === "undefined" || !document.querySelectorAll) return;
     var els = document.querySelectorAll(".spinning");
@@ -230,12 +232,16 @@ PCI18N.ready.then(function () {
       var r = Math.min(parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0, h / 2, w / 2);
       var P = 2 * (w + h) - 8 * r + 2 * Math.PI * r, tail = P / 2, period = P / COMET_SPEED;
       var svg = '<svg class="comet" aria-hidden="true" width="' + w + '" height="' + h + '" style="--P:' + P.toFixed(2) + 'px;--period:' + period.toFixed(3) + 's">';
-      for (var k = 0; k < COMET_LAYERS; k++) {
-        // the head: a round dot (the shortest dash, its round caps). The tail begins at the back of the dot, a radius behind
-        // the head's front, narrower than the dot so the dot reads as a ball; each dash longer than the last and a little
-        // thinner and fainter, the last nothing. --front is how far behind the comet's front a dash begins.
-        var head = k === 0, f = k / (COMET_LAYERS - 1), len = head ? 0.1 : tail * Math.pow(f, 1.6),
-          front = head ? 0 : COMET_HEAD / 2, width = head ? COMET_HEAD : COMET_HEAD * (0.75 - 0.65 * f), alpha = head ? 1 : Math.pow(1 - f, 1.5);
+      // the head: a round dot (the shortest dash, its round caps). The tail begins at the back of the dot, a radius behind
+      // the head's front, narrower than the dot so the dot reads as a ball; each dash longer than the last and a little
+      // thinner, the last nothing. --front is how far behind the comet's front a dash begins. The strokes lie on one
+      // another, so what shows at a point of the tail is every stroke that reaches it: each one's opacity is what takes
+      // the pile from the solidness wanted at the end of the one before (solid) to the one wanted at its own end.
+      var lens = [0], solid = function (d) { return COMET_FADE * Math.pow(Math.max(0, 1 - d / tail), COMET_CURVE); };
+      for (var k = 1; k < COMET_LAYERS; k++) lens.push(tail * Math.pow(k / (COMET_LAYERS - 1), 1.6));
+      for (k = 0; k < COMET_LAYERS; k++) {
+        var head = k === 0, f = k / (COMET_LAYERS - 1), len = head ? 0.1 : lens[k], front = head ? 0 : COMET_HEAD / 2, width = head ? COMET_HEAD : COMET_HEAD * (0.75 - 0.65 * f),
+          here = head ? 1 : solid(lens[k - 1]), after = head || k === COMET_LAYERS - 1 ? 0 : solid(lens[k]), alpha = head ? 1 : (here - after) / (1 - after);
         svg += '<rect x="0" y="0" width="' + w + '" height="' + h + '" rx="' + r.toFixed(2) + '" style="--front:' + (len + front).toFixed(2) + 'px;stroke-width:' + width.toFixed(2) + ';opacity:' + alpha.toFixed(3) +
           ';stroke-dasharray:' + len.toFixed(2) + ' ' + (P - len).toFixed(2) + '"/>';
       }
@@ -252,6 +258,7 @@ PCI18N.ready.then(function () {
   var EVENT_KINDS = { settings: N("settings"), "warm-up": N("warm-up"), "record size": N("record size"), benchmark: N("benchmark"), mqtt: N("mqtt"),
     playback: N("playback"), "now-playing": N("now-playing"), "next-episode": N("prefetch"), nowplaying: N("now-playing"), nextepisode: N("prefetch"), update: N("update"),
     optimizer: N("optimizer"), "library health": N("library health") };
+  var EVENT_ICONS = { optimizer: "optimizer", sync: "sync", tools: "tools", update: "updates", settings: "prefs", "library health": "library", benchmark: "speed" };
   var STATUS_TEXT = { pass: T("Pass"), warn: T("Warning"), fail: T("Fail"), info: T("Info") };
   var VERDICT_TEXT = { use: T("Use"), maybe: T("Maybe"), avoid: T("Unavailable") };
 
@@ -281,6 +288,13 @@ PCI18N.ready.then(function () {
   var DEFAULT_INDEX = { movie: 512 * 1024, tv: 256 * 1024, audio: 0 };  // per file, until a run measures yours
 
   // ---------------------------------------------------------------- pages
+  // a Health group's heading: TrueNAS and ZFS each behind its mark, Media Datasets behind TrueNAS's dataset icon
+  function groupTitle(g) {
+    var t = esc(g.title);
+    if (g.id === "zfs") return t.replace("TrueNAS", brand("truenas") + "TrueNAS").replace("ZFS", brand("openzfs") + "ZFS");
+    if (g.id === "datasets") return icon("dataset") + t;
+    return t;
+  }
   function pageHealth() {
     var h = ST.health;
     if (!h) return top(T("Health"), H("Running the first checks…"), "") + '<p class="muted">' + H("Checking Plex, your media mounts and ZFS. This takes a few seconds.") + "</p>";
@@ -291,7 +305,7 @@ PCI18N.ready.then(function () {
     out += banner(h.summary, false);
     var hj = ST.job;
     if (hj && hj.running) {
-      out += '<div class="note"><strong>' + esc(jobTitle(hj)) + "</strong>" + jobProgress(hj) +
+      out += '<div class="note">' + jobIcon(hj) + "<strong>" + esc(jobTitle(hj)) + "</strong>" + jobProgress(hj) +
         '<div><a href="/optimizer" data-nav>' + H("Open the Optimizer page") + '</a> · <button class="link" type="button" data-act="job" data-job="cancel">' + H("Cancel") + "</button></div></div>";
     }
     out += '<div class="tiles">' +
@@ -300,7 +314,7 @@ PCI18N.ready.then(function () {
       tile(c.fail, P(c.fail, "failure", "failures"), c.fail ? "var(--bad)" : "var(--muted)") + "</div>";
     out += '<div class="stack">';
     h.groups.forEach(function (g) {
-      out += '<section class="card" id="' + esc(g.id) + '">' + heading(esc(g.title), esc(g.hint));
+      out += '<section class="card" id="' + esc(g.id) + '">' + heading(groupTitle(g), esc(g.hint));
       if (g.table && g.table.length) {
         out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library") + '</th><th scope="col">' + H("Folders (Plex → here)") +
           '</th><th scope="col">' + H("Items") + '</th><th scope="col">' + H("Readable here") + '</th><th scope="col">' + H("Record size") + info(RS_HELP, T("Record size")) + "</th></tr></thead><tbody>";
@@ -423,15 +437,15 @@ PCI18N.ready.then(function () {
   function top(title, sub, actions) {
     return '<div class="top"><div><h1>' + esc(title) + '</h1><div class="sub">' + sub + "</div></div>" + (actions || "") + "</div>" + pairAsks();
   }
-  // Pair Now pressed on the Plex Cache at a mirror's site (peerlink.py asks): said at the top of every page here, with where
+  // Pair Now pressed on the Dionysus at a mirror's site (peerlink.py asks): said at the top of every page here, with where
   // to press it — or that no library here is mirrored by that server yet, so the Mirror page comes first
   function pairAsks() {
     var asked = (ST && ST.peer && ST.peer.asked) || {};
     return Object.keys(asked).map(function (sid) {
       var a = asked[sid], n = Math.max(1, Math.ceil((a.left || 0) / 60));
       return '<div class="note">' + links(a.wanted
-        ? T("The Plex Cache on {name} asks to pair: press Pair Now on [System → Mirror Plex Cache](/system#peer) within {n} minutes.", { name: a.name, n: n })
-        : T("The Plex Cache on {name} asks to pair, but no library here is mirrored by {server}: choose one on the [Mirror page](/mirrors), then press Pair Now on [System → Mirror Plex Cache](/system#peer).", { name: a.name, server: a.server })) + "</div>";
+        ? T("The Dionysus on {name} asks to pair: press Pair Now on [System → Mirror Dionysus](/system#peer) within {n} minutes.", { name: a.name, n: n })
+        : T("The Dionysus on {name} asks to pair, but no library here is mirrored by {server}: choose one on the [Mirror page](/mirrors), then press Pair Now on [System → Mirror Dionysus](/system#peer).", { name: a.name, server: a.server })) + "</div>";
     }).join("");
   }
   function rec(feature) {
@@ -1019,7 +1033,7 @@ PCI18N.ready.then(function () {
     var su = op.setup || {}, steps = su.steps || [];
     if (su.ready || (op.configured && !su.at)) return "";  // (answering, its steps not checked yet: nothing to set up that's known)
     var out = '<section class="card">' + heading(esc(T("Set Up the Optimizer")),
-      H("Optional: a second service in this app, and the only part of Plex Cache that can change your media. Until it’s running, the choices below wait."));
+      H("Optional: a second service in this app, and the only part of Dionysus that can change your media. Until it’s running, the choices below wait."));
     if (!su.at) return out + '<p class="muted">' + H("Checking…") + "</p></section>";
     var done = steps.filter(function (x) { return x.ok; }), next = steps.filter(function (x) { return !x.ok; })[0];
     if (done.length) out += '<div class="det">' + done.map(function (x) { return "✓ " + esc(x.title); }).join(" · ") + "</div>";
@@ -1125,13 +1139,13 @@ PCI18N.ready.then(function () {
     if (inlineCopy && job && job.kind === "copy") return "";
     if (job && job.waiting) {
       // after a restart, before it carries on (once the optimizer is ready)
-      return '<section class="card">' + heading(esc(jobTitle(Object.assign({}, job, { resumes: (job.resumes || 0) + 1 }))), "") +
+      return '<section class="card">' + heading(jobIcon(job) + esc(jobTitle(Object.assign({}, job, { resumes: (job.resumes || 0) + 1 }))), "") +
         '<div class="det">' + H("Carries on where it was ({done} of {total} files) once the optimizer is ready.", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) }) +
         "</div>" + jobFailures(job) + "</section>";
     }
     if (job && !job.running) {
       // the last job that ended: its counts and failures, until dismissed
-      return '<section class="card">' + heading(esc(jobTitle(job)), job.cancelled ? H("Cancelled") : H("Finished")) +
+      return '<section class="card">' + heading(jobIcon(job) + esc(jobTitle(job)), job.cancelled ? H("Cancelled") : H("Finished")) +
         '<div class="det">' + (job.kind === "copy" && job.mirror ? H("The last pass: {total} files checked, {copied} copied (changed since the copy)", { total: fmtNum(job.total || 0), copied: fmtNum(job.copied || 0) })
           : job.kind === "copy" ? H("{done} of {total} files copied", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) })
           : H("{optimized} optimized, {rewritten} written again, {skipped} skipped, {failed} failed", job)) + "</div>" + jobFailures(job) +
@@ -1142,7 +1156,7 @@ PCI18N.ready.then(function () {
       : '<button class="btn" type="button" data-act="job" data-job="pause">' + H("Pause") + "</button> ";
     if (job.paused_by === "resilver" && !job.paused) pauseBtn = "";  // a resilver pause can't be overridden
     var sub = job.kind === "copy" ? H("{folder} → {dataset}", { folder: job.folder || "", dataset: job.child || "" }) : "";
-    return '<section class="card">' + heading(esc(jobTitle(job)), sub) + jobProgress(job, jobFailures(job)) +
+    return '<section class="card">' + heading(jobIcon(job) + esc(jobTitle(job)), sub) + jobProgress(job, jobFailures(job)) +
       '<div style="margin-top:10px">' + pauseBtn + (job.stopping ? '<button class="btn" type="button" disabled>' + H("Cancelling…") + "</button> " : '<button class="btn" type="button" data-act="job" data-job="cancel">' + H("Cancel") + "</button> ") +
       '<span class="muted">' + (job.kind === "copy" ? H("Pausing and cancelling take effect straight away; a copy carries on where it was.")
         : H("Pausing and cancelling take effect after the file in hand.")) + " " + H("File jobs started meanwhile wait in the queue.") + "</span></div></section>";
@@ -1160,7 +1174,7 @@ PCI18N.ready.then(function () {
       (ST.queue_hold ? '<div class="note">' + esc(ST.queue_hold) + "</div>" : "") +
       q.map(function (item, i) {
         var sub = item.kind === "copy" ? H("{folder} → {dataset}", { folder: item.folder || "", dataset: item.child || "" }) : "";
-        return '<div class="row">' + badge("info", String(i + 1)) + '<div class="grow"><div class="what">' + esc(jobTitle(item)) + "</div>" +
+        return '<div class="row">' + badge("info", String(i + 1)) + '<div class="grow"><div class="what">' + jobIcon(item) + esc(jobTitle(item)) + "</div>" +
           '<div class="det">' + (sub ? sub + " · " : "") + H("Added {when}", { when: fmtWhen(item.queued) }) + "</div></div>" +
           '<button class="btn" type="button" data-act="queue-remove" data-id="' + esc(item.id) + '">' + H("Remove") + "</button></div>";
       }).join("") + "</section>";
@@ -1399,8 +1413,8 @@ PCI18N.ready.then(function () {
     var at = (ST.migration || {}).checked_at;
     return '<div class="note"><strong>' + H("Next:") + "</strong> " + esc(first.title) + (first.detail ? '<div class="det">' + links(first.detail) + "</div>" : "") +
       (first.cmd ? cmdBox(first.cmd) : "") + migAction(first) +
-      '<div class="det muted">' + (MIG_CHECKING ? H("Checking again…") : at ? H("Looked at {when}: not done yet. Plex Cache looks again by itself every 30 seconds, and this moves on once it is.", { when: ago(at) })
-        : H("Plex Cache looks by itself every 30 seconds, and this moves on once it’s done.")) + "</div></div>";
+      '<div class="det muted">' + (MIG_CHECKING ? H("Checking again…") : at ? H("Looked at {when}: not done yet. Dionysus looks again by itself every 30 seconds, and this moves on once it is.", { when: ago(at) })
+        : H("Dionysus looks by itself every 30 seconds, and this moves on once it’s done.")) + "</div></div>";
   }
   // a check the app can put right itself: its button
   function migAction(c) {
@@ -1409,10 +1423,14 @@ PCI18N.ready.then(function () {
     };
     var row = function (html) { return '<div style="margin-top:6px">' + html + "</div>"; };
     if (c.action === "restart") return row(b("restart", H("Restart Now"), true));
-    // what you've done where Plex Cache can't see it
+    // what you've done where Dionysus can't see it
     if (c.action === "sync_paused") return row(b("sync_paused", H("I’ve Paused the Folder Sync Here"), true));
     if (c.action === "sync_resumed") return row(b("sync_resumed", H("I’ve Resumed the Folder Sync Here"), true));
     if (c.action === "sync_checked") return row(b("sync_checked", H("Nothing Else Carries Them Away"), true));
+    // through Syncthing's API (System → Syncthing)
+    if (c.action === "sync_ignore") return row(b("sync_ignore", H("Add Them in Syncthing"), true));
+    if (c.action === "sync_pause") return row(b("sync_pause", H("Pause the Folder in Syncthing"), true));
+    if (c.action === "sync_resume") return row(b("sync_resume", H("Resume the Folder in Syncthing"), true));
     // both servers, or this one only (chosen before the copy)
     if (c.action === "scope") {
       var both = (((ST.migration || {}).state) || {}).scope === "both";
@@ -1420,7 +1438,7 @@ PCI18N.ready.then(function () {
     }
     return "";
   }
-  // The mirror's light, at the top (migrating.py mirror_view): grey, none (this server alone); green, its Plex Cache
+  // The mirror's light, at the top (migrating.py mirror_view): grey, none (this server alone); green, its Dionysus
   // talking directly; yellow, heard of only through its marker, or not at all — with how the conversion goes with it
   // — and, while the library's state isn't chosen, Mark as Mirror (a library found that looks like one) or No Mirror, the
   // Mirror page's choice: one or the other is needed before the copy (migrating.py mirror_chosen)
@@ -1534,7 +1552,7 @@ PCI18N.ready.then(function () {
   function migrationCard() {
     var mg = ST.migration || {}, st = mg.state, checks = mg.checks || [];
     // (one heading, its explanation behind one ⓘ: an ⓘ inside another can't be opened)
-    var out = '<section class="card" id="child-dataset">' + heading(esc(T("Convert Folder to Child Dataset")),
+    var out = '<section class="card" id="child-dataset">' + heading(icon("dataset") + esc(T("Convert Folder to Child Dataset")),
       H("A record size suits some media better than others, and a dataset has just one. A library folder that needs a different one than the rest of its dataset can become a dataset of its own — a child dataset, at the same path, with the record size that suits it.") +
       "<br><br>" + H("<strong>Ideal already</strong>: its dataset has the record size recommended for it. <strong>Sufficient</strong>: the second best — fine as it is. <strong>Split dataset</strong>: neither; converting the folder lets it read in the size that suits it.") +
       "<br><br>" + H("How: a new dataset is made next to the folder, the files are copied into it (which also gives them its record size and compression), and it takes the folder’s place. Plex keeps every file’s metadata, and is restarted once, at the end. You’ll need room for a second copy until the old one is deleted; snapshots keep the old copy’s space until they expire."));
@@ -1628,9 +1646,9 @@ PCI18N.ready.then(function () {
         stepRow(st.old_path ? btn("undo_rename", H("Put the Old Folder Back"))
             : btn("pass_then_move", H("Compare, Then Set the Old Folder Aside"), true, st.copying || !(cmp && cmp.same) ||
                 checks.some(function (c) { return c.gate === "aside" && !migClear(c); })),
-          (st.old_path ? badge("pass", T("Set aside")) + " " + H("As {name}, in the same place. Nothing is deleted until the very end (after Verify). Plex Cache’s other file jobs wait until the dataset is renamed.", { name: st.old_path.split("/").pop() })
+          (st.old_path ? badge("pass", T("Set aside")) + " " + H("As {name}, in the same place. Nothing is deleted until the very end (after Verify). Dionysus’s other file jobs wait until the dataset is renamed.", { name: st.old_path.split("/").pop() })
             : H("<strong>Set the old folder aside</strong>: the new dataset needs the folder’s name, so the folder is renamed to {name}, in the same place. Nothing is deleted — that’s at the very end, after Verify — and Put Back undoes it.", { name: aside }) +
-              '<div class="det">' + H("The last pass runs first, every time: anything changed since is copied and both copies are compared, and only if they’re the same is the folder set aside. Plex Cache’s other file jobs wait until the dataset is renamed. Pause anything else that writes to this folder first: downloads, Sonarr or Readarr, Syncthing.") + "</div>") +
+              '<div class="det">' + H("The last pass runs first, every time: anything changed since is copied and both copies are compared, and only if they’re the same is the folder set aside. Dionysus’s other file jobs wait until the dataset is renamed. Pause anything else that writes to this folder first: downloads, Sonarr or Readarr, Syncthing.") + "</div>") +
           (st.move_error ? '<div class="det bad">' + esc(st.move_error) + "</div>" : "")) +
         stepRow("", H("<strong>Rename the new dataset</strong> to the folder’s name, in the TrueNAS shell:") + cmdBox("sudo zfs rename " + shq(temp) + " " + shq(st.child)) +
           '<div class="det">' + H("Or in the TrueNAS web UI, if your version offers it: Datasets → select {name} → Rename.", { name: temp.split("/").pop() }) + "</div>") +
@@ -1798,7 +1816,7 @@ PCI18N.ready.then(function () {
         { n: fmtNum(bk.plex.records || 0), until: fmtWhen(bk.until) })) + "</div>";
     }
     var failedWhy = j.status === "failed" ? '<div class="det bad">' + esc(msg((j.events.filter(function (e) { return e.event === "backup_failed"; })[0] || {}).why || "")) + "</div>" : "";
-    return '<div class="row runcard" id="proc-' + esc(j.job) + '">' + status + '<div class="grow"><div class="what">' + esc(jobTitle(titleJob)) + "</div>" +
+    return '<div class="row runcard" id="proc-' + esc(j.job) + '">' + status + '<div class="grow"><div class="what">' + jobIcon(titleJob) + esc(jobTitle(titleJob)) + "</div>" +
       '<div class="det">' + (j.planned > j.files ? H("{start} → {end} · {files} of {planned} files tried", { start: fmtWhen(j.started), end: j.ended ? fmtWhen(j.ended) : T("now"), files: fmtNum(j.files), planned: fmtNum(j.planned) })
         : H("{start} → {end} · {files} files logged", { start: fmtWhen(j.started), end: j.ended ? fmtWhen(j.ended) : T("now"), files: fmtNum(j.files) })) +
       (j.status === "running" && !now ? " · " + H("Stopped without finishing (the app was stopped or restarted)") : "") +
@@ -2166,10 +2184,10 @@ PCI18N.ready.then(function () {
   // Whether a picture in the file has been compressed losslessly: by the optimizer (its tag is on the
   // file), or — for a JPEG — whether its Huffman tables are the standard ones (not optimized) or its own
   function coverState(a, optimized) {
-    if (optimized) return T("{name}: compressed losslessly by Plex Cache (where it helped)", { name: a.name });
+    if (optimized) return T("{name}: compressed losslessly by Dionysus (where it helped)", { name: a.name });
     if (a.jpeg_tables === "standard") return T("{name}: not compressed losslessly (standard JPEG tables)", { name: a.name });
     if (a.jpeg_tables) return T("{name}: already compressed losslessly (its own JPEG tables)", { name: a.name });
-    return T("{name}: not compressed by Plex Cache", { name: a.name });
+    return T("{name}: not compressed by Dionysus", { name: a.name });
   }
   // What the always-cached blocks take in the cache — compressed, as ZFS keeps them (each run of like
   // blocks counted from its first block's estimate)
@@ -3538,8 +3556,8 @@ PCI18N.ready.then(function () {
     if (!a.events.length) out += '<div class="muted">' + H("Nothing yet.") + "</div>";
     a.events.forEach(function (e) {
       var t = new Date(e.t * 1000).toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-      var kind = EVENT_KINDS[e.kind] ? T(EVENT_KINDS[e.kind]) : e.kind;
-      out += '<div class="' + (e.level === "warn" ? "w" : "") + '">' + esc(t) + "  " + esc((kind + "             ").slice(0, Math.max(13, kind.length + 1))) + " " + esc(e.message) + "</div>";
+      var kind = EVENT_KINDS[e.kind] ? T(EVENT_KINDS[e.kind]) : e.kind, pic = EVENT_ICONS[e.kind] ? icon(EVENT_ICONS[e.kind]) : '<span class="pic gap"></span>';
+      out += '<div class="' + (e.level === "warn" ? "w" : "") + '">' + pic + esc(t) + "  " + esc((kind + "             ").slice(0, Math.max(13, kind.length + 1))) + " " + esc(e.message) + "</div>";
     });
     out += "</div></section>";
     return out;
@@ -3764,95 +3782,202 @@ PCI18N.ready.then(function () {
       '" value="" data-secret="' + sec + "." + key + '"></div>';
   }
   // Fields with no meaningful default (where your servers are): no ↺
-  var NO_REVERT = { "plex.url": 1, "truenas.url": 1, "mqtt.host": 1, "mqtt.username": 1 };
+  var NO_REVERT = { "plex.url": 1, "truenas.url": 1, "syncthing.url": 1, "mqtt.host": 1, "mqtt.username": 1 };
   function textInput(sec, key, label, id, help, placeholder) {
     var h = splitHelp(help);
     return '<div class="fld"><label for="' + id + '">' + esc(label) + info(h.more, label) + (NO_REVERT[sec + "." + key] ? "" : revertBtn(sec, key, "")) + '</label><input id="' + id + '" type="text" value="' + esc(S[sec][key]) + '" placeholder="' + esc(placeholder || "") +
       '" data-set="' + sec + "." + key + '">' + helpDiv(h) + "</div>";
   }
 
-  // The Plex Cache at each mirror's site (peerlink.py): found from that Plex server's addresses, paired by itself through the
+  // The Dionysus at each mirror's site (peerlink.py): found from that Plex server's addresses, paired by itself through the
   // synced folders when that's safe, then asked directly — what Mirror Checks' disk comparison relies on. One block per
   // server some library is mirrored by, with its five lights and Pair Now, Unpair; the found/paired/talking light is on the Mirror page too.
-  var PEER_LIGHTS = [["found", N("Plex Cache at the mirror’s site")], ["paired", N("Paired")], ["talking", N("Talking")], ["folders", N("Folder sync")], ["version", N("Version and clock")]];
+  var PEER_LIGHTS = [["found", N("Dionysus at the mirror’s site")], ["paired", N("Paired")], ["talking", N("Talking")], ["folders", N("Folder sync")], ["version", N("Version and clock")]];
   function mirrorName(key) {
     var p2 = ST.plex2 || {}, p = (p2.pairs || {})[key], st = (p2.states || {})[key] || {};
     return (p && p.name) || st.name || T("the mirror");
   }
-  // A pairing's fingerprint as a picture, Syncthing's way: a 5×5 grid mirrored left to right, its cells and its colour read off
-  // the fingerprint's own bits — the same picture on both sides, compared at a glance before the code is.
-  function identicon(fp) {
-    var hex = String(fp || "").replace(/[^0-9A-Fa-f]/g, ""), bits = "";
-    for (var i = 0; i < hex.length; i++) bits += ("000" + parseInt(hex[i], 16).toString(2)).slice(-4);
-    if (bits.length < 24) return "";
-    var hue = parseInt(bits.slice(15, 24), 2) % 360, cells = "";
-    for (var r = 0; r < 5; r++) for (var c = 0; c < 3; c++) {
-      if (bits[r * 3 + c] !== "1") continue;
-      cells += '<rect x="' + c + '" y="' + r + '" width="1" height="1"/>' + (c < 2 ? '<rect x="' + (4 - c) + '" y="' + r + '" width="1" height="1"/>' : "");
-    }
-    return '<svg class="identicon" viewBox="0 0 5 5" shape-rendering="crispEdges" aria-hidden="true" style="color:hsl(' + hue + ',55%,42%)"><g fill="currentColor">' + cells + "</g></svg>";
+  // The mark of each thing Dionysus connects to, before its card's heading (System): TrueNAS, MQTT and Syncthing's from
+  // Simple Icons (CC0, simpleicons.org), in their own colours; Plex's chevron drawn here. Trademarks of their owners.
+  var BRANDS = {
+    plex: '<path fill="#E5A00D" d="M3.5 2h7.2L20 12l-9.3 10H3.5l9.3-10z"/>',
+    truenas: '<path fill="#0095D5" d="M24 10.049v5.114l-10.949 6.324v-5.114L24 10.049zm-24 0v5.114l10.956 6.324v-5.114L0 10.049zm12.004-.605l-4.433 2.559 4.433 2.559 4.429-2.559-4.429-2.559zm10.952-1.207l-9.905-5.723v5.118l5.473 3.164 4.432-2.559zm-12-.605V2.513L1.044 8.236l4.432 2.555 5.48-3.159z"/>',
+    mqtt: '<path fill="#660066" d="M10.657 23.994h-9.45A1.212 1.212 0 0 1 0 22.788v-9.18h.071c5.784 0 10.504 4.65 10.586 10.386Zm7.606 0h-4.045C14.135 16.246 7.795 9.977 0 9.942V6.038h.071c9.983 0 18.121 8.044 18.192 17.956Zm4.53 0h-.97C21.754 12.071 11.995 2.407 0 2.372v-1.16C0 .55.544.006 1.207.006h7.64C15.733 2.49 21.257 7.789 24 14.508v8.291c0 .663-.544 1.195-1.207 1.195ZM16.713.006h6.092A1.19 1.19 0 0 1 24 1.2v5.914c-.91-1.242-2.046-2.65-3.158-3.762C19.588 2.11 18.122.987 16.714.005Z"/>',
+    homeassistant: '<path fill="#18BCF2" d="M22.939 10.627 13.061.749a1.505 1.505 0 0 0-2.121 0l-9.879 9.878C.478 11.21 0 12.363 0 13.187v9c0 .826.675 1.5 1.5 1.5h9.227l-4.063-4.062a2.034 2.034 0 0 1-.664.113c-1.13 0-2.05-.92-2.05-2.05s.92-2.05 2.05-2.05 2.05.92 2.05 2.05c0 .233-.041.456-.113.665l3.163 3.163V9.928a2.05 2.05 0 0 1-1.15-1.84c0-1.13.92-2.05 2.05-2.05s2.05.92 2.05 2.05a2.05 2.05 0 0 1-1.15 1.84v8.127l3.146-3.146A2.051 2.051 0 0 1 18 12.239c1.13 0 2.05.92 2.05 2.05s-.92 2.05-2.05 2.05c-.25 0-.488-.047-.709-.13L12.9 20.602v3.088h9.6c.825 0 1.5-.675 1.5-1.5v-9c0-.825-.477-1.977-1.061-2.561z"/>',
+    nodered: '<path fill="#8F0000" d="M3 0C1.338 0 0 1.338 0 3v6.107h2.858c1.092 0 1.97.868 1.964 1.96v.021c.812-.095 1.312-.352 1.674-.683.416-.382.69-.91 1.016-1.499.325-.59.71-1.244 1.408-1.723.575-.395 1.355-.644 2.384-.686v-.45c0-1.092.88-1.976 1.972-1.976h7.893c1.091 0 1.974.884 1.974 1.976v1.942c0 1.091-.883 2.029-1.974 2.029h-7.893c-1.092 0-1.972-.938-1.972-2.03v-.453c-.853.037-1.408.236-1.798.504-.48.33-.774.802-1.086 1.368-.312.565-.63 1.22-1.222 1.763l-.077.069c3.071.415 4.465 1.555 5.651 2.593 1.39 1.215 2.476 2.275 6.3 2.288v-.46c0-1.092.894-1.946 1.986-1.946H24V3c0-1.662-1.338-3-3-3zm10.276 5.41c-.369 0-.687.268-.687.637v1.942c0 .368.318.636.687.636h7.892a.614.614 0 0 0 .635-.636V6.047a.614.614 0 0 0-.635-.636zM0 10.448v3.267h2.858a.696.696 0 0 0 .678-.69v-1.942c0-.368-.31-.635-.678-.635zm4.821 1.67v.907A1.965 1.965 0 0 1 2.858 15H0v6c0 1.662 1.338 3 3 3h18c1.662 0 3-1.338 3-3v-1.393h-2.942c-1.092 0-1.986-.913-1.986-2.005v-.445c-4.046-.032-5.598-1.333-6.983-2.544-1.437-1.257-2.751-2.431-7.268-2.496zM21.058 15a.644.644 0 0 0-.647.66v1.942c0 .368.278.612.647.612H24V15z"/>',
+    openhab: '<path fill="#E64A19" d="m12 9.103-9.76 9.768c-.376-.553-.725-1.123-.998-1.738l9.39-9.397L12 6.368l1.368 1.368 6.931 6.931-.01.035-.136.403-.156.393-.174.384-.192.374-.175.304L12 9.103zM12 0C5.39 0 0 5.39 0 12c0 1.306.211 2.563.6 3.741l.893-.893.668-.67A10.039 10.039 0 0 1 1.922 12C1.922 6.45 6.45 1.922 12 1.922S22.078 6.449 22.078 12c0 5.55-4.527 10.078-10.078 10.078a10.06 10.06 0 0 1-7.698-3.588l-.012.012-.309.309-.308.309-.308.308-.424.425C5.144 22.39 8.39 24 12.001 24 18.61 24 24 18.61 24 12S18.61 0 12 0z"/>',
+    openzfs: '<path fill="#2A667F" d="M19.3573 3.4035a.6337.6337 0 0 1-.9017 0 .64.64 0 0 1 0-.9043.6337.6337 0 0 1 .9017 0 .6287.6287 0 0 1 0 .9043m-.1407 17.8587c-.4348.4332-1.1383.4332-1.5731 0-.4349-.4396-.4349-1.1429 0-1.5762.4348-.4333 1.1447-.4333 1.5731 0a1.1038 1.1038 0 0 1 0 1.5762m-3.7218-2.1539c-.4348-.4333-.4348-1.1428 0-1.5698.4349-.4396 1.1447-.4396 1.5731 0 .4349.4332.4349 1.1428 0 1.5698-.4348.4396-1.1446.4396-1.5731 0m-.5755 2.1539c-.4349.4332-1.1447.4332-1.5732 0-.4348-.4396-.4348-1.1429 0-1.5762.4349-.4333 1.1447-.4333 1.5732 0 .4348.4333.4348 1.1429 0 1.5762m-3.7219-2.1539c-.4412-.4333-.4412-1.1428 0-1.5698a1.1032 1.1032 0 0 1 1.5732 0c.4348.4332.4348 1.1428 0 1.5698-.4349.4396-1.1447.4396-1.5732 0m-.5755 2.1539c-.4349.4332-1.1447.4332-1.5731 0-.4349-.4396-.4349-1.1429 0-1.5762.4348-.4333 1.1446-.4333 1.5731 0 .4349.4333.4349 1.1429 0 1.5762m-3.7282-2.1539c-.4349-.4333-.4349-1.1428 0-1.5698.4412-.4396 1.1447-.4396 1.5795 0 .4349.4332.4349 1.1428 0 1.5698-.4348.4333-1.1447.4396-1.5795 0m-.5692 2.1476c-.4348.4395-1.1446.4395-1.5731 0-.4412-.4333-.4412-1.1429 0-1.5699a1.1032 1.1032 0 0 1 1.5731 0c.4349.4333.4349 1.1429 0 1.5699M4.6043 2.5809c.2558-.2512.6587-.2512.908 0a.64.64 0 0 1 0 .9042c-.2493.2512-.6586.2512-.908 0-.243-.2512-.2494-.653 0-.9043M5.992 3.9686c.2494-.2512.6587-.2512.908 0a.64.64 0 0 1 0 .9042c-.2493.245-.6586.245-.908 0a.64.64 0 0 1 0-.9042m1.3877 1.3815c.2494-.245.6587-.245.908 0 .2495.2512.2495.6593 0 .9042-.2493.2512-.6586.2512-.908 0-.2494-.2449-.2494-.653 0-.9042m0-2.7693c.2494-.2511.6587-.2511.908 0a.64.64 0 0 1 0 .9043c-.2493.2512-.6586.2449-.908 0a.64.64 0 0 1 0-.9043m1.3877 4.157c.2494-.2449.6587-.2511.908 0a.64.64 0 0 1 0 .9043c-.2493.2511-.6586.2511-.908 0a.64.64 0 0 1 0-.9043m0-2.7692c.2494-.2512.6587-.2512.908 0a.64.64 0 0 1 0 .9042c-.2493.2512-.6586.2512-.908 0-.2494-.2511-.2494-.6593 0-.9042m1.3877-1.3878c.2494-.2511.6523-.2511.908 0a.64.64 0 0 1 0 .9043c-.2557.2512-.6586.2512-.908 0a.64.64 0 0 1 0-.9043m1.3877 4.157c.2494-.2511.6522-.2449.9016 0 .2494.2512.2494.6594 0 .9043-.243.2511-.6522.2511-.9016 0a.64.64 0 0 1 0-.9043m0-2.7692a.6337.6337 0 0 1 .9016 0c.2558.2449.2494.653 0 .9042-.2494.245-.6522.245-.9016 0-.2494-.2511-.2494-.6593 0-.9042m1.3877-1.3878a.6337.6337 0 0 1 .9016 0 .64.64 0 0 1 0 .9043.6337.6337 0 0 1-.9016 0 .64.64 0 0 1 0-.9043m.4284 12.8038c.4349-.4333 1.1447-.4333 1.5732 0 .4348.4396.4348 1.1429 0 1.5762-.4349.4332-1.1447.4332-1.5732 0-.4348-.4396-.4348-1.1429 0-1.5762m.4732-6.3924a.6337.6337 0 0 1-.9016 0c-.2494-.245-.2494-.6531 0-.9043a.6393.6393 0 0 1 .9016.0063c.2494.2449.2494.653 0 .898m0-2.7693a.6337.6337 0 0 1-.9016 0 .64.64 0 0 1 0-.9042.6337.6337 0 0 1 .9016 0 .64.64 0 0 1 0 .9042m-2.2893 3.2528c.2494-.245.6522-.245.9016 0 .2494.2511.2494.6593 0 .9042a.6337.6337 0 0 1-.9016 0 .64.64 0 0 1 0-.9042m-.339 3.7614c.4349-.4396 1.1447-.4396 1.5732 0a1.1038 1.1038 0 0 1 0 1.576c-.4349.4334-1.1383.4334-1.5732 0-.4348-.4395-.4348-1.1428 0-1.576m-.5691 2.1475c.4348.4396.4348 1.1429 0 1.5762-.4413.4332-1.1447.4332-1.5795 0-.4349-.4333-.4349-1.1429 0-1.5762.4348-.4333 1.1446-.4333 1.5795 0m-.4796-10.066c.2494-.2511.6523-.2511.908 0 .243.2513.243.6531 0 .9043-.2557.2512-.6586.2512-.908 0a.64.64 0 0 1 0-.9042m0 2.7755a.6394.6394 0 0 1 .9017-.0063c.2494.2512.2494.6593 0 .9105-.2494.245-.6523.245-.9017 0-.2494-.2512-.2494-.6593 0-.9042m4.163-1.3878a.6337.6337 0 0 1 .9017 0 .64.64 0 0 1 0 .9043.6337.6337 0 0 1-.9017 0 .64.64 0 0 1 0-.9043m0-2.7755c.2494-.2449.6523-.2449.9017 0 .2494.2512.2494.6594 0 .9043a.6337.6337 0 0 1-.9017 0c-.2494-.245-.2494-.6531 0-.9043m1.3877 1.3878a.6337.6337 0 0 1 .9017 0 .64.64 0 0 1 0 .9042.6337.6337 0 0 1-.9017 0 .64.64 0 0 1 0-.9042m0-2.7693a.6337.6337 0 0 1 .9017 0c.2494.245.2494.6531 0 .898a.6337.6337 0 0 1-.9017 0c-.2494-.2449-.2494-.653 0-.898m1.3877 1.3815c.2494-.2449.6523-.2449.9017 0a.64.64 0 0 1 0 .9043.6337.6337 0 0 1-.9017 0c-.2494-.245-.2494-.6531 0-.9043M24 1.8273C24 .8226 23.1878 0 22.171 0H1.8354C.825 0 0 .8163 0 1.8273V8.81h2.7242L0 15.19v6.9764C0 23.1711.8185 24 1.8353 24h20.3358C23.1815 24 24 23.1774 24 22.1664V15.19h-2.7242L24 8.81Z"/>',
+    syncthing: '<path fill="#0891D1" d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm0 2.412c3.115 0 5.885 1.5 7.629 3.815a1.834 1.834 0 0 1 1.564 3.162c.23.818.354 1.68.354 2.57a9.504 9.504 0 0 1-2.166 6.05c.128.281.189.595.162.92a1.854 1.854 0 0 1-2.004 1.678 1.86 1.86 0 0 1-.877-.322A9.486 9.486 0 0 1 12 21.505c-3.84 0-7.154-2.277-8.668-5.552-.3-.01-.601-.092-.879-.254-.858-.51-1.144-1.634-.633-2.513.164-.276.39-.493.653-.643a9.62 9.62 0 0 1-.02-.584c0-5.265 4.282-9.547 9.547-9.547zm0 1.227a8.311 8.311 0 0 0-8.31 8.683c.22.036.439.111.644.23.323.2.564.484.713.805l6.984-.644a1.78 1.78 0 0 1 .787-1.08c.288-.19.612-.286.936-.295.34-.01.68.08.978.254l3.51-2.914a1.82 1.82 0 0 1 .317-1.84A8.3 8.3 0 0 0 12 3.638zm7.027 5.98-3.502 2.91a1.829 1.829 0 0 1-.23 1.719l1.904 2.744c.212-.06.436-.085.668-.066.238.024.46.092.66.193a8.285 8.285 0 0 0 1.793-5.16 8.38 8.38 0 0 0-.265-2.092 1.835 1.835 0 0 1-1.028-.248zm-6.886 4.315-6.975.644a1.8 1.8 0 0 1-.66 1.004A8.312 8.312 0 0 0 12 20.279a8.294 8.294 0 0 0 3.938-.986 1.845 1.845 0 0 1-.075-.69c.028-.341.148-.65.332-.908L14.29 14.95a1.839 1.839 0 0 1-2.148-1.015z"/>'
+  };
+  function brand(name) { return BRANDS[name] ? '<svg class="brandmark" viewBox="0 0 24 24" aria-hidden="true">' + BRANDS[name] + "</svg>" : ""; }
+  // The icons of the app's own places, drawn as the menu's are (strokes on a 24 grid): one per tool, part of its definition
+  // (TOOLS, where icon() finds it), and here one per card on the System page and the menu's own, so a place is known by
+  // its picture before its name is read.
+  var ICONS = {
+    tools: '<path d="M14.7 6.3a4 4 0 0 0 5 5L22 9l-3-3-2.3 1.3a4 4 0 0 0-2 0z"/><path d="m14 10-9.5 9.5a2.1 2.1 0 0 0 3 3L17 13"/><path d="M5 5l3 3"/>',
+    mirror: '<path d="M4 3h16a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM4 14h16a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z"/><path d="M6 6.5h.01M6 17.5h.01"/>',
+    library: '<path d="M4 4h4v16H4zM10 4h4v16h-4z"/><path d="m16 5 3.8-1 3 15.6-3.8 1z"/>',
+    watched: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>',
+    uses: '<path d="M12 22v-5M9 8V2M15 8V2M18 8v5a6 6 0 0 1-12 0V8z"/>',
+    access: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    prefs: '<path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
+    updates: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
+    speed: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+    mappings: '<path d="m16 3 4 4-4 4M20 7H4M8 21l-4-4 4-4M4 17h16"/>'
+  };
+  // a place's icon by its name: a tool's from its definition, the rest from ICONS — the one way an icon is drawn
+  function icon(name) {
+    var t = toolOf(name), d = t ? t.icon : ICONS[name];
+    return d ? '<svg class="ico pic" viewBox="0 0 24 24" aria-hidden="true">' + d + "</svg>" : "";
+  }
+  // the icon of a file job: the tool's, the dataset's for a conversion, the optimizer's otherwise
+  function jobIcon(job) { return icon(job.kind === "tool" ? job.tool : job.kind === "copy" ? "dataset" : "optimizer"); }
+  // A Dionysus's fingerprint (of its own key: one per server, the same wherever it's shown) as a picture, Syncthing's way: a
+  // 5×5 grid mirrored left to right, its cells read off the fingerprint's bits, in the text's colour — known at a glance
+  // before the code is read. Sizes: "" (large, with the code), "md" (beside a line), "sm" (before a name).
+  // an identity's picture: Syncthing's identicon of its ID (stIdenticon), whatever the ID is — Syncthing's device ID where
+  // Syncthing is there, this app's own fingerprint where it isn't — so every mark is drawn one way
+  function identicon(id, size) {
+    if (!id) return "";
+    return stIdenticon(id).replace('class="identicon"', 'class="identicon' + (size ? " " + size : "") + '"');
+  }
+  // how an identity was had, for its ⓘ
+  function identitySource(idn) {
+    return idn.source === "plex" ? T("Plex’s machine identifier, which Plex gives everyone who asks; it stays through moves and reinstalls.")
+      : idn.source === "truenas" ? T("TrueNAS’s id for this host, through its API: it stays through updates and reinstalls of the apps, and changes only with a fresh TrueNAS install.")
+      : idn.source === "certificate" && idn.name === "TrueNAS" ? T("TrueNAS’s web certificate, since no API key is in; a key gives the host’s own id, which outlives a new certificate.")
+      : idn.source === "syncthing" ? T("Syncthing’s device ID, read through its API.") : idn.source === "certificate" ? T("Syncthing’s device ID, read off its sync port’s certificate.")
+      : idn.source === "syncthing-device" ? T("The Syncthing device connected from the mirror’s address, since the Dionysus there doesn’t say yet (an older build).")
+      : T("This Dionysus’s own key, since no Syncthing is known here.");
+  }
+  // the other side's fingerprint, at the top right of its lights: its picture, its code and what to compare it with
+  function peerMark(lk) {
+    var idn = lk.identity || (lk.fingerprint ? { id: lk.fingerprint, short: lk.fingerprint, source: "own" } : null);
+    if (!idn) return "";
+    return '<div class="fpmark"><div class="fpstack">' + identicon(idn.id) + '<span class="fpcode" title="' + esc(idn.id) + '">' + esc(idn.short) + "</span></div>" +
+      info(H("{name}’s fingerprint, the picture and code the Dionysus there shows as its own, at the top right of its own Mirror Dionysus card. Compare the two before pairing by hand, or when in doubt that this is it. This one’s own is at the top right of this card, and beside the app’s name in the menu.", { name: lk.name }), T("{name} fingerprint", { name: lk.name })) + "</div>";
+  }
+  // this one's own, the same way, named after this server's Plex (the mirror's shows it for this one)
+  function ownMark(own) {
+    var idn = own.identity || (own.fingerprint ? { id: own.fingerprint, short: own.fingerprint, source: "own" } : null);
+    if (!idn) return "";
+    var name = own.name || idn.name || T("This Dionysus");
+    return '<div class="fpmark own"><div class="fpstack">' + identicon(idn.id) + '<span class="fpcode" title="' + esc(idn.id) + '">' + esc(idn.short) + '</span><span class="fpname">' + esc(name) + "</span></div>" +
+      info(H("{name}’s identity, this Dionysus’s own: the picture and code the Dionysus at the other site shows for this one, at the top right of its lights there. {source} In full: {id}", { name: name, source: identitySource(idn), id: idn.id }), T("{name} identity", { name: name })) + "</div>";
   }
   function peerServerBlock(lk, pe) {
     var lt = lk.lights || {}, sid = lk.server, url = ((S.peer || {}).servers || {})[sid] || {};
-    var out = '<fieldset class="sub"><legend>' + esc(lk.name) + "</legend>" +
-      '<div class="lights">' + PEER_LIGHTS.map(function (l) { return lightFor(lt[l[0]], T(l[1])); }).join("") + "</div>" +
+    var mark = peerMark(lk);
+    var out = '<fieldset class="sub"><legend>' + (mark ? identicon(lk.fingerprint, "sm") : "") + esc(lk.name) + "</legend>" +
+      '<div class="lights' + (mark ? " marked" : "") + '">' + mark + PEER_LIGHTS.map(function (l) { return lightFor(lt[l[0]], T(l[1])); }).join("") + "</div>" +
       '<div class="grid"><div class="fld"><label for="s-peerurl-' + esc(sid) + '">' + H("Its address") + '</label>' +
       '<input id="s-peerurl-' + esc(sid) + '" type="text" value="' + esc(url.url || "") + '" placeholder="' + esc(lk.detected || "http://192.168.1.20:8642") + '" data-peerurl="' + esc(sid) + '">' +
       (url.url ? ' <button type="button" class="revert" data-peerurl-revert="' + esc(sid) + '" title="' + H("Back to the default ({value})", { value: T("found by itself") }) + '">↺</button>' : "") +
       '<div class="help">' + H("Found by itself. Enter it when the other one runs on another port, or is reached at another address.") + "</div></div></div>";
-    if (lk.paired) out += '<div class="det fp">' + identicon(lk.fingerprint) + "<span>" + H("Fingerprint {fp}: the other one shows the same picture and code when the two are paired with each other.", { fp: lk.fingerprint }) + "</span></div>";
     if (lk.window) {  // (open here: a link to the other one's Pair Now, where it's known)
       var there = ((lk.paired || {}).url || lk.detected || url.url || "").replace(/\/+$/, "");
-      out += '<div class="note">' + H("Pairing is open for {n} more minutes: press Pair Now on the other Plex Cache too.", { n: Math.max(1, Math.ceil(lk.window / 60)) }) +
+      out += '<div class="note">' + H("Pairing is open for {n} more minutes: press Pair Now on the other Dionysus too.", { n: Math.max(1, Math.ceil(lk.window / 60)) }) +
         (there ? ' <a href="' + esc(there) + '/system#peer" target="_blank" rel="noopener">' + H("Open Pair Now on the other one ↗") + "</a>" : "") + "</div>";
     }
     var asked = !!((pe.asked || {})[sid]);
     // one pairing per server: Pair Now while there's none (or the other side asks for a new one), Unpair while there is
     out += '<div class="acts">' + (!lk.paired || asked ? '<button class="btn' + ((lt.found && lt.found.status === "ok" && !lk.paired) || asked ? " pri" : "") + '" type="button" data-act="peer-pair" data-server="' + esc(sid) + '"' + (lk.window ? " disabled" : "") + ">" + H("Pair Now") + "</button>" +
-      info(H("Opens pairing for 10 minutes, without waiting for the synced folder or the mirror’s address: press it on both, then compare the fingerprints. For when pairing by itself can’t, or is off."), T("Pair Now")) : "") +
-      (lk.paired ? '<button class="link" type="button" data-act="peer-unpair" data-server="' + esc(sid) + '" title="' + H("Forgets the pairing on both sides. Neither pairs again by itself: Pair Now on both does.") + '">' + H("Unpair") + "</button>" : "") + "</div>";
+      info(H("Opens pairing for 10 minutes, without waiting for the synced folder or the mirror’s address: press it on both, then compare the fingerprints: what each shows for the other is what the other shows as its own. For when pairing by itself can’t, or is off."), T("Pair Now")) : "") +
+      (lk.paired ? '<button class="btn" type="button" data-act="peer-unpair" data-server="' + esc(sid) + '" title="' + H("Forgets the pairing on both sides. Neither pairs again by itself: Pair Now on both does.") + '">' + H("Unpair") + "</button>" : "") + "</div>";
     return out + "</fieldset>";
   }
   function peerCard() {
     var pe = ST.peer || {}, ps = S.peer || {}, own = pe.own || {}, links = Object.keys(pe.links || {}).map(function (k) { return pe.links[k]; });
-    var out = '<section class="card" id="peer"><h2>' + H("Mirror Plex Cache") + ' <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional") + "</span></h2>" +
-      '<p class="hint">' + H("The Plex Cache at the site of each server your libraries are mirrored by, if there is one. The two talk directly, over your network or a VPN, so Mirror Checks can compare both sites’ files.") +
+    var out = '<section class="card' + (own.fingerprint ? " hasfp" : "") + '" id="peer">' + ownMark(own) + "<h2>" + icon("mirror") + H("Mirror Dionysus") + ' <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional") + "</span></h2>" +
+      '<p class="hint">' + H("The Dionysus at the site of each server your libraries are mirrored by, if there is one. The two talk directly, over your network or a VPN, so Mirror Checks can compare both sites’ files.") +
       info(H("They find each other from the mirror’s Plex addresses, and pair by themselves when it’s safe: each writes a public key into the synced .plexcache folder, and a pairing is taken only from the mirror’s address, with the key the folder carried. " +
         "Every request after that is signed with a key the two work out from those, which never leaves either side. What they ask each other only reads: how each side is, and a library’s list of files.<br><br>" +
-        "Meant for your network, a VPN or Tailscale: don’t open its port to the internet."), T("Mirror Plex Cache")) + "</p>" +
-      '<div style="margin-top:10px">' + checkbox("peer", "enabled", T("Look for a Plex Cache at each mirror’s site"),
+        "Meant for your network, a VPN or Tailscale: don’t open its port to the internet."), T("Mirror Dionysus")) + "</p>" +
+      '<div style="margin-top:10px">' + checkbox("peer", "enabled", T("Look for a Dionysus at each mirror’s site"),
         { s: H("Untick when there’s none there: Mirror Checks then compare the Plexes only.") }) + "</div>";
     if (!ps.enabled) return out + "</section>";
     out += checkbox("peer", "auto_pair", T("Pair by itself"),
       { s: H("When the other one answers from the mirror’s address with the key the synced folder carried."),
-        more: H("Off: the two pair only when you press Pair Now on both, within 10 minutes of each other. Then compare the fingerprints the two show: they’re the same when each is paired with the other.") });
-    out += checkbox("peer", "remote_update", T("The other Plex Cache may start updates here"),
+        more: H("Off: the two pair only when you press Pair Now on both, within 10 minutes of each other. Then compare the fingerprints: what each shows for the other is what the other shows as its own.") });
+    out += checkbox("peer", "remote_update", T("The other Dionysus may start updates here"),
       { s: H("When it runs a newer build, it asks this one to update: the same update this page’s Update Now makes, from GitHub, through the TrueNAS API."),
         more: H("The two must speak the same language: every command of the link has a version, and the Version light says when the other side lacks one. The side that is up to date asks the one that is behind, once per build; nothing named in its request is installed — only what this side’s own update check finds on GitHub for its channel.") });
     out += '<div class="grid">' + number("peer", "port", T("The port this one answers on"), 0, 65535,
       { s: own.port ? H("0 works it out: {port} now.", { port: String(own.port) }) : H("0 works it out."),
-        more: H("The port the other Plex Cache reaches this one on, told to it through the synced folder. 0 works it out: from TrueNAS’s settings for this app, or the port this page is open on. Set it when a port mapping or a proxy changes it.") }) + "</div>";
+        more: H("The port the other Dionysus reaches this one on, told to it through the synced folder. 0 works it out: from TrueNAS’s settings for this app, or the port this page is open on. Set it when a port mapping or a proxy changes it.") }) + "</div>";
     if ((own.addresses || []).length) out += '<div class="det">' + H("This one answers at {addresses}, port {port}.", { addresses: own.addresses.join(", "), port: String(own.port) }) + "</div>";
-    if (!links.length) return out + '<div class="det muted">' + H("No library is mirrored yet: the Plex Cache at a mirror’s site is looked for once one is (<a href=\"/mirrors\" data-nav>Mirror</a>).") + "</div></section>";
+    if (!links.length) return out + '<div class="det muted">' + H("No library is mirrored yet: the Dionysus at a mirror’s site is looked for once one is (<a href=\"/mirrors\" data-nav>Mirror</a>).") + "</div></section>";
     out += links.map(function (lk) { return peerServerBlock(lk, pe); }).join("") +
       '<div class="acts"><button class="btn' + (pe.busy ? " spinning" : "") + '" type="button" data-act="peer-test"' + (pe.busy ? " disabled" : "") + ">" + (pe.busy ? H("Testing…") : H("Test Again")) + "</button></div>";
     return out + "</section>";
+  }
+  // Syncthing (syncthing.py): the folder sync on this server, read through its API — four lights (found, the key, a folder
+  // over every mirrored library, the devices those are shared with), this device's name and ID with Syncthing's own
+  // picture of it at the card's top right (stMark), and the address and key it's reached with. Its checks are Mirror
+  // Checks' (mirror_syncthing_*); Convert Folder to Child Dataset pauses and resumes the folder through it.
+  function syncthingCard() {
+    var sy = ST.syncthing || {}, lt = sy.lights || {}, dev = sy.device || {}, testing = !!sy.busy || !!ST.testing;  // (asked again with the other connections; the lights: integrationLights)
+    var out = '<section class="card' + (integrationMark("syncthing", "Syncthing") ? " hasfp" : "") + '" id="syncthing">' + integrationMark("syncthing", "Syncthing") + "<h2>" + brand("syncthing") + 'Syncthing <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional") + "</span></h2>" +
+      '<p class="hint">' + H("The folder sync between the sites of a mirror, read through its API on this server. Mirror Checks then see that it runs, has a folder over each mirrored library, watches for changes and sends the smallest files first; Convert Folder to Child Dataset pauses the folder and adds its ignore patterns itself.") +
+      info(H("Asked every couple of minutes: its folders and their settings, which devices they’re shared with and whether each is connected, and what’s still on its way. The only things it’s ever asked to change are a folder’s pause, Watch for Changes, its pull order and its ignore patterns — each from a button here, never by itself. The key is kept with the settings and never shown again.<br><br>" +
+        "<strong>Smallest First</strong> matters: the markers and claims in the hidden .plexcache folder are small files about big ones. Sent first, the other site knows a file is being optimized before it arrives; sent after, both sites can optimize the same file."), "Syncthing") + "</p>" +
+      '<div class="lights">' + integrationLights("syncthing", testing, { api: info(H("Syncthing’s REST API changes between releases. This light tries every call the app makes — its status and version, the configuration, the connections, a folder’s state and ignore patterns, changing a folder’s and a device’s settings — against this Syncthing, and is green when each one answers. A scan isn’t tried, since it would start one.<br><br>" +
+        "<strong>If it’s orange, please report it on GitHub</strong> with your Syncthing version and the calls it names: the app then learns the new path, and the features that need it work again. A weekly check against the next Syncthing release runs on GitHub too."), T("API compatibility")) }) + "</div>" +
+      '<div class="grid">' + textInput("syncthing", "url", T("Syncthing address"), "s-syurl", H("Its web UI’s address on this server, filled in by itself when one is found among TrueNAS’s apps or on port 8384. Port 8384 is used if you leave it off."), "http://192.168.1.10:8384") +
+      secretInput("syncthing", "api_key", T("API key"), "s-sykey") + "</div>" +
+      details("stkey", H("How to find the API key"),
+        "<ol style=\"margin:8px 0 0;padding-left:20px\"><li>" + H("In Syncthing, open <strong>Actions → Settings</strong> (top right).") + "</li>" +
+        "<li>" + H("On the <strong>General</strong> tab, copy the <strong>API Key</strong>.") + "</li>" +
+        "<li>" + H("Paste it above.") + "</li></ol>",
+        !!(S.syncthing || {}).url && !(lt.key && lt.key.status === "ok")) +
+      '<div style="margin-top:12px">' + checkbox("syncthing", "throttle", T("Hold Syncthing back while people watch and the disks are busy"),
+        { s: H("A season just dropped in, someone starts watching, and Syncthing scans and sends it all at once: the disks serve three things. With this on, the devices the mirrored folders are shared with are held to a rate while something plays and the media pool’s disks are busy, and let go once they’re calm or nobody is watching."),
+          more: H("Syncthing’s own per-device rate limits are what’s set, so it applies at once and the small .plexcache files still travel; pausing the folder would stop those too. The limits a device had are kept and put back. Held after half a minute over the busy mark, let go after a minute under the calm mark, or at once when the last stream ends. Each hold and release is in the Activity log.") }) + "</div>" +
+      ((S.syncthing || {}).throttle ? '<div class="grid">' +
+        number("syncthing", "throttle_kbps", T("Held to (KB/s)"), 100, 1000000, { s: H("What the devices may send and receive while held back. 2000 leaves a trickle; a mirror a season behind catches up once the film ends.") }) +
+        number("syncthing", "throttle_busy", T("Hold when the disks pass (%)"), 10, 100, { s: H("The media pool’s disks’ busy share while something plays, as Metrics’ “Disks While People Watched” measures it.") }) +
+        number("syncthing", "throttle_calm", T("Let go when they’re under (%)"), 0, 100, { s: H("Lower than the hold mark, so it doesn’t flap.") }) + "</div>" : "") +
+      '<div style="margin-top:12px">' + checkbox("syncthing", "giveway", T("Give way to remote streams on your internet connection"),
+        { s: H("A stream to a player away from home leaves over your upload, often right at its limit. While one plays, the devices Syncthing reaches over the internet — not those on this NAS’s own networks — are held to what’s left of your upload, and let go a minute after the last remote stream ends."),
+          more: H("Which players are remote is Plex’s call, from its LAN Networks setting: the Plex card’s LAN networks light checks that this NAS’s networks and Tailscale’s range are in it, so a viewer at home or on your tailnet never counts. Devices on your LAN keep full speed throughout. The rate is your upload less the streams’ bandwidth and a fifth of headroom, never under the floor; without your upload speed, the floor alone.") }) + "</div>" +
+      ((S.syncthing || {}).giveway ? '<div class="grid">' +
+        number("syncthing", "giveway_up_mbps", T("Your upload speed (Mbit/s)"), 0, 100000, { s: H("0: not known — the floor below is used as the rate.") }) +
+        number("syncthing", "giveway_floor_kbps", T("Never under (KB/s)"), 50, 1000000, { s: H("What Syncthing keeps whatever plays.") }) + "</div>" +
+        '<div style="margin-top:8px">' + checkbox("syncthing", "giveway_both", T("Hold receiving too (my ISP pools upload and download)"), { s: H("Off: only what Syncthing sends is held, since a stream leaves over your upload. On: what it receives too, for a connection whose two directions share one limit.") }) + "</div>" : "") +
+      '<div class="acts"><button class="btn' + (testing ? " spinning" : "") + '" type="button" data-act="syncthing-test"' + (testing ? " disabled" : "") + ">" + (testing ? H("Testing…") : H("Test Again")) + "</button></div>";
+    return out + "</section>";
+  }
+  // Syncthing's picture of a device (its identicon), cell for cell as its UI draws it (identiconDirective.js): every
+  // non-word character dropped, then a 5×5 grid, each cell of the left half filled when the character at row + column × 5
+  // has an even code (none there: filled), mirrored to the right. syncthing.st_cells is the same rule, and
+  // dev/syncthing_api.py holds both to Syncthing's source.
+  function stIdenticon(id) {
+    var value = String(id).replace(/[\W_]/g, ""), cells = "";
+    for (var row = 0; row < 5; row++) {
+      for (var col = 2; col >= 0; col--) {
+        if (value.charCodeAt(row + col * 5) % 2) continue;
+        cells += '<rect x="' + col + '" y="' + row + '" width="1" height="1"/>';
+        if (col !== 2) cells += '<rect x="' + (4 - col) + '" y="' + row + '" width="1" height="1"/>';
+      }
+    }
+    return '<svg class="identicon" viewBox="0 0 5 5" shape-rendering="crispEdges" aria-hidden="true"><g fill="currentColor">' + cells + "</g></svg>";
   }
   // Mirrored Libraries: one row per library here, its mirror chosen from a list — not decided (nothing assumed), no mirror,
   // or a library of one of the account's servers, each with how many of a sample of this library's files it has (sync.py
   // discover: Look for Mirrors, weekly, and by itself when the page opens — lookIfDue; the same look compares the mirror
   // chosen over all of them: plex2.match_rate) — under a light per server in use (reached, its libraries read) and one for
-  // the Plex Cache at its site. The state is per library (plex2.libraries): any server for any library. Nothing is said of
+  // the Dionysus at its site. The state is per library (plex2.libraries): any server for any library. Nothing is said of
   // a library before it was looked at, and a mirror chosen whose files aren't this library's gets a warning in place of
   // Mirrored.
-  var MIRROR_LIBS_HELP = N("Whether another Plex server has the same files is a choice per library, since one server can mirror some of your libraries and not others, and two libraries can be mirrored by two servers. <strong>Not decided</strong> (how every library starts): nothing is assumed — Health asks, and converted files’ originals aren’t deleted, since a mirror that isn’t known could lose its item. <strong>No mirror</strong>: this server’s alone. <strong>A library of another server</strong>: converting waits for both servers, Sync Libraries and Mirror Checks compare the two, the file tools refuse what a folder sync would carry wrongly, and Convert Folder to Child Dataset converts both sides — through the Plex Cache at the other site (<a href=\"/system#peer\" data-nav>System → Mirror Plex Cache</a>), whose light is above the table.<br><br>The list holds every library of the kind on your account’s other servers, each with how many of a sample of this library’s files it has, by path (<strong>Look for Mirrors</strong>, and weekly while a library isn’t decided): nearly all of them, and it looks like the mirror. The same look compares the mirror chosen over all of this library’s files, and runs by itself when this page opens after an hour, or with a library it hasn’t scored: most of them not there, and its row warns instead of saying Mirrored — the wrong library, or a folder sync that’s behind. A server is reached when a library of it is chosen: its addresses are tried, local ones first and each at the address itself rather than through its plex.direct name, and the first that answers from here is kept; Plex’s relay is the last resort, and the light says when it’s the one in use.");
-  // the lights: per server some library is mirrored by, whether it answers and its libraries are read, and the Plex Cache at
+  var MIRROR_LIBS_HELP = N("Whether another Plex server has the same files is a choice per library, since one server can mirror some of your libraries and not others, and two libraries can be mirrored by two servers. <strong>Not decided</strong> (how every library starts): nothing is assumed — Health asks, and converted files’ originals aren’t deleted, since a mirror that isn’t known could lose its item. <strong>No mirror</strong>: this server’s alone. <strong>A library of another server</strong>: converting waits for both servers, Sync Libraries and Mirror Checks compare the two, the file tools refuse what a folder sync would carry wrongly, and Convert Folder to Child Dataset converts both sides — through the Dionysus at the other site (<a href=\"/system#peer\" data-nav>System → Mirror Dionysus</a>), whose light is above the table.<br><br>The list holds every library of the kind on your account’s other servers, each with how many of a sample of this library’s files it has, by path (<strong>Look for Mirrors</strong>, and weekly while a library isn’t decided): nearly all of them, and it looks like the mirror. The same look compares the mirror chosen over all of this library’s files, and runs by itself when this page opens after an hour, or with a library it hasn’t scored: most of them not there, and its row warns instead of saying Mirrored — the wrong library, or a folder sync that’s behind. A server is reached when a library of it is chosen: its addresses are tried, local ones first and each at the address itself rather than through its plex.direct name, and the first that answers from here is kept; Plex’s relay is the last resort, and the light says when it’s the one in use.");
+  // the lights: per server some library is mirrored by, whether it answers and its libraries are read, and the Dionysus at
   // its site — the first of that link's lights that isn't green, since that one says what's missing, with where to fix it
   function mirrorLights(p2, pe) {
     var servers = p2.servers || [], ps = S.peer || {}, links = pe.links || {};
     if (!servers.length) return '<div class="lights">' + light("off", T("No mirror yet"), T("Choose a library’s mirror below: its server is reached from then on.")) + "</div>";
     var out = "";
     servers.forEach(function (sv) {
+      out += '<div class="det" style="display:flex;align-items:center;gap:8px;margin:6px 0 2px">' + identicon(sv.id, "sm") + "<strong>" + esc(sv.name) + "</strong><span class=\"muted\" title=\"" + esc(sv.id) + "\">" + esc(String(sv.id).slice(0, 7).toUpperCase()) + "</span></div>";  // (its identity: Plex's machine identifier, as its own Plex card shows it there)
       // (reached through Plex's relay only — a Plex-run proxy, slow, limited and apt to drop: said, with the way out)
       var relayHint = T("Only Plex’s relay reaches {name} from here: slow, limited, and it drops. Give this NAS a direct way to it — Remote Access on in its Plex settings, a VPN between the sites, or enter an address this NAS can reach, below.", { name: sv.name });
       if (!sv.reached) out += light("fail", T("{name} isn’t reached", { name: sv.name }), T("None of its addresses answered from here. Choose its library again, or enter an address this NAS can reach, below."));
@@ -3861,15 +3986,30 @@ PCI18N.ready.then(function () {
       else if (sv.relay) out += light("warn", sv.error ? T("{name} answered through Plex’s relay, then stopped", { name: sv.name }) : T("{name} answers through Plex’s relay", { name: sv.name }), (sv.error ? sv.error : T("{url} · {n} libraries", { url: sv.url, n: fmtNum((sv.libraries || []).length) })) + " " + relayHint);
       else out += light(sv.error ? "warn" : "ok", sv.error ? T("{name} answered, then stopped", { name: sv.name }) : T("{name} answers", { name: sv.name }), sv.error ? sv.error : T("{url} · {n} libraries", { url: sv.url, n: fmtNum((sv.libraries || []).length) }));
       var lk = links[sv.id], lt = (lk || {}).lights || {};
-      if (!ps.enabled) out += light("off", T("No Plex Cache at {name}’s site", { name: sv.name }), T("Not looked for: Mirror Checks compare the two Plexes only. [System → Mirror Plex Cache](/system#peer)"));
-      else if (!lk) out += light("off", T("Plex Cache at {name}’s site", { name: sv.name }), T("Looked for once the server is reached."));
+      if (!ps.enabled) out += light("off", T("No Dionysus at {name}’s site", { name: sv.name }), T("Not looked for: Mirror Checks compare the two Plexes only. [System → Mirror Dionysus](/system#peer)"));
+      else if (!lk) out += light("off", T("Dionysus at {name}’s site", { name: sv.name }), T("Looked for once the server is reached."));
       else {
         var first = ["found", "paired", "talking"].map(function (k) { return lt[k]; }).filter(function (r) { return r && r.status !== "ok"; })[0] || lt.talking;
-        out += first ? light(first.status, msg(first.text), msg(first.detail || "") + (first.status === "ok" ? "" : " " + T("How to fix it: [System → Mirror Plex Cache](/system#peer).")))
-          : light("testing", T("Plex Cache at {name}’s site", { name: sv.name }), "");
+        out += first ? light(first.status, msg(first.text), msg(first.detail || "") + (first.status === "ok" ? "" : " " + T("How to fix it: [System → Mirror Dionysus](/system#peer).")))
+          : light("testing", T("Dionysus at {name}’s site", { name: sv.name }), "");
       }
     });
     return '<div class="lights">' + out + "</div>";
+  }
+  // under a mirrored library's status: its folder in Syncthing and how it stands (syncthing.py), when Syncthing is connected
+  function syncthingLine(key) {
+    var sy = ST.syncthing || {};
+    if (!sy.wanted) return "";
+    if (!sy.ok) return '<div class="det muted">' + H("Syncthing: not answering ([System → Syncthing](/system#syncthing))").replace(/\[([^\]]+)\]\(([^)]+)\)/, '<a href="$2" data-nav>$1</a>') + "</div>";
+    var cover = (sy.libraries || {})[key] || [], f = cover.length ? (sy.folders || []).filter(function (x) { return x.id === cover[0].folder; })[0] : null;
+    var chosen = (((S.syncthing || {}).folders || {})[key] || {}).folder || "";
+    // the folder, chosen by hand when it isn't found by itself (a mount under another name, a listing Syncthing won't give)
+    var pick = '<select data-stfolder="' + esc(key) + '" aria-label="' + esc(T("The Syncthing folder of {library}", { library: key })) + '"><option value=""' + (chosen ? "" : " selected") + ">" + H("found by itself") + "</option>" +
+      (sy.folders || []).map(function (x) { return '<option value="' + esc(x.id) + '"' + (chosen === x.id ? " selected" : "") + ">" + esc(x.label) + " (" + esc(x.path) + ")</option>"; }).join("") + "</select>" +
+      (chosen ? ' <button type="button" class="revert" data-stfolder-revert="' + esc(key) + '" title="' + H("Back to the default ({value})", { value: T("found by itself") }) + '">↺</button>' : "");
+    if (!f) return '<div class="det bad">' + H("Syncthing: no folder covers this library.") + " " + pick + "</div>";
+    var how = f.paused ? T("paused") : f.need_n ? T("{n} files on their way here", { n: fmtNum(f.need_n) }) : f.out_n ? T("{n} files still to send", { n: fmtNum(f.out_n) }) : f.state === "syncing" || f.state === "scanning" ? T(f.state) : T("up to date");
+    return '<div class="det muted">' + esc(T("Syncthing: “{label}” · {how}", { label: f.label, how: how })) + (cover[0].how === "chosen" ? " · " + esc(T("chosen by hand")) : "") + " " + pick + "</div>";
   }
   // the list a library's mirror is chosen from: not decided, no mirror, then every library of its kind on each server — the
   // ones in use first (their libraries as read), then those found by looking — each named with its server, and with how
@@ -3909,7 +4049,7 @@ PCI18N.ready.then(function () {
   }
   function mirrorLibrariesCard() {
     var p2 = ST.plex2 || {}, sy = ST.sync || {}, pe = ST.peer || {}, libs = ((ST.library || {}).libraries || []).filter(function (l) { return l.kind; });
-    var out = '<section class="card" id="mirrorlibs">' + heading(esc(T("Mirrored Libraries")), MIRROR_LIBS_HELP) +
+    var out = '<section class="card" id="mirrorlibs">' + heading(icon("library") + esc(T("Mirrored Libraries")), MIRROR_LIBS_HELP) +
       '<p class="hint">' + H("Which libraries another server mirrors — chosen per library, from your account’s servers; any server for any library. A library not decided holds back what would act on a mirror.") + "</p>";
     out += mirrorLights(p2, pe);
     // a server in use that isn't reached, stopped answering, or is reached through Plex's relay only: an address this NAS can reach, by hand
@@ -3951,7 +4091,7 @@ PCI18N.ready.then(function () {
             : differ ? '<span class="bad">' + esc(T("{library} on {name} doesn’t have most of this library’s files: the wrong library, or a folder sync that’s behind?", { library: pair.title, name: pair.name })) + "</span>"
             : cerr ? '<span class="bad">' + esc(T("{library} on {name}: its files couldn’t be compared — {why}", { library: pair.title, name: pair.name, why: cerr })) + "</span>"
             : '<span class="muted">' + esc(T("{library} on {name}", { library: pair.title, name: pair.name })) + (rt == null ? " · " + esc(T("files not compared yet")) : "") + "</span>";
-          status = (differ ? badge("warn", T("Files differ")) : badge("pass", T("Mirrored"))) + " " + where;
+          status = (differ ? badge("warn", T("Files differ")) : badge("pass", T("Mirrored"))) + " " + where + syncthingLine(key);
         } else if (st.state === "none") status = "";
         else {  // not decided: what looking found for it (the list says the state) — nothing said of a library not looked at yet
           var where = f ? esc(f.name) + ": " + esc(f.their_title) + ' <span class="muted">' + esc(T("{found} of {of} files there", { found: fmtNum(f.found), of: fmtNum(f.of) })) + "</span>" : "";
@@ -3960,7 +4100,7 @@ PCI18N.ready.then(function () {
         }
         return "<tr><td>" + libIcon(key) + esc(l.title) + "</td><td>" + sel + "</td><td>" + status + "</td></tr>";
       }).join("") + "</tbody></table></div>";
-    if ((sy.peers || []).length) out += '<div class="note">' + H("Another Plex Cache shares these folders (it marked itself in them): {n} system(s). Each optimizes its own side; claims keep them off the same file.", { n: sy.peers.length }) + "</div>";
+    if ((sy.peers || []).length) out += '<div class="note">' + H("Another Dionysus shares these folders (it marked itself in them): {n} system(s). Each optimizes its own side; claims keep them off the same file.", { n: sy.peers.length }) + "</div>";
     // the sign-in the servers are listed from: this server's, or an account of its own
     var signin = '<button class="btn" type="button" data-act="plex2-signin">' + (p2.own_signin ? H("Sign In Again") : H("Use Another Plex Account")) + "</button>";
     out += '<div class="acts" style="margin-top:10px">' + signin + "</div>" +
@@ -3977,7 +4117,7 @@ PCI18N.ready.then(function () {
     // ---- each library: its mirror, chosen from the account's servers (what looking found for it), under the lights
     out += mirrorLibrariesCard();
     // ---- what Plex's own sync carries (Sync Libraries leaves it to Plex)
-    out += '<section class="card"><h2>' + H("Watched State") + "</h2>" +
+    out += '<section class="card"><h2>' + icon("watched") + H("Watched State") + "</h2>" +
       '<p class="hint">' + H("What each person has watched, and their ratings: Plex carries these between your servers itself. Everything else about a library is brought in line by <a href=\"/sync\" data-nav>Sync Libraries</a>.") + "</p>" +
       '<div class="grid">' +
       select("sync", "watched", T("Watched state and ratings"), [["plex", T("Plex’s own sync carries them")], ["off", T("Not synced")]],
@@ -3987,7 +4127,7 @@ PCI18N.ready.then(function () {
       "</div></section>";
     // ---- what uses it
     var on = !!p2.any_mirror;
-    out += '<section class="card">' + heading(esc(T("What Uses It")), "") + '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) +
+    out += '<section class="card">' + heading(icon("uses") + esc(T("What Uses It")), "") + '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) +
       '<div class="grow"><div class="what">' + H("Converting to MKV") + '</div><div class="det">' +
       H("A converted file’s original is deleted only once its library’s mirror has the MKV as a version of the same item too. <a href=\"/convert\" data-nav>Tools → Convert to MKV</a>") + "</div></div></div>" +
       '<div class="row">' + badge(on ? "pass" : "info", on ? T("On") : T("Waiting")) + '<div class="grow"><div class="what">' + H("Sync Libraries") + '</div><div class="det">' +
@@ -4007,7 +4147,7 @@ PCI18N.ready.then(function () {
 
     // ---- Access: who may use the web UI and the API
     var au = ST.auth || {};
-    out += '<section class="card" id="access"><h2>' + H("Access") + '</h2><p class="hint">' + H("Who can open Plex Cache and change its settings.") + "</p>" +
+    out += '<section class="card" id="access"><h2>' + icon("access") + H("Access") + '</h2><p class="hint">' + H("Who can open Dionysus and change its settings.") + "</p>" +
       '<div class="det">' + (au.enabled ? badge("pass", T("Sign-in required")) + " " + H("Signed in as {user}.", { user: au.user })
         : badge(S.general.lan_only ? "info" : "warn", T("No sign-in")) + " " +
           (S.general.lan_only ? H("Any device on your local network can change settings and run the optimizer.") : H("Any device that can reach it can change settings and run the optimizer.")) + " " +
@@ -4020,8 +4160,9 @@ PCI18N.ready.then(function () {
     // ---- Plex
     var guessPlex = ST.host ? "http://" + ST.host + ":32400" : "http://192.168.1.10:32400";
     var tokOk = c.plex_token && c.plex_token.status === "ok";
-    out += '<section class="card" id="plex"><h2>Plex</h2><p class="hint">' + H("Used to list your libraries and see what’s playing.") + "</p>" +
-      '<div class="lights">' + lightFor(c.plex_server, T("Plex server"), testing) + lightFor(c.plex_token, T("Plex sign-in"), testing) + "</div>" +
+    out += '<section class="card' + (integrationMark("plex", "Plex") ? " hasfp" : "") + '" id="plex">' + integrationMark("plex", "Plex") + "<h2>" + brand("plex") + 'Plex</h2><p class="hint">' + H("Used to list your libraries and see what’s playing.") + "</p>" +
+      '<div class="lights">' + integrationLights("plex", testing, { api: info(H("Plex publishes no list of its API, so this light tries every read the app makes — the server, its identity, the libraries, what’s playing, a library’s items and collections, an item, a show’s episodes — and is green when each one answers. The changes the tools make go to the same paths and aren’t tried."), T("API compatibility")) },
+        { lan: c.plex_lan && c.plex_lan.add && c.plex_lan.add.length ? '<button class="btn" type="button" data-act="plex-lan" title="' + H("Adds the networks Plex answers on — this NAS’s, and Tailscale’s range when Plex is on your tailnet — to Plex’s LAN Networks (Settings → Network), keeping what’s there.") + '">' + H("Add Subnets to Plex LAN") + "</button>" : "" }) + "</div>" +
       '<div class="grid">' +
       textInput("plex", "url", T("Server address"), "s-purl", H("Usually your NAS’s IP. Port 32400 is used if you leave it off."), guessPlex) +
       secretInput("plex", "token", T("Token (filled in when you sign in)"), "s-ptok") +
@@ -4035,13 +4176,13 @@ PCI18N.ready.then(function () {
           "Faster than 3 seconds gains little: Now Playing Cache waits for Plex’s own start-up buffer anyway.") }) + "</div>" +
       '<div class="acts"><button class="btn' + (tokOk ? "" : " pri") + '" data-act="plex-signin">' + (tokOk ? H("Sign In Again") : H("Sign In with Plex")) + "</button>" +
       '<span class="muted" style="font-size:13px">' + H("Why sign in?") + info(H("Plex only shares your libraries and what’s playing with apps that hold a token for your account, so this step is required. " +
-      "“Sign In with Plex” opens plex.tv; once you approve “Plex Cache”, Plex gives this app a token. It’s kept only in this app’s config folder and is used to read from your server — " +
+      "“Sign In with Plex” opens plex.tv; once you approve “Dionysus”, Plex gives this app a token. It’s kept only in this app’s config folder and is used to read from your server — " +
       "it can’t see your password. If you already have a token, you can paste it instead."), T("signing in")) + "</span></div></section>";
 
     // ---- TrueNAS
     var guessTn = ST.host ? "https://" + ST.host : "https://192.168.1.10";
     var pf = ST.platform || {};
-    out += '<section class="card" id="truenas"><h2>TrueNAS <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional, recommended") + "</span></h2>" +
+    out += '<section class="card' + (integrationMark("truenas", "TrueNAS") ? " hasfp" : "") + '" id="truenas">' + integrationMark("truenas", "TrueNAS") + "<h2>" + brand("truenas") + 'TrueNAS <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional, recommended") + "</span></h2>" +
       // where this is running: TrueNAS for certain (the API, or the host's version file), or another Linux host
       '<div class="lights">' + light(pf.truenas ? "ok" : pf.truenas === false ? "off" : "warn", T("Platform"), esc(msg(pf.label || "")) +
         (pf.truenas === null || pf.truenas === undefined ? " · " + esc(T("Connect the API, or mount the host’s /etc/version at /host/etc/version in the app’s YAML, to be sure")) : pf.how === "kernel" ? " · " + esc(T("told by the kernel; the API would add the version")) : ""),
@@ -4050,9 +4191,8 @@ PCI18N.ready.then(function () {
       (pf.truenas === false ? '<div class="note pitch">' + H("Not running on TrueNAS, so there’s no API to connect here. Upgrade your server to TrueNAS to supercharge it with caching: SSD speeds from regular HDDs!") + "</div>" : "") +
       '<fieldset class="plain' + (pf.truenas === false ? " greyed" : "") + '"' + (pf.truenas === false ? " disabled" : "") + ">" +
       '<p class="hint">' + H("Read-only: checks cache devices and dataset settings.") + info(H("It’s also how the app sizes the L2ARC, pauses for scrubs and resilvers, and checks the optimizer’s service. It never changes anything."), "TrueNAS") + "</p>" +
-      '<div class="lights">' + lightFor(c.truenas_server, "TrueNAS", testing) + lightFor(c.truenas_key, T("API key"), testing) +
-      lightInfo(c.truenas_api, T("API compatibility"), testing, info(H("TrueNAS renames API methods between releases (<code>zfs.snapshot.*</code> became <code>pool.snapshot.*</code> in 25.04). This light checks every call Plex Cache makes — signing in, the version, pools, disks, dataset settings, apps, updates, snapshots — against the list of methods this TrueNAS offers, and is green when each has a name there. " +
-        "<strong>If it’s orange, please report it on GitHub</strong> with your TrueNAS version and the calls it names: the app then learns the new name, and the features that need it work again. A weekly check against the next TrueNAS release runs on GitHub too, so most renames are caught before they reach you."), T("API compatibility"))) + "</div>" +
+      '<div class="lights">' + integrationLights("truenas", testing, { api: info(H("TrueNAS renames API methods between releases (<code>zfs.snapshot.*</code> became <code>pool.snapshot.*</code> in 25.04). This light checks every call Dionysus makes — signing in, the version, pools, disks, dataset settings, apps, updates, snapshots — against the list of methods this TrueNAS offers, and is green when each has a name there. " +
+        "<strong>If it’s orange, please report it on GitHub</strong> with your TrueNAS version and the calls it names: the app then learns the new name, and the features that need it work again. A weekly check against the next TrueNAS release runs on GitHub too, so most renames are caught before they reach you."), T("API compatibility")) }) + "</div>" +
       '<div class="grid">' +
       textInput("truenas", "url", T("TrueNAS address"), "s-turl", H("https:// is used automatically — TrueNAS revokes API keys sent over plain http."), guessTn) +
       secretInput("truenas", "api_key", T("API key"), "s-tkey") + "</div>" +
@@ -4065,15 +4205,18 @@ PCI18N.ready.then(function () {
         !(c.truenas_key && c.truenas_key.status === "ok")) +
       "</fieldset></section>";
 
-    // ---- the Plex Cache at the mirror's site
+    // ---- the Dionysus at the mirror's site
     out += peerCard();
+
+    // ---- Syncthing (syncthing.py)
+    out += syncthingCard();
 
     // ---- Media Mappings
     out += mappingsCard();
 
     // ---- Preferences: lists, and what stands in for a snapshot before files change
     var g = S.general;
-    out += '<section class="card" id="prefs"><h2>' + H("Preferences") + '</h2><div class="grid">' +
+    out += '<section class="card" id="prefs"><h2>' + icon("prefs") + H("Preferences") + '</h2><div class="grid">' +
       number("general", "page_size", T("Entries per Library page"), 25, 1000, H("On the Library views, a tool’s rows, a job’s files: a long list a page at a time, with the pages told by what’s on them.")) +
       number("general", "tool_page_size", T("Entries per Tools page"), 5, 200, H("On every tool’s page, the Optimizer’s and the check pages: the cards a page at a time. All still ticks every page’s.")) +
       select("general", "backup", T("Backup before changes"), [["snapshot", T("A snapshot, taken through TrueNAS")], ["manual", T("A backup I make myself")], ["copies", T("The copies the action keeps")]],
@@ -4085,10 +4228,10 @@ PCI18N.ready.then(function () {
       number("general", "backup_days", T("Keep backups for (days)"), 1, 365, H("How long a backup made before files change is kept: a snapshot the app takes is deleted after this long, by the app itself (TrueNAS keeps a snapshot for ever otherwise); files set aside or copied as a backup are deleted after it too. Until then a backup holds the space the changed files took, and a change can be reverted from it.") + " " + H("A backup of Plex’s records is kept as long, then deleted by the app.")) +
       "</div></section>";
     // ---- Updates
-    out += '<section class="card" id="updates"><h2>' + H("Updates") + '</h2>' +
+    out += '<section class="card" id="updates"><h2>' + icon("updates") + H("Updates") + '</h2>' +
       '<div class="chk" style="margin-top:8px">' + info(H("Every 6 hours the app asks GitHub for the branch’s newest finished build — a small download, nothing about your setup is sent — " +
         "and, when there’s a newer one, says so under the app’s name and in Home Assistant’s update entity. Check Now asks straight away; Update Now has TrueNAS pull it."), T("update check")) +
-      '<label><input type="checkbox" data-check="general.update_check"' + (g.update_check ? " checked" : "") + ">" + H("Check GitHub for new versions") + "</label>" + revertBtn("general", "update_check", "") + updateLine() + "</div></section>";
+      '<label><input type="checkbox" data-check="general.update_check"' + (g.update_check ? " checked" : "") + ">" + H("Check GitHub for new versions") + "</label>" + revertBtn("general", "update_check", "") + updateLine() + "</div>" + mirrorUpdates() + "</section>";
     out += diskSpeedCard();
     out += mqttCard();
     out += "</div>";
@@ -4097,12 +4240,28 @@ PCI18N.ready.then(function () {
 
   var MQTT_STEPS = [["broker", T("Broker found")], ["tls", T("Encrypted (TLS)")], ["login", T("Login accepted")], ["publish", T("Publishing")]];
   var MQTT_WAITING = { broker: T("Looking for the broker…"), tls: T("Starting TLS…"), login: T("Signing in…"), publish: T("Sending…") };
+  // the paired Dionysus at each mirror's site and its build: asked to update from here once this one is up to date
+  // (peerlink._offer_update; off on the side asked with Mirror Dionysus's "The other Dionysus may start updates here")
+  function mirrorUpdates() {
+    var links = (ST.peer || {}).links || {}, u = ST.updates || {}, said = [];
+    Object.keys(links).forEach(function (k) {
+      var lk = links[k];
+      if (!lk.paired || !lk.version_there) return;
+      if (lk.version_there === ST.version) said.push(H("{name} runs the same build.", { name: lk.name }));
+      else if (u.available) said.push(H("{name} runs {version}: it’s asked to update once this one has updated.", { name: lk.name, version: lk.version_there }));
+      else said.push(H("{name} runs {version}: it’s asked to update, since this one is up to date (how that went: the Version light under Mirror Dionysus).", { name: lk.name, version: lk.version_there }));
+    });
+    if (!said.length) return "";
+    return '<div class="det" style="margin-top:8px">' + said.join(" ") + " " +
+      H("A paired Dionysus behind this one is asked to update from here, the update its own check finds; the side asked can turn that off under <a href=\"/system#peer\" data-nav>Mirror Dionysus</a>.") + "</div>";
+  }
   var UPDATING = false;  // Update Now pressed on this page: said as updating until the page comes back on the new build
   function updateStage(u) {
     if (UPDATING || u.updating) return "updating";
     if (!u.checked && !u.error) return "checking";  // (just started: GitHub asked in a moment)
     if (!u.available) return "";
     if (!(ST.platform || {}).truenas) return "link";
+    if (!ST.connections || ST.testing) return "checking";  // (the connections not tested yet: nothing said of what TrueNAS can do until they are)
     return ((ST.connections || {}).truenas_key || {}).status === "ok" ? "button" : "needkey";  // (TrueNAS could do it, with a key)
   }
   function updateLine() {
@@ -4149,13 +4308,13 @@ PCI18N.ready.then(function () {
   }
   function mqttCard() {
     var M = S.mqtt, on = M.enabled;
-    var out = '<section class="card" id="mqtt"><h2>MQTT <span class="muted" style="font-weight:400;font-size:14px">· ' + H("Home Assistant, Node-RED, openHAB and more · optional") + "</span></h2>" +
+    var out = '<section class="card" id="mqtt"><h2>' + brand("mqtt") + 'MQTT · ' + brand("homeassistant") + 'Home Assistant · ' + brand("nodered") + 'Node-RED · ' + brand("openhab") + 'openHAB <span class="muted" style="font-weight:400;font-size:14px">· ' + H("and more · optional") + "</span></h2>" +
       '<p class="hint">' + H("Publishes status and lots of metrics, and takes commands to switch features and run jobs.") +
       info(H("MQTT is a common way for home automation and monitoring tools to share data, through a <strong>broker</strong> that everything connects to. " +
-        "Plex Cache publishes everything as one JSON message on <code>{base}/state</code> (every {n} s, and straight away after a change), " +
+        "Dionysus publishes everything as one JSON message on <code>{base}/state</code> (every {n} s, and straight away after a change), " +
         "says <code>online</code>/<code>offline</code> on <code>{base}/availability</code>, and takes commands on <code>{base}/set/…</code>. " +
         "Node-RED, openHAB, ioBroker, Telegraf and others can read those directly.<br><br>" +
-        "<strong>Home Assistant:</strong> with discovery on, a “Plex Cache” device appears with sensors for health, streams, RAM, ARC/L2ARC, warm-up, " +
+        "<strong>Home Assistant:</strong> with discovery on, a “Dionysus” device appears with sensors for health, streams, RAM, ARC/L2ARC, warm-up, " +
         "the Metrics figures and lifetime totals, plus switches, buttons and selects. Install the <strong>Mosquitto broker</strong> add-on and the " +
         "<strong>MQTT</strong> integration, add a Home Assistant user for this app (Settings → People → Users), and enter its name and password here.<br><br>" +
         "<strong>Security:</strong> the broker login is the lock. Use a separate login per device, use TLS if your broker offers it, and switch off " +
@@ -4179,7 +4338,7 @@ PCI18N.ready.then(function () {
           "The connection is still encrypted; on, it also proves it’s really your broker."), T("Verify")) +
         '<label><input type="checkbox" data-check="mqtt.verify_tls"' + (M.verify_tls ? " checked" : "") + ">" + H("Verify the broker’s certificate") + "</label>" + revertBtn("mqtt", "verify_tls", "") : "") +
       '<label><input type="checkbox" data-check="mqtt.discovery"' + (M.discovery ? " checked" : "") + ">" + H("Home Assistant discovery") +
-      info(H("Publishes Home Assistant’s discovery messages, so the “Plex Cache” device and its entities appear on their own. openHAB and Domoticz can read them too. " +
+      info(H("Publishes Home Assistant’s discovery messages, so the “Dionysus” device and its entities appear on their own. openHAB and Domoticz can read them too. " +
         "Off: only the state, availability and command topics, for tools that don’t use discovery. Turning it off removes the entities from Home Assistant."), T("Home Assistant discovery")) + "</label>" + revertBtn("mqtt", "discovery", "") +
       '<label><input type="checkbox" data-check="mqtt.allow_control"' + (M.allow_control ? " checked" : "") + ">" + H("Allow control") +
       info(H("Accepts commands on <code>{base}/set/…</code>: switch the three features on or off, run or stop warm-up, re-run health checks, " +
@@ -4205,7 +4364,7 @@ PCI18N.ready.then(function () {
   function diskSpeedCard() {
     var g = S.general, b = ST.benchmark, speeds = g.disk_speeds || {};
     var ds = (ST.zfs.datasets || []).filter(function (d) { return d.keys.length; });
-    var out = '<section class="card" id="disk-speed"><div class="head"><h2>' + H("Disk Speed") + '</h2><span style="flex:1"></span>' +
+    var out = '<section class="card" id="disk-speed"><div class="head"><h2>' + icon("speed") + H("Disk Speed") + '</h2><span style="flex:1"></span>' +
       '<button class="btn' + (b.running ? " spinning" : "") + '" data-act="benchmark"' + (b.running || !ds.length ? " disabled" : "") + ">" +
       (b.running ? (b.progress ? H("Measuring {n} of {total}…", { n: b.progress.done + 1, total: b.progress.total }) : H("Measuring…")) : H("Benchmark Now")) + "</button></div>" +
       '<p class="hint">' + H("How fast each dataset reads when nothing is cached.") + info(H("The app uses it to tell a cache hit from a disk read " +
@@ -4252,15 +4411,34 @@ PCI18N.ready.then(function () {
     return { status: sum.status, text: msg(sum.text) + " " + P(n, "Also, {n} library isn’t being cached: {list} — see Media Mappings below.", "Also, {n} libraries aren’t being cached: {list} — see Media Mappings below.", { list: names }) };
   }
 
-  function lightFor(r, title, testing) {
+  // A service's lights, the standard's way (integrations.py): the steps in their order — found, server, key, API
+  // compatibility, then the service's own — from the state's "integrations". infos: an ⓘ's HTML by step (the API light's).
+  // an integration's identity (integrations.py: Plex's machine identifier, TrueNAS's host id, Syncthing's device ID, the
+  // link's server identity) as the mark at its card's top right — the same picture for the same server wherever it's shown
+  function integrationMark(name, title) {
+    var idn = ((ST.integrations || {})[name] || {}).identity;
+    if (!idn || !idn.id) return "";
+    var label = idn.name || title;
+    return '<div class="fpmark own"><div class="fpstack">' + identicon(idn.id) + '<span class="fpcode" title="' + esc(idn.id) + '">' + esc(idn.short) + '</span><span class="fpname">' + esc(label) + "</span></div>" +
+      info(H("{title}’s identity: the same picture wherever this server is shown, here and at the mirror’s site, whatever address reaches it. {source} In full: {id}", { title: title, source: identitySource(idn), id: idn.id }), T("{title} identity", { title: title })) + "</div>";
+  }
+  // acts: {step: the button for what that light found (its HTML), or ""}, shown in the light's row (light)
+  function integrationLights(name, testing, infos, acts) {
+    var ig = (ST.integrations || {})[name] || {}, lt = ig.lights || {}, labels = ig.labels || {};
+    return (ig.steps || []).map(function (k) {
+      var title = labels[k] ? msg(labels[k]) : k, act = acts && acts[k];
+      return infos && infos[k] ? lightInfo(lt[k], title, testing, infos[k], act) : lightFor(lt[k], title, testing, act);
+    }).join("");
+  }
+  function lightFor(r, title, testing, act) {
     if (!r) return light("off", title, T("Not tested yet"), testing);
-    return light(r.status, r.text, r.detail, testing);
+    return light(r.status, r.text, r.detail, testing, act);
   }
   // a light with an ⓘ after its title: what the check looks at
-  function lightInfo(r, title, testing, infoHtml) {
+  function lightInfo(r, title, testing, infoHtml, act) {
     var st = testing ? "testing" : r ? r.status : "off", text = testing ? T("Checking…") : r ? r.text : title, detail = r ? r.detail : T("Not tested yet");
     return '<div class="lightrow"><span class="light l-' + esc(st) + '" aria-hidden="true"></span><div class="grow"><div class="what">' + esc(text) + infoHtml + "</div>" +
-      (detail && !testing ? '<div class="det">' + links(detail) + "</div>" : "") + "</div></div>";
+      (detail && !testing ? '<div class="det">' + links(detail) + "</div>" : "") + "</div>" + (r && act && !testing ? act : "") + "</div>";
   }
 
   function currentMapping(plexPath) {
@@ -4278,7 +4456,7 @@ PCI18N.ready.then(function () {
 
   function mappingsCard() {
     var locs = ST.locations || [];
-    var out = '<section class="card" id="mappings"><h2>' + H("Media Mappings") + "</h2>" +
+    var out = '<section class="card" id="mappings"><h2>' + icon("mappings") + H("Media Mappings") + "</h2>" +
       '<p class="hint">' + H("Tick the libraries to cache.") + info(H("Unticked libraries are skipped by every feature and by the health checks. " +
       "Plex lists each library’s folders as it sees them inside its own app; if this app has a folder mounted somewhere else, choose where. " +
       "Folders marked ✓ contain that library’s files. A library is only cached once all its folders are found."), T("media mappings")) + "</p>";
@@ -4350,24 +4528,40 @@ PCI18N.ready.then(function () {
   var PAGES = { health: pageHealth, caching: pageCaching, ssd: pageSsd, library: pageLibrary, tools: pageTools, optimizer: pageOptimizer, convert: pageConvert, dataset: pageDataset,
     merge: pageMerge, versions: pageVersions, folders: pageFolders, unlink: pageUnlink, sync: pageSync, filechecks: pageFilechecks, plexchecks: pagePlexchecks, mirrorchecks: pageMirrorchecks,
     processes: pageProcesses, mirrors: pageMirrors, activity: pageActivity, system: pageSystem };
-  // the tools, under the Tools entry in the menu: [page, name, what it does]
+  // The tools, under the Tools entry in the menu — each one's definition: its page, its name, the short name the menu and
+  // the tabs use, its icon (its drawing, strokes on a 24 grid as the menu's; the dataset's is TrueNAS's, from its web UI,
+  // GPL), and what it does: its card's text on the Tools page, and the description its page opens with. The icon is
+  // shown wherever the tool is named — its card, the Tools menu, its page's heading, its jobs on Processes and Health —
+  // from here and nowhere else (test_tool_icons_come_from_their_definitions).
   var TOOLS = [
-    ["optimizer", N("Optimizer"), N("Rewrites media files so they suit caching: the dataset’s record size and compression, and MKV files laid out with their metadata at the end.")],
-    ["convert", N("Convert to MKV"), N("Converts other containers (AVI, MPEG-TS, VOB…) to MKV when nothing in them would be lost — backed up first, revertable after — and sees the new file into Plex on every server before the original goes.")],
-    ["dataset", N("Convert Folder to Child Dataset"), N("Turns a library folder into a dataset of its own, at the same path, with the record size that suits it."), N("Child Dataset")],
-    ["merge", N("Merge Duplicates"), N("Finds the same film on several Plex records and makes them versions of one, keeping its edits, poster and watched state. No file is touched.")],
-    ["versions", N("Duplicate Versions"), N("Where one Plex item holds the same file twice, removes the extra copy — the file and Plex’s part — after a hold.")],
-    ["folders", N("Organize Folders"), N("Moves loose files into a folder of their own, and renames folders to Title (Year) {edition}, without Plex losing anything.")],
-    ["unlink", N("Unlink Files"), N("Replaces hard links and symlinks with files of their own — the same bytes — so synced folders match everywhere and the duplicate tools can tidy them safely.")],
-    ["sync", N("Sync Libraries"), N("Makes a library on its mirror the same as here, or here the same as there — the files it doesn’t list, versions, matches, edited fields, posters, collections and editions — one way, from the side whose edits win.")],
-    ["filechecks", N("File Checks"), N("What’s in each file, as inspected: its tracks — audio, subtitles, their languages and codecs — checked against what a good file has. Each check can be turned off.")],
-    ["plexchecks", N("Plex Checks"), N("How Plex has each item: its versions, their names and lengths, the fields you locked. Each check can be turned off.")],
-    ["mirrorchecks", N("Mirror Checks"), N("Compares the two sites of a mirror: the files on each one’s disk, and what each Plex lists. Finds what the folder sync or a Plex scan missed, and has Plex look again.")]];
+    { page: "optimizer", name: N("Optimizer"), icon: '<path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8 19 13M17.8 6.2 19 5M12.2 6.2 11 5M3 21l9-9"/>',
+      blurb: N("Rewrites media files so they suit caching: the dataset’s record size and compression, and MKV files laid out with their metadata at the end.") },
+    { page: "convert", name: N("Convert to MKV"), icon: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4M7 12h10"/>',
+      blurb: N("Converts other containers (AVI, MPEG-TS, VOB…) to MKV when nothing in them would be lost — backed up first, revertable after — and sees the new file into Plex on every server before the original goes.") },
+    { page: "dataset", name: N("Convert Folder to Child Dataset"), short: N("Child Dataset"), icon: '<path fill="currentColor" stroke="none" d="M6 8C5.72 8 5.48 7.9 5.29 7.71C5.1 7.52 5 7.28 5 7C5 6.72 5.1 6.48 5.29 6.29C5.48 6.1 5.72 6 6 6H18C18.28 6 18.52 6.1 18.71 6.29C18.9 6.48 19 6.72 19 7C19 7.28 18.9 7.52 18.71 7.71C18.52 7.9 18.28 8 18 8H6ZM8 5C7.72 5 7.48 4.9 7.29 4.71C7.1 4.52 7 4.28 7 4C7 3.72 7.1 3.48 7.29 3.29C7.48 3.1 7.72 3 8 3H16C16.28 3 16.52 3.1 16.71 3.29C16.9 3.48 17 3.72 17 4C17 4.28 16.9 4.52 16.71 4.71C16.52 4.9 16.28 5 16 5H8ZM3 9L5 21H19L21 9H3ZM14.71 15.1C14.52 15.29 14.28 15.39 14 15.39H10C9.72 15.39 9.48 15.29 9.29 15.1C9.1 14.91 9 14.67 9 14.39C9 14.11 9.1 13.87 9.29 13.68C9.48 13.49 9.72 13.39 10 13.39H14C14.28 13.39 14.52 13.49 14.71 13.68C14.9 13.87 15 14.11 15 14.39C15 14.67 14.9 14.91 14.71 15.1Z"/>',
+      blurb: N("Turns a library folder into a dataset of its own, at the same path, with the record size that suits it.") },
+    { page: "merge", name: N("Merge Duplicates"), icon: '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>',
+      blurb: N("Finds the same film on several Plex records and makes them versions of one, keeping its edits, poster and watched state. No file is touched.") },
+    { page: "versions", name: N("Duplicate Versions"), icon: '<rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16V4a2 2 0 0 1 2-2h12"/>',
+      blurb: N("Where one Plex item holds the same file twice, removes the extra copy — the file and Plex’s part — after a hold.") },
+    { page: "folders", name: N("Organize Folders"), icon: '<path d="M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.7.9l.8 1.2a2 2 0 0 0 1.7.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1"/><path d="M2 13h10m-3-3 3 3-3 3"/>',
+      blurb: N("Moves loose files into a folder of their own, and renames folders to Title (Year) {edition}, without Plex losing anything.") },
+    { page: "unlink", name: N("Unlink Files"), icon: '<path d="m18.84 12.25 1.72-1.71a5 5 0 0 0-7.07-7.07l-1.72 1.71M5.17 11.75l-1.71 1.71a5 5 0 0 0 7.07 7.07l1.71-1.71M8 2v3M2 8h3M16 19v3M19 16h3"/>',
+      blurb: N("Replaces hard links and symlinks with files of their own — the same bytes — so synced folders match everywhere and the duplicate tools can tidy them safely.") },
+    { page: "sync", name: N("Sync Libraries"), icon: '<path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16M16 16h5v5"/>',
+      blurb: N("Makes a library on its mirror the same as here, or here the same as there — the files it doesn’t list, versions, matches, edited fields, posters, collections and editions — one way, from the side whose edits win.") },
+    { page: "filechecks", name: N("File Checks"), icon: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 15l2 2 4-4"/>',
+      blurb: N("What’s in each file, as inspected: its tracks — audio, subtitles, their languages and codecs — checked against what a good file has. Each check can be turned off.") },
+    { page: "plexchecks", name: N("Plex Checks"), icon: '<path d="m3 17 2 2 4-4M3 7l2 2 4-4M13 6h8M13 12h8M13 18h8"/>',
+      blurb: N("How Plex has each item: its versions, their names and lengths, the fields you locked. Each check can be turned off.") },
+    { page: "mirrorchecks", name: N("Mirror Checks"), icon: '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7M11 18H8a2 2 0 0 1-2-2V9"/>',
+      blurb: N("Compares the two sites of a mirror: the files on each one’s disk, and what each Plex lists. Finds what the folder sync or a Plex scan missed, and has Plex look again.") }];
+  function toolOf(name) { return TOOLS.filter(function (t) { return t.page === name; })[0]; }
   var TOOL_PAGES = { optimizer: 1, convert: 1, dataset: 1, merge: 1, versions: 1, folders: 1, unlink: 1, sync: 1, filechecks: 1, plexchecks: 1, mirrorchecks: 1 };
   function toolsNav(current) {
     return '<div class="lctl" style="margin-bottom:14px"><div class="seg small" role="tablist" aria-label="' + H("Tools") + '">' +
       '<a role="tab" href="/tools" data-nav aria-selected="' + (current === "tools") + '">' + H("All tools") + "</a>" +
-      TOOLS.map(function (t) { return '<a role="tab" href="/' + t[0] + '" data-nav aria-selected="' + (current === t[0]) + '">' + esc(T(t[3] || t[1])) + "</a>"; }).join("") + "</div></div>";
+      TOOLS.map(function (t) { return '<a role="tab" href="/' + t.page + '" data-nav aria-selected="' + (current === t.page) + '">' + esc(T(t.short || t.name)) + "</a>"; }).join("") + "</div></div>";
   }
   // ---- Counts: every number a page shows of what's been found, one standard (evaluate.py). The state's "counts" give every
   // page of the Tools menu — and the Library page — its count for each library and over them all ("tools": the menu's),
@@ -4435,10 +4629,10 @@ PCI18N.ready.then(function () {
     return key == null ? libs.length > 0 : libs.indexOf(String(key)) >= 0;
   }
   function pageTools() {
-    var out = top(T("Tools"), H("What Plex Cache can do to your library beyond caching it. Each tool has a page of its own; none changes anything until you ask it to. The number on a card is what the tool has found to do, across your libraries."), "");
+    var out = top(T("Tools"), H("What Dionysus can do to your library beyond caching it. Each tool has a page of its own; none changes anything until you ask it to. The number on a card is what the tool has found to do, across your libraries."), "");
     out += '<div class="stack">' + toolsNav("tools") + '<div class="grid">' + TOOLS.map(function (t) {
-      return '<section class="card toolcard"><h2><a href="/' + t[0] + '" data-nav>' + esc(T(t[1])) + " →</a>" +
-        countChip(countOf(t[0]), toolBad(t[0])) + "</h2><p>" + esc(T(t[2])) + "</p></section>";
+      return '<section class="card toolcard"><h2><a href="/' + t.page + '" data-nav>' + icon(t.page) + esc(T(t.name)) + "</a>" +
+        countChip(countOf(t.page), toolBad(t.page)) + "</h2><p>" + esc(T(t.blurb)) + "</p></section>";
     }).join("") + "</div></div>";
     return out;
   }
@@ -4664,6 +4858,8 @@ PCI18N.ready.then(function () {
     mirror_only_there: mirrorBlock(N("Only on disk at the other site"), N("Let the folder sync copy the file here, or delete it at the other site if it shouldn’t be there, then press Scan Again on Mirror Checks.")),
     mirror_size_differs: mirrorBlock(N("A different size at each site"), N("Let the folder sync finish copying it, or copy the right one over the other, then press Scan Again on Mirror Checks.")),
     mirror_missing_here: mirrorBlock(N("In Plex here, not on disk"), N("Put the file back, or have Plex here look at its folder (Scan Folder on Mirror Checks) so it drops what’s gone, then press Scan Again there.")),
+    // a file Syncthing is still carrying (syncthing.py transit): the same finding's shape, and it goes by itself once the file is through
+    mirror_syncthing_transit: mirrorBlock(N("On its way through Syncthing"), N("Nothing to do but wait: the finding goes by itself once Syncthing has carried the file across. Pausing the folder in Syncthing would only hold it longer.")),
     // the row's record one of a film's several, as Merge Duplicates last found them in this library (Tool.merge_first)
     tool_merge: { page: "merge", label: N("More than 1 Plex record"),
       found: function () { return H("This item is on more than one Plex record here."); },
@@ -4900,14 +5096,14 @@ PCI18N.ready.then(function () {
   // the short one, always shown, is the page's description above (toolBlurb)
   function toolHead(name, title, help) {
     var sec = "tool-" + name;
-    return '<div class="head"><h2>' + esc(title) + '</h2><span style="flex:1"></span>' + guideBtn(sec) + "</div>" +
+    return '<div class="head"><h2>' + icon(name) + esc(title) + '</h2><span style="flex:1"></span>' + guideBtn(sec) + "</div>" +
       (guides[sec] ? '<div class="guide toolguide"><div><p>' + help + "</p></div></div>" : "");
   }
   // a tool's title, from the Tools page's list
-  function toolTitle(name) { var t = TOOLS.filter(function (x) { return x[0] === name; })[0]; return t ? T(t[1]) : name || ""; }
+  function toolTitle(name) { var t = toolOf(name); return t ? T(t.name) : name || ""; }
   // what a tool does, in a sentence or two: its card's text on the Tools page, and the description atop its own page
   // (test_tool_pages_open_with_their_card_text) — one text, so the two can't drift apart
-  function toolBlurb(name) { var t = TOOLS.filter(function (x) { return x[0] === name; })[0]; return t ? esc(T(t[2])) : ""; }
+  function toolBlurb(name) { var t = toolOf(name); return t ? esc(T(t.blurb)) : ""; }
   // the process a tool's Apply became (jobs.py ToolJob): running or queued for this tool, or the last one that ended
   function toolJob(name) {
     var j = ST.job;
@@ -5223,7 +5419,7 @@ PCI18N.ready.then(function () {
       },
       applies: function (sc) {
         // the warning (the way to do it is the choice among the options above), with what Apply does
-        var how = { watched: T("the mirror chosen on the Mirror page"), suspected: T("a server of your account whose files are here too — a mirror until you say otherwise on the Mirror page"), peer: T("another Plex Cache sharing these folders") }[sc.mirror && sc.mirror.how];
+        var how = { watched: T("the mirror chosen on the Mirror page"), suspected: T("a server of your account whose files are here too — a mirror until you say otherwise on the Mirror page"), peer: T("another Dionysus sharing these folders") }[sc.mirror && sc.mirror.how];
         var out = sc.mirror
           ? H("<strong>These files look mirrored on {name}</strong>{how}. Syncing files — Syncthing and the like — doesn’t carry a hard link: at the other site each path is a whole copy of its own. So here each link is made a file of its own, which copies the original into a duplicate; the sync then carries the same copies across. Afterwards, make sure your file sync and both Plex servers have caught up with the changes, then run <a href=\"/merge\" data-nav>Merge Duplicates</a> on each side. Removing the extra paths instead would delete the other site’s only copy, and Plex there would lose the item’s metadata.", { name: sc.mirror.name, how: how ? " (" + how + ")" : "" })
           : H("No mirror is known: <strong>removing the extra paths</strong> is the clean way — the file stays where Plex has it and nowhere else. Making each link a file of its own, then merging, is the safer way if these files are mirrored somewhere the app can’t see: a duplicate survives a sync, a removed path doesn’t.");
@@ -5267,7 +5463,7 @@ PCI18N.ready.then(function () {
       if (r.shape === "split") return H("An item of its own on {name} now: merged there into one item, as one of its versions.", { name: nm.dst });
       if (dstFiles.indexOf(f) >= 0) return H("Listed on {name} too: it stays as it is.", { name: nm.dst });
       if (scanned.indexOf(f) >= 0) return H("Not listed on {name}: its folder is scanned there, and Plex there adds it.", { name: nm.dst }) +
-        (unknown.indexOf(f) >= 0 ? " " + H("Whether it’s on disk there can’t be told: no Plex Cache answers at that site.") : "");
+        (unknown.indexOf(f) >= 0 ? " " + H("Whether it’s on disk there can’t be told: no Dionysus answers at that site.") : "");
       return H("Not on {name}’s disk, so a scan there can’t find it: see <a href=\"/mirrorchecks\" data-nav>Mirror Checks</a>.", { name: nm.dst });
     };
     var dropFile = function (f) {
@@ -5334,7 +5530,7 @@ PCI18N.ready.then(function () {
       read: function (sc) { return sc.records == null ? null : { n: sc.records, text: P(sc.records, "{n} record read", "{n} records read", { n: fmtNum(sc.records) }) }; },
       extra: function (sc) {
         var nm = syncNames(sc), out = [statChip("grey", T("{n} on {name} too", { n: fmtNum(sc.matched || 0), name: nm.dst }), T("Items found on both servers, by their files’ place in the library folder."))];
-        if (sc.disk === false) out.push(statChip("grey", T("{name}’s disk not read", { name: nm.dst }), T("No Plex Cache answers at that site: a file its Plex doesn’t list has its folder scanned there, on the disk or not.")));
+        if (sc.disk === false) out.push(statChip("grey", T("{name}’s disk not read", { name: nm.dst }), T("No Dionysus answers at that site: a file its Plex doesn’t list has its folder scanned there, on the disk or not.")));
         return out;
       },
       empty: H("Nothing to bring in line: the two servers have this library the same."),
@@ -5360,9 +5556,9 @@ PCI18N.ready.then(function () {
   }
   function pageMirrorchecks() {
     return checksPage("mirrorchecks", "mirror", "Mirror Checks", H("Each library paired with one on its mirror (the Mirror page) is compared file by file, by each file’s place in the library folder. " +
-      "<strong>The disks</strong>: through the Plex Cache at the other site, its files against these — on one side only, or a different size. A file changed in the last hour is left out: it may still be syncing. " +
+      "<strong>The disks</strong>: through the Dionysus at the other site, its files against these — on one side only, or a different size. A file changed in the last hour is left out: it may still be syncing. " +
       "<strong>The Plexes</strong>: what the mirror’s Plex lists against what Plex here lists, and the files here that Plex doesn’t list. Scan Folder, under such a finding, asks the Plex that’s missing the file to look at its folder. " +
-      "<strong>The folder sync</strong>: whether the markers and claims in the hidden .plexcache folder reach the other site. While they don’t, the two Plex Caches could optimize the same file, so optimizing and the file tools are held in that library until the sync carries them, until you ignore the finding, or while its check is off.<br><br>" +
+      "<strong>The folder sync</strong>: whether the markers and claims in the hidden .plexcache folder reach the other site. While they don’t, the two Dionysus instances could optimize the same file, so optimizing and the file tools are held in that library until the sync carries them, until you ignore the finding, or while its check is off.<br><br>" +
       "It only reads, every 6 hours and when you press Scan Again. Each finding is a chip on its item — a file Plex doesn’t list, or one only at the other site, is an item of its own. Ignore greys an item’s findings out for good."));
   }
 
@@ -5473,13 +5669,15 @@ PCI18N.ready.then(function () {
       if (sub.hidden !== !onTools) sub.hidden = !onTools;
       if (onTools && sub.dataset.for !== page) {
         sub.dataset.for = page;
-        sub.innerHTML = TOOLS.map(function (t) { return '<a class="subnav' + (page === t[0] ? " on" : "") + '" href="/' + t[0] + '" data-nav' + (page === t[0] ? ' aria-current="page"' : "") + ">" + esc(T(t[3] || t[1])) + "</a>"; }).join("");
+        sub.innerHTML = TOOLS.map(function (t) { return '<a class="subnav' + (page === t.page ? " on" : "") + '" href="/' + t.page + '" data-nav' + (page === t.page ? ' aria-current="page"' : "") + ">" + icon(t.page) + esc(T(t.short || t.name)) + "</a>"; }).join("");
       }
     }
     var dot = document.getElementById("dot-health");
     var c = ST.health ? ST.health.counts : null;
     dot.className = "dot " + (!c ? "" : c.fail ? "fail" : c.warn ? "warn" : "ok");
-    menuCount(document.getElementById("count-tools"), countOf("tools"), TOOLS.some(function (t) { return toolBad(t[0]); }));
+    menuCount(document.getElementById("count-tools"), countOf("tools"), TOOLS.some(function (t) { return toolBad(t.page); }));
+    var bfp = document.getElementById("brandfp"), ownId = (((ST.peer || {}).own || {}).identity || {}).id || ((ST.peer || {}).own || {}).fingerprint || "";
+    if (bfp && bfp.dataset.fp !== ownId) { bfp.dataset.fp = ownId; bfp.innerHTML = ownId ? identicon(ownId, "menu") : ""; bfp.title = ownId ? T("{name} identity", { name: ((ST.peer || {}).own || {}).name || T("This Dionysus") }) + " " + ownId : ""; }
     var ver = document.getElementById("version"), up = ST.updates || {};
     // the stages: updating (asked of TrueNAS, until this page comes back on the new build), checking (just started, GitHub not
     // asked yet), an update to have (a button when TrueNAS can do it, else a link), or nothing to say
@@ -5488,7 +5686,7 @@ PCI18N.ready.then(function () {
       (stage === "updating" ? '<span class="update quiet">' + H("Updating…") + "</span>"
         : stage === "checking" ? '<span class="update quiet">' + H("checking…") + "</span>"
         : stage === "button" ? '<button type="button" class="update" data-act="updates-apply">' + H("Update now") + "</button>"
-        : stage === "needkey" ? '<a class="update" href="/system#truenas" data-nav>' + H("Update available · add a TrueNAS API key to install it") + "</a>"
+        : stage === "needkey" ? '<a class="update" href="/system#updates" data-nav>' + H("Update available") + "</a>"
         : stage === "link" ? '<a class="update" href="' + esc(up.repo) + (up.channel === "dev" ? "/commits/dev" : "/releases") + '" target="_blank" rel="noopener">' +
           (up.latest && up.latest !== ST.version.replace(/-dev$/, "") ? H("v{version} available ↗", { version: up.latest }) : H("newer dev build ↗")) + "</a>" : "");
     var bar = document.getElementById("userbar");
@@ -5584,7 +5782,7 @@ PCI18N.ready.then(function () {
       if (!editing() && !selecting() && !interacting()) render();
       lookIfDue();
     }).catch(function () {
-      if (!ST) main.innerHTML = '<p class="muted">' + H("Can’t reach the Plex Cache service. Retrying…") + "</p>";
+      if (!ST) main.innerHTML = '<p class="muted">' + H("Can’t reach the Dionysus service. Retrying…") + "</p>";
       else if (UPDATING || (ST.updates || {}).updating) render();  // (away while it restarts: still "Updating…")
     });
   }
@@ -5595,8 +5793,8 @@ PCI18N.ready.then(function () {
     if (page === "ssd") EST = {};  // the what-if sliders start from your settings every time
     if (push) history.pushState({}, "", "/" + page);
     else if (location.pathname !== "/" + page && location.pathname !== "/") history.replaceState({}, "", "/" + page + location.hash);
-    document.title = "Plex Cache – " + ({ health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), library: T("Library"), tools: T("Tools"), processes: T("Processes"), mirrors: T("Mirror"), activity: T("Metrics"), system: T("System") }[page] ||
-      (TOOLS.filter(function (t) { return t[0] === page; })[0] || [0, page])[1]);
+    document.title = "Dionysus – " + ({ health: T("Health"), caching: T("Caching"), ssd: T("SSD Cache"), library: T("Library"), tools: T("Tools"), processes: T("Processes"), mirrors: T("Mirror"), activity: T("Metrics"), system: T("System") }[page] ||
+      (toolOf(page) || { name: page }).name);
     render();
     window.scrollTo(0, 0);
     main.focus({ preventScroll: true });
@@ -5693,7 +5891,7 @@ PCI18N.ready.then(function () {
 
   document.addEventListener("click", function (e) {
     // ↺ on the Optimizer page and the second server's pairs: back to the default
-    var orv = e.target.closest("[data-optlib-revert], [data-p2lib-revert], [data-peerurl-revert], [data-lhcheck-revert], [data-lhlang-revert], [data-lhquality-revert]");
+    var orv = e.target.closest("[data-optlib-revert], [data-p2lib-revert], [data-peerurl-revert], [data-stfolder-revert], [data-lhcheck-revert], [data-lhlang-revert], [data-lhquality-revert]");
     if (orv) {
       e.preventDefault();
       if (orv.dataset.lhlangRevert !== undefined) {
@@ -5711,7 +5909,11 @@ PCI18N.ready.then(function () {
         var lh = JSON.parse(JSON.stringify((S.library_health || {}).checks || {}));
         delete lh[orv.dataset.lhcheckRevert];
         queueSave("library_health", "checks", lh, true);
-      } else if (orv.dataset.peerurlRevert !== undefined) {  // (the other Plex Cache's address: found by itself again)
+      } else if (orv.dataset.stfolderRevert !== undefined) {  // (a library's Syncthing folder: found by itself again)
+        var sfl = Object.assign({}, (S.syncthing || {}).folders || {});
+        delete sfl[orv.dataset.stfolderRevert];
+        queueSave("syncthing", "folders", sfl, true);
+      } else if (orv.dataset.peerurlRevert !== undefined) {  // (the other Dionysus's address: found by itself again)
         var svs = JSON.parse(JSON.stringify((S.peer || {}).servers || {}));
         delete svs[orv.dataset.peerurlRevert];
         queueSave("peer", "servers", svs, true);
@@ -6078,13 +6280,22 @@ PCI18N.ready.then(function () {
     }
     else if (act === "retest") { flush().then(function () { return api("/api/test", {}); }).then(function () { ST.testing = true; render(); load(); }); }
     else if (act === "plex-signin") { signIn(); }
+    else if (act === "plex-lan") {  // System → Plex: Add Subnets to Plex LAN — the networks Plex answers on into its LAN Networks
+      el.disabled = true;
+      api("/api/plex/lan", {}).then(function () { ST.testing = true; render(); setTimeout(load, 1500); }).catch(function (e) { toast(e.message, true); load(); });
+    }
     else if (act === "plex2-signin") { signIn("plex2"); }
     else if (act === "plex2-address") {  // an address for a mirror this NAS can reach, by hand
       var inp = document.querySelector('[data-p2addr="' + el.dataset.server + '"]');
       el.disabled = true;
       api("/api/plex2/address", { server: el.dataset.server, url: inp ? inp.value.trim() : "" }).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
-    else if (act === "peer-pair" || act === "peer-unpair" || act === "peer-test") {  // System → Mirror Plex Cache, per mirror's server
+    else if (act === "syncthing-test") {  // System → Syncthing: asked again now
+      el.disabled = true;
+      flush().then(function () { return api("/api/syncthing/test", {}); }).then(function () { (ST.syncthing || {}).busy = true; render(); setTimeout(load, 2500); })
+        .catch(function (e) { toast(e.message, true); load(); });
+    }
+    else if (act === "peer-pair" || act === "peer-unpair" || act === "peer-test") {  // System → Mirror Dionysus, per mirror's server
       el.disabled = true;
       flush().then(function () { return api("/api/peer/" + act.slice(5), { server: el.dataset.server || "" }); }).then(function (got) { ST.peer = got; render(); setTimeout(load, 2000); })
         .catch(function (e) { toast(e.message, true); load(); });
@@ -6213,6 +6424,20 @@ PCI18N.ready.then(function () {
     }
   });
 
+  // A key pasted into a secret field is saved and tried at once — no need to leave the field — and its card says Checking…
+  // meanwhile (the state's testing or busy, until the server has asked the service).
+  main.addEventListener("paste", function (e) {
+    var el = e.target;
+    if (!el || !el.dataset || !el.dataset.secret) return;
+    setTimeout(function () {
+      var q = el.dataset.secret.split("."), v = (el.value || "").trim();
+      if (!v) return;
+      queueSave(q[0], q[1], v, true);
+      el.value = "";
+      if (q[0] === "syncthing") { if (ST.syncthing) ST.syncthing.busy = true; } else ST.testing = true;
+      render();
+    }, 0);
+  });
   main.addEventListener("change", function (e) {
     var el = e.target;
     if (el.dataset.set) {
@@ -6272,12 +6497,18 @@ PCI18N.ready.then(function () {
   // Mirror: a library's mirror chosen from its row's list — not decided, no mirror, or "<server>:<its library there>"
   document.addEventListener("change", function (e) {
     var el = e.target;
+    if (el.dataset && el.dataset.stfolder !== undefined) {  // the Syncthing folder of a library, chosen by hand (or found by itself again)
+      var fl = Object.assign({}, (S.syncthing || {}).folders || {});
+      if (el.value) fl[el.dataset.stfolder] = { folder: el.value }; else delete fl[el.dataset.stfolder];
+      queueSave("syncthing", "folders", fl, true);
+      return;
+    }
     if (!el.dataset || el.dataset.p2lib === undefined) return;
     var v = el.value, i = v.indexOf(":");
     el.disabled = true;
     if (i < 0) mirrorChoose(el.dataset.p2lib, v); else mirrorChoose(el.dataset.p2lib, "mirror", v.slice(0, i), v.slice(i + 1));
   });
-  // System → Mirror Plex Cache: the other Plex Cache's address by hand, per mirror's server (peer.servers)
+  // System → Mirror Dionysus: the other Dionysus's address by hand, per mirror's server (peer.servers)
   document.addEventListener("change", function (e) {
     var el = e.target;
     if (!el.dataset || el.dataset.peerurl === undefined) return;

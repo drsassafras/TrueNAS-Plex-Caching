@@ -1,4 +1,4 @@
-"""Where Plex Cache is running: TrueNAS, or another Linux host — with ZFS or without. Nothing is
+"""Where Dionysus is running: TrueNAS, or another Linux host — with ZFS or without. Nothing is
 assumed: the TrueNAS API answering says TrueNAS for certain, with its version; so does the kernel —
 TrueNAS builds its own, named "…+truenas", and a container runs on the host's kernel, so that's
 visible from inside with no key and no mount; so does the host's /etc/version when the app's YAML

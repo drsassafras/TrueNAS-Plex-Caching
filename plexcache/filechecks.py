@@ -71,7 +71,7 @@ def check_file(app, f, path: str, m: dict | None, rec: dict, opts: dict, info: d
         add("compression", {"optimal": "ideal", "assumed": "pass"}.get(zfs_state, "warn"),
             {"optimal": M("Written with the dataset’s compression, by the optimizer."),
              "assumed": M("Written after the dataset’s compression was set, so it has it."),
-             "unknown": M("Not known: it was there before Plex Cache began keeping track. Optimize Now writes it with the dataset’s compression."),
+             "unknown": M("Not known: it was there before Dionysus began keeping track. Optimize Now writes it with the dataset’s compression."),
              "not_optimal": M("Written with another compression than the dataset’s. Optimize Now writes it again.")}.get(zfs_state, ""))
     mkv = m.get("format") == "mkv"
     ours = (info or {}).get("ours") or {}
@@ -128,10 +128,10 @@ def check_file(app, f, path: str, m: dict | None, rec: dict, opts: dict, info: d
             add("cover", "pass", M("Not compressed losslessly: a JPEG with the standard tables. The optimizer only rewrites MKV files; "
                                    "jpegtran -optimize would make it smaller, every pixel the same."))
         else:
-            add("cover", worst, M("Compressed losslessly by Plex Cache (where it helped).") if optimized
+            add("cover", worst, M("Compressed losslessly by Dionysus (where it helped).") if optimized
                 else M("Not compressed losslessly: a JPEG with the standard tables. Optimize Now compresses it, every pixel the same.") if worst == "warn"
                 else M("Already compressed losslessly (the JPEG’s own tables).") if worst == "ideal"
-                else M("Not compressed by Plex Cache; whether it could be smaller isn’t known (PNG)."))
+                else M("Not compressed by Dionysus; whether it could be smaller isn’t known (PNG)."))
     if not audio and not mkv:  # (a video file in another container)
         _container(app, add, path, str(getattr(f, "library_key", "") or ""))
     if audio:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Does the TrueNAS that's coming still have every call Plex Cache makes?
+"""Does the TrueNAS that's coming still have every call Dionysus makes?
 
 TrueNAS renames API methods between releases (zfs.snapshot.* became pool.snapshot.* in 25.04,
 zfs.dataset.* went in 25.10). The app keeps each call's names over the versions in
@@ -93,7 +93,7 @@ def main() -> int:
         return 2
     found, missing = check(pkg)
     label = args.checkout or f"{REPO} @ {args.ref}"
-    print(f"Plex Cache's TrueNAS calls against {label}:")
+    print(f"Dionysus's TrueNAS calls against {label}:")
     for what, names in METHODS.items():
         ok = found[what]
         gone = [n for n in names if n not in ok]

@@ -32,7 +32,7 @@ Mirror page) is converted so that nothing of it reaches the other site:
   .stignore must then leave out ``<name>-new`` and ``.<name>.plexcache-old``; it's paused here from
   the last pass until the dataset is in place, and resumed after. With a mirror chosen and no
   Syncthing found, you say nothing else syncs the folder.
-* **The other Plex Cache** (peerlink.py, or its marker: peers.py) — it must run TrueNAS; it's
+* **The other Dionysus** (peerlink.py, or its marker: peers.py) — it must run TrueNAS; it's
   converted too (both servers, one after the other: this one first) or not (this server only), as
   its room for its own copy allows; a conversion of the library left partway there is a warning
   until the switch here, and stops it from then on — completed or reverted there first; it holds
@@ -52,6 +52,7 @@ import urllib.error
 from . import zfs, zfslog
 from .i18n import M
 from .jobs import Job
+from .syncthing import SyncthingError, ignored_by
 
 FRESH_COMPARE = 120  # seconds a comparison counts as just made, for setting the old folder aside
 RESTART_WAIT = 300  # seconds a restart asked for here normally takes: the optimizer back and seeing the dataset
@@ -248,8 +249,30 @@ class Migration:
     def confirm(self, what: str) -> dict:
         """What you say you've done where the app can't see it: the folder sync paused here before the set-aside
         (sync_paused), resumed after the switch (sync_resumed), or, with no Syncthing found, nothing else syncing the folder
-        in a way that would carry the new dataset or the old folder away (sync_checked)."""
+        in a way that would carry the new dataset or the old folder away (sync_checked). With Syncthing connected (System →
+        Syncthing), done through its API instead: its ignore patterns added (sync_ignore), the folder paused (sync_pause)
+        or resumed (sync_resume)."""
         st = self._moving()
+        if what in ("sync_ignore", "sync_pause", "sync_resume"):
+            f, rel = self.app.syncthing.folder_over(st.get("folder") or "")
+            if f is None:
+                raise ValueError(M("Syncthing doesn’t show a folder over this one: check again."))
+            if what == "sync_resume" and st.get("step") != "verify":
+                raise ValueError("resumed once the dataset is in place")
+            try:
+                if what == "sync_ignore":
+                    self.app.syncthing.add_ignores(f["id"], self._ignore_lines(st, root_over(st.get("folder") or "", rel)))
+                elif what == "sync_pause":
+                    self.app.syncthing.pause(f["id"], True)
+                    st["sync_paused"] = time.time()
+                else:
+                    self.app.syncthing.pause(f["id"], False)
+                    self.app.syncthing.rescan(f["id"], rel)  # (the dataset in the folder's place, read now rather than at the next interval)
+                    st["sync_resumed"] = time.time()
+            except SyncthingError as e:
+                raise ValueError(e.why) from None
+            self._save()
+            return self.refresh()
         if what not in ("sync_paused", "sync_resumed", "sync_checked"):
             raise ValueError("nothing to confirm")
         if what == "sync_resumed" and st.get("step") != "verify":
@@ -366,16 +389,16 @@ class Migration:
         since, asked = status.get("since"), st.get("restart_asked")
         snippet, action = "", ""
         if asked and not (since and since > asked):
-            check("sees", False, M("The optimizer sees the new dataset"), M("Restarting Plex Cache… this is checked again once it’s back (a minute or so)."),
+            check("sees", False, M("The optimizer sees the new dataset"), M("Restarting Dionysus… this is checked again once it’s back (a minute or so)."),
                   level="waiting", doing=M("Restarting"), within=RESTART_WAIT,
-                  late=lambda waited: M("Plex Cache was asked to restart {waited} ago, and the optimizer hasn’t come back. Restart it in TrueNAS: "
+                  late=lambda waited: M("Dionysus was asked to restart {waited} ago, and the optimizer hasn’t come back. Restart it in TrueNAS: "
                                         "Apps → {app} → Restart, then check again.", waited=waited, app=self._app_name() or "plex-cache"))
             return False
         if root and props.get(root):
             check("sees", False, M("The optimizer sees the new dataset"), M("Its media volume passes new datasets on: it should show up by itself in a few seconds."),
                   action="restart", level="waiting", doing=M("Waiting"), within=SEES_WAIT,
                   late=lambda waited: M("Its media volume passes new datasets on, yet the optimizer hasn’t seen {path} after {waited}. Restart Now restarts "
-                                        "Plex Cache (both its containers, a minute or so); if it still isn’t seen, the dataset has to be inside the folder "
+                                        "Dionysus (both its containers, a minute or so); if it still isn’t seen, the dataset has to be inside the folder "
                                         "mounted there.", path=path, waited=waited))
             return False
         if since and since > seen:
@@ -383,7 +406,7 @@ class Migration:
                        path=path)
         else:
             action = "restart"
-            detail = M("The optimizer was started before the dataset appeared, so it needs a restart to see it. Restart Now restarts Plex Cache "
+            detail = M("The optimizer was started before the dataset appeared, so it needs a restart to see it. Restart Now restarts Dionysus "
                        "(both its containers, a minute or so); anything running picks up where it was. To never need this again, make the "
                        "optimizer’s media volume read like this in Apps → {app} → Edit:", app=self._app_name() or "plex-cache")
             if root:
@@ -399,14 +422,14 @@ class Migration:
             return None
 
     def restart(self) -> dict:
-        """Restart Plex Cache (both containers) through TrueNAS, so the optimizer sees a dataset made
+        """Restart Dionysus (both containers) through TrueNAS, so the optimizer sees a dataset made
         since it started. TrueNAS carries it out: this app goes down with it, and picks up after."""
         st = self.state
         if not st or st.get("step") not in ("create", "switch"):
             raise ValueError("nothing here needs a restart")
         name = self._app_name()
         if not name:
-            raise ValueError(M("Plex Cache can’t restart itself without the TrueNAS API (System → TrueNAS, with a key allowed to manage apps). "
+            raise ValueError(M("Dionysus can’t restart itself without the TrueNAS API (System → TrueNAS, with a key allowed to manage apps). "
                                "Restart it in TrueNAS: Apps → plex-cache → Restart."))
         with self.lock:
             st["restart_asked"] = time.time()
@@ -577,31 +600,50 @@ class Migration:
             checks = list(self.checks)
         return [c for c in checks if not c["ok"] and c.get("level") != "warn" and (gate is None or c.get("gate") == gate)]
 
+    def _ignore_lines(self, st: dict, root: str) -> list[str]:
+        """The ignore patterns the Syncthing folder at ``root`` (above the library folder) needs: the new dataset and the
+        old folder, anchored at its root."""
+        folder = st.get("folder") or ""
+        temp, old = os.path.basename(st.get("temp_folder") or folder + "-new"), os.path.basename(_old_path(folder))
+        rel = os.path.relpath(os.path.dirname(folder), root)
+        return ["/" + (n if rel == "." else rel + "/" + n) for n in (temp, old)]
+
     def _check_sync(self, st: dict, check) -> None:
-        """The folder sync over the folder: Syncthing's root (.stfolder) the folder itself, or one above whose .stignore
-        leaves out the new dataset and the old folder; paused here before the set-aside, resumed after. With no Syncthing
+        """The folder sync over the folder: Syncthing's folder — through its API where it's connected (System → Syncthing),
+        else by its marker on disk (.stfolder) — the folder itself, or one above whose ignore patterns leave out the new
+        dataset and the old folder; paused here before the set-aside, resumed after. Through the API, each is a button
+        here (sync_ignore, sync_pause, sync_resume); without it, you do it in Syncthing and say so. With no Syncthing
         found and a mirror chosen, said by you. Nothing with neither."""
         folder, step = st.get("folder") or "", st.get("step")
         if not folder:
             return
-        root, watched = sync_root(folder), self._mirror_watched(st.get("library")) or bool(self._mirror_seen(st.get("library")))
+        api, rel = self.app.syncthing.folder_over(folder)  # (the folder in Syncthing over it, from its API)
+        root = root_over(folder, rel) if api is not None else sync_root(folder)
+        watched = self._mirror_watched(st.get("library")) or bool(self._mirror_seen(st.get("library")))
         if not root and not watched and not st.get("sync_paused"):  # (paused: said, even once the folder it was found in is set aside)
             return
         name = os.path.basename(folder)
         temp, old = os.path.basename(st.get("temp_folder") or folder + "-new"), os.path.basename(_old_path(folder))
+        label = api["label"] if api is not None else ""
         if step in ("create", "copy"):
             if root == folder:
-                check("sync_root", True, M("Syncthing’s folder is the library folder itself"),
+                check("sync_root", True, M("Syncthing’s folder “{label}” is the library folder itself", label=label) if api is not None else M("Syncthing’s folder is the library folder itself"),
                       M("Setting the folder aside stops Syncthing there instead of sending deletes, and the copy carries its .stfolder into the new dataset."))
             elif root:
-                rel = os.path.relpath(os.path.dirname(folder), root)
-                lines = ["/" + (n if rel == "." else rel + "/" + n) for n in (temp, old)]
-                missing = [ln for ln in lines if not ignored(root, ln[1:])]
-                check("sync_ignore", not missing, M("Syncthing leaves out {temp} and {old}", temp=temp, old=old),
-                      "" if not missing else M("Syncthing’s folder is {root}, above the library folder: it would send the new dataset to the other site "
-                                               "as a second copy, and the set-aside as every file deleted. Add these lines to its ignore patterns on this server "
-                                               "(Syncthing → the folder → Edit → Ignore Patterns, kept in {file}), then check again:",
-                                               root=root, file=os.path.join(root, SYNC_IGNORE)), "\n".join(missing))
+                lines = self._ignore_lines(st, root)
+                patterns = api.get("ignores") if api is not None else None
+                missing = [ln for ln in lines if not (ignored_by(patterns, ln[1:]) if patterns is not None else ignored(root, ln[1:]))]
+                if api is not None:
+                    check("sync_ignore", not missing, M("Syncthing leaves out {temp} and {old}", temp=temp, old=old),
+                          "" if not missing else M("Syncthing’s folder “{label}” is {root}, above the library folder: it would send the new dataset to the other site "
+                                                   "as a second copy, and the set-aside as every file deleted. Add Them in Syncthing adds these lines to its ignore patterns:", label=label, root=root),
+                          "\n".join(missing), action="" if not missing else "sync_ignore")
+                else:
+                    check("sync_ignore", not missing, M("Syncthing leaves out {temp} and {old}", temp=temp, old=old),
+                          "" if not missing else M("Syncthing’s folder is {root}, above the library folder: it would send the new dataset to the other site "
+                                                   "as a second copy, and the set-aside as every file deleted. Add these lines to its ignore patterns on this server "
+                                                   "(Syncthing → the folder → Edit → Ignore Patterns, kept in {file}), then check again:",
+                                                   root=root, file=os.path.join(root, SYNC_IGNORE)), "\n".join(missing))
             else:
                 done = bool(st.get("sync_checked"))
                 check("sync_checked", done, M("Nothing else syncs the folder in a way that would carry the new dataset or the old folder away"),
@@ -609,21 +651,34 @@ class Migration:
                                         "other site (another sync tool, a script), have it leave out {temp} and {old}, and pause it during the switch.",
                                         folder=folder, temp=temp, old=old), action="" if done else "sync_checked")
         elif step == "switch":
-            paused = bool(st.get("sync_paused"))
-            check("sync_paused", paused or bool(st.get("old_path")), M("The folder sync paused here"),
-                  "" if paused else M("Pause the folder in Syncthing on this server (Folders → {name} → Pause), or whatever else syncs it, before the old "
-                                      "folder is set aside, and leave it paused until the dataset is in place. What the other site changes meanwhile waits "
-                                      "there, and comes over once it’s resumed.", name=name),
-                  action="" if paused or st.get("old_path") else "sync_paused", gate="aside")
+            if api is not None:
+                paused = bool(api["paused"])
+                check("sync_paused", paused or bool(st.get("old_path")), M("The folder sync paused here"),
+                      "" if paused else M("Pause the Folder in Syncthing pauses “{label}” on this server before the old folder is set aside, and it stays paused until "
+                                          "the dataset is in place. What the other site changes meanwhile waits there, and comes over once it’s resumed.", label=label),
+                      action="" if paused or st.get("old_path") else "sync_pause", gate="aside")
+            else:
+                paused = bool(st.get("sync_paused"))
+                check("sync_paused", paused or bool(st.get("old_path")), M("The folder sync paused here"),
+                      "" if paused else M("Pause the folder in Syncthing on this server (Folders → {name} → Pause), or whatever else syncs it, before the old "
+                                          "folder is set aside, and leave it paused until the dataset is in place. What the other site changes meanwhile waits "
+                                          "there, and comes over once it’s resumed.", name=name),
+                      action="" if paused or st.get("old_path") else "sync_paused", gate="aside")
         elif step == "verify" and (st.get("sync_paused") or root):
-            done = bool(st.get("sync_resumed"))
-            check("sync_resumed", done, M("The folder sync resumed here"),
-                  "" if done else M("Resume the folder in Syncthing on this server: it finds the same files where they were, and sends nothing."),
-                  action="" if done else "sync_resumed")
+            if api is not None:
+                done = not api["paused"]
+                check("sync_resumed", done, M("The folder sync resumed here"),
+                      "" if done else M("Resume the Folder in Syncthing resumes “{label}” and asks it to scan the folder now: it finds the same files where they were, and sends nothing.", label=label),
+                      action="" if done else "sync_resume")
+            else:
+                done = bool(st.get("sync_resumed"))
+                check("sync_resumed", done, M("The folder sync resumed here"),
+                      "" if done else M("Resume the folder in Syncthing on this server: it finds the same files where they were, and sends nothing."),
+                      action="" if done else "sync_resumed")
 
     def _mirror_seen(self, library) -> dict | None:
         """A mirror of the library's files seen though not chosen on the Mirror page — a server of the account with the same
-        files, or another Plex Cache sharing the folders (tools.mirrored, as every tool goes by) — or None."""
+        files, or another Dionysus sharing the folders (tools.mirrored, as every tool goes by) — or None."""
         if not library:
             return None
         from .tools import mirrored
@@ -638,7 +693,7 @@ class Migration:
                  "check it or work with it. Mark it as the mirror, or say the library has no mirror (here, or on the [Mirror page](/mirrors)).",
                  name=seen.get("name") or "?", library=seen.get("their_title") or "?") \
             if seen.get("how") == "suspected" else \
-            M("Another Plex Cache ({name}) shares these folders, but the library isn’t marked as mirrored, so the conversion can’t check it or work "
+            M("Another Dionysus ({name}) shares these folders, but the library isn’t marked as mirrored, so the conversion can’t check it or work "
               "with it. On the [Mirror page](/mirrors), choose its Plex server and mark the library as mirrored, or say it has no mirror.", name=seen.get("name") or "?")
 
     def _mirror_watched(self, library=None) -> bool:
@@ -652,7 +707,7 @@ class Migration:
             return False
 
     def _mirror(self, fresh: bool = False, library: str = "") -> dict | None:
-        """What the Plex Cache at the site of the library's mirror says of itself (peerlink.facts): asked again first when
+        """What the Dionysus at the site of the library's mirror says of itself (peerlink.facts): asked again first when
         ``fresh`` and the last answer is over a minute old. The library: the one named, else the conversion's."""
         links = getattr(self.app, "peerlinks", None)
         link = links.for_library(str(library or (self.state or {}).get("library") or "")) if links is not None else None
@@ -685,8 +740,8 @@ class Migration:
         link = links.for_library(key) if links is not None else None
         if link is not None and link.settling():  # just after a start: nothing concluded from what isn't known yet
             name = self._mirror_name(None, key)
-            check("mirror_link", False, M("Connecting to the Plex Cache at {name}’s site…", name=name),
-                  M("Plex Cache just started: what {name} says is asked for first, normally within a minute.", name=name),
+            check("mirror_link", False, M("Connecting to the Dionysus at {name}’s site…", name=name),
+                  M("Dionysus just started: what {name} says is asked for first, normally within a minute.", name=name),
                   level="waiting", doing=M("Connecting"), gate="aside")
             return
         f = self._mirror(fresh=True, library=key)
@@ -714,7 +769,7 @@ class Migration:
                     pass
                 elif not room:
                     check("mirror_room", False, M("Room on {name} for its own copy", name=name),
-                          M("Not known yet: {name} hasn’t said (an older Plex Cache, or not reached). It checks again when its turn comes.", name=name), level="warn")
+                          M("Not known yet: {name} hasn’t said (an older Dionysus, or not reached). It checks again when its turn comes.", name=name), level="warn")
                 else:
                     check("mirror_room", bool(room.get("ok")), M("Room on {name} for its own copy", name=name),
                           M("{free} free there; its copy needs {need}.", free=_gb(room.get("free")), need=_gb(room.get("needed"))) if room.get("ok") else
@@ -741,11 +796,11 @@ class Migration:
                 check("mirror_holding", bool(holding), M("{name} holds its file jobs on {library}", name=name, library=title),
                       "" if holding else M("Normally completes automatically: {name} takes this up within a minute.", name=name),
                       level="waiting", doing=M("Waiting"), within=HOLD_WAIT, gate="aside",
-                      late=lambda waited: M("{name} hasn’t taken this up after {waited}. Check that the two Plex Caches are talking and run the same version "
-                                            "(System → Mirror Plex Cache, the Talking and Version lights), then press Check Again.", name=name, waited=waited))
+                      late=lambda waited: M("{name} hasn’t taken this up after {waited}. Check that the two Dionysus instances are talking and run the same version "
+                                            "(System → Mirror Dionysus, the Talking and Version lights), then press Check Again.", name=name, waited=waited))
             else:
                 check("mirror_holding", False, M("{name} holds its file jobs on {library}", name=name, library=title),
-                      M("Can’t be confirmed: the two Plex Caches aren’t talking (System → Mirror Plex Cache). Don’t run its file tools or the optimizer "
+                      M("Can’t be confirmed: the two Dionysus instances aren’t talking (System → Mirror Dionysus). Don’t run its file tools or the optimizer "
                         "on {library} there until this one is done.", library=title), level="warn")
         elif step == "verify":
             self._check_mirror_files(st, check, f, name, lib, force)
@@ -756,12 +811,12 @@ class Migration:
         title = M("{name} runs TrueNAS", name=name)
         if f is None:
             check("mirror_truenas", False, title,
-                  M("Can’t tell what it runs on: System → Mirror Plex Cache says there’s no Plex Cache at the mirror’s site.") if not links.wanted() else
-                  M("Can’t tell what it runs on: pair the two Plex Caches (System → Mirror Plex Cache), or let the folder sync carry .plexcache, then check again."))
+                  M("Can’t tell what it runs on: System → Mirror Dionysus says there’s no Dionysus at the mirror’s site.") if not links.wanted() else
+                  M("Can’t tell what it runs on: pair the two Dionysus instances (System → Mirror Dionysus), or let the folder sync carry .plexcache, then check again."))
             return
         p = f.get("platform")
         if not isinstance(p, dict):
-            check("mirror_truenas", False, title, M("{name} runs an older Plex Cache, which doesn’t say what it runs on: update it, then check again.", name=name))
+            check("mirror_truenas", False, title, M("{name} runs an older Dionysus, which doesn’t say what it runs on: update it, then check again.", name=name))
         elif p.get("truenas") is True:
             check("mirror_truenas", True, M("{name} runs TrueNAS {version}", name=name, version=p.get("version") or ""), "")
         else:
@@ -774,7 +829,7 @@ class Migration:
         left out — it may still be syncing. Compared at most every FILES_EVERY, or on Check Again."""
         title = M("The same files as on {name}", name=name)
         if not f or f.get("via") != "link" or not lib.get("key"):
-            check("mirror_files", False, title, M("Not compared: the two Plex Caches aren’t talking (System → Mirror Plex Cache). Compare the folder on both "
+            check("mirror_files", False, title, M("Not compared: the two Dionysus instances aren’t talking (System → Mirror Dionysus). Compare the folder on both "
                                                   "sides by hand, or pair them and check again."), level="warn")
             return
         cached = getattr(self, "_mf", None)
@@ -787,7 +842,7 @@ class Migration:
         got = cached[2]
         if got.get("pending"):
             check("mirror_files", False, title, M("Reading the files on both sides…"), level="waiting", doing=M("Reading"), within=FILES_WAIT,
-                  late=lambda waited: M("Still reading after {waited}. Check that the two Plex Caches are talking (System → Mirror Plex Cache), "
+                  late=lambda waited: M("Still reading after {waited}. Check that the two Dionysus instances are talking (System → Mirror Dionysus), "
                                         "then press Check Again.", waited=waited))
         elif got.get("error"):
             check("mirror_files", False, title, M("Not compared: {why}", why=got["error"]), level="warn")
@@ -806,7 +861,7 @@ class Migration:
             return {"pending": True}
         link = self.app.peerlinks.for_library(key)
         if link is None:
-            return {"error": str(M("the two Plex Caches aren’t talking"))}
+            return {"error": str(M("the two Dionysus instances aren’t talking"))}
         got = link.files(lib["key"])
         if not got.get("ready"):
             return {"pending": True}
@@ -868,7 +923,7 @@ class Migration:
         return None
 
     def mirror_view(self) -> dict:
-        """For the page: whether a mirror is watched, and how its Plex Cache is heard from — its light ("off": no mirror,
+        """For the page: whether a mirror is watched, and how its Dionysus is heard from — its light ("off": no mirror,
         only this server; "testing": just started, not asked yet; "ok": talking directly, over the link; "warn": only its
         marker, carried by the folder sync, or not heard from at all), what that means for the conversion; with a mirror, its name and page, and each candidate
         folder as it is there."""
@@ -905,12 +960,12 @@ class Migration:
             detail = how
         elif via == "marker":
             status, title = "warn", M("Mirror: {name}, through its marker only", name=name)
-            detail = M("The two Plex Caches aren’t talking directly ([System → Mirror Plex Cache](/system#peer)), so what {name} says comes "
+            detail = M("The two Dionysus instances aren’t talking directly ([System → Mirror Dionysus](/system#peer)), so what {name} says comes "
                        "through the folder sync, as old as it makes it: that it holds its file jobs can’t be confirmed, and the files "
                        "aren’t compared after the switch. {how}", name=name, how=how)
         else:
             status, title = "warn", M("Mirror: {name}, not heard from", name=name)
-            detail = M("Neither the link ([System → Mirror Plex Cache](/system#peer)) nor its marker in the shared folder says anything "
+            detail = M("Neither the link ([System → Mirror Dionysus](/system#peer)) nor its marker in the shared folder says anything "
                        "of {name} yet, so it can’t be checked: pair the two, or let the folder sync carry .plexcache. {how}", name=name, how=how)
         out = {"watched": True, "status": status, "title": title, "detail": detail, "name": name, "via": via,
                "url": url.rstrip("/") + "/dataset" if url else "", "folders": {}}
@@ -1157,35 +1212,23 @@ def sync_root(folder: str) -> str | None:
     return None
 
 
+def root_over(folder: str, rel: str) -> str:
+    """The Syncthing folder's root here, from where the library folder is within it (syncthing.covering's rel): the folder
+    itself when rel is empty."""
+    if not rel:
+        return folder
+    return folder[:-len(rel)].rstrip("/") if folder.endswith("/" + rel) else os.path.dirname(folder)
+
+
 def ignored(root: str, rel: str) -> bool:
-    """Whether the ignore patterns of the Syncthing folder at ``root`` (its .stignore) leave out ``rel`` (a path within it),
-    as Syncthing reads them: the first pattern that matches decides; "/a" anchored at the root, "a" at any level; *, ? and
-    ** wildcards; (?d) and (?i) prefixes; "!" lets a path back in; a folder left out leaves out what's in it. #include
-    lines aren't followed (their patterns don't count here)."""
+    """Whether the ignore patterns of the Syncthing folder at ``root`` (its .stignore on disk) leave out ``rel`` (a path within
+    it), as Syncthing reads them (syncthing.ignored_by)."""
     try:
         with open(os.path.join(root, SYNC_IGNORE), encoding="utf-8") as fh:
             lines = fh.read().splitlines()
     except (OSError, UnicodeDecodeError):
         return False
-    rel = rel.strip("/")
-    for line in lines:
-        pat = line.strip()
-        if not pat or pat.startswith("//") or pat.startswith("#"):
-            continue
-        neg = pat.startswith("!")
-        pat = pat[1:] if neg else pat
-        fold = False
-        while pat[:4] in ("(?d)", "(?i)"):
-            fold = fold or pat[:4] == "(?i)"
-            pat = pat[4:]
-        pat = pat.rstrip("/")
-        if not pat:
-            continue
-        body = re.escape(pat.lstrip("/")).replace(r"\*\*", "\0").replace(r"\*", "[^/]*").replace(r"\?", "[^/]").replace("\0", ".*")
-        rx = ("^" if pat.startswith("/") else "^(?:.*/)?") + body + "(?:/.*)?$"
-        if re.match(rx, rel, re.I if fold else 0):
-            return not neg
-    return False
+    return ignored_by(lines, rel)
 
 
 def their_folder(rows, name: str) -> dict | None:

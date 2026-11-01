@@ -19,7 +19,7 @@ from .i18n import CODES, M
 TOOL_NAMES = ("merge", "versions", "folders", "unlink", "convert", "sync")  # the tools (tools/), as the "tools" section keys them
 
 SECRET_MASK = "__unchanged__"
-SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"), ("mqtt", "password"))
+SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"), ("syncthing", "api_key"), ("mqtt", "password"))
 
 DEFAULTS: dict = {
     "plex": {"url": "", "token": ""},
@@ -42,10 +42,21 @@ DEFAULTS: dict = {
         "users": "home",         # whose: "me" | "home" (every user of the Plex Home)
     },
     "truenas": {"url": "", "api_key": "", "verify_tls": False},
-    # The other Plex Cache, at the mirror's site (peerlink.py: System → Mirror Plex Cache). "enabled": looked for (off: there's
+    # The folder sync on this server, read through its API (syncthing.py: System → Syncthing). "throttle": while people watch and
+    # the media pool's disks are busier than "throttle_busy" %, the devices the mirrored folders are shared with are held to
+    # "throttle_kbps" (Syncthing's per-device rate limits), until the disks are calmer than "throttle_calm" % or nobody plays.
+    # "folders": per library (its key) -> {"folder": the Syncthing folder id chosen by hand}, where the folder over a library
+    # isn't found by itself (syncthing.covering); "" or none: found by itself.
+    # "giveway": while a stream plays to a player Plex calls remote (off the LAN: it leaves over your internet connection), the
+    # devices Syncthing reaches over the internet are held to what's left of your upload ("giveway_up_mbps", 0: not known, a
+    # fixed "giveway_floor_kbps" then) less the streams' bandwidth, never under the floor; "giveway_both": receiving held too
+    # (an ISP that pools up and down).
+    "syncthing": {"url": "", "api_key": "", "throttle": True, "throttle_kbps": 2000, "throttle_busy": 70, "throttle_calm": 40, "folders": {},
+                  "giveway": True, "giveway_up_mbps": 0, "giveway_floor_kbps": 500, "giveway_both": False},
+    # The other Dionysus, at the mirror's site (peerlink.py: System → Mirror Dionysus). "enabled": looked for (off: there's
     # none there); "auto_pair": paired by itself when it's safe; "port": the port the other side reaches this one on (0: worked
-    # out); "remote_update": a paired Plex Cache that's newer may start this one's update (the one its own check finds);
-    # "servers": per mirrored server (its machine id) -> {"url": the Plex Cache's address at its site ("": found by itself)}.
+    # out); "remote_update": a paired Dionysus that's newer may start this one's update (the one its own check finds);
+    # "servers": per mirrored server (its machine id) -> {"url": the Dionysus's address at its site ("": found by itself)}.
     "peer": {"enabled": True, "auto_pair": True, "remote_update": True, "port": 0, "servers": {}},
     "general": {
         "poll_seconds": 5,
@@ -180,6 +191,11 @@ OLD_MODES = {"off": {"start": "off", "end": "none"}, "rest": {"end": "rest"}, "a
 # ranges the web UI offers; dropdowns accept only their own choices.
 LIMITS = {
     ("peer", "port"): (0, 65535),
+    ("syncthing", "throttle_kbps"): (100, 1000000),
+    ("syncthing", "throttle_busy"): (10, 100),
+    ("syncthing", "throttle_calm"): (0, 100),
+    ("syncthing", "giveway_up_mbps"): (0, 100000),
+    ("syncthing", "giveway_floor_kbps"): (50, 1000000),
     ("general", "hdd_mb_per_sec"): (10, 5000),
     ("general", "ram_reserve_gb"): (0, 4096),
     ("warmup", "weekday"): (0, 6),
@@ -259,20 +275,20 @@ def normalize_url(section: str, value: str) -> str:
 
     Plex: ``192.168.1.10`` -> ``http://192.168.1.10:32400`` (port added for http only).
     TrueNAS: ``192.168.1.10`` -> ``https://192.168.1.10`` (API keys need https).
-    The other Plex Cache (peer): ``192.168.1.20`` -> ``http://192.168.1.20:8642``.
+    The other Dionysus (peer): ``192.168.1.20`` -> ``http://192.168.1.20:8642``. Syncthing: ``192.168.1.10`` -> ``http://192.168.1.10:8384``.
     """
     value = value.strip().rstrip("/")
     if not value:
         return ""
     if not re.match(r"^https?://", value, re.I):
         value = ("https://" if section == "truenas" else "http://") + value
-    if section in ("plex", "plex2", "peer") and value.lower().startswith("http://"):
+    if section in ("plex", "plex2", "peer", "syncthing") and value.lower().startswith("http://"):
         # (an https:// address is usually a reverse proxy on 443, so leave it alone)
         scheme, rest = value.split("://", 1)
         hostport = rest.split("/", 1)[0]
         has_port = re.search(r":\d+$", hostport) and not hostport.endswith("]")
         if not has_port:
-            value = f"{scheme}://{hostport}:{8642 if section == 'peer' else PLEX_DEFAULT_PORT}" + (rest[len(hostport):] if "/" in rest else "")
+            value = f"{scheme}://{hostport}:{8642 if section == 'peer' else 8384 if section == 'syncthing' else PLEX_DEFAULT_PORT}" + (rest[len(hostport):] if "/" in rest else "")
     return value
 
 
@@ -348,10 +364,14 @@ def _coerce(section: str, key: str, value, current):
         return value
     if key == "url":
         return _url(section, value)
-    if (section, key) in (("plex", "token"), ("truenas", "api_key"), ("plex2", "account_token")):
+    if (section, key) in (("plex", "token"), ("truenas", "api_key"), ("syncthing", "api_key"), ("plex2", "account_token")):
         return _text(section, key, value, 255, spaces=False)
+    if (section, key) == ("syncthing", "folders"):  # per library: the Syncthing folder chosen for it by hand
+        if not isinstance(value, dict) or len(value) > MAX_ITEMS or any(not isinstance(v, dict) or not _LIB_KEY.fullmatch(str(k)) for k, v in value.items()):
+            raise SettingsError(M("{setting} must map each library to its Syncthing folder", setting="syncthing.folders"))
+        return {str(k): {"folder": _text(section, "folder", str(v.get("folder") or ""), 200, spaces=False)} for k, v in value.items() if v.get("folder")}
     if (section, key) in (("plex2", "servers"), ("peer", "servers")):
-        # the mirrored servers by machine id: as reached (name, url, token, relay: through Plex's relay only), or the Plex Cache's address at each one's site
+        # the mirrored servers by machine id: as reached (name, url, token, relay: through Plex's relay only), or the Dionysus's address at each one's site
         if not isinstance(value, dict) or len(value) > MAX_ITEMS or any(not isinstance(v, dict) or not _LIB_KEY.fullmatch(str(k)) for k, v in value.items()):
             raise SettingsError(M("{setting} must map each server’s id to its settings", setting=f"{section}.servers"))
         out = {}
@@ -596,6 +616,8 @@ class Settings:
             "PLEX_TOKEN": ("plex", "token"),
             "TRUENAS_URL": ("truenas", "url"),
             "TRUENAS_API_KEY": ("truenas", "api_key"),
+            "SYNCTHING_URL": ("syncthing", "url"),
+            "SYNCTHING_API_KEY": ("syncthing", "api_key"),
         }.items():
             if os.environ.get(env) and not self._data[sec][key]:
                 self._data[sec][key] = _coerce(sec, key, os.environ[env], "")
@@ -626,7 +648,7 @@ class Settings:
                         if isinstance(v, dict) and v.get("state") == "mirror" and not v.get("server"):
                             v["server"] = sid
                     pe = saved.get("peer") if isinstance(saved.get("peer"), dict) else None
-                    if pe is not None and pe.get("url"):  # (the other Plex Cache's address by hand: that server's)
+                    if pe is not None and pe.get("url"):  # (the other Dionysus's address by hand: that server's)
                         pe.setdefault("servers", {})[sid] = {"url": str(pe.pop("url"))}
             pe = saved.get("peer") if isinstance(saved, dict) and isinstance(saved.get("peer"), dict) else None
             if pe is not None:

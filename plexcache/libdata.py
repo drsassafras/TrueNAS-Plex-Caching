@@ -15,7 +15,7 @@ Four kinds of data, each with its own way of learning it changed:
   after the records and files, one request per item, and again when the library's stamp moves.
 * **The mirror** — with the library paired with one on its mirror (the Mirror page): both servers' items of
   the kind the two compare by (films; shows, seasons and episodes; artists, albums and tracks), each one's own page
-  where the two differ, and the other site's files on disk, through the Plex Cache there when it's talking. What Sync
+  where the two differ, and the other site's files on disk, through the Dionysus there when it's talking. What Sync
   Libraries brings in line, and Mirror Checks. Read again when the pairing changes, the records here were read since,
   the library there changed (its own change stamp), or it's old; nothing at all without a mirror.
 * **Layouts** — the inside of each file (filemap), read by the Inspector and cached by the file's stat:
@@ -100,7 +100,7 @@ class LibraryData:
     server's side (None: no mirror, or the library isn't paired) — {"library", "title", "locations": its library there,
     "here", "there": each server's items (MIRROR_KEYS), "pages_here", "pages_there": {key: the item's own page} for the
     items the two differ on, "disk": the other site's files [[place in the folder, size, mtime]] or None, "disk_why":
-    why not ("none": no Plex Cache known there; "link": the link to it not working; "reading": it hasn't read them yet;
+    why not ("none": no Dionysus known there; "link": the link to it not working; "reading": it hasn't read them yet;
     else what went wrong)}."""
 
     def __init__(self, key: str):
@@ -590,7 +590,7 @@ class Gatherer:
             # (tried: not again until the library there changes, or the age is up — or Scan Again)
             d.mirror_for, d.mirror_changed, d.mirror_at = pairing, str(getattr(there, "changed", "") or ""), time.time()
             return
-        # the other site's files, through the Plex Cache there
+        # the other site's files, through the Dionysus there
         disk, why = None, "none"
         links = getattr(app, "peerlinks", None)
         link = links.for_library(d.key) if links is not None else None

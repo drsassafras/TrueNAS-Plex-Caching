@@ -1,8 +1,9 @@
-name: TrueNAS API watch
+name: API watch
 
-# Every week: does the TrueNAS release in the making (the middleware's master branch) still declare every
-# API call Plex Cache makes? TrueNAS renames methods between releases (zfs.snapshot.* became pool.snapshot.*
-# in 25.04); this fails, and GitHub says so, before the release reaches anyone's NAS. dev/truenas_api.py.
+# Every week: do the TrueNAS and Syncthing releases in the making (the middleware's master branch, Syncthing's
+# main) still declare every API call Dionysus makes? TrueNAS renames methods between releases (zfs.snapshot.*
+# became pool.snapshot.* in 25.04); Syncthing moves REST paths. This fails, and GitHub says so, before the
+# release reaches anyone's NAS. dev/truenas_api.py, dev/syncthing_api.py.
 
 on:
   schedule:
@@ -21,3 +22,5 @@ jobs:
         with:
           python-version: "3.15"
       - run: python3 dev/truenas_api.py --ref master
+      - run: python3 dev/syncthing_api.py --ref main
+        if: always()

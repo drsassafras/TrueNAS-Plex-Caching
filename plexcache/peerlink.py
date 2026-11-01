@@ -1,9 +1,9 @@
-"""The links between Plex Caches: the one here and the one at each mirror's site (the System page's
-Mirror Plex Cache card, one block per mirrored server). Each finds the other, they pair, and from then
+"""The links between Dionysus instances: the one here and the one at each mirror's site (the System page's
+Mirror Dionysus card, one block per mirrored server). Each finds the other, they pair, and from then
 on they ask each other directly — what each side's folder sync carries, what files each has — instead
 of only leaving notes in the shared folders (peers.py).
 
-* **Finding it** — the other Plex Cache usually runs on the mirror's NAS: its Plex's addresses (the
+* **Finding it** — the other Dionysus usually runs on the mirror's NAS: its Plex's addresses (the
   one that answers from here, and the LAN ones plex.tv lists) on the port this one uses and on
   8642–8649, and whatever addresses and port the other side advertises in its marker. Each is asked
   for ``/peer/v1/hello`` (open: public facts only); the one whose own Plex is that mirror is it. An
@@ -69,16 +69,16 @@ log = logging.getLogger("plexcache")
 API = 1                   # the link's language: a side with another number isn't talked to
 # Every command of the link, each with its version. The handshake is what says which commands the other side has: its
 # hello and its status carry this table, and a side uses a command only when the other side's table has it at the same
-# version (PeerLink.can) — nothing is inferred from its Plex Cache version. A side whose table doesn't list a command
+# version (PeerLink.can) — nothing is inferred from its Dionysus version. A side whose table doesn't list a command
 # is told so on the Version light, and asked to update (remote update), never sent a request it doesn't know; one that
 # sends no table at all is taken to have none beyond the handshake. A command's version moves when its request or its
 # answer changes shape — API_SHAPES names each one's fields, tests/peer_api.json records them, and
 # test_the_link_api_is_versioned fails a change without a bump (dev/peer_api.py records a bump).
-COMMANDS = {"hello": 1, "pair": 1, "status": 1, "files": 1, "unpair": 1, "carry": 1, "update": 1}
+COMMANDS = {"hello": 2, "pair": 1, "status": 2, "files": 1, "unpair": 1, "carry": 1, "update": 1}
 API_SHAPES = {  # each command's request fields (its body, or its query) and its answer's, sorted
-    "hello": {"request": [], "answer": ["api", "app", "commands", "instance", "name", "plex", "public", "time", "version"]},
+    "hello": {"request": [], "answer": ["api", "app", "commands", "identity", "instance", "name", "plex", "public", "time", "version"]},
     "pair": {"request": ["addresses", "instance", "manual", "name", "plex", "port", "public", "window"], "answer": ["paired", "public", "why"]},
-    "status": {"request": [], "answer": ["api", "channel", "commands", "commit", "instance", "libraries", "migration", "name", "platform", "publishing", "time", "truenas_api", "version"],
+    "status": {"request": [], "answer": ["api", "channel", "commands", "commit", "identity", "instance", "libraries", "migration", "name", "platform", "publishing", "time", "truenas_api", "version"],
                "libraries": ["converting", "first", "folders", "holding", "published", "seen", "title"]},
     "files": {"request": ["library"], "answer": ["at", "files", "ready"]},
     "unpair": {"request": [], "answer": ["ok"]},
@@ -87,7 +87,7 @@ API_SHAPES = {  # each command's request fields (its body, or its query) and its
 }
 UPDATE_RETRY = 6 * 3600   # a side asked to update and still behind: asked again after this
 SETTLE = 180              # seconds after a start for which a link's first look is waited for before a page concludes anything from it (settling)
-PORT = 8642               # Plex Cache's own port, as compose.yaml publishes it
+PORT = 8642               # Dionysus's own port, as compose.yaml publishes it
 PORTS = range(PORT, PORT + 8)  # the ports looked on besides the advertised ones and our own: one picked by hand is usually near the default
 TICK_EVERY = 300          # seconds between looks at the other side (found, paired, talking)
 TICK_FAST = 30            # …while Pair Now's window is open here, or a conversion is under way on either side (the scheduler's pass)
@@ -136,9 +136,12 @@ def shared_key(private: int, other_public: str) -> bytes:
     return hashlib.sha256(b"plexcache-peer-v1|" + pow(y, private, P).to_bytes(256, "big")).digest()
 
 
-def fingerprint(a: str, b: str) -> str:
-    """What both sides show of a pairing (the same on each): three groups of four characters."""
-    h = hashlib.sha256("|".join(sorted((a.lower(), b.lower()))).encode()).hexdigest().upper()
+def fingerprint(public: str) -> str:
+    """A Dionysus's fingerprint, of its own public key (one per server, the same wherever it's shown: a side shows its own,
+    and the other side's for the other): three groups of four characters."""
+    if not public:
+        return ""
+    h = hashlib.sha256(public.lower().encode()).hexdigest().upper()
     return "-".join(h[i:i + 4] for i in (0, 4, 8))
 
 
@@ -190,7 +193,7 @@ def _local_host(host: str) -> bool:
 
 
 class PeerLinks:
-    """This side of every link: the key pair, what this Plex Cache says of itself (its hello, its advert, its status), the
+    """This side of every link: the key pair, what this Dionysus says of itself (its hello, its advert, its status), the
     requests that come in, and one PeerLink per mirrored server (link, for_library)."""
 
     def __init__(self, app):
@@ -254,7 +257,7 @@ class PeerLinks:
 
     # ------------------------------------------------------------ the links
     def link(self, server: str) -> "PeerLink":
-        """The link to the Plex Cache at the site of the mirrored server (its machine id), made as needed."""
+        """The link to the Dionysus at the site of the mirrored server (its machine id), made as needed."""
         with self.lock:
             lk = self.links.get(server)
             if lk is None:
@@ -266,7 +269,7 @@ class PeerLinks:
         return [self.link(sid) for sid in self.app.mirrors.used()]
 
     def for_library(self, key: str) -> "PeerLink | None":
-        """The link to the Plex Cache at the site of the library's mirror, or None (no mirror, or none looked for there)."""
+        """The link to the Dionysus at the site of the library's mirror, or None (no mirror, or none looked for there)."""
         sid = self.app.mirrors.server_of(str(key))
         if not sid:
             return None
@@ -277,7 +280,7 @@ class PeerLinks:
         return self.link(server) if server else None
 
     def wanted(self) -> bool:
-        """Whether a Plex Cache is looked for at some mirror's site."""
+        """Whether a Dionysus is looked for at some mirror's site."""
         return any(lk.wanted() for lk in self.used())
 
     def talking(self) -> bool:
@@ -369,7 +372,18 @@ class PeerLinks:
     def hello(self) -> dict:
         """The open answer: public facts only."""
         return {"app": "plexcache", "api": API, "commands": dict(COMMANDS), "instance": self.instance(), "name": getattr(self.app, "plex_name", "") or "",
-                "version": self.app.version, "plex": self.own_plex_id(), "public": self.public(), "time": time.time()}
+                "version": self.app.version, "plex": self.own_plex_id(), "public": self.public(), "time": time.time(), "identity": self.identity()}
+
+    def identity(self) -> dict:
+        """This server's identity, one for every place it's shown (the menu, the Mirror Dionysus card, the other side's card):
+        Syncthing's device ID when Syncthing is here (syncthing.identity: from its API, or read off its sync port), else this
+        app's own key's fingerprint. {"id", "short", "source" ("syncthing" | "certificate" | "own"), "name"}."""
+        sy = getattr(self.app, "syncthing", None)
+        got = sy.identity() if sy is not None else None
+        if got:
+            return dict(got, name=got.get("name") or getattr(self.app, "plex_name", "") or "")
+        fp = fingerprint(self.public())
+        return {"id": fp, "short": fp, "source": "own", "name": getattr(self.app, "plex_name", "") or ""}
 
     def local_status(self) -> dict:
         """Our side, for the other: version and clock, and per library the marker we publish and the ones we see."""
@@ -391,7 +405,7 @@ class PeerLinks:
                     seen[inst] = float(m.get("at") or 0)
             libs[key] = dict({"title": lib.get("title") or "", "published": published.get(key), "first": first.get(key), "seen": seen}, **own_library(self.app, key))
         return dict({"instance": self.instance(), "name": getattr(self.app, "plex_name", "") or "", "version": self.app.version, "api": API,
-                     "commands": dict(COMMANDS), "channel": CHANNEL, "commit": COMMIT[:7],
+                     "commands": dict(COMMANDS), "channel": CHANNEL, "commit": COMMIT[:7], "identity": self.identity(),
                      "time": time.time(), "publishing": bool(getattr(getattr(self.app, "optimizing", None), "client", None) and self.app.optimizing.client.configured),
                      "libraries": libs}, **own_facts(self.app))
 
@@ -421,7 +435,7 @@ class PeerLinks:
         inst = headers.get("X-Plexcache-Peer")
         link = next((lk for lk in list(self.links.values()) if lk.paired and lk.paired.get("instance") == inst), None)
         if link is None:
-            raise PeerError("not paired with this Plex Cache")
+            raise PeerError("not paired with this Dionysus")
         at, nonce, sig = headers.get("X-Plexcache-Time") or "", headers.get("X-Plexcache-Nonce") or "", headers.get("X-Plexcache-Signature") or ""
         try:
             age = abs(time.time() - int(at))
@@ -454,7 +468,7 @@ class PeerLinks:
             # the other side says which Plex it sits next to: the link to that mirror's site takes it
             sid = str(data.get("plex") or "")
             if not sid or sid not in self.app.mirrors.used():
-                got = {"paired": False, "why": "this side has no library mirrored by that server, or no Plex Cache there"}
+                got = {"paired": False, "why": "this side has no library mirrored by that server, or no Dionysus there"}
             else:
                 got = self.link(sid).handle_pair(data, client_host)
             self._note_ask(sid, data, got)
@@ -483,7 +497,7 @@ class PeerLinks:
                     link.declined.append(old["instance"])
             self.save()
             if old:
-                self.app.activity.event("sync", M("The Plex Cache on {name} unpaired from this one", name=old.get("name") or old.get("instance")))
+                self.app.activity.event("sync", M("The Dionysus on {name} unpaired from this one", name=old.get("name") or old.get("instance")))
             return 200, {"ok": True}
         return 404, {"error": "not found"}
 
@@ -550,12 +564,12 @@ class PeerLinks:
 
     def _snapshot(self) -> dict:
         return {"wanted": self.wanted(), "health": self.health(), "busy": self.busy, "public": self.public(),
-                "own": {"port": self.own_port(), "addresses": self.own_addresses()}, "asked": self.asks(),
+                "own": {"port": self.own_port(), "addresses": self.own_addresses(), "fingerprint": fingerprint(self.public()), "identity": self.identity(), "name": getattr(self.app, "plex_name", "") or ""}, "asked": self.asks(),
                 "links": {lk.server: lk.snapshot() for lk in self.used()}}
 
 
 class PeerLink:
-    """The link to the Plex Cache at one mirrored server's site: found, paired, talking (one per server: PeerLinks.link)."""
+    """The link to the Dionysus at one mirrored server's site: found, paired, talking (one per server: PeerLinks.link)."""
 
     def __init__(self, links: PeerLinks, server: str):
         self.links, self.app, self.server = links, links.app, server
@@ -591,7 +605,7 @@ class PeerLink:
         return self.links.settings()
 
     def url_setting(self) -> str:
-        """The other Plex Cache's address set by hand for this mirror, or ""."""
+        """The other Dionysus's address set by hand for this mirror, or ""."""
         return str(((self.settings().get("servers") or {}).get(self.server) or {}).get("url") or "")
 
     def instance(self) -> str:
@@ -605,16 +619,16 @@ class PeerLink:
         return self.server if self.server in self.app.mirrors.used() and self.app.mirrors.configured(self.server) else ""
 
     def wanted(self) -> bool:
-        """Whether a Plex Cache is looked for at this mirror's site: the mirror in use, and not said to have none."""
+        """Whether a Dionysus is looked for at this mirror's site: the mirror in use, and not said to have none."""
         return bool(self.settings().get("enabled", True)) and bool(self.mirror_id())
 
     def known(self) -> bool:
-        """Whether a Plex Cache is known to run at the mirror's site: one paired with, or found answering there — what a
+        """Whether a Dionysus is known to run at the mirror's site: one paired with, or found answering there — what a
         check that needs it is red for when it can't run (Mirror Checks), rather than merely not run."""
         return self.wanted() and bool(self.paired or self.found)
 
     def settling(self) -> bool:
-        """Whether what this link knows is still being worked out, just after a start: a Plex Cache is looked for at the
+        """Whether what this link knows is still being worked out, just after a start: a Dionysus is looked for at the
         mirror's site and the first look (tick) hasn't finished — for at most SETTLE seconds after the start. The pages say
         they're connecting meanwhile, rather than concluding from what isn't known yet."""
         return self.wanted() and not self.settled and time.time() - self.links.started < SETTLE
@@ -627,7 +641,7 @@ class PeerLink:
         """The mirror Plex's addresses: the one that answers from here first, then the ones plex.tv lists (local first)."""
         from .plex import direct_address
         sv = self.app.mirrors.servers().get(self.server) or {}
-        # (its plex.direct name as the address it stands for; Plex's relay is no place for a Plex Cache)
+        # (its plex.direct name as the address it stands for; Plex's relay is no place for a Dionysus)
         out = [direct_address(h) or h for h in [_host_of(sv.get("url") or "")] if h and not sv.get("relay")]
         at, listed = self._hosts
         if time.time() - at > 3600:
@@ -709,17 +723,17 @@ class PeerLink:
         return got
 
     def probe(self, url: str) -> dict | None:
-        """The hello at an address, when a Plex Cache answers there (not us)."""
+        """The hello at an address, when a Dionysus answers there (not us)."""
         try:
             got = self._get(url + "/peer/v1/hello")
-        except Exception:  # noqa: BLE001 — nothing there, or not a Plex Cache
+        except Exception:  # noqa: BLE001 — nothing there, or not a Dionysus
             return None
         if got.get("app") != "plexcache" or not valid_public(got.get("public")) or got.get("instance") == self.instance():
             return None
         return got
 
     def find(self) -> dict | None:
-        """The other Plex Cache: the first address whose Plex Cache sits next to the mirror's Plex."""
+        """The other Dionysus: the first address whose Dionysus sits next to the mirror's Plex."""
         mirror = self.mirror_id()
         tried, wrong = [], None
         for url in self.candidates():
@@ -728,7 +742,7 @@ class PeerLink:
             if h is None:
                 continue
             if h.get("plex") != mirror:
-                wrong = M("A Plex Cache answers at {url}, but its Plex isn’t {name}.", url=url, name=self.name())
+                wrong = M("A Dionysus answers at {url}, but its Plex isn’t {name}.", url=url, name=self.name())
                 continue
             with self.lock:
                 self.found, self.found_at, self.tried, self.find_error = {"url": url, "hello": h, "at": time.time()}, time.time(), tried, None
@@ -744,7 +758,7 @@ class PeerLink:
         return time.time() < self.window
 
     def pair_now(self) -> None:
-        """Pair Now (System → Mirror Plex Cache): the other side may pair with us for a while, even without the marker,
+        """Pair Now (System → Mirror Dionysus): the other side may pair with us for a while, even without the marker,
         and an instance unpaired by hand is paired with again."""
         with self.lock:
             self.window = time.time() + PAIR_WINDOW
@@ -767,18 +781,18 @@ class PeerLink:
             self.paired, self.status, self.last_ok, self.last_error = None, None, 0.0, None
         self.save()
         if old:
-            self.app.activity.event("sync", M("Unpaired from the Plex Cache on {name}", name=old.get("name") or old.get("instance")))
+            self.app.activity.event("sync", M("Unpaired from the Dionysus on {name}", name=old.get("name") or old.get("instance")))
         threading.Thread(target=self.app.publish_peers, name="peers", daemon=True).start()
 
     def _marker_public(self, instance: str) -> str:
         return ((self._markers().get(instance) or {}).get("peer") or {}).get("public") or ""
 
     def may_pair(self, hello: dict, url: str) -> M | None:
-        """Why we wouldn't pair with the Plex Cache whose hello this is, answering at ``url``, or None. By itself only when
+        """Why we wouldn't pair with the Dionysus whose hello this is, answering at ``url``, or None. By itself only when
         its marker in our folders carries the same key, and it answers at an address of the mirror's Plex (as plex.tv
         lists it to our sign-in) or the one set by hand: a hello's own word on which Plex it sits next to proves nothing."""
         if not self.wanted():
-            return M("No library is mirrored by {name} here ([Mirror page](/mirrors)), or this side is set to have no Plex Cache at the mirrors’ sites.", name=self.name())
+            return M("No library is mirrored by {name} here ([Mirror page](/mirrors)), or this side is set to have no Dionysus at the mirrors’ sites.", name=self.name())
         if hello.get("plex") != self.mirror_id():
             return M("Its Plex isn’t {name}.", name=self.name())
         if self.window_open():
@@ -805,7 +819,7 @@ class PeerLink:
             self.pair_error = None
         self.save()
         if not same:
-            self.app.activity.event("sync", M("Paired with the Plex Cache on {name} ({url})", name=hello.get("name") or hello["instance"], url=url))
+            self.app.activity.event("sync", M("Paired with the Dionysus on {name} ({url})", name=hello.get("name") or hello["instance"], url=url))
 
     def try_pair(self) -> bool:
         """Pairing with what find() found, when may_pair allows: it's asked to pair, and checks us the same way."""
@@ -858,7 +872,7 @@ class PeerLink:
         if not valid_public(pub) or not inst:
             return {"paired": False, "why": "bad request"}
         if not self.wanted():  # (nothing looked for here: nothing fetched back either)
-            return {"paired": False, "why": "this side has no library mirrored by that server, or no Plex Cache there"}
+            return {"paired": False, "why": "this side has no library mirrored by that server, or no Dionysus there"}
         ports = [p for p in [body.get("port")] if isinstance(p, int) and 0 < p < 65536] + [PORT]
         hosts = [client_host] + [h for h in body.get("addresses") or [] if isinstance(h, str)]
         # where we'd look for it ourselves first (the address set by hand, the one found), then where it says it is
@@ -917,11 +931,28 @@ class PeerLink:
         return got
 
     # ------------------------------------------------------------ what the other side tells us
+    def other_identity(self) -> dict | None:
+        """The other side as it names itself: its status's identity while talking, else its hello's (an older Dionysus sends
+        none: None, and its key's fingerprint stands in)."""
+        st = self.status if self.talking() else None
+        got = (st or {}).get("identity") or ((self.found or {}).get("hello") or {}).get("identity")
+        if isinstance(got, dict) and got.get("id"):
+            return dict(got)
+        sy = getattr(self.app, "syncthing", None)  # (an older Dionysus there: the Syncthing device connected from the mirror's address)
+        if sy is None or not sy.talking():
+            return None
+        hosts = [_host_of(self.url_setting()), _host_of((self.found or {}).get("url") or "")]
+        try:
+            hosts += self._mirror_hosts()
+        except Exception:  # noqa: BLE001
+            pass
+        return sy.device_at(hosts)
+
     def facts(self) -> dict | None:
-        """What the Plex Cache at the mirror's site says of itself, for converting a folder to a child dataset (migrating.py)
+        """What the Dionysus at the mirror's site says of itself, for converting a folder to a child dataset (migrating.py)
         and holding the file jobs while it converts one (mirrorhealth.converting): over the link while talking (fresh),
         else from its marker in our shared folders (as old as the folder sync makes it); None when neither is there.
-        {"via": "link" | "marker", "at", "name", "platform" (None: an older Plex Cache that doesn't say), "truenas_api",
+        {"via": "link" | "marker", "at", "name", "platform" (None: an older Dionysus that doesn't say), "truenas_api",
         "migration", "libraries": {our library key: {"key": its own, "folders", "converting", "holding"}}} — kept a few
         seconds (asked for every library, every few seconds)."""
         cached = getattr(self, "_facts", None)
@@ -1081,9 +1112,9 @@ class PeerLink:
             self.update_said = (time.time(), bool(got.get("started")), str(got.get("why") or ""))
         name = (self.paired or {}).get("name") or self.name()
         if got.get("started"):
-            self.app.activity.event("update", M("The Plex Cache on {name} ({theirs}) was asked to update to {ours}, and is", name=name, theirs=theirs[0], ours=ours[0]))
+            self.app.activity.event("update", M("The Dionysus on {name} ({theirs}) was asked to update to {ours}, and is", name=name, theirs=theirs[0], ours=ours[0]))
         else:
-            self.app.activity.event("update", M("The Plex Cache on {name} ({theirs}) was asked to update to {ours}, and couldn’t: {why}", name=name, theirs=theirs[0], ours=ours[0], why=got.get("why") or "?"))
+            self.app.activity.event("update", M("The Dionysus on {name} ({theirs}) was asked to update to {ours}, and couldn’t: {why}", name=name, theirs=theirs[0], ours=ours[0], why=got.get("why") or "?"))
 
     def handle_update(self, data: dict) -> dict:
         """The other side, newer, asks this one to update (POST /peer/v1/update): the update this side's own checker finds on
@@ -1091,7 +1122,7 @@ class PeerLink:
         Off with peer.remote_update. {"started", "why", "version": this side's}."""
         answer = lambda why: {"started": False, "why": str(why), "version": self.app.version}  # noqa: E731
         if not self.settings().get("remote_update", True):
-            return answer("updates from the other Plex Cache are off here")
+            return answer("updates from the other Dionysus are off here")
         if str(data.get("channel") or "") != CHANNEL:
             return answer(f"channels differ ({CHANNEL} here)")
         up = getattr(self.app, "updates", None)
@@ -1105,7 +1136,7 @@ class PeerLink:
             self.app.update_now()
         except ValueError as e:
             return answer(e)
-        self.app.activity.event("update", M("The Plex Cache on {name} asked this one to update: TrueNAS is pulling the newer image", name=(self.paired or {}).get("name") or self.name()))
+        self.app.activity.event("update", M("The Dionysus on {name} asked this one to update: TrueNAS is pulling the newer image", name=(self.paired or {}).get("name") or self.name()))
         return {"started": True, "why": "", "version": self.app.version}
 
     # ------------------------------------------------------------ carrying .plexcache
@@ -1233,30 +1264,30 @@ class PeerLink:
             return {"found": off(M("No mirror"), why), "paired": off(M("Not paired")), "talking": off(M("Not talking")),
                     "folders": off(M("Folder sync")), "version": off(M("Version and clock"))}
         if not self.settings().get("enabled", True):
-            why = M("Set to have no Plex Cache at the mirrors’ sites.")
-            return {"found": off(M("No Plex Cache at {name}’s site", name=name), why), "paired": off(M("Not paired")), "talking": off(M("Not talking")),
+            why = M("Set to have no Dionysus at the mirrors’ sites.")
+            return {"found": off(M("No Dionysus at {name}’s site", name=name), why), "paired": off(M("Not paired")), "talking": off(M("Not talking")),
                     "folders": off(M("Folder sync")), "version": off(M("Version and clock"))}
         out = {}
         f, p = self.found, self.paired
         if p and (self.talking() or not f):
-            out["found"] = {"status": "ok", "text": M("Plex Cache found on {name}", name=p.get("name") or p.get("instance")), "detail": p.get("url") or ""}
+            out["found"] = {"status": "ok", "text": M("Dionysus found on {name}", name=p.get("name") or p.get("instance")), "detail": p.get("url") or ""}
         elif f:
-            out["found"] = {"status": "ok", "text": M("Plex Cache found on {name}", name=f["hello"].get("name") or f["hello"].get("instance")),
+            out["found"] = {"status": "ok", "text": M("Dionysus found on {name}", name=f["hello"].get("name") or f["hello"].get("instance")),
                             "detail": M("{url} · version {version}", url=f["url"], version=f["hello"].get("version") or "?")}
         elif not self.ticked:
-            out["found"] = {"status": "testing", "text": M("Looking for the Plex Cache at {name}’s site…", name=name), "detail": ""}
+            out["found"] = {"status": "testing", "text": M("Looking for the Dionysus at {name}’s site…", name=name), "detail": ""}
         else:
-            out["found"] = {"status": "warn", "text": M("No Plex Cache found at {name}’s site", name=name),
-                            "detail": M("{why} Tried: {tried}. Runs on another port, or at another address? Enter host:port below — or press Pair Now on that Plex Cache first: its request tells this side where it is.",
+            out["found"] = {"status": "warn", "text": M("No Dionysus found at {name}’s site", name=name),
+                            "detail": M("{why} Tried: {tried}. Runs on another port, or at another address? Enter host:port below — or press Pair Now on that Dionysus first: its request tells this side where it is.",
                                         why=self.find_error or "", tried=self.tried_summary() or "—")}
         if p:
             out["paired"] = {"status": "ok", "text": M("Paired with {name}", name=p.get("name") or p.get("instance")),
                              "detail": M("Since {when}, {how}.", how=M("paired by itself through the synced folder") if p.get("how") == "auto" else M("paired manually"),
                                          when=time.strftime("%Y-%m-%d %H:%M", time.localtime(p.get("at") or 0)))}
         elif f:
-            out["paired"] = {"status": "warn", "text": M("Plex Cache found, but not paired"), "detail": self.pair_error or M("Pairing is tried every few minutes.")}
+            out["paired"] = {"status": "warn", "text": M("Dionysus found, but not paired"), "detail": self.pair_error or M("Pairing is tried every few minutes.")}
         else:
-            out["paired"] = off(M("Not paired"), M("Waiting for the other Plex Cache to be found."))
+            out["paired"] = off(M("Not paired"), M("Waiting for the other Dionysus to be found."))
         if not p:
             out["talking"] = off(M("Not talking"), M("Waiting for the pairing."))
         elif self.talking():
@@ -1294,7 +1325,7 @@ class PeerLink:
             if any(r.get("link") for r in rows.values()):
                 return {"status": "ok", "text": M("The link carries .plexcache"),
                         "detail": M("Markers and claims reach the other side over the link, at once: the folder sync needn’t carry them.") + (f" {behind}" if behind else "")}
-            cant = "" if self.can("carry") else " " + M("The link can’t carry .plexcache: Plex Cache there ({version}) is older.", version=(self.status or {}).get("version") or "?")
+            cant = "" if self.can("carry") else " " + M("The link can’t carry .plexcache: Dionysus there ({version}) is older.", version=(self.status or {}).get("version") or "?")
             if behind:
                 return {"status": "ok", "text": M("The link is up; the folder sync is behind"), "detail": f"{behind}{cant}"}
             return {"status": "ok", "text": M("Folder sync carries .plexcache"), "detail": M("Both ways, up to {minutes} minutes behind.", minutes=int(lag // 60)) + cant}
@@ -1311,7 +1342,7 @@ class PeerLink:
         if int(st.get("api") or 0) != API:
             problems.append(M("the link’s version differs ({theirs} there, {ours} here)", theirs=st.get("api"), ours=API))
         if str(st.get("version") or "") != str(self.app.version):
-            problems.append(M("Plex Cache {theirs} there, {ours} here", theirs=st.get("version") or "?", ours=self.app.version))
+            problems.append(M("Dionysus {theirs} there, {ours} here", theirs=st.get("version") or "?", ours=self.app.version))
         theirs = self.commands_there()
         lacks = [c for c in COMMANDS if c not in theirs]
         differ = [c for c in COMMANDS if c in theirs and theirs[c] != COMMANDS[c]]
@@ -1329,7 +1360,7 @@ class PeerLink:
         if problems:
             return {"status": "warn", "text": M("Versions, link commands or clocks differ"), "detail": "; ".join(str(p) for p in problems) + "." + asked}
         return {"status": "ok", "text": M("Same version and link commands, clocks agree"),
-                "detail": M("Plex Cache {version} on both sides, every link command at the same version, clocks within {n} seconds.", version=self.app.version, n=max(1, int(abs(self.skew)))) + asked}
+                "detail": M("Dionysus {version} on both sides, every link command at the same version, clocks within {n} seconds.", version=self.app.version, n=max(1, int(abs(self.skew)))) + asked}
 
     def health(self) -> str:
         """The link's worst light: "ok", "warn", "fail" or "off" (nothing looked for). What Mirror Checks warn on."""
@@ -1343,8 +1374,12 @@ class PeerLink:
     def snapshot(self) -> dict:
         with self.lock:
             paired = dict(self.paired) if self.paired else None
+            theirs = str((paired or ((self.found or {}).get("hello") or {})).get("public") or "")  # (the other side's key: paired with, or what answered)
+            st = self.status if self.talking() else None
         return {"server": self.server, "name": self.name(), "wanted": self.wanted(), "lights": self.lights(), "health": self.health(), "paired": paired,
-                "fingerprint": fingerprint(self.public(), paired["public"]) if paired else "", "window": max(0, int(self.window - time.time())),
+                "fingerprint": fingerprint(theirs), "identity": self.other_identity() or ({"id": fingerprint(theirs), "short": fingerprint(theirs), "source": "own", "name": self.name()} if theirs else None),
+                "window": max(0, int(self.window - time.time())),
+                "version_there": str(st.get("version") or "") if st else "",
                 "url": self.url_setting(), "detected": (self.found or {}).get("url") or ""}
 
 

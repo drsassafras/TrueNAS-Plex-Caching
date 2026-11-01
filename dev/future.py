@@ -302,6 +302,20 @@ class Line:
         print(f"    {colour}{'✔' if ok else '✘'}{OFF if self.tty else ''} {text} ({elapsed // 60}:{elapsed % 60:02d})", flush=True)
 
 
+# A build step that couldn't fetch what it needed (a download refused, DNS, a tag not published yet): not a failure of the
+# code, so the run says "not run, try again" (exit 3: tnsync shows it grey) rather than red
+FETCH_FAILED = re.compile(r"curl: \(\d+\)|TLS connect error|Connection reset by peer|Could not resolve host|failed to fetch|manifest unknown|manifest for .* not found|"
+                          r"TLS handshake timeout|unexpected EOF|i/o timeout|Temporary failure in name resolution|Hash Sum mismatch|Failed to fetch", re.I)
+
+
+class FetchFailed(Exception):
+    pass
+
+
+def fetch_failed(lines: list[str]) -> bool:
+    return any(FETCH_FAILED.search(x) for x in lines)
+
+
 def build_image(tag: str, args: list[str], verbose: bool) -> bool:
     """The project's image built on python:<tag> with the build arguments: with -v as docker prints it; otherwise one line
     that moves, the full output kept in LOG and its tail shown when the build fails."""
@@ -343,6 +357,8 @@ def build_image(tag: str, args: list[str], verbose: bool) -> bool:
         tail = fh.read().splitlines()[-40:]
     print("\n".join("    " + x for x in tail))
     print(f"    (the whole build log: {LOG})")
+    if fetch_failed(tail):
+        raise FetchFailed(next(x.strip() for x in tail if FETCH_FAILED.search(x)))
     return False
 
 
@@ -366,7 +382,12 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
         tag = tag or next(p.value.split(":", 1)[1] for p in picks if p.name == "Python")
         print("The future stack — each dependency's newest pre-release, else its stable release — inside the project's image, every warning an error:")
         print(table(picks))
-    if not build_image(tag, args, verbose):
+    try:
+        built = build_image(tag, args, verbose)
+    except FetchFailed as e:
+        print(f"\nNot run: a download the build needs failed ({e}). Nothing is known about python:{tag} from this — run it again.")
+        return 3
+    if not built:
         print(f"\nThe image doesn't build on python:{tag} (no such tag yet, or the build fails there).")
         return 1
     run = lambda *args: subprocess.run(["docker", "run", "--rm", "-v", f"{ROOT}:/src:ro", "-w", "/src", "--entrypoint", "python", IMAGE, *args],
@@ -399,6 +420,103 @@ def future_tag(python: str) -> str:
     return re.sub(r"^\d+\.\d+", f"{python}-rc", m.group(1)) if m else f"{python}-rc-slim-trixie"
 
 
+SYNCTHING_RELEASES = "https://api.github.com/repos/syncthing/syncthing/releases?per_page=12"
+
+
+def free_port() -> int:
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def syncthing_route(verbose: bool) -> int:
+    """Syncthing's newest pre-release (else its newest release) downloaded from GitHub, started with a home of its own on free
+    ports — no discovery, no relays, no default folder — and the live tests (tests LiveSyncthingTests) run against it: every
+    call the app makes, tried on the Syncthing that's coming. 0 all answered; 1 the tests failed; 3 the download failed (run
+    it again)."""
+    import json
+    import platform
+    import tarfile
+    import urllib.request
+    import xml.etree.ElementTree as ET
+    import zipfile
+    system = "macos" if sys.platform == "darwin" else "linux"
+    arch = {"x86_64": "amd64", "AMD64": "amd64", "arm64": "arm64", "aarch64": "arm64"}.get(platform.machine(), platform.machine())
+    try:
+        with urllib.request.urlopen(SYNCTHING_RELEASES, timeout=30) as r:
+            rels = json.load(r)
+        rel = next((x for x in rels if x.get("prerelease") and not x.get("draft")), None) or next(x for x in rels if not x.get("draft"))
+        asset = next(a for a in rel["assets"] if a["name"].startswith(f"syncthing-{system}-{arch}-") and a["name"].endswith((".tar.gz", ".zip")))
+        print(f"Syncthing {rel['tag_name']} ({'pre-release' if rel.get('prerelease') else 'release'}): {asset['name']}")
+        d = tempfile.mkdtemp(prefix="syncthing-future-")  # (a download: a folder of its own, nothing else in it)
+        archive = os.path.join(d, asset["name"])
+        with urllib.request.urlopen(asset["browser_download_url"], timeout=120) as r, open(archive, "wb") as fh:
+            shutil.copyfileobj(r, fh)
+        if archive.endswith(".zip"):
+            with zipfile.ZipFile(archive) as z:
+                z.extractall(d)
+        else:
+            with tarfile.open(archive) as t:
+                t.extractall(d, filter="data")
+    except Exception as e:  # noqa: BLE001 — GitHub, the network: not the code's doing
+        print(f"\nNot run: Syncthing couldn't be downloaded ({e}). Run it again.")
+        return 3
+    binary = next((os.path.join(dp, f) for dp, _ds, fs in os.walk(d) for f in fs if f in ("syncthing", "syncthing.exe")), None)
+    if not binary:
+        print("\nNot run: the archive holds no syncthing binary.")
+        return 3
+    os.chmod(binary, 0o755)
+    home = tempfile.mkdtemp(prefix="syncthing-home-")
+    subprocess.run([binary, "generate", "--home", home, "--no-default-folder", "--skip-port-probing"], check=True, stdout=None if verbose else subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    cfg = os.path.join(home, "config.xml")
+    tree = ET.parse(cfg)
+    root = tree.getroot()
+    gui_port, sync_port = free_port(), free_port()
+    gui = root.find("gui")
+    assert gui is not None
+    gui.find("address").text = f"127.0.0.1:{gui_port}"  # type: ignore[union-attr]
+    api_key = gui.find("apikey").text  # type: ignore[union-attr]
+    opts = root.find("options")
+    assert opts is not None
+    for la in opts.findall("listenAddress"):
+        opts.remove(la)
+    ET.SubElement(opts, "listenAddress").text = f"tcp://127.0.0.1:{sync_port}"
+    for tag, val in (("globalAnnounceEnabled", "false"), ("localAnnounceEnabled", "false"), ("relaysEnabled", "false"), ("natEnabled", "false"), ("urAccepted", "-1"), ("startBrowser", "false"), ("crashReportingEnabled", "false")):
+        el = opts.find(tag)
+        if el is None:
+            el = ET.SubElement(opts, tag)
+        el.text = val
+    tree.write(cfg)
+    proc = subprocess.Popen([binary, "serve", "--home", home, "--no-browser", "--no-restart", "--skip-port-probing"], stdout=None if verbose else subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    url = f"http://127.0.0.1:{gui_port}"
+    try:
+        deadline = time.time() + 60
+        up = False
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(url + "/rest/noauth/health", timeout=2) as r:
+                    up = json.load(r).get("status") == "OK"
+                    if up:
+                        break
+            except Exception:  # noqa: BLE001
+                time.sleep(1)
+        if not up:
+            print("\nNot run: Syncthing didn't come up on its port.")
+            return 3
+        print(f"Syncthing up at {url}; the live tests against it:")
+        env = dict(os.environ, SYNCTHING_LIVE_URL=url, SYNCTHING_LIVE_KEY=api_key or "", SYNCTHING_LIVE_SYNC_PORT=str(sync_port), CI="1")
+        got = subprocess.run([sys.executable, *WARN, "-m", "unittest", "-v" if verbose else "-q", "tests.test_plexcache.LiveSyncthingTests"], cwd=ROOT, env=env)
+        print(f"\nSyncthing {rel['tag_name']}: " + ("every call the app makes is answered." if got.returncode == 0 else "the live tests fail — its API moved; see plexcache/syncthing.py CALLS."))
+        return 1 if got.returncode else 0
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     major, minor = image_python()
@@ -407,9 +525,12 @@ def main() -> int:
     ap.add_argument("--stable", action="store_true", help="the next Python only: the tools at the Dockerfile's pins, node from Debian")
     ap.add_argument("--fresh", action="store_true", help="ask upstream again for the channels rather than using the day's answers")
     ap.add_argument("--local", action="store_true", help="run on an interpreter of this machine instead of inside the image")
+    ap.add_argument("--syncthing", action="store_true", help="instead: download Syncthing's newest pre-release, start it, and run the live tests against it")
     ap.add_argument("-v", "--verbose", action="store_true", help="the build's and the tools' full output (quiet otherwise: one progress line, the log kept)")
     ap.add_argument("tests", nargs="*", default=["tests.test_plexcache"], help="what to run (default: the whole suite)")
     args = ap.parse_args()
+    if args.syncthing:
+        return syncthing_route(args.verbose)
     if not args.local:
         return image_route(args.python, args.tag, args.tests, args.verbose, args.stable, args.fresh)
     cmd = find_python(args.python)

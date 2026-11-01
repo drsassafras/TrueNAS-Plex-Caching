@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from . import __version__
 from .i18n import M
 
-PRODUCT = "Plex Cache"
+PRODUCT = "Dionysus"
 PAGE_SIZE = 500
 
 # Plex library type -> our media kind
@@ -23,7 +23,19 @@ LEAF_TYPE = {"movie": 1, "show": 4, "artist": 10}
 
 
 class PlexError(Exception):
-    pass
+    """``code``: the HTTP status when Plex answered with one (0 otherwise)."""
+
+    def __init__(self, why, code: int = 0):
+        super().__init__(why)
+        self.code = code
+
+
+# Every read the app makes of Plex, by what it's for (as truenas.METHODS, syncthing.CALLS): Plex publishes no list of its API,
+# so each is tried when Plex is connected (PlexClient.verify_api: the API compatibility light). The changes the tools make
+# (match, unmatch, split, merge, refresh, emptyTrash, edits) go to the same /library paths and aren't tried: they'd change things.
+CALLS = {"the server itself": "/", "the server's identity": "/identity", "the libraries": "/library/sections", "what's playing": "/status/sessions",
+         "a library's items": "/library/sections/{section_key}/all", "a library's collections": "/library/sections/{section_key}/collections",
+         "an item": "/library/metadata/{rating_key}", "a show's episodes": "/library/metadata/{show_rating_key}/allLeaves", "the server's preferences": "/:/prefs"}
 
 
 @dataclass
@@ -237,8 +249,8 @@ class PlexClient:
         except urllib.error.HTTPError as e:
             e.close()  # it holds the connection open
             if e.code == 401:
-                raise PlexError(M("Plex rejected the token (401 Unauthorized)")) from None
-            raise PlexError(M("Plex returned HTTP {code} for {path}", code=str(e.code), path=path)) from None
+                raise PlexError(M("Plex rejected the token (401 Unauthorized)"), 401) from None
+            raise PlexError(M("Plex returned HTTP {code} for {path}", code=str(e.code), path=path), e.code) from None
         except urllib.error.URLError as e:
             raise PlexError(M("Can’t reach Plex at {url}: {why}", url=self.url, why=str(e.reason))) from None
         except (TimeoutError, OSError) as e:
@@ -259,6 +271,16 @@ class PlexClient:
         folded records' own metadata is gone, though; they're matched afresh."""
         self._changing("split", [rating_key])
         self._request(f"/library/metadata/{rating_key}/split", method="PUT")
+
+    def prefs(self) -> dict[str, str]:
+        """The server's preferences (/:/prefs): {id: value}. LanNetworksBandwidth is Settings → Network → LAN Networks, what Plex
+        calls local when it marks a player local or remote."""
+        root = ET.fromstring(self._request("/:/prefs"))
+        return {str(st.get("id")): str(st.get("value") or "") for st in root.findall("Setting") if st.get("id")}
+
+    def set_pref(self, pref: str, value: str) -> None:
+        """One preference set (PUT /:/prefs?id=value), as the Settings pages do."""
+        self._request("/:/prefs", {pref: value}, method="PUT")
 
     def merge(self, keep: str, others: list[str]) -> None:
         """Several items made one (Plex's own "Merge"): ``others`` become versions of ``keep``, whose
@@ -373,6 +395,48 @@ class PlexClient:
         if not root.get("machineIdentifier"):
             raise PlexError(M("Something answered at {url}, but it isn’t Plex", url=self.url))
         return {"version": root.get("version", ""), "machine_id": root.get("machineIdentifier", ""), "ms": ms}
+
+    def verify_api(self) -> dict:
+        """Every read of CALLS tried against this Plex: {what: True answered, False not there (404), None not tried — a path
+        that needs a library, an item or a show where there is none}. An error other than 404 is left as None: not this light's."""
+        out: dict = {}
+        libs: list[Library] | None = None
+        keys: dict[str, str | None] = {}
+
+        def first(kind: str, type_code: int) -> str | None:
+            """The rating key of the first item of the first library of ``kind`` (its type), listed a page of one."""
+            for lib in libs or []:
+                if lib.type != kind:
+                    continue
+                root = ET.fromstring(self._request(f"/library/sections/{lib.key}/all", {"type": type_code}, headers={"X-Plex-Container-Size": "1", "X-Plex-Container-Start": "0"}))
+                for d in root:
+                    if d.get("ratingKey"):
+                        return d.get("ratingKey")
+            return None
+        for what, path in CALLS.items():
+            try:
+                if "{" in path:
+                    if libs is None:
+                        libs = self.libraries()
+                    if "{section_key}" in path:
+                        if not libs:
+                            out[what] = None
+                            continue
+                        path = path.replace("{section_key}", str(libs[0].key))
+                    else:
+                        want = "show_rating_key" if "{show_rating_key}" in path else "rating_key"
+                        if want not in keys:
+                            keys[want] = first("show", 2) if want == "show_rating_key" else next((k for lib in libs for k in [first(lib.type, LEAF_TYPE.get(lib.type, 1))] if k), None)
+                        if not keys[want]:
+                            out[what] = None
+                            continue
+                        path = path.replace("{" + want + "}", str(keys[want]))
+                self._request(path, {"type": LEAF_TYPE.get(libs[0].type, 1)} if libs and path.endswith("/all") else None,
+                              headers={"X-Plex-Container-Size": "1", "X-Plex-Container-Start": "0"} if path.endswith(("/all", "/allLeaves")) else None)
+                out[what] = True
+            except PlexError as e:
+                out[what] = False if e.code == 404 else None
+        return out
 
     def ping(self) -> dict:
         start = time.monotonic()

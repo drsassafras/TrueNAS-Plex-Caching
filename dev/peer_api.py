@@ -1,4 +1,4 @@
-"""The link's API as recorded: tests/peer_api.json holds every command of the link between two Plex Caches
+"""The link's API as recorded: tests/peer_api.json holds every command of the link between two Dionysus instances
 (plexcache/peerlink.py: COMMANDS, API_SHAPES) with its version and the fields of its request and its answer.
 test_the_link_api_is_versioned compares the code with the record, so a command whose shape changes needs its
 version raised — and then this run, to record the new shape:

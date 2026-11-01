@@ -1,4 +1,4 @@
-# Plex Cache for TrueNAS — paste into Apps → Discover Apps → ⋮ → Install via YAML.
+# Dionysus Media Server Manager — paste into Apps → Discover Apps → ⋮ → Install via YAML.
 # Name the app with lowercase letters and hyphens, e.g. plex-cache.
 #
 # Before installing:

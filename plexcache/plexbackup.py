@@ -1,4 +1,4 @@
-"""Before Plex Cache changes Plex's own records — a merge, an edit, a match, a poster chosen, here or on the mirrored
+"""Before Dionysus changes Plex's own records — a merge, an edit, a match, a poster chosen, here or on the mirrored
 server — a backup of each record it's about to change, as Plex has it then: its fields and which are locked, its tags
 (genres, collections, labels…), its match, its edition, the poster and background chosen, and its files. Revert puts the
 records back from it: a merge split apart again, and each record it folded given its own metadata back.

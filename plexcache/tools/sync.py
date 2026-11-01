@@ -6,7 +6,7 @@ and backgrounds chosen by hand, collections and labels, the edition. Watched sta
 carries them (the Mirror page).
 
 What it reads is the data layer's (libdata.py: the mirror's side — both servers' items, each one's own page where the two
-differ, and the other site's files through the Plex Cache there), compared by sync.compare_library: items matched across
+differ, and the other site's files through the Dionysus there), compared by sync.compare_library: items matched across
 the two by their files' place in the library folder. So a row is only what this can bring in line. What it can't — several
 items on the winning side that are one on the other (a split needs matching each part again), files shared out another way
 on both sides (regroup()), a file that isn't on disk on the other side — is Mirror Checks' (mirrorhealth.py), with the
@@ -43,7 +43,7 @@ class SyncLibraries(Tool):
          "choices": [("this", M("This server")), ("mirror", M("The mirror"))],
          "help": M("The side the other is brought in line with: its matches, versions, edits, posters and collections. This server: the mirror is changed to match it. The mirror: this server is.")},
         {"id": "scan", "name": M("Files the other side doesn’t list"), "kinds": KINDS, "default": True,
-         "help": M("A file on the winning side that Plex on the other side doesn’t list, though it’s on disk there (or can’t be told: no Plex Cache at that site): its folder scanned there. A file that isn’t on disk there is Mirror Checks’.")},
+         "help": M("A file on the winning side that Plex on the other side doesn’t list, though it’s on disk there (or can’t be told: no Dionysus at that site): its folder scanned there. A file that isn’t on disk there is Mirror Checks’.")},
         {"id": "grouping", "name": M("Versions grouped differently"), "kinds": KINDS, "default": True,
          "help": M("Files that are one item’s versions on the winning side and several items on the other: merged into one item there (Plex’s own Merge). The other way round — one item there that would need splitting — is Mirror Checks’.")},
         {"id": "matches", "name": M("Matches"), "kinds": KINDS, "default": True,
@@ -102,7 +102,7 @@ class SyncLibraries(Tool):
         src, dst = (a, b) if source == "this" else (b, a)
         got = compare_library(src, dst, {}, libhealth.enabled(self.app.settings.get()), limit=None)
         # the other side's disk, by each file's place in the library folder: where a scan there can find a file (None: can't
-        # be told — no Plex Cache there, or it isn't talking)
+        # be told — no Dionysus there, or it isn't talking)
         if source == "this":
             disk = None if m.get("disk") is None else {_norm(r[0]) for r in m["disk"]}
             on_disk_there = {}

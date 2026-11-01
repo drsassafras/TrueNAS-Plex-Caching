@@ -98,6 +98,9 @@ tn = fakes.FakeTrueNAS(workdir=tmp, pool={"name": "tank", "status": "ONLINE",
 tn.per_dataset["tank/plexfiles/tv"] = {"primarycache": "all", "secondarycache": "all", "recordsize": 1048576}
 if showcase:
     tn.per_dataset["tank/plexfiles"] = {"primarycache": "all", "secondarycache": "all", "recordsize": 1048576}
+# Syncthing on this server (System → Syncthing), with one folder over the media, not yet sending the smallest files first
+syncthing = fakes.FakeSyncthing()
+syncthing.folder("plexfiles", media, "Plex Files", order="random")
 plex.sessions = [
     {"id": "a", "item": cat["episodes"][4], "offset": 690000, "duration": 1680000, "player": "Living room TV"},
     {"id": "b", "item": cat["movies"][3], "offset": 900000, "duration": 7200000, "player": "Phone", "local": False},
@@ -106,6 +109,7 @@ app = App(os.path.join(tmp, "config"))
 app.settings.update({
     "plex": {"url": plex.url, "token": "good-token"},
     "truenas": {"url": tn.url, "api_key": "good-key"},
+    "syncthing": {"url": syncthing.url, "api_key": "st-key"},
     "general": {"hdd_mb_per_sec": 182, "hdd_measured_at": "2026-10-07T21:14:00",
                 # TV and Audiobooks already mapped; Movies left for the demo to pick.
                 "path_map": [{"plex": "/data/TV", "local": os.path.join(media, "TV")},

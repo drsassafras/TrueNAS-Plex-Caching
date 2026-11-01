@@ -50,7 +50,7 @@ FROM python:${PYTHON_TAG}
 ARG MKVTOOLNIX
 ARG OXIPNG
 
-LABEL org.opencontainers.image.title="Plex Cache" \
+LABEL org.opencontainers.image.title="Dionysus" \
       org.opencontainers.image.description="Keeps Plex media warm in ZFS ARC/L2ARC on TrueNAS" \
       org.opencontainers.image.source="https://github.com/drsassafras/TrueNAS-Plex-Caching" \
       org.opencontainers.image.licenses="MIT"

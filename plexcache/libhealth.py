@@ -90,12 +90,12 @@ CHECKS = {
     # Mirror Checks' (mirrorhealth.py: one per kind of finding, "mirror_<kind>"), found in the background and kept
     "mirror": [
         {"id": "mirror_sync_files", "name": M(".plexcache folder not synced"), "applies": ALL,
-         "help": M("The markers and claims in the hidden .plexcache folder don’t reach the other site, or arrive hours late: the two Plex Caches could optimize the same file. "
+         "help": M("The markers and claims in the hidden .plexcache folder don’t reach the other site, or arrive hours late: the two Dionysus instances could optimize the same file. "
                    "Optimizing and the file tools are held in this library until the folder sync carries it (Syncthing: don’t ignore .plexcache), until you ignore the finding, or while this check is off.")},
         {"id": "mirror_only_here", "name": M("Only on disk here"), "applies": ALL,
-         "help": M("On disk here and not at the other site: the folder sync hasn’t carried it there, or it was deleted there. Read through the Plex Cache at the other site: without the link to it, not checked.")},
+         "help": M("On disk here and not at the other site: the folder sync hasn’t carried it there, or it was deleted there. Read through the Dionysus at the other site: without the link to it, not checked.")},
         {"id": "mirror_only_there", "name": M("Only on disk at the other site"), "applies": ALL,
-         "help": M("On disk at the other site and not here: the folder sync hasn’t carried it here, or it was deleted here. Read through the Plex Cache at the other site: without the link to it, not checked.")},
+         "help": M("On disk at the other site and not here: the folder sync hasn’t carried it here, or it was deleted here. Read through the Dionysus at the other site: without the link to it, not checked.")},
         {"id": "mirror_size_differs", "name": M("A different size at each site"), "applies": ALL,
          "help": M("The same file, a different size at each site: one side changed it and the sync hasn’t caught up, or it couldn’t. A file changed in the last hour is left out: it may still be syncing.")},
         {"id": "mirror_not_listed_there", "name": M("Not in the mirror’s Plex"), "applies": ALL,
@@ -109,6 +109,25 @@ CHECKS = {
         {"id": "mirror_regroup", "name": M("Grouped differently on the mirror"), "applies": ALL,
          "help": M("The same files make up the items another way on the two servers, in a way Sync Libraries can’t bring in line: several items on the side whose edits win are one item on the other (making them several again means splitting it and matching each part), "
                    "or the files are shared out among items differently on both sides. Split or merge the items in Plex on one side until each side’s items hold the same files; Sync Libraries then brings the rest in line.")},
+        # Syncthing's (syncthing.py: live, from its API, where it's connected on System → Syncthing), on the library's folder in it
+        {"id": "mirror_syncthing_down", "name": M("Syncthing not answering"), "applies": ALL,
+         "help": M("Syncthing is set up on System → Syncthing but isn’t answering there: not running, another address, or the API key refused. Until it answers, nothing is known of the folder sync.")},
+        {"id": "mirror_syncthing_no_folder", "name": M("No Syncthing folder over the library"), "applies": ALL,
+         "help": M("No folder in Syncthing has this library’s folder, or a folder above it, as its path — in any of the forms the folder is known by (as Plex, this app and the host see it) — so nothing carries it to the other site. Share the folder in Syncthing, or check its path.")},
+        {"id": "mirror_syncthing_paused", "name": M("Syncthing folder paused"), "applies": ALL,
+         "help": M("The folder is paused in Syncthing on this server: nothing moves between the sites until it’s resumed. Resume Folder resumes it.")},
+        {"id": "mirror_syncthing_not_watched", "name": M("Syncthing folder not watched"), "applies": ALL,
+         "help": M("Watch for Changes is off for the folder in Syncthing, so a new or changed file waits for its next full scan, usually an hour away, before it’s sent. Watch for Changes turns it on.")},
+        {"id": "mirror_syncthing_order", "name": M("Syncthing not sending smallest first"), "applies": ALL,
+         "help": M("The folder’s pull order in Syncthing isn’t Smallest First. The markers and claims in .plexcache are small files about big ones: sent first, the other site knows a file is being optimized before the file arrives; sent after, the two sites can optimize the same file. Smallest First sets it.")},
+        {"id": "mirror_syncthing_ignores", "name": M("Syncthing ignores .plexcache"), "applies": ALL,
+         "help": M("The folder’s ignore patterns in Syncthing leave out the hidden .plexcache folder, so the markers and claims never reach the other site. Remove the pattern in Syncthing (the folder → Edit → Ignore Patterns).")},
+        {"id": "mirror_syncthing_disconnected", "name": M("Syncthing device not connected"), "applies": ALL,
+         "help": M("None of the devices the folder is shared with in Syncthing is connected: the other site’s Syncthing is off, or can’t be reached. Nothing reaches the other site until it is.")},
+        {"id": "mirror_syncthing_transit", "name": M("On its way through Syncthing"), "applies": ALL,
+         "help": M("A file Syncthing is still carrying: on its way here from the other site, or still being sent there. Until it has arrived the two sites don’t hold the same file, so Sync Libraries leaves its item until then. The finding goes by itself once the file is through.")},
+        {"id": "mirror_syncthing_other_device", "name": M("Mirror’s Syncthing not among the folder’s devices"), "applies": ALL,
+         "help": M("The Dionysus at the mirror’s site names its Syncthing device over the link, and that device isn’t one this folder is shared with. The two Dionysus instances talk, but their Syncthings aren’t paired for this folder: share it with that device in Syncthing, or the folders aren’t the same sync.")},
     ],
 }
 # the categories whose findings a module of its own works out in the background and keeps: the app's attribute that holds

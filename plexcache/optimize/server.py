@@ -189,7 +189,7 @@ class Service:
 
 
 def _at(body: dict) -> float | None:
-    """A marker's or claim's time as given (one carried from the other Plex Cache, written here as the same file: nothing
+    """A marker's or claim's time as given (one carried from the other Dionysus, written here as the same file: nothing
     for the folder sync to fight over), else now."""
     at = body.get("at")
     return float(at) if isinstance(at, (int, float)) and at > 0 else None

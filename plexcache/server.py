@@ -27,6 +27,15 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
 
 
+def _plex_lan(app) -> list:
+    """Add Subnets to Plex LAN: this NAS's networks and the tailnet into Plex's LAN Networks (App.plex_add_lan_networks), Plex's
+    refusal said the settings' way."""
+    try:
+        return app.plex_add_lan_networks()
+    except PlexError as e:
+        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+
+
 def _build_id() -> str:
     """A short fingerprint of the web UI's files. It changes whenever they do (after tnsync or an
     update), so pages ask for the new files by name and open tabs know to reload themselves."""
@@ -195,12 +204,12 @@ def make_handler(app):
                 return True
             if app.settings.section("general").get("lan_only") and not local_address(self.client_address[0]):
                 self._refuse(path, M("outside the local network"),
-                             M("Plex Cache only answers devices on your local network. To use it from elsewhere, turn off "
+                             M("Dionysus only answers devices on your local network. To use it from elsewhere, turn off "
                                "“Local network only” in System, from a device on your network."))
                 return False
             if not auth.enabled and not host_allowed(self.headers.get("Host")):
                 self._refuse(path, M("not a local name"),
-                             M("Without a sign-in, Plex Cache only answers to its IP address or a local name. Open it by "
+                             M("Without a sign-in, Dionysus only answers to its IP address or a local name. Open it by "
                                "its IP address, set PLEXCACHE_URL to the address you use, or set PLEXCACHE_USERNAME and "
                                "PLEXCACHE_PASSWORD in the app’s YAML."))
                 return False
@@ -215,7 +224,7 @@ def make_handler(app):
             if not logged:
                 app.activity.event("settings", M("refused a request from {address}: {why}", address=address, why=reason), "warn")
             if path in PAGES or path == "/login":
-                page = "<!doctype html><meta charset=utf-8><title>Plex Cache</title><p style=\"font:16px system-ui;margin:3em auto;max-width:36em\">"
+                page = "<!doctype html><meta charset=utf-8><title>Dionysus</title><p style=\"font:16px system-ui;margin:3em auto;max-width:36em\">"
                 return self._send(403, (page + _html(str(why)) + "</p>").encode(), "text/html; charset=utf-8")
             return self._error(why, 403)
 
@@ -230,7 +239,7 @@ def make_handler(app):
             return False
 
         def _peer(self, method: str):
-            """The other Plex Cache's requests (peerlink.py): open for its hello and its pairing, signed with the pairing's
+            """The other Dionysus's requests (peerlink.py): open for its hello and its pairing, signed with the pairing's
             key for the rest — never the web UI's sign-in."""
             raw = b""
             if method == "POST":
@@ -476,6 +485,10 @@ def make_handler(app):
                     # Re-run the checks this setting affects, so the page shows whether it worked.
                     if any(k in body for k in ("plex", "truenas")):
                         app.test_connections_async(then_checks=True, rescan="plex" in body)
+                    elif "syncthing" in body:  # (its card's lights: asked again now, nothing else re-run)
+                        app.syncthing.tick_async(force=True)
+                        if any(k.startswith(("throttle", "giveway")) for k in body["syncthing"]):
+                            app.syncthing.throttle_tick()  # (what's held follows the settings at once)
                     else:
                         app.run_checks_async(rescan="excluded_libraries" in body.get("general", {}))
                     return self._json({"settings": app.settings.public()})
@@ -511,7 +524,7 @@ def make_handler(app):
                     from . import peers, safety
                     why = peers.optimizer_conflict(app, key) or app.mirror_health.hold(key)
                     if why:
-                        raise SettingsError(why)  # (another Plex Cache would undo it, or wouldn't see the claims: said on Health / Mirror Checks too)
+                        raise SettingsError(why)  # (another Dionysus would undo it, or wouldn't see the claims: said on Health / Mirror Checks too)
                     if mode == "optimize":  # files are rewritten: room for the largest (and what a snapshot keeps of the rewritten), and a backup that can be made
                         sums = (app.optimizing.summary or {}).get(key) or {}
                         ready = safety.readiness(app, key, "largest", retained=int(sums.get("todo_bytes") or 0), tool="optimizer")
@@ -522,8 +535,13 @@ def make_handler(app):
                         raise SettingsError(M("files must be a list of the files to optimize"))
                     got = app.optimizing.queue(key, mode, files)  # now, or after the jobs before it
                     return self._json({"started": got == "started", "queued": got == "queued"})
+                if path == "/api/plex/lan":  # System → Plex: Add Subnets to Plex LAN (this NAS's networks and the tailnet into Plex's LAN Networks)
+                    return self._json({"networks": _plex_lan(app)})
+                if path == "/api/syncthing/test":  # System → Syncthing: Test Again (syncthing.py)
+                    app.syncthing.tick_async(force=True)
+                    return self._json({"started": True})
                 if path.startswith("/api/peer/"):
-                    # System → Mirror Plex Cache (peerlink.py): Pair Now and Unpair on a mirror's link ({"server": its id}), Test Again on every one
+                    # System → Mirror Dionysus (peerlink.py): Pair Now and Unpair on a mirror's link ({"server": its id}), Test Again on every one
                     link = app.peerlinks.for_server(str(body.get("server") or ""))
                     if path == "/api/peer/test":
                         app.peerlinks.tick_async(force=True)
@@ -603,7 +621,7 @@ def make_handler(app):
                             return self._json(jsonable(mig.refresh(force=True)))
                         if action == "scope":  # both servers, or this one only
                             return self._json(jsonable(mig.set_scope(str(body.get("scope") or ""))))
-                        if action in ("sync_paused", "sync_resumed", "sync_checked"):  # what you've done where the app can't see
+                        if action in ("sync_paused", "sync_resumed", "sync_checked", "sync_ignore", "sync_pause", "sync_resume"):  # what you've done where the app can't see; or done through Syncthing's API
                             return self._json(jsonable(mig.confirm(action)))
                         if action in ("copy", "catchup"):
                             if action == "copy":  # the folder copied into the new dataset: a recent snapshot first (room is among its own checks)
@@ -751,5 +769,5 @@ def make_handler(app):
 def serve(app, host: str, port: int):
     httpd = ThreadingHTTPServer((host, port), make_handler(app))
     httpd.daemon_threads = True
-    log.info("Plex Cache %s listening on http://%s:%d", app.version, host, port)
+    log.info("Dionysus %s listening on http://%s:%d", app.version, host, port)
     return httpd

@@ -1,4 +1,4 @@
-# Developing Plex Cache
+# Developing Dionysus
 
 This folder holds what you need to try changes on a real TrueNAS before pushing them:
 

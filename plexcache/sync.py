@@ -7,8 +7,8 @@ how its libraries are compared with this server's.
   each library's files here looked for, by path, on each of their libraries of the kind (counted as plex2.match_rate
   counts a mirror chosen) — so the page can say, per library here, which library where looks like its mirror
   (by_library, suspected), and which libraries were looked at (compared).
-* Another Plex Cache: a system sharing the library folders marks itself there (optimize/claims.py): seen by peers(),
-  so a Plex Cache at the other site is known without any setup.
+* Another Dionysus: a system sharing the library folders marks itself there (optimize/claims.py): seen by peers(),
+  so a Dionysus at the other site is known without any setup.
 * compare_library(): a library on two servers — read by the data layer (libdata.py: the mirror's side) — items matched
   across them by their files' place in the library folder (the same on both: the folders are synced), else by online
   entry; shows, seasons, artists and albums through their episodes and tracks — and the differences listed, source →
@@ -255,7 +255,7 @@ DETAIL_KEYS = ("fields", "locked", "art_locked", "summary", "summary_text", "tag
 
 
 class Sync:
-    """The mirror choice (settings "sync": mirrors), the servers that may be one (discover), and the other Plex Caches seen
+    """The mirror choice (settings "sync": mirrors), the servers that may be one (discover), and the other Dionysus instances seen
     in the library folders (peers)."""
 
     def __init__(self, app):
@@ -305,7 +305,7 @@ class Sync:
         return got if got and got["rate"] >= MIRROR_RATE else None
 
     def peers(self) -> list[str]:
-        """Other Plex Caches seen in the library folders (their markers, within PEER_DAYS)."""
+        """Other Dionysus instances seen in the library folders (their markers, within PEER_DAYS)."""
         mine = self.app.optimizing.instance()
         found, now = set(), time.time()
         for lib in getattr(self.app, "libraries", []) or []:

@@ -23,7 +23,7 @@ its title, the page it lives on, what its chip there means (flag_help), and whic
 concern (flags), where the view shows one chip per tool.
 
 Files are only ever touched through the optimizer service (optimize/files.py): the one part of
-Plex Cache that may write to the media. Plex is asked through its API, here and on the mirror.
+Dionysus that may write to the media. Plex is asked through its API, here and on the mirror.
 
 A tool's state (the last scan, the results, what it's still waiting for) is kept in tools-<name>.json.
 """
@@ -578,7 +578,7 @@ class Tool:
         """A file action through the optimizer service, its refusal said in words."""
         client = self.app.optimizing.client
         if not client.configured:
-            raise ValueError(M("The optimizer service isn’t set up: it’s the part of Plex Cache that may write to your media. See the Optimizer page."))
+            raise ValueError(M("The optimizer service isn’t set up: it’s the part of Dionysus that may write to your media. See the Optimizer page."))
         try:
             return client.file_action(action, path, to=to, root=root)
         except urllib.error.HTTPError as e:
@@ -615,7 +615,7 @@ def mirror(app, library: str):
 def mirrored(app, library: str) -> dict | None:
     """Whether the library's files are mirrored somewhere, as far as the app can tell: {"name", "how": "watched" |
     "suspected" | "peer"} — the library marked as mirrored on the Mirror page; a library of a server of the account whose
-    files are here too (a mirror until you say otherwise); another Plex Cache sharing the folders. None when you've said
+    files are here too (a mirror until you say otherwise); another Dionysus sharing the folders. None when you've said
     the library has no mirror, or none is seen. What every tool goes by, and converting a folder to a child dataset too."""
     if mirror(app, library) is not None:
         return {"name": mirror_name(app, library), "how": "watched"}

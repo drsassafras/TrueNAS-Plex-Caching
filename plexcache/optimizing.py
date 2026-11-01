@@ -168,7 +168,7 @@ class OptimizerClient:
 
     def mark(self, folder: str, instance: str, info: dict, at: float | None = None) -> dict:
         """A system's marker in a library folder, with what it tells the other systems (peers.py): ours, or the other
-        Plex Cache's carried over the link (``at``: its time, so the file is the same as the one there)."""
+        Dionysus's carried over the link (``at``: its time, so the file is the same as the one there)."""
         return self._call("/api/folder", {"action": "mark", "path": folder, "instance": instance, "info": info, **({"at": at} if at else {})}, timeout=30)
 
     def file_action(self, action: str, path: str, to: str = "", root: str = "") -> dict:
@@ -1310,7 +1310,7 @@ class OptimizeJob(Job):
 
 class Claims:
     """A job's claims on the files it remuxes, for systems sharing a library: each file is
-    claimed a few files ahead, and the claim carried to the Plex Cache at the mirror's site over
+    claimed a few files ahead, and the claim carried to the Dionysus at the mirror's site over
     the link (peerlink.carry), which answers with its own claims on the file — the earliest wins,
     at once. Without the link, by the time the file's turn comes another system's claim would have
     synced over (WAIT). With no other system ever seen in the folder, nothing waits."""
@@ -1338,7 +1338,7 @@ class Claims:
         return None, None
 
     def _call(self, path: str, release: bool = False, carry: bool = True) -> dict | None:
-        """The claim (or its release) made in the library folder here — and, while the link to the other Plex Cache
+        """The claim (or its release) made in the library folder here — and, while the link to the other Dionysus
         is talking, carried there: its answer (the other side's live claims on the file) kept for take()."""
         plex = dict(self.items).get(path)
         root = self.op.library_root(plex) if plex else None

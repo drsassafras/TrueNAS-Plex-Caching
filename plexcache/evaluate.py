@@ -617,7 +617,7 @@ class Evaluator:
         app = self.app
         lib = app.library_info(key) or {}
         if not lib.get("kind"):
-            return na(M("Plex Cache doesn’t work on this kind of library."))
+            return na(M("Dionysus doesn’t work on this kind of library."))
         if lib.get("excluded"):
             return na(M("This library is left out (System → Media Mappings)."))
         if page == "dataset":
@@ -741,7 +741,7 @@ class Evaluator:
 
     def counts(self) -> dict:
         """Every page of the Tools menu, and the Library page: {page: {"libraries": {key: count}, "total": count}} — every
-        library Plex has that Plex Cache works on, those a page doesn't apply to "na" — and the menu's own count, over its
+        library Plex has that Dionysus works on, those a page doesn't apply to "na" — and the menu's own count, over its
         pages ("tools": {"total"})."""
         libs = [str(lib["key"]) for lib in getattr(self.app, "libraries", []) or [] if lib.get("kind")]
         out = {}

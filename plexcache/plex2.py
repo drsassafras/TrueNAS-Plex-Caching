@@ -1,7 +1,7 @@
 """The mirrors: other Plex servers with the same files — another site's, kept in step by syncing the folders — chosen per
 library, from the servers this server's Plex account can use (plex.tv's list; or, signed in apart, another account's).
 
-A mirror matters wherever Plex Cache touches a file or a record the other site holds too: a converted file's original is
+A mirror matters wherever Dionysus touches a file or a record the other site holds too: a converted file's original is
 deleted only once both Plexes list the MKV (converting.py), a file set aside is purged only once both have let go of it
 (trash.py), Sync Libraries carries edits between the two, Mirror Checks compares the sites, Organize Folders merges the
 record there after a move, a folder's conversion to a child dataset is coordinated with the other side, and the Plex
@@ -108,7 +108,7 @@ class Mirrors:
         return out
 
     def any_mirror(self) -> bool:
-        """Whether some library is mirrored, by a server reached: what the Plex Cache links and the mirror's checks need.
+        """Whether some library is mirrored, by a server reached: what the Dionysus links and the mirror's checks need.
         (Every library not listed, "*", counts before this Plex's libraries are read.)"""
         return any(self.configured(s) for s in self.used())
 

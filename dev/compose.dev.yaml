@@ -1,4 +1,4 @@
-# Plex Cache — TEST copy for trying changes on the NAS before pushing.
+# Dionysus — TEST copy for trying changes on the NAS before pushing.
 #
 # Runs the published image, but with the code replaced by whatever `tnsync`
 # last copied to /mnt/ssd/AppConfigs/plex-cache-dev/src/plexcache.

@@ -3,7 +3,7 @@
 Off until switched on in System. Everything is in one retained JSON message
 (<base>/state); commands arrive on <base>/set/<name>; <base>/availability says
 online/offline. With discovery on, Home Assistant's MQTT discovery messages make the
-"Plex Cache" device and its entities appear on their own.
+"Dionysus" device and its entities appear on their own.
 """
 
 import datetime as dt
@@ -104,12 +104,12 @@ def _health_text(health: dict):
     if fails and warns:
         what = M("{problems} and {n} warnings", one="{problems} and {n} warning",
                  problems=M("{n} problems to fix", one="{n} problem to fix", n=fails), n=warns)
-        return M("{what} — open Health in Plex Cache for the details.", what=what)
+        return M("{what} — open Health in Dionysus for the details.", what=what)
     if fails:
-        return M("{n} problems to fix — open Health in Plex Cache for the details.",
-                 one="{n} problem to fix — open Health in Plex Cache for the details.", n=fails)
-    return M("{n} warnings — open Health in Plex Cache for the details.",
-             one="{n} warning — open Health in Plex Cache for the details.", n=warns)
+        return M("{n} problems to fix — open Health in Dionysus for the details.",
+                 one="{n} problem to fix — open Health in Dionysus for the details.", n=fails)
+    return M("{n} warnings — open Health in Dionysus for the details.",
+             one="{n} warning — open Health in Dionysus for the details.", n=warns)
 
 
 def update_installable(app, st: dict | None = None) -> list | None:
@@ -121,7 +121,7 @@ def update_installable(app, st: dict | None = None) -> list | None:
         return None
     missing = []
     if ((st.get("connections") or {}).get("truenas_key") or {}).get("status") != "ok":
-        missing.append(M("connect the TrueNAS API in Plex Cache (System → TrueNAS), with a key allowed to manage apps"))
+        missing.append(M("connect the TrueNAS API in Dionysus (System → TrueNAS), with a key allowed to manage apps"))
     if not app.settings.section("mqtt").get("allow_control"):
         missing.append(M("turn on Allow control (System → MQTT)"))
     return missing
@@ -134,7 +134,7 @@ def update_info(app, lang: str = "en", st: dict | None = None) -> dict:
     would let it."""
     updates = getattr(app, "updates", None)
     latest = (updates and updates.latest) or __version__
-    info = {"installed_version": __version__, "latest_version": latest, "title": "Plex Cache",
+    info = {"installed_version": __version__, "latest_version": latest, "title": "Dionysus",
             "release_url": REPO_URL}
     # (TrueNAS restarts the app, which starts afresh; one that never came back stops saying so)
     since = getattr(updates, "updating", None)
@@ -146,7 +146,7 @@ def update_info(app, lang: str = "en", st: dict | None = None) -> dict:
     if latest != __version__:
         missing = update_installable(app, st)
         if missing is None:
-            notes.append(M("A newer version is on GitHub. Plex Cache updates itself only on TrueNAS: update it where it runs."))
+            notes.append(M("A newer version is on GitHub. Dionysus updates itself only on TrueNAS: update it where it runs."))
         elif missing:
             notes.append(M("A newer version is on GitHub. To install it from here, {what}.",
                            what=M("{a} and {b}", a=missing[0], b=missing[1]) if len(missing) > 1 else missing[0]))
@@ -306,9 +306,9 @@ def build_state(app, period: str = "week", lang: str = "en") -> dict:
 # Shown in Home Assistant when you open an entity (its "description" attribute), from one
 # retained message on <base>/info. Plain text, a sentence or two: the web UI's ⓘ, shortened.
 DESCRIPTIONS = {
-    # Plex Cache
+    # Dionysus
     "health": M("Overall result of the health checks: ok, warning (features still run), problem (something needs fixing) or checking."),
-    "health_text": M("A one-line summary of the health checks. The Health page in Plex Cache lists every check with its fix."),
+    "health_text": M("A one-line summary of the health checks. The Health page in Dionysus lists every check with its fix."),
     "problem": M("On when a health check failed: something needs fixing before every feature can work."),
     "streams": M("How many Plex streams are playing right now."),
     "streaming": M("On while anything is playing on Plex."),
@@ -318,12 +318,12 @@ DESCRIPTIONS = {
     "health_warnings": M("How many health checks gave a warning. Features still run; the Health page says what could be better."),
     "health_failures": M("How many health checks failed. The Health page says how to fix each one."),
     "health_checked": M("When the health checks last ran. They run at startup, every 6 hours and whenever settings change."),
-    "plex_connected": M("On when Plex Cache can reach your Plex server with a working sign-in."),
-    "truenas_connected": M("On when Plex Cache can reach the TrueNAS API with its (read-only) API key."),
+    "plex_connected": M("On when Dionysus can reach your Plex server with a working sign-in."),
+    "truenas_connected": M("On when Dionysus can reach the TrueNAS API with its (read-only) API key."),
     "checking": M("On while the health checks are running."),
     "benchmarking": M("On while the disk benchmark is measuring each dataset’s uncached read speed."),
-    "version": M("The version of Plex Cache that’s running."),
-    "update": M("Whether a newer Plex Cache is on GitHub (checked every 6 hours, if switched on in System)."),
+    "version": M("The version of Dionysus that’s running."),
+    "update": M("Whether a newer Dionysus is on GitHub (checked every 6 hours, if switched on in System)."),
     # Activity
     "report_verdict": M("The Metrics page’s verdict for the chosen period (System → MQTT): what could be better, or that all went well."),
     "report_streams": M("Streams played in the report period."),
@@ -352,10 +352,10 @@ DESCRIPTIONS = {
     "disk_busy_avg": M("How busy the media pool’s disks were, on average, while people watched."),
     "disk_busy_peak": M("The busiest the media pool’s disks got while people watched. Near 100% leaves little room for skips that miss the cache."),
     "attention": M("How many items the Metrics page’s Needs Attention list has for the report period."),
-    "total_streams": M("Streams played since Plex Cache started counting. Only goes up, for long-term statistics."),
-    "total_skips": M("Skips since Plex Cache started counting. Only goes up."),
-    "total_skips_cached": M("Skips that played from cache, since Plex Cache started counting. Only goes up."),
-    "total_preloaded": M("Data read by Now Playing Cache and Prefetch, since Plex Cache started counting. Only goes up."),
+    "total_streams": M("Streams played since Dionysus started counting. Only goes up, for long-term statistics."),
+    "total_skips": M("Skips since Dionysus started counting. Only goes up."),
+    "total_skips_cached": M("Skips that played from cache, since Dionysus started counting. Only goes up."),
+    "total_preloaded": M("Data read by Now Playing Cache and Prefetch, since Dionysus started counting. Only goes up."),
     # Warm-up
     "warmup_state": M("Warm-up (fills the Lead-in Cache on a schedule): off, idle (waiting for its next run), preparing, running or paused."),
     "warmup_running": M("On while a warm-up run is going (including while it’s paused)."),
@@ -390,7 +390,7 @@ DESCRIPTIONS = {
     "nextepisode_ram_percent": M("Prefetch’s RAM limit, as a share of the ZFS cache available after the reserve. The two limits together can’t pass 100%."),
     "warmup_pacing_percent": M("Share of disk time L2ARC-only caching (warm-up, and Prefetch’s L2ARC-only steps) may use, when automatic L2ARC pacing is off in the web UI. Lower is gentler on other work; “Run warm-up now” ignores it."),
     "ram_reserve_gb": M("ZFS cache kept for the rest of the NAS (TrueNAS, other apps, ZFS itself). The RAM limits are shares of what’s left."),
-    "poll_seconds": M("How often Plex Cache asks Plex what’s playing. 5 seconds suits most people; 3 reacts sooner to skips and short tracks."),
+    "poll_seconds": M("How often Dionysus asks Plex what’s playing. 5 seconds suits most people; 3 reacts sooner to skips and short tracks."),
 }
 
 
@@ -482,10 +482,10 @@ RETIRED = [("sensor", "arc_max"), ("sensor", "l2arc_needed"), ("select", "start_
 # Entities are spread over a main device and three linked ones, so Home Assistant shows them
 # under clear headings (each with its own page and dashboard card).
 DEVICES = {
-    "main": "Plex Cache",
-    "activity": M("Plex Cache Metrics"),
-    "warmup": M("Plex Cache Warm-up"),
-    "memory": M("Plex Cache RAM & ZFS"),
+    "main": "Dionysus",
+    "activity": M("Dionysus Metrics"),
+    "warmup": M("Dionysus Warm-up"),
+    "memory": M("Dionysus RAM & ZFS"),
 }
 
 
@@ -523,7 +523,7 @@ def entities(state: dict, allow_control: bool, lang: str = "en") -> list[tuple[s
     D = "diagnostic"
     period = state.get("report_period") or render(PERIOD_NAME["week"], lang)
 
-    # ---- Plex Cache: is it healthy, what's playing, what's being preloaded
+    # ---- Dionysus: is it healthy, what's playing, what's being preloaded
     sensor("main", "health", M("Health"), "health", dc="enum", options=HEALTH_STATES, icon="mdi:heart-pulse")
     sensor("main", "health_text", M("Health summary"), "health_text", icon="mdi:text-box-outline")
     binary("main", "problem", M("Problem"), "problem", dc="problem")
@@ -548,10 +548,10 @@ def entities(state: dict, allow_control: bool, lang: str = "en") -> list[tuple[s
                icon="mdi:database-cog-outline", cat=D)
     # The installed version, and the newest one on GitHub (when checking is on)
     # (Its own topic, <base>/update, holds just the JSON Home Assistant's update entity reads.) It can
-    # be installed from Home Assistant only when Plex Cache can do it (Update Now, through the TrueNAS
+    # be installed from Home Assistant only when Dionysus can do it (Update Now, through the TrueNAS
     # API, with control allowed); otherwise its notes say what would let it.
     upd = {"_device": "main", "name": M("Update"), "device_class": "firmware",
-           "title": "Plex Cache", "release_url": REPO_URL, "entity_category": "diagnostic"}
+           "title": "Dionysus", "release_url": REPO_URL, "entity_category": "diagnostic"}
     if allow_control and state.get("update_installable"):
         upd["payload_install"] = "install"
     E.append(("update", "update", upd))
@@ -822,16 +822,16 @@ class HomeAssistantBridge:
 
     # ---------------------------------------------------------- discovery
     def _devices(self, node: str, lang: str = "en") -> dict:
-        main = {"identifiers": [node], "name": DEVICES["main"], "manufacturer": "Plex Cache",
-                "model": "Plex Cache for TrueNAS", "sw_version": self.app.version}
+        main = {"identifiers": [node], "name": DEVICES["main"], "manufacturer": "Dionysus",
+                "model": "Dionysus Media Server Manager", "sw_version": self.app.version}
         url = self._web_url()
         if url:
             main["configuration_url"] = url  # Home Assistant's "Visit" link
         out = {"main": main}
         for key, name in DEVICES.items():
             if key != "main":
-                out[key] = {"identifiers": [f"{node}_{key}"], "name": render(name, lang), "manufacturer": "Plex Cache",
-                            "model": "Plex Cache for TrueNAS", "sw_version": self.app.version, "via_device": node}
+                out[key] = {"identifiers": [f"{node}_{key}"], "name": render(name, lang), "manufacturer": "Dionysus",
+                            "model": "Dionysus Media Server Manager", "sw_version": self.app.version, "via_device": node}
                 if url:
                     out[key]["configuration_url"] = url
         return out
@@ -843,7 +843,7 @@ class HomeAssistantBridge:
         topics = set()
         ents = entities(state, cfg["allow_control"], lang)
         # Which software sent these: Home Assistant shows it, and asks every discovery message for it
-        origin = {"name": "Plex Cache", "sw_version": self.app.version, "support_url": REPO_URL}
+        origin = {"name": "Dionysus", "sw_version": self.app.version, "support_url": REPO_URL}
         # Every entity's description, in one retained message (sent with discovery, not with each update)
         c.publish(f"{base}/info", json.dumps({oid: render(describe(oid), lang) for _, oid, _ in ents}), retain=True)
         for component, oid, conf in ents:
@@ -852,7 +852,7 @@ class HomeAssistantBridge:
             conf = dict(conf)
             conf.update(unique_id=f"{node}_{oid}", device=devices[conf.pop("_device")], origin=origin)
             if oid in AVAILABLE_WHEN:
-                # available while Plex Cache is online AND the control applies now (from the state message)
+                # available while Dionysus is online AND the control applies now (from the state message)
                 conf["availability"] = [{"topic": avail},
                                         {"topic": state_topic, "value_template": "{{ 'online' if value_json.available.%s else 'offline' }}" % oid}]
                 conf["availability_mode"] = "all"

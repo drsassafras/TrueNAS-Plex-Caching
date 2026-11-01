@@ -382,7 +382,7 @@ def resolve_conflict(copy: str, original: str, log=lambda text: None) -> dict:
         return {"result": "kept", "reason": "not Matroska"}
     va, vb = (a.get("ours") or {}).get("PLEXCACHE_OPTIMIZER"), (b.get("ours") or {}).get("PLEXCACHE_OPTIMIZER")
     if not (va and vb):
-        return {"result": "kept", "reason": "not both optimized by Plex Cache"}
+        return {"result": "kept", "reason": "not both optimized by Dionysus"}
     log("comparing the streams")
     if stream_hashes(copy) != stream_hashes(original):
         return {"result": "kept", "reason": "the streams differ"}

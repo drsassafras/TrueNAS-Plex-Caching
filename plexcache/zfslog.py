@@ -1,6 +1,6 @@
 """The ZFS record: what this NAS's datasets are set to, and the compression each file is written
 with. It's about this system only (a file synced elsewhere is written again there), so it lives
-in Plex Cache's config folder (zfs-record.json), not with the media.
+in Dionysus's config folder (zfs-record.json), not with the media.
 
 A file's compression can't be read back from it. So the record keeps, per dataset, its record size
 and compression and since when they've been seen (``since``), with the earlier settings and their

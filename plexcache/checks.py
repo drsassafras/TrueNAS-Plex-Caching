@@ -307,7 +307,7 @@ def check_zfs(app) -> dict:
                               M("{label}. Datasets are read from ZFS directly; the checks that need the TrueNAS API — cache devices, pool layout, scrubs — are left out.", label=pf.get("label") or "")))
         elif pf.get("truenas"):  # (on TrueNAS for certain: the key is what's missing)
             items.append(item("warn", M("TrueNAS API key needed"),
-                              M("This is TrueNAS, but no API key is set. With one, Plex Cache checks each dataset’s settings and cache devices, sizes the L2ARC, pauses for scrubs and resilvers — and can update itself from the page when a new build is out."),
+                              M("This is TrueNAS, but no API key is set. With one, Dionysus checks each dataset’s settings and cache devices, sizes the L2ARC, pauses for scrubs and resilvers — and can update itself from the page when a new build is out."),
                               M("Add a read-only key with app management allowed in [System → TrueNAS](/system#truenas).")))
         else:
             items.append(item("info", M("TrueNAS API not connected"),
@@ -320,7 +320,7 @@ def check_zfs(app) -> dict:
         items.append(item("warn", M("TrueNAS API"),
                           M("Connected to {version}, but this release hasn’t got {n} of the calls the app makes: {what}. The features that need them won’t work until the app is updated for it.",
                             version=z["truenas_version"] or "", n=len(gone), what="; ".join(f"{what} ({', '.join(names)})" for what, names in gone.items())),
-                          M("Look for a newer Plex Cache in [System → Updates](/system#updates) — or report the TrueNAS version and the calls above on GitHub.")))
+                          M("Look for a newer Dionysus in [System → Updates](/system#updates) — or report the TrueNAS version and the calls above on GitHub.")))
     elif z.get("truenas_version"):
         items.append(item("pass", M("TrueNAS API"), M("Connected to {version} (read-only). Every call the app makes is there.", version=z["truenas_version"])
                           if z.get("truenas_methods") is not None else M("Connected to {version} (read-only).", version=z["truenas_version"])))
@@ -594,14 +594,14 @@ def check_cache_mode(app) -> dict:
     items.extend(_tool_items(app))
     items.extend(_link_items(app))
     items.extend(_job_failures(app))
-    return {"id": "mode", "title": M("Plex Cache"),
+    return {"id": "mode", "title": M("Dionysus"),
             "hint": M("How caching runs here — with an SSD cache (L2ARC) or RAM only — who can use the app, and the optimizer service."), "items": items}
 
 
-OPTIMIZER_HELP = M("The optimizer is the part of Plex Cache that rewrites your media files so they suit caching: in their "
+OPTIMIZER_HELP = M("The optimizer is the part of Dionysus that rewrites your media files so they suit caching: in their "
                    "dataset’s record size and compression and, for MKV files, with the attachments, chapters, index and tags after the "
                    "video. The Optimizer page has the choices for each library and a card for each file to optimize, with <strong>Optimize Selected</strong>.<br><br>"
-                   "It’s optional, and runs as a second service in this app — the only part of Plex Cache that can write to your "
+                   "It’s optional, and runs as a second service in this app — the only part of Dionysus that can write to your "
                    "media. It does nothing on its own: it rewrites one file at a time when you press Optimize Now, checks each "
                    "new file before swapping it in, and skips anything playing or just added. It has no web page and no port of "
                    "its own; only this app talks to it, with a token both services share.")
@@ -627,7 +627,7 @@ def _job_failures(app) -> list[dict]:
 
 def _sync_items(app) -> list[dict]:
     """The mirror (sync.py, the Mirror page): the mirror choice still to make, a server found that may be a mirror,
-    another Plex Cache seen in the folders. (What Sync Libraries would bring in line is its count, as every tool's.)"""
+    another Dionysus seen in the folders. (What Sync Libraries would bring in line is its count, as every tool's.)"""
     sync = getattr(app, "sync", None)
     if sync is None:
         return []
@@ -653,7 +653,30 @@ def _sync_items(app) -> list[dict]:
                              M("Mark it as mirrored on the [Mirror page](/mirrors), or say it has no mirror."))))
     out.extend(_peer_items(app))
     out.extend(_mirror_items(app))
+    out.extend(_syncthing_items(app))
     return out
+
+
+def _syncthing_items(app) -> list[dict]:
+    """Syncthing (syncthing.py), on Health: set up but not answering, its key refused, or its key still to paste — so it shows
+    here and in Home Assistant, not only on its card."""
+    sy = getattr(app, "syncthing", None)
+    if sy is None or not sy.wanted():
+        return []
+    st = dict(sy.status)
+    if not st:
+        return []
+    link = {"href": "/system#syncthing", "text": M("Open System")}
+    if st.get("code") == "nokey":
+        return [dict(item("info", M("Syncthing found, its API key still to paste"), M("Syncthing answers at {url}; with its key, Mirror Checks see the folder sync and Convert Folder to Child Dataset pauses and resumes it itself.", url=st.get("url") or ""),
+                          M("Paste its API key on [System → Syncthing](/system#syncthing).")), link=link)]
+    if st.get("code") == "auth":
+        return [dict(item("fail", M("Syncthing didn’t accept the API key"), M("The key on [System → Syncthing](/system#syncthing) isn’t the one Syncthing at {url} has now.", url=st.get("url") or ""),
+                          M("Copy the key again (Syncthing → Actions → Settings → General → API Key) and paste it on [System → Syncthing](/system#syncthing).")), link=link)]
+    if not st.get("ok"):
+        return [dict(item("warn", M("Syncthing isn’t answering"), M("{why} Nothing is known of the folder sync until it does.", why=st.get("error") or ""),
+                          M("Check that Syncthing runs and that its address on [System → Syncthing](/system#syncthing) is the right one.")), link=link)]
+    return []
 
 
 def _tool_items(app) -> list[dict]:
@@ -699,7 +722,7 @@ def _link_items(app) -> list[dict]:
 
 
 def _peer_items(app) -> list[dict]:
-    """Another Plex Cache sharing library folders (peers.py): who, with which settings, and what
+    """Another Dionysus sharing library folders (peers.py): who, with which settings, and what
     would fight — syncing both ways, optimizer choices that differ, a file tool just run there."""
     from . import peers
     summary = getattr(app, "peers_summary", None)
@@ -712,10 +735,10 @@ def _peer_items(app) -> list[dict]:
     names = {str(lib["key"]): lib.get("title") or lib["key"] for lib in getattr(app, "libraries", []) or []}
     for sy in summary.get("systems") or []:
         s = sy.get("sync") or {}
-        ran = (sy.get("tools") or {}).get("sync") or s.get("mode") == "apply"  # (an older Plex Cache: applying on a timer)
+        ran = (sy.get("tools") or {}).get("sync") or s.get("mode") == "apply"  # (an older Dionysus: applying on a timer)
         how = (M("hasn’t run Sync Libraries this week") if not ran else M("runs Sync Libraries with its own edits winning") if s.get("source") == "this"
                else M("runs Sync Libraries with its mirror’s edits winning"))
-        out.append(dict(item("info", M("Another Plex Cache shares these folders: {name}", name=sy.get("name") or sy.get("instance")),
+        out.append(dict(item("info", M("Another Dionysus shares these folders: {name}", name=sy.get("name") or sy.get("instance")),
                              M("Version {version}; shares {libs}; it {how}. Each side optimizes its own files, and claims keep the two off the same file.",
                                version=sy.get("version") or "?", libs=[names.get(k, k) for k in sy.get("libraries") or []], how=how),
                              "" if summary.get("publishing") else M("This side can’t tell the other about its own settings until the optimizer service is set up (it writes the marker).")),
@@ -730,7 +753,7 @@ def _peer_items(app) -> list[dict]:
 
 
 def _mirror_items(app) -> list[dict]:
-    """The Plex Cache at the mirror's site (peerlink.py) and Mirror Checks (mirrorhealth.py): the link not healthy, a
+    """The Dionysus at the mirror's site (peerlink.py) and Mirror Checks (mirrorhealth.py): the link not healthy, a
     library held because .plexcache doesn't reach the other site, findings waiting."""
     links, health = getattr(app, "peerlinks", None), getattr(app, "mirror_health", None)
     if links is None or health is None:
@@ -739,9 +762,9 @@ def _mirror_items(app) -> list[dict]:
     state = links.health()
     if state in ("warn", "fail"):
         bad = [v for lk in links.used() if lk.wanted() for v in lk.lights().values() if v["status"] in ("warn", "fail")]
-        out.append(dict(item(state, M("The link to the Plex Cache at a mirror’s site needs attention"),
+        out.append(dict(item(state, M("The link to the Dionysus at a mirror’s site needs attention"),
                              M("{lights}. Mirror Checks rely on it: some of its checks are left out meanwhile.", lights=[b["text"] for b in bad]),
-                             M("See [System → Mirror Plex Cache](/system#peer).")), link={"href": "/system#peer", "text": M("Open System")}))
+                             M("See [System → Mirror Dionysus](/system#peer).")), link={"href": "/system#peer", "text": M("Open System")}))
     names = {str(lib["key"]): lib.get("title") or lib["key"] for lib in getattr(app, "libraries", []) or []}
     converting = [k for k in health.libraries() if health.converting(k)]
     if converting:
@@ -751,7 +774,7 @@ def _mirror_items(app) -> list[dict]:
     held = [k for k in health.libraries() if k not in converting and health.hold(k)]
     if held:
         out.append(dict(item("fail", M("Optimizing is held: {libraries}", libraries=[names.get(k, k) for k in held]),
-                             M("The .plexcache folder doesn’t reach the other site, so its Plex Cache wouldn’t see this side’s claims: the two could optimize the same file."),
+                             M("The .plexcache folder doesn’t reach the other site, so its Dionysus wouldn’t see this side’s claims: the two could optimize the same file."),
                              M("Fix the folder sync (Syncthing: don’t ignore .plexcache), or ignore the finding on Mirror Checks.")),
                         link={"href": "/mirrorchecks", "text": M("Open Mirror Checks")}))
     n = sum((c or {}).get("mirror") or 0 for k, c in (getattr(app, "health_counts", None) or {}).items() if k in health.libraries())

@@ -2,7 +2,7 @@
 // PageStructureTests): the page as the browser would draw it from one /api/state answer, with no
 // browser. A small stand-in for the DOM is enough: app.js writes the page as HTML into #main and reads
 // little back. Usage: node tests/render.js <page> < state.json  → {"html", "text", "title", "info" (what's behind every ⓘ),
-// "blocks" (what every red chip that stops a row says), "menu"} on stdout,
+// "blocks" (what every red chip that stops a row says), "menu" (the count beside Tools, and "sub": the tools under it while a tool page is open)} on stdout,
 // where the state is the server's /api/state (settings included) and <page> a path such as "system".
 "use strict";
 const fs = require("fs"), path = require("path"), vm = require("vm");
@@ -76,7 +76,7 @@ setTimeout(() => {
   if (process.env.RENDER_DEBUG) console.error("render.js: locale " + (sandbox.PCI18N && sandbox.PCI18N.locale) + ", main drawn: " + !!(byId.main && byId.main.innerHTML));
   const html = byId.main ? byId.main.innerHTML : "";
   const text = html.replace(/<style[\s\S]*?<\/style>/g, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\s+/g, " ").trim();
-  const mc = byId["count-tools"];  // (the count beside Tools in the menu)
-  const menu = mc ? { html: mc.innerHTML, hidden: !!mc.hidden, cls: Array.from(mc.classList._s), title: mc.getAttribute("title") } : null;
+  const mc = byId["count-tools"], ts = byId["toolsub"];  // (the count beside Tools in the menu, and the tools under it)
+  const menu = mc ? { html: mc.innerHTML, hidden: !!mc.hidden, cls: Array.from(mc.classList._s), title: mc.getAttribute("title"), sub: ts && !ts.hidden ? ts.innerHTML : "" } : null;
   process.stdout.write(JSON.stringify({ html, text, title: document.title, info: sandbox.PCINFO || {}, blocks: sandbox.PCBLOCKS || {}, menu }));
 }, 300);

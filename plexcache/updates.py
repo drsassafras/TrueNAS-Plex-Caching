@@ -135,7 +135,7 @@ class UpdateChecker:
         self.checked, self.error = time.time(), None
         if self.available() and before != (self.latest, self.latest_commit):
             if self.latest != mine:
-                self.app.activity.event("update", M("Plex Cache {latest} is available (this is {current})", latest=self.latest, current=self.app.version))
+                self.app.activity.event("update", M("Dionysus {latest} is available (this is {current})", latest=self.latest, current=self.app.version))
             else:
                 self.app.activity.event("update", M("A newer dev build is available: dev is at {head} (this is {mine})", head=(head or "?")[:7], mine=(self.commit or "?")[:7]))
         if getattr(self.app, "ha", None):
