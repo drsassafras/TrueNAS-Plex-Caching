@@ -438,12 +438,15 @@ class Syncthing:
                 folders.append({"id": fid, "label": str(f.get("label") or fid), "path": str(f.get("path") or ""), "paused": bool(f.get("paused")),
                                 "order": str(f.get("order") or "random"), "watched": bool(f.get("fsWatcherEnabled")), "rescan": f.get("rescanIntervalS"),
                                 "devices": [{"id": d, "name": str((devs.get(d) or {}).get("name") or d[:7]), "connected": bool((conns.get(d) or {}).get("connected")),
-                                             "address": str((conns.get(d) or {}).get("address") or ""),
+                                             "address": str((conns.get(d) or {}).get("address") or ""), "type": str((conns.get(d) or {}).get("type") or ""),
+                                             "addresses": [str(a) for a in (devs.get(d) or {}).get("addresses") or []],
                                              "max_recv": int((devs.get(d) or {}).get("maxRecvKbps") or 0), "max_send": int((devs.get(d) or {}).get("maxSendKbps") or 0)} for d in shared],
                                 "state": None, "need_files": None, "need_bytes": None, "ignores": None, "libraries": []})
             for row in folders:
                 row["host_path"] = self.host_of(row["path"], "syncthing")  # (where its path is on the host, from TrueNAS's mounts of the Syncthing app)
             got["folders"] = folders
+            opts = cfg.get("options") or {}
+            got["options"] = {k: bool(opts.get(k, True)) for k in ("globalAnnounceEnabled", "localAnnounceEnabled", "relaysEnabled", "natEnabled")}
             byid = {f["id"]: f for f in folders}
             listings: dict[str, list[str] | None] = {}  # (a folder's top level, asked once: for a library folder no path form matches)
 
@@ -725,6 +728,81 @@ class Syncthing:
         links = getattr(self.app, "peerlinks", None)
         link = links.for_library(key) if links is not None else None
         return link.other_identity() if link is not None else None
+
+    def device_hosts(self, did: str) -> list[str]:
+        """Where the mirror behind a device may be reached: the hosts of the link whose Dionysus names this device as its
+        Syncthing, else of any link at whose site the device is connected from — for an address to give the device."""
+        links = getattr(self.app, "peerlinks", None)
+        out: list[str] = []
+        for lk in (links.used() if links is not None else []):
+            hosts = [h for h in [_host_of(lk.url_setting()), _host_of((lk.found or {}).get("url") or "")] if h]
+            try:
+                hosts += [h for h in lk._mirror_hosts() if h]
+            except Exception:  # noqa: BLE001
+                pass
+            other = lk.other_identity() or {}
+            dev = next((d for f in self.status.get("folders") or [] for d in f.get("devices") or [] if d["id"] == did), None)
+            here = (dev or {}).get("address", "").rsplit(":", 1)[0].strip("[]")
+            if other.get("id") == did or (here and here in hosts):
+                for h in hosts:
+                    if h not in out:
+                        out.append(h)
+        return out
+
+    def reach_light(self) -> dict:
+        """How each mirror device is reached: direct (ok), through a relay (orange: an address to give it, when one is known),
+        not findable (orange: dynamic address with global discovery off). {"status", "text", "detail", "fix": {device: host}}."""
+        st = dict(self.status)
+        devices = {d["id"]: d for f in st.get("folders") or [] if f.get("libraries") for d in f.get("devices") or []}
+        if not st.get("ok") or not devices:
+            return {"status": "off", "text": M("Reach"), "detail": M("How each mirror device is reached, once the folders over the libraries are known.")}
+        opts = st.get("options") or {}
+        said, fix, bad = [], {}, False
+        for did, d in devices.items():
+            kind = str(d.get("type") or "")
+            hosts = self.device_hosts(did)
+            if d.get("connected") and "relay" in kind:
+                bad = True
+                said.append(M("{name} is reached through a relay (slow, and someone else’s): give it an address of its own.", name=d["name"]))
+                if hosts:
+                    fix[did] = hosts[0]
+            elif d.get("connected"):
+                said.append(M("{name}: direct, {kind}.", name=d["name"], kind=kind or "tcp"))
+            elif d.get("addresses") in ([], ["dynamic"]) and not opts.get("globalAnnounceEnabled", True):
+                bad = True
+                said.append(M("{name} has no address of its own and global discovery is off, so it can’t be found.", name=d["name"]))
+                if hosts:
+                    fix[did] = hosts[0]
+            else:
+                said.append(M("{name}: not connected now.", name=d["name"]))
+        notes = []
+        if not opts.get("localAnnounceEnabled", True):
+            notes.append(M("Local discovery is off: devices on your LAN are found by their addresses only."))
+        if not opts.get("relaysEnabled", True):
+            notes.append(M("Relays are off: no fallback when a direct connection fails."))
+        detail = " ".join(str(x) for x in said + notes)
+        if fix:
+            detail += " " + str(M("Add Its Address sets tcp://{host}:{port} on the device, keeping what it has; Syncthing then tries that first.", host=next(iter(fix.values())), port=str(SYNC_PORT)))
+        return {"status": "warn" if bad else "ok", "text": M("{n} mirror devices reached through a relay or not findable", one="{n} mirror device reached through a relay or not findable", n=sum(1 for d in devices.values() if ("relay" in str(d.get("type") or "") and d.get("connected")) or (not d.get("connected") and d.get("addresses") in ([], ["dynamic"]) and not opts.get("globalAnnounceEnabled", True)))) if bad
+                else M("Every mirror device is reached directly") if all(d.get("connected") for d in devices.values()) else M("Mirror devices: direct where connected"),
+                "detail": detail, "fix": fix}
+
+    def add_device_address(self, did: str) -> str:
+        """The mirror's host, as the link knows it, given to the device as tcp://host:22000 (what it has kept): Syncthing tries it first."""
+        hosts = self.device_hosts(did)
+        if not hosts:
+            raise ValueError(M("No address is known for that device: pair the Dionysus at its site first, or set its address in Syncthing."))
+        dev = next((d for f in self.status.get("folders") or [] for d in f.get("devices") or [] if d["id"] == did), None)
+        have = list((dev or {}).get("addresses") or ["dynamic"])
+        addr = f"tcp://{hosts[0]}:{SYNC_PORT}"
+        if addr not in have:
+            try:
+                self.client().patch_device(did, {"addresses": [addr] + have})
+            except SyncthingError as e:
+                raise ValueError(e.why) from None
+            self.app.activity.event("sync", M("Syncthing device {name} given the address {addr}", name=(dev or {}).get("name") or did[:7], addr=addr))
+            self.refresh()
+        return addr
 
     def device_at(self, hosts) -> dict | None:
         """The device our Syncthing is connected to at one of ``hosts`` (its connection's address): {"id", "short", "source":
@@ -1051,7 +1129,7 @@ class Syncthing:
         the app makes known to this release (api), a folder over each mirrored library (folders), their devices (devices)."""
         st = dict(self.status)
         off = lambda text, detail="": {"status": "off", "text": text, "detail": detail}  # noqa: E731
-        rest = {"key": off(M("API key")), "api": off(M("API compatibility")), "folders": off(M("Folders")), "devices": off(M("Devices")), "throttle": off(M("Throttle"))}
+        rest = {"key": off(M("API key")), "api": off(M("API compatibility")), "folders": off(M("Folders")), "devices": off(M("Devices")), "reach": off(M("Reach")), "throttle": off(M("Throttle"))}
         if not self.wanted():
             looked = self.found.get("at")
             return dict({"found": {"status": "warn" if looked else "off", "text": M("Syncthing not found on this network") if looked else M("Syncthing"),
@@ -1085,6 +1163,7 @@ class Syncthing:
         names = {str(lib["key"]): lib.get("title") or lib["key"] for lib in getattr(self.app, "libraries", []) or []}
         folders = [f for f in st.get("folders") or [] if f["libraries"]]
         out["throttle"] = self.throttle_light()
+        out["reach"] = self.reach_light()
         if not keys:
             out["folders"] = off(M("No library is mirrored"), M("Which folder carries each library is looked at once one is ([Mirror page](/mirrors))."))
             out["devices"] = off(M("Devices"))
@@ -1112,7 +1191,7 @@ class Syncthing:
         and the file lists (their counts instead)."""
         st = dict(self.status)
         return {"wanted": self.wanted(), "busy": self.busy, "at": st.get("at"), "ok": bool(st.get("ok")), "error": st.get("error"), "version": st.get("version"),
-                "device": st.get("device") or {}, "identity": self.identity(), "lights": self.lights(), "found": dict(self.found), "api": st.get("api") or {},
+                "device": st.get("device") or {}, "identity": self.identity(), "lights": self.lights(), "found": dict(self.found), "api": st.get("api") or {}, "options": st.get("options") or {},
                 "throttle": {"on": bool(self.settings().get("throttle")), "active": dict(self.throttled) if self.throttled else None, "reading": dict(self.reading)},
                 "folders": [{k: v for k, v in f.items() if k not in ("ignores", "need", "remote_need")} | {"need_n": len(f.get("need") or []), "out_n": sum(len(v) for v in (f.get("remote_need") or {}).values()),
                              "ignores_plexcache": bool(f.get("ignores") and any(ignored_by(f["ignores"], mark_in(e["rel"]))

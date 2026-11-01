@@ -3925,8 +3925,10 @@ class AppEdgeTests(unittest.TestCase):
         root = logging.getLogger()
         saved_handlers, saved_level = list(root.handlers), root.level
         try:
-            # main() sets up logging to the screen; catch what it says instead of printing it mid-progress-bar
-            with self.assertLogs("plexcache", "WARNING") as logs:
+            # main() sets up logging to the screen; catch what it says instead of printing it mid-progress-bar.
+            # Its stop-signal handler is caught too: left installed, it would swallow the SIGTERM that stops the
+            # test run (tnsync's Enter), and the rest of the suite would carry on.
+            with self.assertLogs("plexcache", "WARNING") as logs, mock.patch("signal.signal"):
                 self.assertEqual(main_mod.main(), 0)
             self.assertTrue(any("login is off" in m for m in logs.output))
         finally:
@@ -3971,6 +3973,45 @@ class AppEdgeTests(unittest.TestCase):
         finally:
             root.handlers[:] = saved_handlers
             root.setLevel(saved_level)
+
+
+
+class TestRunnerTests(unittest.TestCase):
+    def test_a_stop_ends_the_run_at_once_and_the_unfinished_test_is_not_a_failure(self):
+        """tnsync's Enter sends tests/run.py a SIGTERM. The run ends then, mid-test, even when an earlier
+        test left a SIGTERM handler of its own behind; the test it was in isn't reported as failed."""
+        import signal
+        import subprocess
+        import textwrap
+        folder = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(folder, "stop_probe_tests.py"), "w", encoding="utf-8") as fh:
+            fh.write(textwrap.dedent("""
+                import signal, sys, time, unittest
+                class Probe(unittest.TestCase):
+                    def test_1_leaves_a_handler(self):
+                        signal.signal(signal.SIGTERM, lambda *a: None)    # as the app's main() would
+                    def test_2_is_running_when_the_stop_comes(self):
+                        print("running", flush=True)
+                        time.sleep(60)
+                        self.fail("not stopped")
+                    def test_3_never_runs(self):
+                        pass
+            """))
+        runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.py")
+        proc = subprocess.Popen([sys.executable, runner, "stop_probe_tests"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, env=dict(os.environ, PYTHONPATH=folder))
+        try:
+            self.assertEqual(proc.stdout.readline().strip(), "1/3 tests done")
+            self.assertEqual(proc.stdout.readline().strip(), "running")
+            proc.send_signal(signal.SIGTERM)
+            out, _ = proc.communicate(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        self.assertEqual(proc.returncode, 130)
+        self.assertIn("Stopped: 1 of 3 tests ran, 2 not run", out)
+        self.assertNotIn("fail", out.lower())
 
 
 
@@ -4430,6 +4471,7 @@ class TrueNASWatchTests(unittest.TestCase):
         w("plugins/auth.py", "class AuthService(Service):\n\n    class Config:\n        cli_namespace = \"auth\"\n\n    async def login_with_api_key(self, app, key):\n        pass\n")
         w("plugins/system.py", "class SystemService(Service):\n    def version(self):\n        pass\n\n    def host_id(self):\n        pass\n\nclass Other:\n    def version2(self):\n        pass\n")
         w("plugins/disk.py", "class DiskService(CRUDService):\n    pass\n")
+        w("plugins/interface.py", "class InterfaceService(CRUDService):\n    pass\n")
         w("plugins/apps.py", "class AppService(GenericCRUDService[AppEntry, str]):\n\n    class Config:\n        namespace = 'app'\n\n"
           "    @job()\n    def redeploy(self, job, name):\n        pass\n\n    def pull_images(self, job, name, options):\n        pass\n")
         w("service/core_service.py", "class CoreService(Service):\n    def get_methods(self, prefix=''):\n        pass\n")
@@ -12691,6 +12733,34 @@ class SyncthingTests(unittest.TestCase):
         app.settings.update({"peer": {"servers": {"xyz": {"url": "http://192.168.60.222:8642"}}}})
         self.assertEqual((link.other_identity() or {}).get("source"), "syncthing-device")
         self.assertEqual(link.snapshot()["identity"]["short"], "ZZZZZZZ")
+        # how the mirror's device is reached: direct (ok); through a relay (orange, with the mirror's address to give it, from the
+        # link); not findable with no address and global discovery off
+        reach = sy.lights()["reach"]
+        self.assertEqual((reach["status"], en(reach["text"])), ("ok", "Every mirror device is reached directly"))
+        st.connection_type[fakes.ST_OTHER_ID] = "relay-client"
+        sy.refresh()
+        reach = sy.lights()["reach"]
+        self.assertEqual((reach["status"], en(reach["text"]), reach["fix"]), ("warn", "1 mirror device reached through a relay or not findable", {fakes.ST_OTHER_ID: "192.168.60.222"}))
+        self.assertIn("Cottage NAS is reached through a relay", en(reach["detail"]))
+        html = PageStructureTests()._render(jsonable(app.state()), "system")["html"]
+        self.assertIn('data-act="syncthing-address" data-device="' + fakes.ST_OTHER_ID + '"', html)
+        self.assertEqual(sy.add_device_address(fakes.ST_OTHER_ID), "tcp://192.168.60.222:22000")
+        self.assertEqual(st.devices[1]["addresses"], ["tcp://192.168.60.222:22000", "dynamic"])
+        self.assertEqual(sy.add_device_address(fakes.ST_OTHER_ID), "tcp://192.168.60.222:22000")  # (again: nothing added twice)
+        self.assertEqual(st.devices[1]["addresses"], ["tcp://192.168.60.222:22000", "dynamic"])
+        st.connection_type.clear()
+        st.connected[fakes.ST_OTHER_ID] = False
+        st.devices[1]["addresses"] = ["dynamic"]
+        st.options["globalAnnounceEnabled"] = False
+        sy.refresh()
+        reach = sy.lights()["reach"]
+        self.assertEqual(reach["status"], "warn")
+        self.assertIn("global discovery is off, so it can’t be found", en(reach["detail"]))
+        st.options["globalAnnounceEnabled"] = True
+        st.connected[fakes.ST_OTHER_ID] = True
+        sy.refresh()
+        with self.assertRaises(ValueError):
+            sy.add_device_address("NOBODY-" + fakes.ST_OTHER_ID[7:])
         # the throttle, on from the start
         self.assertEqual(config.DEFAULTS["syncthing"]["throttle"], True)
         light = lambda: sy.lights()["throttle"]  # noqa: E731
@@ -13078,6 +13148,12 @@ class IntegrationStandardTests(unittest.TestCase):
                 for step, r in lights.items():
                     self.assertIn(r["status"], integrations.STATUSES, (step, r))
                     self.assertTrue(r["text"], (step, "a light says what it is"))
+                # the api light is the shared one (integrations.api_light): "API compatibility", and once connected its count of
+                # this integration's calls — not another light standing in for it
+                api_text = en(lights["api"]["text"])
+                self.assertRegex(api_text, r"^API compatibility(: (all \d+|\d+ of \d+) (calls|commands) (known|missing))?$", (cls.name, api_text))
+                if lights["api"]["status"] != "off":
+                    self.assertRegex(api_text, r"(all %d|\d+ of %d) (calls|commands)" % (len(ig.calls), len(ig.calls)), (cls.name, "the api light counts this integration's own calls"))
                 self.assertEqual(set(snap[cls.name]), {"title", "steps", "lights", "labels", "exceptions", "calls", "identity"})
                 self.assertEqual(snap[cls.name]["steps"], steps)
                 # every integration names its server by a key the service holds, never an address: an identity with its source
@@ -13089,13 +13165,11 @@ class IntegrationStandardTests(unittest.TestCase):
                 if "card" not in cls.exceptions:
                     self.assertIn('integrationMark("' + cls.name + '"', js[js.index('id="' + cls.name + '"') - 400:js.index('id="' + cls.name + '"')], "the card's mark comes from integrationMark")
                 # the card: its lights drawn by the one function, in the standard's order — or its exception for that
-                if "card" in cls.exceptions:
-                    self.assertNotIn('integrationLights("' + cls.name + '"', js)
-                else:
-                    card = js[js.index('id="' + cls.name + '"'):]
-                    card = card[:card.index("</section>")]
-                    self.assertIn('integrationLights("' + cls.name + '", testing, { api: info(', card, "the card's lights come from integrationLights, with the API light's ⓘ")
-                    self.assertNotIn("lightFor(c.", card, "a light drawn beside the standard's")
+                self.assertIn('integrationLights("' + cls.name + '"', js, "the card's lights come from integrationLights, in the standard's order")
+                card = js[js.index('id="' + cls.name + '"'):]
+                card = card[:card.index("</section>")]
+                self.assertNotIn("lightFor(c.", card, "a light drawn beside the standard's")
+                self.assertNotIn("PEER_LIGHTS", js, "a list of lights of its own beside the standard's steps")
         # the words of the API light are one function's, whatever the service
         self.assertEqual((snap["plex"]["identity"]["id"], snap["plex"]["identity"]["short"], snap["plex"]["identity"]["source"]), ("abc", "ABC", "plex"))
         self.assertEqual((snap["truenas"]["identity"]["id"], snap["truenas"]["identity"]["source"]), ("d41d8cd98f00b204e9800998ecf8427e", "truenas"))
@@ -13105,6 +13179,24 @@ class IntegrationStandardTests(unittest.TestCase):
             card = card[:card.index("</section>")]
             self.assertRegex(card, r'class="card hasfp" id="' + name + r'"><div class="fpmark own"><div class="fpstack"><svg class="identicon".*?<span class="fpcode" title="[^"]+">' + short + "</span>")
         self.assertEqual(en(integrations.api_light([], [], 9, "v1")["text"]), "API compatibility: all 9 calls known")
+        self.assertEqual(en(integrations.api_light(["status (v2 here, v1 there)"], [], 7, "Dionysus 0.16.21", "commands")["text"]), "API compatibility: 1 of 7 commands missing")
+        self.assertIn("learns the new commands", en(integrations.api_light(["x"], [], 7, "v", "commands")["detail"]))
+        # the link's: every command of the link against the table the other side sent
+        link = app.peerlinks.link("xyz")
+        link.talking = lambda: True
+        from plexcache import peerlink as pl
+        link.status = {"version": "0.16.21", "api": pl.API, "commands": dict(pl.COMMANDS)}
+        self.assertEqual(en(link.lights()["api"]["text"]), f"API compatibility: all {len(pl.COMMANDS)} commands known")
+        link.status["commands"]["status"] = pl.COMMANDS["status"] - 1
+        del link.status["commands"]["carry"]
+        got = link.lights()["api"]
+        self.assertEqual((got["status"], en(got["text"])), ("warn", f"API compatibility: 2 of {len(pl.COMMANDS)} commands missing"))
+        self.assertIn(f"status (v{pl.COMMANDS['status']} here, v{pl.COMMANDS['status'] - 1} there)", en(got["detail"]))
+        self.assertIn("carry (v1 here, none there)", en(got["detail"]))
+        self.assertEqual(en(link.lights()["version"]["text"]), "Dionysus 0.16.21 there" if False else en(link.lights()["version"]["text"]))  # (version and clocks: a light of its own)
+        self.assertIn("Dionysus 0.16.21 there", en(link.lights()["version"]["detail"]))
+        del link.status["commands"]
+        self.assertEqual(en(link.lights()["api"]["text"]), f"API compatibility: {len(pl.COMMANDS) - 1} of {len(pl.COMMANDS)} commands missing")
         self.assertEqual(en(integrations.api_light(["x (GET /a)"], [], 9, "v1", "paths")["text"]), "API compatibility: 1 of 9 calls missing")
         self.assertIn("learns the new paths", en(integrations.api_light(["x (GET /a)"], [], 9, "v1", "paths")["detail"]))
         self.assertIn("learns the new names", en(integrations.api_light(["x (a.b)"], [], 9, "v1")["detail"]))
@@ -13121,6 +13213,7 @@ class IntegrationStandardTests(unittest.TestCase):
         c = app.test_connections()
         self.assertEqual((c["plex_api"]["status"], en(c["plex_api"]["text"])), ("ok", f"API compatibility: all {len(CALLS)} calls known"))
         self.assertIn("Plex Media Server", en(c["plex_api"]["detail"]))
+        self.assertTrue(en(c["plex_api"]["detail"]).startswith("Every call the app makes is answered by Plex Media Server"), en(c["plex_api"]["detail"]))
         tried = PlexClient(PLEX.url, "good-token").verify_api()
         self.assertEqual(set(tried), set(CALLS))
         self.assertTrue(all(v is True for v in tried.values()), tried)
@@ -13149,6 +13242,50 @@ class IntegrationStandardTests(unittest.TestCase):
         self.assertEqual((c["plex_lan"]["status"], en(c["plex_lan"]["text"])), ("ok", "Plex’s LAN networks cover the networks Plex answers on"))
         self.assertEqual(app.plex_add_lan_networks(), ["10.0.0.0/8", "100.64.0.0/10"])  # (nothing missing: nothing set)
         PLEX.prefs["LanNetworksBandwidth"] = ""
+        # the custom access URLs: well-formed, this server's, reachable from here; and this NAS's tailnet address to add
+        import ipaddress
+        import urllib.parse
+        from plexcache.plex import PlexClient as _PC
+        self.assertEqual(en(c["plex_urls"]["text"]), "No custom access URLs")
+        light = lambda: app._urls_light(PLEX.prefs["customConnections"], "abc")  # noqa: E731
+        PLEX.prefs["customConnections"] = "nonsense"
+        self.assertEqual((light()["status"], en(light()["text"])), ("warn", "A custom access URL isn’t this server’s: nonsense"))
+        PLEX.prefs["customConnections"] = PLEX.url
+        self.assertEqual((light()["status"], en(light()["text"])), ("ok", "Custom access URLs are this server’s"))
+        PLEX.prefs["customConnections"] = PLEX.url + ",http://127.0.0.1:1"
+        self.assertEqual((light()["status"], en(light()["text"])), ("ok", "Custom access URLs are this server’s; 1 not reached from here"))
+        from plexcache.peerlink import PeerLinks as _PL
+        with mock.patch.object(_PL, "reach", lambda self, urls, mid: ("Cabin", {u: {"ok": True, "why": ""} for u in urls})):
+            got = light()  # (the other site reaches it: fine)
+            self.assertEqual((got["status"], en(got["text"])), ("ok", "Custom access URLs are this server’s"))
+            self.assertIn("http://127.0.0.1:1 (not from this NAS, but from Cabin)", en(got["detail"]))
+        with mock.patch.object(_PL, "reach", lambda self, urls, mid: ("Cabin", {u: {"ok": False, "why": "Name or service not known"} for u in urls})):
+            got = light()  # (from neither: a client given it can't reach the server)
+            self.assertEqual((got["status"], en(got["text"])), ("warn", "Plex can’t be reached at http://127.0.0.1:1"))
+            self.assertIn("from this NAS, and from Cabin too (Name or service not known)", en(got["detail"]))
+        with mock.patch.object(_PC, "identity", lambda self: {"machine_id": "someone-else", "version": "1", "ms": 1}):
+            self.assertEqual(en(light()["text"]), f"A custom access URL isn’t this server’s: {PLEX.url}, http://127.0.0.1:1")
+        TRUENAS.interfaces = [{"name": "eno1", "aliases": [{"type": "INET", "address": "192.168.50.222", "netmask": 24}], "state": {"aliases": []}},
+                              {"name": "tailscale0", "aliases": [], "state": {"aliases": [{"type": "INET", "address": "100.101.102.103", "netmask": 32}]}}]
+        try:
+            app._host_addresses = None
+            self.assertEqual(app.host_addresses(), {"lan": ["192.168.50.222"], "tailnet": ["100.101.102.103"]})
+            self.assertIn(ipaddress.ip_network("192.168.50.0/24"), app.local_networks())
+            PLEX.prefs["customConnections"] = PLEX.url
+            port = urllib.parse.urlsplit(PLEX.url).port
+            got = light()
+            self.assertEqual((got["status"], en(got["text"]), got["add"]), ("warn", "Custom access URLs leave out this NAS’s tailnet address", [f"http://100.101.102.103:{port}"]))
+            self.assertEqual(app.plex_add_custom_urls(), [PLEX.url, f"http://100.101.102.103:{port}"])
+            self.assertEqual(PLEX.prefs["customConnections"], f"{PLEX.url},http://100.101.102.103:{port}")
+            self.assertTrue(any("custom access URLs given" in str(e["message"]) for e in app.activity.snapshot()["events"]))
+            st2 = jsonable(app.state())
+            st2["testing"], st2["connections"]["plex_urls"] = False, jsonable(got)  # (the page as it stands once the test it kicked off is done)
+            html2 = PageStructureTests()._render(st2, "system")["html"]
+            self.assertIn('data-act="plex-urls"', html2)
+        finally:
+            TRUENAS.interfaces = []
+            app._host_addresses = None
+            PLEX.prefs["customConnections"] = ""
         self.assertIn("Add Subnets to Plex LAN sets Settings → Network → LAN Networks to 100.64.0.0/10", en(app._lan_light("", "abc")["detail"]))
         self.assertIn("wasn’t checked", en(app._lan_light("", "abc")["detail"]))  # (plex.tv not reached: the tailnet not told, so offered)
         # Plex reached on the subnets: what plex.tv says Plex publishes, each address tried as this Plex (its /identity)
@@ -13160,22 +13297,50 @@ class IntegrationStandardTests(unittest.TestCase):
             self.assertEqual((r["status"], r["add"]), ("warn", ["100.64.0.0/10"]))
             self.assertIn("Plex answers at 100.101.102.103 (100.64.0.0/10).", en(r["detail"]))
             app.test_connections()
-            html = PageStructureTests()._render(jsonable(app.state()), "system")["html"]  # (the button in the check's row, beside it)
+            html = PageStructureTests()._render(dict(jsonable(app.state()), testing=False), "system")["html"]  # (the button in the check's row, beside it; not the retest the add started)
             row = html[html.index("Plex’s LAN networks leave out"):]
             row = row[:row.index("</section>")].split('class="lightrow"')[0]
             self.assertRegex(row, r'</div></div><button class="btn" type="button" data-act="plex-lan" title="[^"]+">Add Subnets to Plex LAN</button></div>')
+        from plexcache.peerlink import PeerLinks
+        tried_there = []
+
+        def there(ok):  # (the other site's Dionysus trying the addresses: Cabin)
+            return lambda self, urls, mid: tried_there.append(list(urls)) or ("Cabin", {u: {"ok": ok, "why": "" if ok else "timed out"} for u in urls})
         with mock.patch.object(_plexmod, "servers", lambda cid, tok: [mine]), mock.patch.object(App, "_plex_answers", staticmethod(lambda url, mid: False)):
-            r = app._lan_light("", "abc")  # (an address of Plex's there that doesn't answer: not added, said)
-            self.assertEqual((r["status"], en(r["text"]), r.get("add")), ("warn", "Plex doesn’t answer on 100.64.0.0/10", None))
-            self.assertIn("Plex has 100.101.102.103 on 100.64.0.0/10, but didn’t answer there", en(r["detail"]))
-            self.assertEqual(app.plex_add_lan_networks(), [])
-            self.assertEqual(PLEX.prefs["LanNetworksBandwidth"], "")
+            r = app._lan_light("", "abc")  # (not answering from here, no other site to try from: still offered, said)
+            self.assertEqual((r["status"], en(r["text"]), r.get("add")), ("warn", "Plex’s LAN networks leave out 100.64.0.0/10", ["100.64.0.0/10"]))
+            self.assertIn("Plex has 100.101.102.103 on 100.64.0.0/10, but didn’t answer there from this NAS (no paired Dionysus", en(r["detail"]))
+            with mock.patch.object(PeerLinks, "reach", there(True)):  # (answering from the other site: offered, said where from)
+                r = app._lan_light("", "abc")
+                self.assertEqual((r["status"], r.get("add")), ("warn", ["100.64.0.0/10"]))
+                self.assertIn("Plex answers at 100.101.102.103 (100.64.0.0/10) from Cabin, though not from this NAS.", en(r["detail"]))
+                self.assertEqual(tried_there[-1], ["http://100.101.102.103:32400"])
+                self.assertEqual(en(app._lan_light("100.64.0.0/10", "abc")["text"]), "Plex’s LAN networks cover the networks Plex answers on")
+            with mock.patch.object(PeerLinks, "reach", there(False)):  # (from neither: not added, the light says so — and with one interface, the fix)
+                r = app._lan_light("", "abc")
+                self.assertEqual((r["status"], en(r["text"]), r.get("add"), r.get("iface")), ("warn", "Plex doesn’t answer on 100.64.0.0/10", None, None))
+                self.assertIn("didn’t answer there from this NAS or from Cabin", en(r["detail"]))
+                self.assertIn("Plex listens on every network", en(r["detail"]))
+                self.assertEqual(app.plex_add_lan_networks(), [])
+                self.assertEqual(PLEX.prefs["LanNetworksBandwidth"], "")
+                r = app._lan_light("", "abc", "eth0")
+                self.assertEqual(r["iface"], "eth0")
+                self.assertIn("Answer on All Networks sets it to any", en(r["detail"]))
+                PLEX.prefs["PreferredNetworkInterface"] = "eth0"
+                try:
+                    app.test_connections()
+                    st = dict(jsonable(app.state()), testing=False)
+                    self.assertRegex(PageStructureTests()._render(st, "system")["html"], r'data-act="plex-iface" title="[^"]+">Answer on All Networks</button>')
+                    app.plex_any_interface()
+                    self.assertEqual(PLEX.prefs["PreferredNetworkInterface"], "")
+                finally:
+                    PLEX.prefs.pop("PreferredNetworkInterface", None)
         with mock.patch.object(_plexmod, "servers", lambda cid, tok: [dict(mine, connections=[])]):
             r = app._lan_light("", "abc")  # (Plex not on the tailnet: left out, the light green)
             self.assertEqual((r["status"], r.get("add")), ("ok", None))
             self.assertIn("Plex has no address on 100.64.0.0/10", en(r["detail"]))
             app.test_connections()
-            self.assertNotIn('data-act="plex-lan"', PageStructureTests()._render(jsonable(app.state()), "system")["html"])
+            self.assertNotIn('data-act="plex-lan"', PageStructureTests()._render(dict(jsonable(app.state()), testing=False), "system")["html"])
         app.test_connections()
         self.assertLess(card.index("Plex server found"), card.index("Signed in to Plex"))
         self.assertLess(card.index("Signed in to Plex"), card.index("API compatibility"))
@@ -17176,6 +17341,8 @@ class PeerLinkEdgeTests(unittest.TestCase):
             a.mirror_link.files("7")
             a.mirror_link.request("POST", "/peer/v1/carry", {"library": "7", "mirrors": "1", "marker": {"at": 1.0}, "claims": []})
             a.mirror_link.request("POST", "/peer/v1/update", {"version": a.version, "commit": "", "channel": pl.CHANNEL})
+            reached = a.mirror_link.request("POST", "/peer/v1/reach", {"urls": [PLEX.url, "ftp://x", "http://127.0.0.1:1"], "machine": "abc"})
+            self.assertEqual([(r["url"], r["ok"]) for r in reached["results"]], [(PLEX.url, True), ("ftp://x", False), ("http://127.0.0.1:1", False)])
             a.mirror_link.unpair()
         for c, fields in sent.items():
             self.assertLessEqual(fields, set(pl.API_SHAPES[c]["request"]), f"{c} sends a field its shape doesn't name")
@@ -17205,13 +17372,29 @@ class PeerLinkEdgeTests(unittest.TestCase):
             self.assertEqual((got["started"], got["version"]), (True, b.version))
             upd.assert_called_once()
         asked = []
-        with mock.patch.object(link, "request", side_effect=lambda m, p, body=None, timeout=30: asked.append(p) or {"started": True, "why": ""}):
+        with mock.patch.object(link, "request", side_effect=lambda m, p, body=None, timeout=30: asked.append(p) or {"started": True, "why": ""}), \
+                mock.patch.object(a.updates, "check", return_value=True) as fresh:
             st = dict(link.status or {}, version="0.0.1", channel=pl.CHANNEL, commit="")
             a.updates.checked, a.updates.latest, a.updates.latest_commit = time.time(), __version__, None   # (current here)
+            link.update_said = (time.time(), False, "no newer build found on GitHub for this channel")
+            link._offer_update(dict(st, version="999.0.0"))                                          # (newer there: not asked, the old answer dropped)
+            self.assertEqual((asked, link.update_said), ([], None))
+            fresh.assert_not_called()
+            def found():                                                                             # (a build published since the last check)
+                a.updates.latest = "999.0.0"
+                return True
+            fresh.side_effect = found
+            link._offer_update(st)                                                                   # (checked again before asking: behind here, not asked)
+            fresh.assert_called_once()
+            self.assertEqual((asked, link.update_said), ([], None))
+            fresh.side_effect, link.update_asked = None, None
+            a.updates.latest = __version__
             link._offer_update(dict(st, commands={}))                                                # (no update command there: not asked)
             self.assertEqual(asked, [])
+            fresh.reset_mock()
             link._offer_update(st)
             self.assertEqual(asked, ["/peer/v1/update"])
+            fresh.assert_called_once()                                                               # (GitHub checked again just before asking)
             link._offer_update(st)                                                                   # (asked once per build seen there)
             self.assertEqual(asked, ["/peer/v1/update"])
             self.assertTrue(link.update_said and link.update_said[1])
@@ -17298,13 +17481,14 @@ class PeerLinkEdgeTests(unittest.TestCase):
         link.status.update(api=2, version="9.9")
         link.skew = 500
         light = link._version_light()
-        self.assertEqual((light["status"], light["detail"].count(";")), ("warn", 3))             # (api, version, the commands it lacks, clocks)
-        self.assertIn("it doesn’t say which link commands it has", en(light["detail"]))            # (no table in its status: only the handshake)
+        self.assertEqual((light["status"], light["detail"].count(";")), ("warn", 2))             # (api, version, clocks; the commands are the API light's)
         self.assertEqual(link.commands_there(), {})
+        api = link._api_light()                                                                       # (no table in its status: only the handshake)
+        self.assertEqual((api["status"], en(api["text"])), ("warn", f"API compatibility: {len(pl.COMMANDS) - 1} of {len(pl.COMMANDS)} commands missing"))
         link.status["commands"] = {c: v for c, v in pl.COMMANDS.items() if c not in ("carry", "update")}
-        self.assertIn("it lacks the link commands carry, update", en(link._version_light()["detail"]))  # (a table without them)
+        self.assertIn("carry (v1 here, none there)", en(link._api_light()["detail"]))                 # (a table without them)
         link.status["commands"] = dict(pl.COMMANDS, carry=pl.COMMANDS["carry"] + 1)
-        self.assertIn("the link commands carry are of another version there", en(link._version_light()["detail"]))
+        self.assertIn(f"carry (v{pl.COMMANDS['carry']} here, v{pl.COMMANDS['carry'] + 1} there)", en(link._api_light()["detail"]))
         self.assertFalse(link.can("carry"))
         self.assertTrue(link.can("files"))
         a.settings.update({"peer": {"enabled": False}})

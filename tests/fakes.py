@@ -116,7 +116,7 @@ class FakePlex:
     def __init__(self, cat: dict, token: str = "good-token", music_path: str = "/music", report_root: str | None = None):
         self.cat = cat
         self.token = token
-        self.prefs = {"LanNetworksBandwidth": ""}  # (Settings → Network → LAN Networks, as /:/prefs gives and takes it)
+        self.prefs = {"LanNetworksBandwidth": "", "customConnections": ""}  # (Settings → Network, as /:/prefs gives and takes them)
         # Pretend Plex sees the media under a different folder (like /data inside its own app).
         self.report_root = report_root
         # Names shown in the UI (the demo swaps in nicer ones for screenshots).
@@ -222,7 +222,7 @@ class FakePlex:
         parts = u.path.split("/")
         self.puts = getattr(self, "puts", []) + [(u.path, {k: v if len(v) > 1 else v[0] for k, v in q.items()})]
         if u.path == "/:/prefs":
-            for k, v in q.items():
+            for k, v in parse_qs(u.query, keep_blank_values=True).items():  # (a setting cleared: given as blank)
                 self.prefs[k] = v[0]
             return True
         if u.path.startswith("/library/sections/") and u.path.endswith("/all") and q.get("id"):  # an edit
@@ -521,7 +521,7 @@ class FakeTrueNAS:
                     self._send(conn, "this is not json")
                     continue
                 elif req["method"] == "core.get_methods":  # (every method this TrueNAS has, by name; methods_missing: left out)
-                    have = ["auth.login_with_api_key", "system.version", "system.host_id", "pool.query", "pool.dataset.query", "zfs.dataset.query", "disk.query",
+                    have = ["auth.login_with_api_key", "system.version", "system.host_id", "interface.query", "pool.query", "pool.dataset.query", "zfs.dataset.query", "disk.query",
                             "app.query", "app.pull_images", "app.redeploy", "core.get_methods"] + \
                            [getattr(self, "snapshot_api", "pool.snapshot") + x for x in (".query", ".create", ".delete", ".rollback")]
                     result = {m: {"description": ""} for m in have if m not in getattr(self, "methods_missing", ())}
@@ -529,6 +529,8 @@ class FakeTrueNAS:
                     result = "TrueNAS-25.10.0"
                 elif req["method"] == "system.host_id":
                     result = "d41d8cd98f00b204e9800998ecf8427e"
+                elif req["method"] == "interface.query":
+                    result = getattr(self, "interfaces", [])  # (a test gives the host its interfaces: [{"name", "aliases": [{"type": "INET", "address"}], "state": {"aliases"}}])
                 elif req["method"] == "pool.query":
                     result = [self.pool_data]
                 elif req["method"] == "pool.dataset.query":
@@ -892,6 +894,8 @@ class FakeSyncthing:
         self.folders: list[dict] = folders if folders is not None else []
         self.connected: dict[str, bool] = {other_id: True}
         self.connections_address: dict[str, str] = {}  # device -> "host:port" it's connected from
+        self.connection_type: dict[str, str] = {}  # device -> "tcp-client" | "relay-client" …
+        self.options: dict = {"globalAnnounceEnabled": True, "localAnnounceEnabled": True, "relaysEnabled": True, "natEnabled": True}
         self.ignores: dict[str, list[str]] = {}
         self.folder_status: dict[str, dict] = {}
         self.listing: dict[str, list[str]] = {}  # folder id -> the names at its top level (/rest/db/browse)
@@ -953,9 +957,9 @@ class FakeSyncthing:
                 if self.command == "GET" and path == "/rest/system/version":
                     return self._reply({"version": "v1.29.2", "os": "linux", "arch": "amd64"})
                 if self.command == "GET" and path == "/rest/config":
-                    return self._reply({"version": 37, "folders": fake.folders, "devices": fake.devices})
+                    return self._reply({"version": 37, "folders": fake.folders, "devices": fake.devices, "options": fake.options})
                 if self.command == "GET" and path == "/rest/system/connections":
-                    return self._reply({"connections": {d: {"connected": on, "address": fake.connections_address.get(d, "")} for d, on in fake.connected.items()}})
+                    return self._reply({"connections": {d: {"connected": on, "address": fake.connections_address.get(d, ""), "type": fake.connection_type.get(d, "tcp-client" if on else "")} for d, on in fake.connected.items()}})
                 if self.command == "GET" and path == "/rest/db/status":
                     if folder is None:
                         return self._reply({"error": "no such folder"}, 404)

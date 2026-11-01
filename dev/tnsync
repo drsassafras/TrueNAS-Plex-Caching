@@ -353,7 +353,8 @@ run_in_src() {   # run_in_src <command> — in the code being copied (for master
     # that's the exported copy, not your folder). Python's bytecode cache is kept out of the
     # project. Straight to the terminal (not through a pipe), so a test runner can draw a progress bar.
     # At a terminal, Enter stops the run: the command runs as a job of its own (its process group), the
-    # keyboard is watched meanwhile, and the whole group is ended on Enter (ABORTED=1, exit 130).
+    # keyboard is watched meanwhile, and the whole group is ended on Enter (ABORTED=1, exit 130): SIGTERM first
+    # (tests/run.py then says how far it got), SIGKILL if it's still there 2 s later.
     ABORTED=0
     if [ ! -t 0 ]; then
         ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$1" )
@@ -369,6 +370,10 @@ run_in_src() {   # run_in_src <command> — in the code being copied (for master
         if read -r -t 1 line; then
             ABORTED=1
             kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+            # A runner that ignores the stop (a handler left behind, a stuck child) gets 2 s, then is killed.
+            local waited=0
+            while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 20 ]; do sleep 0.1; waited=$((waited + 1)); done
+            kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
             break
         fi
     done

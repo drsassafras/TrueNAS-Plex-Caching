@@ -24,6 +24,7 @@ METHODS = {
     "signing in": ("auth.login_with_api_key",),
     "the TrueNAS version": ("system.version",),
     "the host's id": ("system.host_id",),
+    "the host's interfaces": ("interface.query",),
     "the pool's layout and cache devices": ("pool.query",),
     "the cache devices' sizes": ("disk.query",),
     "a dataset's settings": ("zfs.dataset.query", "pool.dataset.query"),  # (zfs.dataset.* went in 25.10; pool.dataset.query has them too)
@@ -140,6 +141,19 @@ class TrueNASClient:
             return str(self.call("system.version"))
         except TrueNASError:
             return ""
+
+    def addresses(self) -> list[str]:
+        """Every IPv4 address on the host's interfaces (interface.query: what's configured, and what's up), Tailscale's among them."""
+        try:
+            rows = self.call("interface.query") or []
+        except TrueNASError:
+            return []
+        out: list[str] = []
+        for r in rows:
+            for alias in list(r.get("aliases") or []) + list(((r.get("state") or {}).get("aliases")) or []):
+                if str(alias.get("type") or "").upper() == "INET" and alias.get("address") and alias["address"] not in out:
+                    out.append(str(alias["address"]))
+        return out
 
     def host_id(self) -> str:
         """TrueNAS's own id for this host (system.host_id): the same across reinstalls of the apps, so this server's identity."""

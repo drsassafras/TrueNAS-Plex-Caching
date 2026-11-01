@@ -27,6 +27,43 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
 
 
+def _plex_urls(app) -> list:
+    """Add URLs to Plex: this NAS's tailnet address into Plex's Custom server access URLs (App.plex_add_custom_urls)."""
+    try:
+        return app.plex_add_custom_urls()
+    except PlexError as e:
+        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+
+
+def _integration_actions(app, path: str, body: dict) -> dict | None:
+    """The System cards' buttons on Plex and Syncthing: Add Subnets to Plex LAN, Answer on All Networks, Add URLs to Plex, Syncthing's Test Again and
+    Add Its Address. None when ``path`` isn't one of them."""
+    if path == "/api/plex/lan":
+        return {"networks": _plex_lan(app)}
+    if path == "/api/plex/urls":
+        return {"urls": _plex_urls(app)}
+    if path == "/api/plex/interface":
+        try:
+            app.plex_any_interface()
+        except PlexError as e:
+            raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+        return {"started": True}
+    if path == "/api/syncthing/address":
+        return {"address": _syncthing_address(app, str(body.get("device") or ""))}
+    if path == "/api/syncthing/test":
+        app.syncthing.tick_async(force=True)
+        return {"started": True}
+    return None
+
+
+def _syncthing_address(app, device: str) -> str:
+    """Add Its Address: the mirror's host given to its Syncthing device (Syncthing.add_device_address), a refusal said the settings' way."""
+    try:
+        return app.syncthing.add_device_address(device)
+    except ValueError as e:
+        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+
+
 def _plex_lan(app) -> list:
     """Add Subnets to Plex LAN: this NAS's networks and the tailnet into Plex's LAN Networks (App.plex_add_lan_networks), Plex's
     refusal said the settings' way."""
@@ -535,11 +572,9 @@ def make_handler(app):
                         raise SettingsError(M("files must be a list of the files to optimize"))
                     got = app.optimizing.queue(key, mode, files)  # now, or after the jobs before it
                     return self._json({"started": got == "started", "queued": got == "queued"})
-                if path == "/api/plex/lan":  # System → Plex: Add Subnets to Plex LAN (this NAS's networks and the tailnet into Plex's LAN Networks)
-                    return self._json({"networks": _plex_lan(app)})
-                if path == "/api/syncthing/test":  # System → Syncthing: Test Again (syncthing.py)
-                    app.syncthing.tick_async(force=True)
-                    return self._json({"started": True})
+                got = _integration_actions(app, path, body)  # (System → Plex and Syncthing: the cards' buttons)
+                if got is not None:
+                    return self._json(got)
                 if path.startswith("/api/peer/"):
                     # System → Mirror Dionysus (peerlink.py): Pair Now and Unpair on a mirror's link ({"server": its id}), Test Again on every one
                     link = app.peerlinks.for_server(str(body.get("server") or ""))

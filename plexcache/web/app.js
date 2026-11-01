@@ -3792,7 +3792,6 @@ PCI18N.ready.then(function () {
   // The Dionysus at each mirror's site (peerlink.py): found from that Plex server's addresses, paired by itself through the
   // synced folders when that's safe, then asked directly — what Mirror Checks' disk comparison relies on. One block per
   // server some library is mirrored by, with its five lights and Pair Now, Unpair; the found/paired/talking light is on the Mirror page too.
-  var PEER_LIGHTS = [["found", N("Dionysus at the mirror’s site")], ["paired", N("Paired")], ["talking", N("Talking")], ["folders", N("Folder sync")], ["version", N("Version and clock")]];
   function mirrorName(key) {
     var p2 = ST.plex2 || {}, p = (p2.pairs || {})[key], st = (p2.states || {})[key] || {};
     return (p && p.name) || st.name || T("the mirror");
@@ -3857,19 +3856,11 @@ PCI18N.ready.then(function () {
     return '<div class="fpmark"><div class="fpstack">' + identicon(idn.id) + '<span class="fpcode" title="' + esc(idn.id) + '">' + esc(idn.short) + "</span></div>" +
       info(H("{name}’s fingerprint, the picture and code the Dionysus there shows as its own, at the top right of its own Mirror Dionysus card. Compare the two before pairing by hand, or when in doubt that this is it. This one’s own is at the top right of this card, and beside the app’s name in the menu.", { name: lk.name }), T("{name} fingerprint", { name: lk.name })) + "</div>";
   }
-  // this one's own, the same way, named after this server's Plex (the mirror's shows it for this one)
-  function ownMark(own) {
-    var idn = own.identity || (own.fingerprint ? { id: own.fingerprint, short: own.fingerprint, source: "own" } : null);
-    if (!idn) return "";
-    var name = own.name || idn.name || T("This Dionysus");
-    return '<div class="fpmark own"><div class="fpstack">' + identicon(idn.id) + '<span class="fpcode" title="' + esc(idn.id) + '">' + esc(idn.short) + '</span><span class="fpname">' + esc(name) + "</span></div>" +
-      info(H("{name}’s identity, this Dionysus’s own: the picture and code the Dionysus at the other site shows for this one, at the top right of its lights there. {source} In full: {id}", { name: name, source: identitySource(idn), id: idn.id }), T("{name} identity", { name: name })) + "</div>";
-  }
   function peerServerBlock(lk, pe) {
     var lt = lk.lights || {}, sid = lk.server, url = ((S.peer || {}).servers || {})[sid] || {};
     var mark = peerMark(lk);
     var out = '<fieldset class="sub"><legend>' + (mark ? identicon(lk.fingerprint, "sm") : "") + esc(lk.name) + "</legend>" +
-      '<div class="lights' + (mark ? " marked" : "") + '">' + mark + PEER_LIGHTS.map(function (l) { return lightFor(lt[l[0]], T(l[1])); }).join("") + "</div>" +
+      '<div class="lights' + (mark ? " marked" : "") + '">' + mark + integrationLights("peer", false, null, null, { found: lt.found, key: lt.paired, api: lt.api, talking: lt.talking, folders: lt.folders, version: lt.version }) + "</div>" +
       '<div class="grid"><div class="fld"><label for="s-peerurl-' + esc(sid) + '">' + H("Its address") + '</label>' +
       '<input id="s-peerurl-' + esc(sid) + '" type="text" value="' + esc(url.url || "") + '" placeholder="' + esc(lk.detected || "http://192.168.1.20:8642") + '" data-peerurl="' + esc(sid) + '">' +
       (url.url ? ' <button type="button" class="revert" data-peerurl-revert="' + esc(sid) + '" title="' + H("Back to the default ({value})", { value: T("found by itself") }) + '">↺</button>' : "") +
@@ -3888,7 +3879,7 @@ PCI18N.ready.then(function () {
   }
   function peerCard() {
     var pe = ST.peer || {}, ps = S.peer || {}, own = pe.own || {}, links = Object.keys(pe.links || {}).map(function (k) { return pe.links[k]; });
-    var out = '<section class="card' + (own.fingerprint ? " hasfp" : "") + '" id="peer">' + ownMark(own) + "<h2>" + icon("mirror") + H("Mirror Dionysus") + ' <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional") + "</span></h2>" +
+    var out = '<section class="card' + (integrationMark("peer", own.name || T("This Dionysus")) ? " hasfp" : "") + '" id="peer">' + integrationMark("peer", own.name || T("This Dionysus")) + "<h2>" + icon("mirror") + H("Mirror Dionysus") + ' <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional") + "</span></h2>" +
       '<p class="hint">' + H("The Dionysus at the site of each server your libraries are mirrored by, if there is one. The two talk directly, over your network or a VPN, so Mirror Checks can compare both sites’ files.") +
       info(H("They find each other from the mirror’s Plex addresses, and pair by themselves when it’s safe: each writes a public key into the synced .plexcache folder, and a pairing is taken only from the mirror’s address, with the key the folder carried. " +
         "Every request after that is signed with a key the two work out from those, which never leaves either side. What they ask each other only reads: how each side is, and a library’s list of files.<br><br>" +
@@ -3922,7 +3913,10 @@ PCI18N.ready.then(function () {
       info(H("Asked every couple of minutes: its folders and their settings, which devices they’re shared with and whether each is connected, and what’s still on its way. The only things it’s ever asked to change are a folder’s pause, Watch for Changes, its pull order and its ignore patterns — each from a button here, never by itself. The key is kept with the settings and never shown again.<br><br>" +
         "<strong>Smallest First</strong> matters: the markers and claims in the hidden .plexcache folder are small files about big ones. Sent first, the other site knows a file is being optimized before it arrives; sent after, both sites can optimize the same file."), "Syncthing") + "</p>" +
       '<div class="lights">' + integrationLights("syncthing", testing, { api: info(H("Syncthing’s REST API changes between releases. This light tries every call the app makes — its status and version, the configuration, the connections, a folder’s state and ignore patterns, changing a folder’s and a device’s settings — against this Syncthing, and is green when each one answers. A scan isn’t tried, since it would start one.<br><br>" +
-        "<strong>If it’s orange, please report it on GitHub</strong> with your Syncthing version and the calls it names: the app then learns the new path, and the features that need it work again. A weekly check against the next Syncthing release runs on GitHub too."), T("API compatibility")) }) + "</div>" +
+        "<strong>If it’s orange, please report it on GitHub</strong> with your Syncthing version and the calls it names: the app then learns the new path, and the features that need it work again. A weekly check against the next Syncthing release runs on GitHub too."), T("API compatibility")) },
+      { reach: Object.keys((lt.reach || {}).fix || {}).map(function (did) {
+        return '<button class="btn" type="button" data-act="syncthing-address" data-device="' + esc(did) + '" title="' + H("Gives the device the mirror’s address as tcp://host:22000, keeping what it has.") + '">' + H("Add Its Address") + "</button>";
+      }).join(" ") }) + "</div>" +
       '<div class="grid">' + textInput("syncthing", "url", T("Syncthing address"), "s-syurl", H("Its web UI’s address on this server, filled in by itself when one is found among TrueNAS’s apps or on port 8384. Port 8384 is used if you leave it off."), "http://192.168.1.10:8384") +
       secretInput("syncthing", "api_key", T("API key"), "s-sykey") + "</div>" +
       details("stkey", H("How to find the API key"),
@@ -4162,7 +4156,9 @@ PCI18N.ready.then(function () {
     var tokOk = c.plex_token && c.plex_token.status === "ok";
     out += '<section class="card' + (integrationMark("plex", "Plex") ? " hasfp" : "") + '" id="plex">' + integrationMark("plex", "Plex") + "<h2>" + brand("plex") + 'Plex</h2><p class="hint">' + H("Used to list your libraries and see what’s playing.") + "</p>" +
       '<div class="lights">' + integrationLights("plex", testing, { api: info(H("Plex publishes no list of its API, so this light tries every read the app makes — the server, its identity, the libraries, what’s playing, a library’s items and collections, an item, a show’s episodes — and is green when each one answers. The changes the tools make go to the same paths and aren’t tried."), T("API compatibility")) },
-        { lan: c.plex_lan && c.plex_lan.add && c.plex_lan.add.length ? '<button class="btn" type="button" data-act="plex-lan" title="' + H("Adds the networks Plex answers on — this NAS’s, and Tailscale’s range when Plex is on your tailnet — to Plex’s LAN Networks (Settings → Network), keeping what’s there.") + '">' + H("Add Subnets to Plex LAN") + "</button>" : "" }) + "</div>" +
+        { lan: (c.plex_lan && c.plex_lan.add && c.plex_lan.add.length ? '<button class="btn" type="button" data-act="plex-lan" title="' + H("Adds the networks Plex answers on — this NAS’s, and Tailscale’s range when Plex is on your tailnet — to Plex’s LAN Networks (Settings → Network), keeping what’s there.") + '">' + H("Add Subnets to Plex LAN") + "</button>" : "") +
+            (c.plex_lan && c.plex_lan.iface ? '<button class="btn" type="button" data-act="plex-iface" title="' + H("Sets Plex’s Preferred network interface (Settings → Network) to any, so Plex answers on every network this NAS is on.") + '">' + H("Answer on All Networks") + "</button>" : ""),
+          urls: c.plex_urls && c.plex_urls.add && c.plex_urls.add.length ? '<button class="btn" type="button" data-act="plex-urls" title="' + H("Adds this NAS’s tailnet address, on Plex’s port, to Plex’s Custom server access URLs (Settings → Network), keeping what’s there.") + '">' + H("Add URLs to Plex") + "</button>" : "" }) + "</div>" +
       '<div class="grid">' +
       textInput("plex", "url", T("Server address"), "s-purl", H("Usually your NAS’s IP. Port 32400 is used if you leave it off."), guessPlex) +
       secretInput("plex", "token", T("Token (filled in when you sign in)"), "s-ptok") +
@@ -4423,8 +4419,9 @@ PCI18N.ready.then(function () {
       info(H("{title}’s identity: the same picture wherever this server is shown, here and at the mirror’s site, whatever address reaches it. {source} In full: {id}", { title: title, source: identitySource(idn), id: idn.id }), T("{title} identity", { title: title })) + "</div>";
   }
   // acts: {step: the button for what that light found (its HTML), or ""}, shown in the light's row (light)
-  function integrationLights(name, testing, infos, acts) {
-    var ig = (ST.integrations || {})[name] || {}, lt = ig.lights || {}, labels = ig.labels || {};
+  // (lights: another set drawn in the same order — the link's per server, from that link's own lights)
+  function integrationLights(name, testing, infos, acts, lights) {
+    var ig = (ST.integrations || {})[name] || {}, lt = lights || ig.lights || {}, labels = ig.labels || {};
     return (ig.steps || []).map(function (k) {
       var title = labels[k] ? msg(labels[k]) : k, act = acts && acts[k];
       return infos && infos[k] ? lightInfo(lt[k], title, testing, infos[k], act) : lightFor(lt[k], title, testing, act);
@@ -6283,6 +6280,18 @@ PCI18N.ready.then(function () {
     else if (act === "plex-lan") {  // System → Plex: Add Subnets to Plex LAN — the networks Plex answers on into its LAN Networks
       el.disabled = true;
       api("/api/plex/lan", {}).then(function () { ST.testing = true; render(); setTimeout(load, 1500); }).catch(function (e) { toast(e.message, true); load(); });
+    }
+    else if (act === "plex-iface") {  // System → Plex: Answer on All Networks — Plex's Preferred network interface set to any
+      el.disabled = true;
+      api("/api/plex/interface", {}).then(function () { ST.testing = true; render(); setTimeout(load, 1500); }).catch(function (e) { toast(e.message, true); load(); });
+    }
+    else if (act === "plex-urls") {  // System → Plex: Add URLs to Plex — this NAS's tailnet address among the custom access URLs
+      el.disabled = true;
+      api("/api/plex/urls", {}).then(function () { ST.testing = true; render(); setTimeout(load, 1500); }).catch(function (e) { toast(e.message, true); load(); });
+    }
+    else if (act === "syncthing-address") {  // System → Syncthing: Add Its Address — the mirror's host on its device
+      el.disabled = true;
+      api("/api/syncthing/address", { device: el.dataset.device }).then(function () { if (ST.syncthing) ST.syncthing.busy = true; render(); setTimeout(load, 2500); }).catch(function (e) { toast(e.message, true); load(); });
     }
     else if (act === "plex2-signin") { signIn("plex2"); }
     else if (act === "plex2-address") {  // an address for a mirror this NAS can reach, by hand

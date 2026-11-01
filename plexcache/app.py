@@ -173,6 +173,9 @@ def _closing_errors():
         raise
 
 
+IFACE_PREF = "PreferredNetworkInterface"  # Plex's Settings → Network → Preferred network interface ("": any)
+
+
 def _sentences(parts: list) -> M | str:
     """Sentences (each an M) as one text, a space between each."""
     out: M | str = ""
@@ -472,6 +475,7 @@ class App:
                 res["plex_server"] = {"status": "fail", "text": M("No Plex server found"), "detail": detail}
         res["plex_api"] = {"status": "off", "text": M("API compatibility"), "detail": M("Checked once you’re signed in.")}
         res["plex_lan"] = {"status": "off", "text": M("LAN networks"), "detail": M("Checked once you’re signed in.")}
+        res["plex_urls"] = {"status": "off", "text": M("Custom access URLs"), "detail": M("Checked once you’re signed in.")}
         if res["plex_server"]["status"] != "ok":
             res["plex_token"] = {"status": "off", "text": M("Plex sign-in: waiting for the server"),
                                  "detail": M("Sign-in is checked once the server is found.")}
@@ -498,9 +502,12 @@ class App:
                 res["plex_api"] = api_light([f"{w} ({PLEX_CALLS[w]})" for w, ok in tried.items() if ok is False], [w for w in PLEX_CALLS if tried.get(w) is None],
                                             len(PLEX_CALLS), f"Plex Media Server {info['version']}" if info.get("version") else "Plex", "paths")
                 try:
-                    res["plex_lan"] = self._lan_light(self.plex(timeout=10).prefs().get("LanNetworksBandwidth", ""), info.get("machine_id", ""))
+                    prefs = self.plex(timeout=10).prefs()
+                    res["plex_lan"] = self._lan_light(prefs.get("LanNetworksBandwidth", ""), info.get("machine_id", ""), prefs.get(IFACE_PREF, ""))
+                    res["plex_urls"] = self._urls_light(prefs.get("customConnections", ""), info.get("machine_id", ""))
                 except PlexError as e:
                     res["plex_lan"] = {"status": "off", "text": M("LAN networks"), "detail": msg(e)}
+                    res["plex_urls"] = {"status": "off", "text": M("Custom access URLs"), "detail": msg(e)}
             except PlexError as e:
                 bad = "token" in str(e).lower()
                 res["plex_token"] = {"status": "fail", "text": M("Plex token rejected") if bad else M("Couldn’t check Plex sign-in"),
@@ -560,6 +567,115 @@ class App:
             self.connections = res
         return res
 
+    def host_addresses(self) -> dict:
+        """This NAS's addresses, by kind: {"lan": [...], "tailnet": [...]} — the host's interfaces through TrueNAS when its key is in
+        (kept an hour), with the addresses this app is reached at (peerlink.own_addresses). The tailnet's are Tailscale's range."""
+        from .syncthing import TAILNET
+        cached = getattr(self, "_host_addresses", None)
+        if cached and time.time() - cached[0] < 3600:
+            return cached[1]
+        found: list[str] = []
+        if self.settings.section("truenas").get("api_key"):
+            try:
+                with self.truenas() as tn:
+                    found = tn.addresses()
+            except Exception:  # noqa: BLE001
+                found = []
+        for h in (self.peerlinks.own_addresses() if getattr(self, "peerlinks", None) is not None else []):
+            if h not in found:
+                found.append(h)
+        out: dict = {"lan": [], "tailnet": []}
+        for h in found:
+            try:
+                ip = ipaddress.ip_address(h)
+            except ValueError:
+                continue
+            if ip.version != 4 or ip.is_loopback or ip.is_link_local:
+                continue
+            (out["tailnet"] if ip in TAILNET else out["lan"]).append(str(ip))
+        self._host_addresses = (time.time(), out)
+        return out
+
+    def local_networks(self) -> list:
+        """The networks a viewer is at home on: /24 around each of this NAS's LAN addresses (the host's interfaces, this app's own)."""
+        out = list(self.syncthing.own_networks())
+        for ip in self.host_addresses()["lan"]:
+            net = ipaddress.ip_network(f"{ip}/24", strict=False)
+            if net not in out:
+                out.append(net)
+        return out
+
+    def custom_urls(self, value: str, machine_id: str = "") -> dict:
+        """Plex's Custom server access URLs read against this server: each well-formed, answering as this server (``machine_id``),
+        reachable from here; and the ones to add — this NAS's tailnet address with Plex's scheme and port, so a tailnet viewer
+        finds the server directly rather than through Plex's relay. {"have": [{"url", "status": "ok" | "wrong" | "unreached" |
+        "bad", "why"}], "missing": [urls]}."""
+        p = self.settings.section("plex")
+        u = urllib.parse.urlsplit(p.get("url") or "")
+        scheme, port = u.scheme or "http", u.port or PLEX_DEFAULT_PORT
+        have = []
+        for raw in [x.strip() for x in (value or "").split(",") if x.strip()]:
+            cu = urllib.parse.urlsplit(raw)
+            if cu.scheme not in ("http", "https") or not cu.hostname:
+                have.append({"url": raw, "status": "bad", "why": M("not an address like https://plex.example.com:32400")})
+                continue
+            try:
+                ident = PlexClient(raw, "", timeout=5).identity()
+                if machine_id and ident.get("machine_id") and ident["machine_id"] != machine_id:
+                    have.append({"url": raw, "status": "wrong", "why": M("another Plex server answers there")})
+                else:
+                    have.append({"url": raw, "status": "ok", "why": ""})
+            except PlexError as e:
+                have.append({"url": raw, "status": "unreached", "why": M("{why} — from this NAS; a public address may still work from outside", why=msg(e))})
+        unreached = [h for h in have if h["status"] == "unreached"]
+        there = self.peerlinks.reach([h["url"] for h in unreached], machine_id) if unreached and getattr(self, "peerlinks", None) is not None else None
+        if there is not None:
+            name, got = there
+            for h in unreached:
+                r = got.get(h["url"])
+                if r and r["ok"]:
+                    h.update(status="ok", why=M("not from this NAS, but from {name}", name=name or M("the other site")))
+                elif r:
+                    h.update(status="nowhere", why=M("{why} — from this NAS, and from {name} too ({there})", why=h["why"].params["why"] if isinstance(h["why"], M) else h["why"],
+                                                     name=name or M("the other site"), there=r["why"]))
+        hosts = {urllib.parse.urlsplit(h["url"]).hostname for h in have}
+        missing = [f"{scheme}://{ip}:{port}" for ip in self.host_addresses()["tailnet"] if ip not in hosts]
+        return {"have": have, "missing": missing}
+
+    def _urls_light(self, value: str, machine_id: str = "") -> dict:
+        got = self.custom_urls(value, machine_id)
+        bad = [h for h in got["have"] if h["status"] in ("bad", "wrong")]
+        unreached = [h for h in got["have"] if h["status"] == "unreached"]
+        nowhere = [h for h in got["have"] if h["status"] == "nowhere"]
+        if bad:
+            return {"status": "warn", "text": M("A custom access URL isn’t this server’s: {urls}", urls=", ".join(h["url"] for h in bad)),
+                    "detail": M("{what}. A remote client given it can’t reach this server. Settings → Network → Custom server access URLs in Plex.", what="; ".join(f"{h['url']}: {h['why']}" for h in bad))}
+        if got["missing"]:
+            return {"status": "warn", "text": M("Custom access URLs leave out this NAS’s tailnet address"), "add": got["missing"],
+                    "detail": M("A tailnet viewer reaches this server through Plex’s relay unless Plex advertises {urls}. Add URLs to Plex adds it, keeping what’s there ({have}).",
+                                urls=", ".join(got["missing"]), have=", ".join(h["url"] for h in got["have"]) or M("none yet"))}
+        if nowhere:
+            return {"status": "warn", "text": M("Plex can’t be reached at {urls}", urls=", ".join(h["url"] for h in nowhere)),
+                    "detail": M("{what}. A remote client given it can’t reach this server: check the address’s DNS, port forwarding or proxy, or take it out of Settings → Network → Custom server access URLs in Plex.",
+                                what="; ".join(f"{h['url']}: {h['why']}" for h in nowhere))}
+        if unreached:
+            return {"status": "ok", "text": M("Custom access URLs are this server’s; {n} not reached from here", n=len(unreached)),
+                    "detail": "; ".join(f"{h['url']}: {h['why']}" for h in unreached)}
+        if not got["have"]:
+            return {"status": "ok", "text": M("No custom access URLs"), "detail": M("None needed: this NAS has no tailnet address. One for a public domain is yours to add in Plex (Settings → Network).")}
+        return {"status": "ok", "text": M("Custom access URLs are this server’s"), "detail": ", ".join(f"{h['url']} ({h['why']})" if h["why"] else h["url"] for h in got["have"])}
+
+    def plex_add_custom_urls(self) -> list[str]:
+        """Plex's Custom server access URLs given this NAS's tailnet address with Plex's port (what it has kept), then tested again."""
+        client = self.plex(timeout=10)
+        got = self.custom_urls(client.prefs().get("customConnections", ""), client.identity().get("machine_id", ""))
+        merged = [h["url"] for h in got["have"]] + got["missing"]
+        if got["missing"]:
+            client.set_pref("customConnections", ",".join(merged))
+            self.activity.event("settings", M("Plex’s custom access URLs given {urls}", urls=", ".join(got["missing"])))
+        self.test_connections_async(then_checks=False)
+        return merged
+
     def lan_networks(self, value: str) -> tuple[list[str], list[str]]:
         """Plex's LAN Networks setting read against what should be in it: this NAS's own networks (syncthing.own_networks) and
         Tailscale's range, so a viewer at home or on your tailnet is never taken for remote. (what Plex has, what's missing)"""
@@ -571,7 +687,7 @@ class App:
                 have.append(ipaddress.ip_network(part.strip(), strict=False))
             except ValueError:
                 continue
-        wanted = list(self.syncthing.own_networks()) + [TAILNET]
+        wanted = self.local_networks() + [TAILNET]
         missing = [str(w) for w in wanted if not any(w.subnet_of(h) for h in have if h.version == w.version)]
         return [str(h) for h in have], missing
 
@@ -584,7 +700,8 @@ class App:
         u = urllib.parse.urlsplit(p["url"] or "")
         scheme, port = u.scheme or "http", u.port or PLEX_DEFAULT_PORT
         out = [f"{scheme}://{u.hostname}:{port}"] if u.hostname else []
-        for h in (self.peerlinks.own_addresses() if getattr(self, "peerlinks", None) is not None else []):
+        own = self.host_addresses()
+        for h in own["lan"] + own["tailnet"]:
             url = f"{scheme}://{f'[{h}]' if ':' in h else h}:{port}"
             if url not in out:
                 out.append(url)
@@ -620,6 +737,15 @@ class App:
                     got = {"status": "ok", "address": host}
                     break
             out[str(net)] = got
+        silent = [n for n, r in out.items() if r["status"] == "silent"]  # (tried again from the other site: from here isn't from everywhere)
+        tried = [u for u in urls if any(urllib.parse.urlsplit(u).hostname == out[n]["address"] for n in silent)]
+        there = self.peerlinks.reach(tried, machine_id) if tried and getattr(self, "peerlinks", None) is not None else None
+        if there is not None:
+            name, got_there = there
+            for n in silent:
+                hits = [u for u in tried if urllib.parse.urlsplit(u).hostname == out[n]["address"]]
+                ok = next((u for u in hits if (got_there.get(u) or {}).get("ok")), None)
+                out[n] = dict(out[n], status="ok" if ok else "silent", there=name or M("the other site"), checked=any(u in got_there for u in hits))
         return out
 
     @staticmethod
@@ -635,34 +761,54 @@ class App:
         {"have", "missing", "add" (the missing ones Plex answers on, or that couldn't be told), "reach"}."""
         from .syncthing import TAILNET
         have, missing = self.lan_networks(value)
-        reach = self.plex_reach(list(self.syncthing.own_networks()) + [TAILNET], machine_id)
-        add = [m for m in missing if reach.get(m, {}).get("status") not in ("none", "silent")]
+        reach = self.plex_reach(self.local_networks() + [TAILNET], machine_id)
+        add = [m for m in missing if reach.get(m, {}).get("status") != "none" and not (reach.get(m, {}).get("status") == "silent" and reach[m].get("checked"))]
         return {"have": have, "missing": missing, "add": add, "reach": reach}
 
-    def _lan_light(self, value: str, machine_id: str = "") -> dict:
+    def _lan_light(self, value: str, machine_id: str = "", iface: str = "") -> dict:
+        """The LAN networks light: what Plex's LAN Networks leave out ("add": Add Subnets to Plex LAN's), and where Plex answers —
+        from here, else from the other site's Dionysus. "iface": Plex's Preferred network interface when it's one interface and
+        Plex doesn't answer somewhere (Answer on All Networks clears it)."""
         plan = self.lan_plan(value, machine_id)
         have, add, reach = plan["have"], plan["add"], plan["reach"]
         said = []
-        ok = [f"{r['address']} ({n})" for n, r in reach.items() if r["status"] == "ok"]
+        ok = [f"{r['address']} ({n})" for n, r in reach.items() if r["status"] == "ok" and not r.get("there")]
         if ok:
             said.append(M("Plex answers at {addresses}.", addresses=", ".join(ok)))
+        for n, r in reach.items():
+            if r["status"] == "ok" and r.get("there"):
+                said.append(M("Plex answers at {address} ({net}) from {name}, though not from this NAS.", address=r["address"], net=n, name=r["there"]))
         silent = [n for n, r in reach.items() if r["status"] == "silent"]
         for n in silent:
-            said.append(M("Plex has {address} on {net}, but didn’t answer there: check Settings → Network → Preferred network interface in Plex, and the firewall.",
-                          address=reach[n]["address"], net=n))
+            where = M("from this NAS or from {name}", name=reach[n]["there"]) if reach[n].get("checked") else M("from this NAS (no paired Dionysus to try from the other site)")
+            said.append(M("Plex has {address} on {net}, but didn’t answer there {where}.", address=reach[n]["address"], net=n, where=where))
+        if silent and iface:
+            said.append(M("Plex answers only on its network interface {iface} (Settings → Network → Preferred network interface): Answer on All Networks sets it to any.", iface=iface))
+        elif silent:
+            said.append(M("Plex listens on every network, so look at what’s between: the firewall, and Tailscale’s own settings for the tailnet."))
         for n, r in reach.items():
             if r["status"] == "none":
                 said.append(M("Plex has no address on {net}, so it’s left out: a viewer there can’t reach Plex directly. For the tailnet, run Tailscale on this NAS.", net=n))
             elif r["status"] == "unknown":
                 said.append(M("Plex’s addresses couldn’t be had from plex.tv, so whether it answers on {net} wasn’t checked.", net=n))
+        fix = {"iface": iface} if silent and iface else {}
         if add:
-            return {"status": "warn", "text": M("Plex’s LAN networks leave out {nets}", nets=", ".join(add)), "add": add,
-                    "detail": _sentences([M("Plex marks a stream to a player on these as remote, so Syncthing would give way for a viewer at home or on your tailnet, and Plex may send them through its relay. "
-                                      "Add Subnets to Plex LAN sets Settings → Network → LAN Networks to {merged}.", merged=", ".join(have + add))] + said)}
+            return dict(fix, status="warn", text=M("Plex’s LAN networks leave out {nets}", nets=", ".join(add)), add=add,
+                        detail=_sentences([M("Plex marks a stream to a player on these as remote, so Syncthing would give way for a viewer at home or on your tailnet, and Plex may send them through its relay. "
+                                             "Add Subnets to Plex LAN sets Settings → Network → LAN Networks to {merged}.", merged=", ".join(have + add))] + said))
         if silent:
-            return {"status": "warn", "text": M("Plex doesn’t answer on {nets}", nets=", ".join(silent)), "detail": _sentences(said)}
+            return dict(fix, status="warn", text=M("Plex doesn’t answer on {nets}", nets=", ".join(silent)), detail=_sentences(said))
         return {"status": "ok", "text": M("Plex’s LAN networks cover the networks Plex answers on"),
                 "detail": _sentences(([M("{nets}.", nets=", ".join(have))] if have else []) + said)}
+
+    def plex_any_interface(self) -> None:
+        """Answer on All Networks: Plex's Preferred network interface set to any, then the connections tested again."""
+        client = self.plex(timeout=10)
+        was = client.prefs().get(IFACE_PREF, "")
+        if was:
+            client.set_pref(IFACE_PREF, "")
+            self.activity.event("settings", M("Plex’s network interface set to any (was {iface})", iface=was))
+        self.test_connections_async(then_checks=False)
 
     def plex_add_lan_networks(self) -> list[str]:
         """Plex's LAN Networks given this NAS's networks and the tailnet — those Plex answers on (lan_plan) — keeping what it

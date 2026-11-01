@@ -60,6 +60,16 @@
       ],
       "version": 1
     },
+    "reach": {
+      "answer": [
+        "results"
+      ],
+      "request": [
+        "machine",
+        "urls"
+      ],
+      "version": 1
+    },
     "status": {
       "answer": [
         "api",

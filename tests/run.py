@@ -1,6 +1,7 @@
 """Run the test suite with a progress bar, so you can see it isn't stuck.
 
-    python3 tests/run.py
+    python3 tests/run.py                  # the whole suite (tests.test_plexcache)
+    python3 tests/run.py <module>         # another test module, by its import name
 
 On a terminal, one line is redrawn as tests finish:
 
@@ -9,9 +10,15 @@ On a terminal, one line is redrawn as tests finish:
 When the output isn't a terminal (CI, a log file), it prints a line every 10%.
 Failures are listed in full at the end, as unittest normally does, and the
 exit code is non-zero if anything failed.
+
+A stop signal (SIGTERM: what tnsync sends when you press Enter) ends the run at
+once, mid-test. The test that was running when it came isn't counted as failed:
+the run says how many tests ran and how many weren't run, and exits with 130.
 """
 
 import os
+import shutil
+import signal
 import sys
 import time
 import unittest
@@ -31,6 +38,7 @@ class ProgressResult(unittest.TextTestResult):
         self.tty = tty
         self.done = 0
         self.next_report = 10
+        self.on_stop = None   # the SIGTERM handler main() sets, kept in place between tests
 
     def _draw(self, test):
         self.done += 1
@@ -54,6 +62,13 @@ class ProgressResult(unittest.TextTestResult):
         elif pct * 100 >= self.next_report or self.done == self.total:
             print(f"    {self.done}/{self.total} tests done" + (f", {bad} failed" if bad else ""), flush=True)
             self.next_report += 10
+
+    def startTest(self, test):
+        # A test can leave its own SIGTERM handler behind (the app's main() sets one); put ours back,
+        # so a stop still stops the run.
+        if self.on_stop and signal.getsignal(signal.SIGTERM) is not self.on_stop:
+            signal.signal(signal.SIGTERM, self.on_stop)
+        super().startTest(test)
 
     def addSuccess(self, test):
         super().addSuccess(test)
@@ -83,7 +98,8 @@ class ProgressResult(unittest.TextTestResult):
 
 
 def main() -> int:
-    suite = unittest.defaultTestLoader.loadTestsFromName("tests.test_plexcache")
+    module = sys.argv[1] if len(sys.argv) > 1 else "tests.test_plexcache"
+    suite = unittest.defaultTestLoader.loadTestsFromName(module)
     total = suite.countTestCases()
     tty = sys.stdout.isatty()
     started = time.time()
@@ -93,6 +109,24 @@ def main() -> int:
     # TextTestRunner prints its own summary; keep ours instead.
     result = runner._makeResult()
     unittest.registerResult(result)
+
+    def stop(*_):
+        # Stopped from outside (tnsync's Enter): end now, without waiting for the test that's running.
+        # That test didn't finish, so it isn't a failure; only the tests that finished are counted.
+        if tty:
+            sys.stdout.write("\r\033[K")
+        bad = len(result.failures) + len(result.errors)
+        if bad:
+            result.printErrors()
+            print(f"\n    {RED if tty else ''}{bad} of the {result.done} tests that ran failed{OFF if tty else ''}")
+        print(f"    Stopped: {result.done} of {total} tests ran, {total - result.done} not run")
+        sys.stdout.flush()
+        tests_module = sys.modules.get(module)
+        if tests_module is not None and getattr(tests_module, "TMP", None):
+            shutil.rmtree(tests_module.TMP, ignore_errors=True)   # what tearDownModule would have removed
+        os._exit(130)
+    result.on_stop = stop
+    signal.signal(signal.SIGTERM, stop)
     result.startTestRun()
     try:
         suite(result)

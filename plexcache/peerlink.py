@@ -63,6 +63,7 @@ import urllib.request
 
 from . import CHANNEL, COMMIT
 from .i18n import M
+from .updates import newer
 
 log = logging.getLogger("plexcache")
 
@@ -74,7 +75,7 @@ API = 1                   # the link's language: a side with another number isn'
 # sends no table at all is taken to have none beyond the handshake. A command's version moves when its request or its
 # answer changes shape — API_SHAPES names each one's fields, tests/peer_api.json records them, and
 # test_the_link_api_is_versioned fails a change without a bump (dev/peer_api.py records a bump).
-COMMANDS = {"hello": 2, "pair": 1, "status": 2, "files": 1, "unpair": 1, "carry": 1, "update": 1}
+COMMANDS = {"hello": 2, "pair": 1, "status": 2, "files": 1, "unpair": 1, "carry": 1, "update": 1, "reach": 1}
 API_SHAPES = {  # each command's request fields (its body, or its query) and its answer's, sorted
     "hello": {"request": [], "answer": ["api", "app", "commands", "identity", "instance", "name", "plex", "public", "time", "version"]},
     "pair": {"request": ["addresses", "instance", "manual", "name", "plex", "port", "public", "window"], "answer": ["paired", "public", "why"]},
@@ -84,7 +85,9 @@ API_SHAPES = {  # each command's request fields (its body, or its query) and its
     "unpair": {"request": [], "answer": ["ok"]},
     "carry": {"request": ["claims", "library", "marker", "mirrors"], "answer": ["carried", "claims", "why"]},
     "update": {"request": ["channel", "commit", "version"], "answer": ["started", "version", "why"]},
+    "reach": {"request": ["machine", "urls"], "answer": ["results"]},
 }
+REACH_MAX = 12            # addresses one reach request may have tried (each Plex's /identity, a few seconds at most)
 UPDATE_RETRY = 6 * 3600   # a side asked to update and still behind: asked again after this
 SETTLE = 180              # seconds after a start for which a link's first look is waited for before a page concludes anything from it (settling)
 PORT = 8642               # Dionysus's own port, as compose.yaml publishes it
@@ -356,6 +359,44 @@ class PeerLinks:
         self._tn_port = (time.time(), got)
         return got
 
+    # ------------------------------------------------------------ Plex reached from the other site
+    def reach(self, urls: list[str], machine_id: str) -> tuple[str, dict[str, dict]] | None:
+        """Plex's addresses (``urls``) tried from the other site (POST /peer/v1/reach): the first link talking that has the
+        command. (the other side's name, {url: {"ok": answered as this Plex (``machine_id``), "why": what failed}}), or None when
+        no link can ask."""
+        for lk in self.used():
+            if not urls or not lk.talking() or not lk.can("reach"):
+                continue
+            try:
+                got = lk.request("POST", "/peer/v1/reach", {"urls": list(urls)[:REACH_MAX], "machine": machine_id}, timeout=10 + 6 * min(len(urls), REACH_MAX))
+            except (PeerError, OSError) as e:
+                log.debug("reach from %s failed: %s", lk.server, e)
+                continue
+            out = {str(r.get("url")): {"ok": bool(r.get("ok")), "why": str(r.get("why") or "")}
+                   for r in got.get("results") or [] if isinstance(r, dict) and r.get("url") in urls}
+            return (lk.name() or (lk.paired or {}).get("name") or ""), out
+        return None
+
+    def handle_reach(self, data: dict) -> dict:
+        """The other side's Plex tried from here at each of its addresses ("urls": http(s) only, REACH_MAX at most) — its
+        /identity, which needs no token, answering as that server ("machine"). {"results": [{"url", "ok", "why"}]}."""
+        from .plex import PlexClient, PlexError
+        from .i18n import render
+        machine = str(data.get("machine") or "")
+        out = []
+        for url in [u for u in data.get("urls") or [] if isinstance(u, str)][:REACH_MAX]:
+            u = urllib.parse.urlsplit(url)
+            if u.scheme not in ("http", "https") or not u.hostname:
+                out.append({"url": url, "ok": False, "why": "not an http(s) address"})
+                continue
+            try:
+                got = PlexClient(url, "", timeout=5).identity().get("machine_id") or ""
+                ok = not machine or got == machine
+                out.append({"url": url, "ok": ok, "why": "" if ok else "another Plex server answers there"})
+            except PlexError as e:
+                out.append({"url": url, "ok": False, "why": render(e.args[0]) if e.args else str(e)})
+        return {"results": out}
+
     def own_addresses(self) -> list[str]:
         """The addresses we may be reached on, to advertise: the one the browser uses, and Plex's here (usually the NAS)."""
         out = []
@@ -490,6 +531,12 @@ class PeerLinks:
                 return 400, {"error": "invalid JSON"}
             data = data if isinstance(data, dict) else {}
             return 200, link.handle_carry(data) if path == "/peer/v1/carry" else link.handle_update(data)
+        if path == "/peer/v1/reach" and method == "POST":
+            try:
+                data = json.loads(body or b"{}")
+            except ValueError:
+                return 400, {"error": "invalid JSON"}
+            return 200, self.handle_reach(data if isinstance(data, dict) else {})
         if path == "/peer/v1/unpair" and method == "POST":
             with self.lock:
                 old, link.paired, link.status = link.paired, None, None
@@ -1092,18 +1139,30 @@ class PeerLink:
     def _offer_update(self, st: dict) -> None:
         """The other side behind this one on the same channel, while this one is current (its own update check found
         nothing newer): asked once to update (POST /peer/v1/update), when it has the command. How it went: update_said,
-        for the Version light. Never the other way round: the side that's behind doesn't ask."""
+        for the Version light. Never the other way round: the side that's behind doesn't ask — a newer version there, or
+        an update this side's own check finds, and nothing is asked (and an earlier ask's answer is dropped, so the light
+        doesn't say the other side couldn't update when it's this side that's behind). Before asking, this side checks
+        GitHub again, not trusting an earlier check: a build published since may be the one the other side runs."""
         up = getattr(self.app, "updates", None)
         if up is None or not self.can("update", st) or st.get("channel") != CHANNEL:
             return
         theirs = (str(st.get("version") or ""), str(st.get("commit") or "")[:7])
         ours = (str(self.app.version), COMMIT[:7])
         behind = theirs[0] != ours[0] or (CHANNEL == "dev" and bool(theirs[1]) and bool(ours[1]) and theirs[1] != ours[1])
-        if not behind or not getattr(up, "checked", None) or up.available():
+        if not behind or not getattr(up, "checked", None):
+            return
+        if newer(theirs[0], ours[0]) or up.available():
+            with self.lock:
+                self.update_said = None
             return
         if self.update_asked and self.update_asked[0] == theirs and time.time() - self.update_asked[1] < UPDATE_RETRY:
             return
         self.update_asked = (theirs, time.time())
+        up.check()  # (fresh: what's on GitHub now, not what an earlier check saw)
+        if up.available():
+            with self.lock:
+                self.update_said = None
+            return
         try:
             got = self.request("POST", "/peer/v1/update", {"version": ours[0], "commit": ours[1], "channel": CHANNEL}, timeout=60)
         except (PeerError, OSError) as e:
@@ -1256,7 +1315,7 @@ class PeerLink:
 
     # ------------------------------------------------------------ the lights
     def lights(self) -> dict:
-        """The System card's five lights for this server: {"found", "paired", "talking", "folders", "version"}: {"status", "text", "detail"}."""
+        """The System card's six lights for this server: {"found", "paired", "talking", "folders", "api", "version"}: {"status", "text", "detail"}."""
         off = lambda text, detail="": {"status": "off", "text": text, "detail": detail}  # noqa: E731
         name = self.name()
         if not self.mirror_id():
@@ -1298,6 +1357,7 @@ class PeerLink:
             out["talking"] = {"status": "fail", "text": M("Not answering"),
                               "detail": M("{url}: {why}", url=p.get("url") or "", why=self.last_error or M("no answer yet"))}
         out["folders"] = self._folders_light()
+        out["api"] = self._api_light()
         out["version"] = self._version_light()
         return out
 
@@ -1334,33 +1394,42 @@ class PeerLink:
                     "detail": f"{behind} " + M("Optimizing there is held until the sync catches up, or the finding is ignored on [Tools → Mirror Checks](/mirrorchecks).")}
         return {"status": "ok", "text": M("Folder sync carries .plexcache"), "detail": M("The other side’s markers arrive here up to {minutes} minutes behind.", minutes=int(lag // 60))}
 
+    def _api_light(self) -> dict:
+        """API compatibility, the standard's light (integrations.api_light): every command of the link (COMMANDS) against the table
+        the other side sent — one it lacks, or has at another version, is named; a side that sends no table has only the
+        handshake. Off until the two talk."""
+        from .integrations import api_light
+        st = self.status if self.talking() else None
+        if not st:
+            return {"status": "off", "text": M("API compatibility"), "detail": M("Checked once the two are talking: every command of the link against the ones the Dionysus there has.")}
+        theirs = self.commands_there()
+        version = M("Dionysus {version}", version=st.get("version") or "?")
+        if not isinstance(st.get("commands"), dict):
+            return api_light([f"{c} (v{v} here, none there)" for c, v in COMMANDS.items() if c != "hello"], [], len(COMMANDS), version, "commands")
+        gone = [f"{c} (v{v} here, {'v' + str(theirs[c]) if c in theirs else 'none'} there)" for c, v in COMMANDS.items() if theirs.get(c) != v]
+        return api_light(gone, [], len(COMMANDS), version, "commands")
+
     def _version_light(self) -> dict:
         st = self.status if self.talking() else None
         if not st:
             return {"status": "off", "text": M("Version and clock"), "detail": M("Checked once the two are talking.")}
-        problems = []
+        problems, notes = [], []
         if int(st.get("api") or 0) != API:
             problems.append(M("the link’s version differs ({theirs} there, {ours} here)", theirs=st.get("api"), ours=API))
-        if str(st.get("version") or "") != str(self.app.version):
-            problems.append(M("Dionysus {theirs} there, {ours} here", theirs=st.get("version") or "?", ours=self.app.version))
-        theirs = self.commands_there()
-        lacks = [c for c in COMMANDS if c not in theirs]
-        differ = [c for c in COMMANDS if c in theirs and theirs[c] != COMMANDS[c]]
-        if not isinstance(st.get("commands"), dict):
-            problems.append(M("it doesn’t say which link commands it has, so only the handshake is used"))
-        elif lacks:
-            problems.append(M("it lacks the link commands {list}", list=", ".join(lacks)))
-        if differ:
-            problems.append(M("the link commands {list} are of another version there", list=", ".join(differ)))
+        if str(st.get("version") or "") != str(self.app.version):  # (said, not a problem: the API light says whether the two still speak the same commands)
+            notes.append(M("Dionysus {theirs} there, {ours} here", theirs=st.get("version") or "?", ours=self.app.version))
         if abs(self.skew) > SKEW_WARN:
             problems.append(M("the clocks are {n} seconds apart", n=int(abs(self.skew))))
         said = self.update_said
         asked = "" if not said else " " + (M("Asked it to update at {when}: TrueNAS there is pulling the newer image.", when=time.strftime("%H:%M", time.localtime(said[0]))) if said[1]
-                                          else M("Asked it to update at {when}; it couldn’t: {why}", when=time.strftime("%H:%M", time.localtime(said[0])), why=said[2]))
+                                          else M("Asked it to update at {when}; it couldn’t: {why}", when=time.strftime("%H:%M", time.localtime(said[0])), why=said[2])
+                                          + (" " + str(M("This build isn’t on GitHub yet (copied here by hand), so there’s nothing for the other side to update to until it’s pushed.")) if "no newer build" in str(said[2]) else ""))
         if problems:
-            return {"status": "warn", "text": M("Versions, link commands or clocks differ"), "detail": "; ".join(str(p) for p in problems) + "." + asked}
-        return {"status": "ok", "text": M("Same version and link commands, clocks agree"),
-                "detail": M("Dionysus {version} on both sides, every link command at the same version, clocks within {n} seconds.", version=self.app.version, n=max(1, int(abs(self.skew)))) + asked}
+            return {"status": "warn", "text": M("The link’s version or the clocks differ"), "detail": "; ".join(str(p) for p in problems + notes) + "." + asked}
+        if notes:
+            return {"status": "ok", "text": M("Versions differ; clocks agree"), "detail": "; ".join(str(n) for n in notes) + ". " + str(M("Fine while every link command matches (the API compatibility light).")) + asked}
+        return {"status": "ok", "text": M("Same version, clocks agree"),
+                "detail": M("Dionysus {version} on both sides, clocks within {n} seconds.", version=self.app.version, n=max(1, int(abs(self.skew)))) + asked}
 
     def health(self) -> str:
         """The link's worst light: "ok", "warn", "fail" or "off" (nothing looked for). What Mirror Checks warn on."""

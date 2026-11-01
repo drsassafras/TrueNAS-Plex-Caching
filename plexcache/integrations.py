@@ -35,15 +35,16 @@ def api_light(gone: list, untried: list, total: int, version: str, kind: str = "
     """The api light, the same words for every service: every call known; some missing (named, with the version, to be
     reported); or some not tried yet. ``gone``: the missing calls' labels, each with how it's called; ``kind``: what the app
     would have to learn — method "names" (TrueNAS) or "paths" (REST)."""
+    unit = M("commands") if kind == "commands" else M("calls")
     if gone:
-        return {"status": "warn", "text": M("API compatibility: {n} of {total} calls missing", n=len(gone), total=total),
+        return {"status": "warn", "text": M("API compatibility: {n} of {total} {unit} missing", n=len(gone), total=total, unit=unit),
                 "detail": M("{version} hasn’t got: {what}. The features that need them won’t work until the app learns the new {kind} — please report this version and these calls on GitHub.",
-                            version=version or "?", what="; ".join(gone), kind=M("names") if kind == "names" else M("paths"))}
+                            version=version or "?", what="; ".join(gone), kind=M("names") if kind == "names" else M("commands") if kind == "commands" else M("paths"))}
     if untried:
-        return {"status": "ok", "text": M("API compatibility: {n} of {total} calls known", n=total - len(untried), total=total),
+        return {"status": "ok", "text": M("API compatibility: {n} of {total} {unit} known", n=total - len(untried), total=total, unit=unit),
                 "detail": M("Not tried yet, since there’s nothing to try them on: {what}.", what="; ".join(untried))}
-    return {"status": "ok", "text": M("API compatibility: all {total} calls known", total=total),
-            "detail": M("Every call the app makes is answered by {version}.", version=version or "")}
+    return {"status": "ok", "text": M("API compatibility: all {total} {unit} known", total=total, unit=unit),
+            "detail": M("Every {item} the app makes is answered by {version}.", item=M("command") if kind == "commands" else M("call"), version=version or "")}
 
 
 class Integration:
@@ -95,7 +96,7 @@ def _worst(rows: list[dict], fallback: dict) -> dict:
 
 class PlexIntegration(Integration):
     name, title = "plex", "Plex"
-    own = ("lan",)
+    own = ("lan", "urls")
     exceptions = {"found": "Plex is where your media is: its address is yours to give (or the sign-in's, which lists your servers), not looked for on the network."}
 
     @property
@@ -105,7 +106,7 @@ class PlexIntegration(Integration):
 
     def standard_lights(self) -> dict:
         c = getattr(self.app, "connections", None) or {}
-        return {"server": c.get("plex_server"), "key": c.get("plex_token"), "api": c.get("plex_api"), "lan": c.get("plex_lan")}
+        return {"server": c.get("plex_server"), "key": c.get("plex_token"), "api": c.get("plex_api"), "lan": c.get("plex_lan"), "urls": c.get("plex_urls")}
 
     def identity(self) -> dict | None:
         return (getattr(self.app, "connections", None) or {}).get("plex_identity")
@@ -130,7 +131,7 @@ class TrueNASIntegration(Integration):
 
 class SyncthingIntegration(Integration):
     name, title = "syncthing", "Syncthing"
-    own = ("folders", "devices", "throttle")
+    own = ("folders", "devices", "reach", "throttle")
 
     @property
     def calls(self):  # type: ignore[override]
@@ -150,9 +151,9 @@ class LinkIntegration(Integration):
     its own with Pair Now and Unpair."""
 
     name, title = "peer", "Mirror Dionysus"
-    own = ("talking", "folders")
-    exceptions = {"server": "One hello answers both: the Dionysus found at the mirror’s site is the one reached (found).",
-                  "card": "A block of lights per mirrored server, each its own link with Pair Now and Unpair: not one row of lights."}
+    own = ("talking", "folders", "version")
+    exceptions = {"server": "One hello answers both: the Dionysus found at the mirror’s site is the one reached (found)."}
+    # (its card: a block of lights per mirrored server, each drawn by the one function in the standard's order, from that link's lights)
 
     @property
     def calls(self):  # type: ignore[override]
@@ -170,8 +171,8 @@ class LinkIntegration(Integration):
         if not self.app.peerlinks.wanted():
             none = off(M("Not looked for"), M("Mirror Dionysus is off: Mirror Checks compare the two Plexes only."))
         return {"found": _worst([r.get("found") for r in rows], none), "key": _worst([r.get("paired") for r in rows], off(M("Not paired"))),
-                "api": _worst([r.get("version") for r in rows], off(M("Version and clock"))), "talking": _worst([r.get("talking") for r in rows], off(M("Not talking"))),
-                "folders": _worst([r.get("folders") for r in rows], off(M("Folder sync")))}
+                "api": _worst([r.get("api") for r in rows], off(M("API compatibility"))), "talking": _worst([r.get("talking") for r in rows], off(M("Not talking"))),
+                "folders": _worst([r.get("folders") for r in rows], off(M("Folder sync"))), "version": _worst([r.get("version") for r in rows], off(M("Version and clock")))}
 
 
 ALL = (PlexIntegration, TrueNASIntegration, SyncthingIntegration, LinkIntegration)
