@@ -8,20 +8,23 @@
   --chart-a:#008F7E; --chart-b:#C2651A;
   --sans:"IBM Plex Sans","Segoe UI",system-ui,-apple-system,sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+  --head:var(--sans);
   color-scheme:light;
 }
-@media (prefers-color-scheme: dark){
-  :root{
-    --bg:#121614; --panel:#1A1F1C; --ink:#E6EAE7; --muted:#9CA59F; --soft:#B3BBB6; --line:#2C332F; --line2:#252B28;
-    --accent:#3FA596; --accent-ink:#0B1311; --side:#0C0F0E;
-    --ok-bg:#16382A; --ok:#8FD9AE; --warn-bg:#3D2A12; --warn:#F2C08A; --bad-bg:#3E1B18; --bad:#F2A49C;
-    --info-bg:#262C29; --info:#B3BBB6; --run-bg:#14304A; --run:#9BC8EE;
-    --guide-bg:#18231F; --guide-line:#2A3A34; --note-bg:#2E2414; --note-line:#4A3A20; --note-ink:#F2D3A6;
-    --code-bg:#151A18; --c-movie:#3FA596; --c-tv:#8CC9BE; --c-audio:#D9A15A; --c-res:#6B746F; --c-idx:#A797D8; --track:#2A302D;
-    --chart-a:#159C8A; --chart-b:#CF7A2A;
-    color-scheme:dark;
-  }
-}
+/* The look: these are Classic Light's colours, the fallback. The theme in use (System → Themes) sets every one of them,
+   and its fonts, from /theme.css (plexcache/themes.py), on <html data-theme="…">; /theme.js picks the theme and marks
+   <html> with data-mode (light | dark) and the theme's decorations, which decor.js draws. Rules that differ in a dark
+   theme go under :root[data-mode="dark"], never under the device's own light or dark setting. */
+@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:200 900;font-display:swap;src:url(/static/fonts/sourcesans3-latin.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:200 900;font-display:swap;src:url(/static/fonts/sourcesans3-latin-ext.woff2) format("woff2");unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:200 900;font-display:swap;src:url(/static/fonts/sourcesans3-cyrillic.woff2) format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:200 900;font-display:swap;src:url(/static/fonts/sourcesans3-greek.woff2) format("woff2");unicode-range:U+0370-0377,U+037A-037F,U+0384-038A,U+038C,U+038E-03A1,U+03A3-03FF}
+@font-face{font-family:"Source Sans 3";font-style:italic;font-weight:200 900;font-display:swap;src:url(/static/fonts/sourcesans3-italic-latin.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:"Source Sans 3";font-style:italic;font-weight:200 900;font-display:swap;src:url(/static/fonts/sourcesans3-italic-latin-ext.woff2) format("woff2");unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:"Source Sans 3";font-style:italic;font-weight:200 900;font-display:swap;src:url(/static/fonts/sourcesans3-italic-cyrillic.woff2) format("woff2");unicode-range:U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116}
+@font-face{font-family:"Source Sans 3";font-style:italic;font-weight:200 900;font-display:swap;src:url(/static/fonts/sourcesans3-italic-greek.woff2) format("woff2");unicode-range:U+0370-0377,U+037A-037F,U+0384-038A,U+038C,U+038E-03A1,U+03A3-03FF}
+@font-face{font-family:"Cinzel";font-style:normal;font-weight:400 900;font-display:swap;src:url(/static/fonts/cinzel-latin.woff2) format("woff2");unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:"Cinzel";font-style:normal;font-weight:400 900;font-display:swap;src:url(/static/fonts/cinzel-latin-ext.woff2) format("woff2");unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.45}
 a{color:var(--accent)}
@@ -60,8 +63,8 @@ a{color:var(--accent)}
   .brand img{width:28px;height:28px}
   .main{padding:20px 16px 48px}
 }
-h1{font-size:30px;margin:0;font-weight:700;letter-spacing:-.3px}
-h2{font-size:17px;margin:0 0 4px;font-weight:600}
+h1{font-size:30px;margin:0;font-weight:700;letter-spacing:-.3px;font-family:var(--head)}
+h2{font-size:17px;margin:0 0 4px;font-weight:600;font-family:var(--head)}
 .top{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:24px}
 .sub{color:var(--muted);font-size:14px;margin-top:6px;max-width:760px}
 .muted{color:var(--muted)}
@@ -347,12 +350,10 @@ h2 .mode-ic{vertical-align:-3px}
 .pick-note{flex-basis:100%;font-size:12px;font-weight:400;color:var(--muted)}
 .fallback{display:flex;align-items:center;gap:6px;margin-top:6px;font-size:13px;color:var(--note-ink);background:var(--note-bg);border:1px solid var(--note-line);border-radius:8px;padding:6px 10px}
 .fallback .mode-ic{margin-left:0}
-@media (prefers-color-scheme:dark){
-  .mode-ic.mk-ram-def{color:#8FD1AE;background:#1B2E24}
-  .mode-ic.mk-ssd-def{color:#9DBDF0;background:#1E2A3D}
-  .mode-ic.mk-ssd-only,.mode-ic.mk-ram-only{color:#A7AEA9;background:#2A302C}
-  .pick-list{box-shadow:0 8px 24px rgba(0,0,0,.5)}
-}
+:root[data-mode="dark"] .mode-ic.mk-ram-def{color:#8FD1AE;background:#1B2E24}
+:root[data-mode="dark"] .mode-ic.mk-ssd-def{color:#9DBDF0;background:#1E2A3D}
+:root[data-mode="dark"] .mode-ic.mk-ssd-only, :root[data-mode="dark"] .mode-ic.mk-ram-only{color:#A7AEA9;background:#2A302C}
+:root[data-mode="dark"] .pick-list{box-shadow:0 8px 24px rgba(0,0,0,.5)}
 
 /* Prefetch: one block per library */
 .pflibs{display:grid;gap:12px;margin-top:6px}
@@ -474,10 +475,16 @@ h2 .mode-ic{vertical-align:-3px}
 .covlegend b{display:inline-block;min-width:3.2em}
 .covcross{stroke:var(--ink);stroke-width:1;stroke-dasharray:3 3}
 .covhit{fill:transparent}
-@media (prefers-color-scheme: dark){
-  .cov0{fill:#E6F1FB;stroke:#E6F1FB}.cov1{fill:#B5D4F4;stroke:#B5D4F4}.cov2{fill:#85B7EB;stroke:#85B7EB}.cov3{fill:#378ADD;stroke:#378ADD}.cov4{fill:#185FA5;stroke:#185FA5}
-  .covsw.cov0{background:#E6F1FB}.covsw.cov1{background:#B5D4F4}.covsw.cov2{background:#85B7EB}.covsw.cov3{background:#378ADD}.covsw.cov4{background:#185FA5}
-}
+:root[data-mode="dark"] .cov0{fill:#E6F1FB;stroke:#E6F1FB}
+:root[data-mode="dark"] .cov1{fill:#B5D4F4;stroke:#B5D4F4}
+:root[data-mode="dark"] .cov2{fill:#85B7EB;stroke:#85B7EB}
+:root[data-mode="dark"] .cov3{fill:#378ADD;stroke:#378ADD}
+:root[data-mode="dark"] .cov4{fill:#185FA5;stroke:#185FA5}
+:root[data-mode="dark"] .covsw.cov0{background:#E6F1FB}
+:root[data-mode="dark"] .covsw.cov1{background:#B5D4F4}
+:root[data-mode="dark"] .covsw.cov2{background:#85B7EB}
+:root[data-mode="dark"] .covsw.cov3{background:#378ADD}
+:root[data-mode="dark"] .covsw.cov4{background:#185FA5}
 
 /* Plex's poster beside a file or what plays: all the same size */
 .poster{display:block;flex:none;width:46px;height:69px;object-fit:cover;border-radius:4px;background:var(--line2)}
@@ -539,8 +546,7 @@ h2 .mode-ic{vertical-align:-3px}
 .ldrow>td{background:var(--code-bg)}
 .lfacts{display:flex;flex-wrap:wrap;gap:4px 22px;font-size:13px;margin:0 0 10px}
 .tbl.compact td,.tbl.compact th{padding:5px 8px;font-size:13px}
-@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .lp-padding{fill:#3A403C;background:#3A403C}}
-:root[data-theme="dark"] .lp-padding{fill:#3A403C;background:#3A403C}
+:root[data-mode="dark"] .lp-padding{fill:#3A403C;background:#3A403C}
 /* a file's blocks: every block the same size, filled in proportion with what's in it */
 .lblocks{display:flex;align-items:center;flex-wrap:wrap;gap:3px}
 .lblk{display:inline-flex;flex-direction:column;align-items:stretch;width:30px;padding:0;border:1px solid var(--soft);border-radius:2px;background:var(--panel);font:inherit;color:inherit;cursor:inherit}
@@ -824,3 +830,29 @@ fieldset.greyed *{cursor:not-allowed}
 /* what Apply will do, right before it (every tool): what it does, what it changes, the backup */
 .note.applybox>div+div{margin-top:6px}
 .undo{margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+
+/* ---- A theme's decorations (themes.py "decor", drawn by decor.js; theme.js marks <html> with them) */
+/* spots: round the app, and on the menu */
+:root[data-spots="on"] body{background-image:var(--spots-img,none)}
+:root[data-spots="on"] .side{background-image:var(--menu-spots-img,none)}
+/* vines: the app sits in a frame, cut to the vine round it; the spots show outside */
+:root[data-vines="on"] body{padding:10px}
+:root[data-vines="on"] .shell{position:relative;min-height:calc(100vh - 20px);background:var(--bg);border-radius:14px}
+:root[data-vines="on"] .side{top:10px;height:calc(100vh - 20px)}
+.shell>svg.framevine,.shell>svg.seamvine{position:absolute;left:0;top:0;overflow:visible;pointer-events:none;z-index:3}
+/* a card's border is its vine: the card's own colour stops at the vine, which is drawn behind what's in the card */
+:root[data-vines="on"] .card{position:relative;isolation:isolate;background:transparent;border-color:transparent}
+.card>svg.vine{position:absolute;left:-1px;top:-1px;overflow:visible;pointer-events:none;z-index:-1}
+:root:not([data-vines="on"]) .card>svg.vine{display:none}
+/* film: a reel and its band of film under each page's title */
+.filmline{margin:-14px 0 20px;line-height:0}
+.filmline svg{display:block;max-width:100%;height:auto}
+@media (max-width:720px){
+  :root[data-vines="on"] body{padding:6px}
+  :root[data-vines="on"] .shell{min-height:calc(100vh - 12px)}
+  :root[data-vines="on"] .side{top:auto;height:auto}
+}
+@media print{:root[data-vines="on"] body{padding:0;background-image:none}.framevine,.seamvine,.filmline{display:none}}
+/* System → Themes: each theme on a row, its buttons at the end */
+.themelist{margin:12px 0 6px}
+.themerow{align-items:center;flex-wrap:wrap}

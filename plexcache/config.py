@@ -156,6 +156,9 @@ DEFAULTS: dict = {
     "tools": {name: {} for name in TOOL_NAMES},
     # MQTT (off until switched on): status on <base_topic>/state, commands on <base_topic>/set/<name>.
     # With "discovery", Home Assistant (and openHAB, Domoticz...) create the entities themselves.
+    # How the web UI looks (themes.py): "selected", the theme's id, or "auto" — the light or dark theme by the device's
+    # own setting ("auto_light", "auto_dark"); "custom": the themes people uploaded, by id (each checked by themes.validate).
+    "themes": {"selected": "dionysus-light", "auto_light": "dionysus-light", "auto_dark": "dionysus-dark", "custom": {}},
     "mqtt": {
         "enabled": False,
         "host": "",
@@ -324,6 +327,12 @@ def _url(section: str, value) -> str:
 
 
 def _coerce(section: str, key: str, value, current):
+    if section == "themes":
+        from .themes import ThemeError, coerce
+        try:
+            return coerce(key, value, current)
+        except ThemeError as e:
+            raise SettingsError(e.args[0]) from None
     if section == "tools":
         if not isinstance(value, dict) or any(not isinstance(k, str) or not isinstance(v, dict) for k, v in value.items()):
             raise SettingsError(M("tools.{tool} must map each library (or “*”) to its options", tool=key))

@@ -12,7 +12,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import filehistory, plexbackup
+from . import filehistory, plexbackup, themes
 from .auth import SESSION_DAYS, Auth
 from .config import SettingsError
 from .i18n import M, jsonable, msg
@@ -95,7 +95,8 @@ _ASSET = re.compile(r'(/static/[A-Za-z0-9_.-]+\.(?:js|css))"')
 
 
 # Reachable without signing in: the sign-in page's own files and the container health check.
-OPEN_PATHS = {"/healthz", "/login"}
+OPEN_PATHS = {"/healthz", "/login", "/theme.css", "/theme.js"}  # (the sign-in page wears the theme too)
+mimetypes.add_type("font/woff2", ".woff2")
 
 
 # The local network: private and link-local addresses, this machine, and the shared range VPNs such as
@@ -307,11 +308,25 @@ def make_handler(app):
                 return self._file(os.path.join(WEB_DIR, "login.html" if auth.enabled else "index.html"))
             if path.startswith("/static/"):
                 name = path[len("/static/"):]
-                if not re.fullmatch(r"(i18n/)?[a-zA-Z0-9_-][a-zA-Z0-9_.-]*", name):
+                if not re.fullmatch(r"(i18n/|fonts/)?[a-zA-Z0-9_-][a-zA-Z0-9_.-]*", name):
                     return self._error("not found", 404)
                 return self._file(os.path.join(WEB_DIR, name))
             if path == "/healthz":
                 return self._json({"ok": True, "version": app.version})
+            if path in ("/theme.css", "/theme.js"):
+                # the themes' colours, and which one shows (themes.py): asked for again on every page load, never kept
+                ts = app.settings.section("themes")
+                body, ctype = (themes.css(ts), "text/css") if path == "/theme.css" else (themes.script(ts), "application/javascript")
+                return self._send(200, body.encode("utf-8"), ctype + "; charset=utf-8", {"Cache-Control": "no-store"})
+            if path == "/api/themes/download":
+                # a theme as a file (System → Themes): a built-in one as a copy to rename and change
+                tid = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id") or [""])[0]
+                theme = next((t for t in themes.everything((app.settings.section("themes")).get("custom")) if t["id"] == tid), None)
+                if theme is None:
+                    return self._error("no such theme", 404)
+                name = theme["id"] + ("-copy" if theme.get("builtin") else "")
+                return self._send(200, themes.download(theme).encode("utf-8"), "application/json",
+                                  {"Content-Disposition": f'attachment; filename="dionysus-theme-{name}.json"', "Cache-Control": "no-store"})
             if path == "/api/state":
                 # the page open and its library ("focus=<page>:<library>"): evaluated first, its data read first (evaluate.py)
                 focus = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("focus") or [""])[0]
@@ -450,6 +465,14 @@ def make_handler(app):
                                   {"Content-Disposition": 'attachment; filename="plex-cache-settings.json"'})
             return self._error("not found", 404)
 
+        def _themes(self, path: str, body: dict):
+            """System → Themes (themes.py): a theme file added, or an added one taken away."""
+            try:
+                tid = themes.upload(app.settings, body.get("theme")) if path.endswith("upload") else themes.remove(app.settings, body.get("id"))
+            except themes.ThemeError as e:
+                raise SettingsError(e.args[0]) from None
+            return self._json(dict({"settings": app.settings.public()}, **({"id": tid} if tid else {})))
+
         def _same_origin(self) -> bool:
             """A browser says which page a request came from (Origin). Changes are only
             taken from this app's own pages; scripts and tools send no Origin at all."""
@@ -526,9 +549,11 @@ def make_handler(app):
                         app.syncthing.tick_async(force=True)
                         if any(k.startswith(("throttle", "giveway")) for k in body["syncthing"]):
                             app.syncthing.throttle_tick()  # (what's held follows the settings at once)
-                    else:
+                    elif set(body) != {"themes"}:  # (a theme changes nothing a check looks at)
                         app.run_checks_async(rescan="excluded_libraries" in body.get("general", {}))
                     return self._json({"settings": app.settings.public()})
+                if path in ("/api/themes/upload", "/api/themes/remove"):
+                    return self._themes(path, body)
                 if path == "/api/test":
                     app.test_connections_async(then_checks=True, rescan=True)
                     return self._json({"started": True})

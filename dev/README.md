@@ -11,6 +11,7 @@ This folder holds what you need to try changes on a real TrueNAS before pushing 
 | `versions.py` | Prints what an image carries (its OS, Python, MKVToolNix, ffmpeg…); each build logs it. |
 | `coverage.py` | Runs the tests and shows how much of the code they reach, per file. No installs needed (Python 3.12+). |
 | `codecs.py` | Codec names as MKVToolNix shows them, for Library Health (`plexcache/codec_names.py`). The image build runs it for the MKVToolNix release it installs; run it by hand to refresh the committed copy. |
+| `css.js`, `package.json` | What checks and builds the app's CSS: **Stylelint** on the source, then **Autoprefixer** (the browser prefixes its targets need) and **cssnano** (minified) for the image. The settings and the pinned packages are in `package.json`; see below. |
 | `screenshots.js` | Makes the README screenshots from the demo (see below). |
 | `make_fixtures.py` | Makes the optimizer's test files (`tests/fixtures/*.mkv`: many real-world features, a few hundred KB) and the snapshot of what optimizing them gives. Run it with `--snapshot` after checking a change the tests caught (needs ffmpeg and MKVToolNix). |
 
@@ -97,6 +98,7 @@ After that, `tnsync local -y` is all you need.
 ## Working without a NAS
 
 ```sh
+npm ci --prefix dev     # once (and when dev/package-lock.json changes): what the CSS tests need
 python3 tests/run.py    # the test suite, with fake Plex, TrueNAS and MQTT servers
 python3 dev/coverage.py # the same, showing how much of the code the tests reach (Python 3.12+; add --missing for line numbers)
 python3 tests/demo.py   # the UI with sample data at http://127.0.0.1:8642
@@ -116,11 +118,22 @@ NODE_PATH=$(npm root -g) node dev/screenshots.js
 
 `DEMO_SHOWCASE=1` sets the demo up as a mostly healthy system with one warning left to show. The script swaps the demo's 127.0.0.1 addresses for a typical home one (192.168.1.10) in the pictures.
 
+## The CSS
+
+`plexcache/web/app.css` is written **without browser prefixes** (`-webkit-`, `-moz-`, `-ms-`, `-o-`): write the standard property and leave the prefixes to Autoprefixer. The image build (the Dockerfile's `css` stage, on Node's LTS) runs `dev/css.js build` on it, which adds the prefixes the browsers in `dev/package.json`'s `"browserslist"` still need (`defaults`: over 0.5% of use, each browser's last two versions, Firefox ESR, none that's dead) and minifies it with cssnano; that copy replaces the source's in the image. `tnsync` copies the source as it is, so the test app serves it unprefixed and unminified — fine for a current browser.
+
+```sh
+node dev/css.js lint                 # Stylelint on plexcache/web/*.css
+node dev/css.js build > /tmp/app.css # what the image ships (--no-minify: prefixed only)
+```
+
+The suite checks it (`CssBuildTests`): no prefix written by hand in the CSS, the pages' and scripts' own styles or the themes' CSS; Stylelint clean, with its recommended rules and the five no-vendor-prefix rules (`"stylelint"` in `dev/package.json`); and the build clean, only adding prefixes. They need `npm ci --prefix dev` (GitHub's test job runs it); without node they skip, like the page tests.
+
 ## Python and the other dependencies
 
 The code needs Python 3.15 or later. The image is built on `python:3.15-slim-trixie` (`PYTHON_TAG` in the Dockerfile), whatever 3.15.x is newest at the build, and the build workflow rebuilds the release weekly so a new patch release or Debian package reaches the image within a week. MKVToolNix comes from its own repository (mkvtoolnix.download, which is why the image is Debian), ffmpeg built from its release with no external libraries (the optimizer only copies streams, hashes them and reads cover art; the static builds around carry every codec library, and Debian's package 500 MB of dependencies), oxipng from its releases and jpegtran built from libjpeg-turbo's, each pinned in the Dockerfile. GitHub runs the tests on 3.15 with every deprecation warning an error, and `pyright` after them (`pyrightconfig.json`: an error is a fault that would fail at run time; the annotation warnings are kept at zero).
 
-**Kept current by a check, not by memory.** `test_dependencies_are_current` runs when the suite runs by hand (not on GitHub): once a day it asks upstream for the newest release of everything the app depends on — the Python and the Debian the image is built on, MKVToolNix, ffmpeg, oxipng, libjpeg-turbo, pyright — against what the project pins. A pin a patch or minor release behind is moved there and then (the Dockerfile or workflow edited, said in the output; MKVToolNix's every release counts as minor, since each carries fixes); a major release, or a new Debian or Python, fails the test naming it, until it's moved or held by choice. `python3 dev/upkeep.py` is the same check as a report (`--report` moves nothing, `--fresh` asks again). The GitHub Actions are Dependabot's. `python3 dev/versions.py` prints what an image carries; each build logs it.
+**Kept current by a check, not by memory.** `test_dependencies_are_current` runs when the suite runs by hand (not on GitHub): once a day it asks upstream for the newest release of everything the app depends on — the Python and the Debian the image is built on, MKVToolNix, ffmpeg, oxipng, libjpeg-turbo, pyright, and the Node LTS and packages that check and build the CSS (`dev/package.json`, moved with npm so its lock moves too) — against what the project pins. A pin a patch or minor release behind is moved there and then (the Dockerfile or workflow edited, said in the output; MKVToolNix's every release counts as minor, since each carries fixes); a major release, or a new Debian or Python, fails the test naming it, until it's moved or held by choice. `python3 dev/upkeep.py` is the same check as a report (`--report` moves nothing, `--fresh` asks again). The GitHub Actions are Dependabot's. `python3 dev/versions.py` prints what an image carries; each build logs it.
 
 **The future track.** `python3 dev/future.py` builds the image on the next Python's newest prerelease (`python:3.16.0a1-slim-trixie`, say, while the image runs 3.15) and runs the whole suite inside it with every warning an error. The tools come the same way: for each, upstream's newest pre-release when it's ahead of the stable release, else that stable release — Python's alphas, betas and rcs as Docker Hub tags them; Node's nightlies and rcs from nodejs.org (the page tests need node; the image serves no pages through it, so the build is fetched once, kept in `~/.cache/plex-cache/node/`, and mounted into the container); ffmpeg's git snapshot, built from source once a week (`FFMPEG_SOURCE` and `FFMPEG_STAMP` in the Dockerfile); libjpeg-turbo's and oxipng's GitHub pre-releases; MKVToolNix has releases only. The run starts with a table of what it chose, kept for a day in `~/.cache/plex-cache/future.json` (`--fresh` asks again; `python3 dev/upkeep.py` reports it too); upstream not reached means the pin. `--stable` keeps every tool at the Dockerfile's pin, with Debian's node; `--tag 3.15-slim-forky` will try the next Debian the same way. The build shows as one line that moves (its step, what it's doing, the time); its full output goes to a log, shown when the build fails, or on the terminal with `-v`. The suite then runs through `tests/run.py`, with its progress bar. It needs Docker with a running engine, and uses BuildKit when Docker has it (`docker buildx`; on a Mac, `brew install docker-buildx`, then the `cliPluginsExtraDirs` line brew prints in `~/.docker/config.json`), else Docker's legacy builder. `--local` uses a `python3.16` of your own (or `uv`, which fetches prerelease builds). It is local on purpose: GitHub shows how the app runs; this shows where it is going. When the next Python is released and the suite is clean on it, moving the image is `PYTHON_TAG` in the Dockerfile and `python-version` in `build.yml`.
 

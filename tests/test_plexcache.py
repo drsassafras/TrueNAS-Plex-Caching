@@ -3124,6 +3124,141 @@ class ServerTests(unittest.TestCase):
         wait_for(lambda: not self.app.checking and not self.app.testing)
 
 
+class ThemeTests(unittest.TestCase):
+    """Themes (themes.py): the built-in four, a theme file checked before it reaches a page, the routes that serve the
+    look (/theme.css, /theme.js) and download and upload a theme, and System → Themes."""
+
+    @classmethod
+    def setUpClass(cls):
+        from plexcache.server import serve
+        cls.app = _new_app()
+        cls.httpd = serve(cls.app, "127.0.0.1", 0)
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    req = ServerTests.req
+
+    def _root(self, *p):
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), *p)
+
+    def test_built_in_themes(self):
+        """Every built-in theme sets every colour; Classic Light is the app's look before themes (app.css's own colours,
+        the fallback), and Dionysus Light is what a new install shows. No rule follows the device's light or dark setting
+        but the theme: a dark rule goes under the theme's mode."""
+        from plexcache import config, themes
+        css = _read(self._root("plexcache", "web", "app.css"), encoding="utf-8")
+        self.assertNotIn("prefers-color-scheme", css)
+        fallback = dict(re.findall(r"--([a-z0-9-]+):(#[0-9A-Fa-f]{3,6})", css[:css.index("}")]))
+        classic = themes.built_in("classic-light")["colors"]
+        self.assertGreater(len(fallback), 30)
+        self.assertEqual({k: v for k, v in classic.items() if k in fallback}, fallback)
+        for t in themes.BUILT_IN:
+            self.assertEqual(set(t["colors"]), set(themes.COLORS), t["id"])
+            self.assertEqual(themes.validate(dict(t, id="x-" + t["id"])), dict(t, id="x-" + t["id"], dionysus_theme=1, colors={k: v.upper() for k, v in t["colors"].items()}))
+        self.assertEqual(config.DEFAULTS["themes"]["selected"], "dionysus-light")
+        self.assertEqual({t["mode"] for t in themes.BUILT_IN if t["id"].endswith("-dark")}, {"dark"})
+        # every colour the decorations use is one a theme sets (but the see-through holes they cut, --hole)
+        used = set(re.findall(r"var\(--([a-z0-9-]+)", _read(self._root("plexcache", "web", "decor.js"), encoding="utf-8")))
+        self.assertEqual(used - set(themes.COLORS), {"hole"})
+        self.assertLessEqual({"film", "film-mark", "vine", "vine-leaf", "frame", "frame-leaf", "menu-vine", "panel"}, used)
+
+    def test_theme_files_are_checked(self):
+        """A theme from a file: #hex colours only, fonts and decorations from their lists, no built-in's id; what it
+        leaves out comes from the theme it's based on. A downloaded theme uploads again as it is."""
+        from plexcache import themes
+        base = {"name": "Wine Cellar", "mode": "dark", "based_on": "dionysus-dark"}
+        t = themes.validate(dict(base, colors={"accent": "#c04070"}))
+        self.assertEqual((t["id"], t["colors"]["accent"], t["colors"]["bg"], t["fonts"]["headings"], t["decor"]["vines"]),
+                         ("wine-cellar", "#C04070", themes.built_in("dionysus-dark")["colors"]["bg"], "Cinzel", True))
+        for bad in ({"colors": {"bg": "red;}body{background:url(x)"}}, {"colors": {"bg": "url(x)"}}, {"colors": {"nope": "#fff"}},
+                    {"fonts": {"text": "Comic Sans"}}, {"decor": {"logo": "mine"}}, {"decor": {"spots": 50}}, {"decor": {"vines": "yes"}},
+                    {"name": "<script>"}, {"name": ""}, {"id": "classic-light"}, {"id": "Bad Id"}, {"mode": "dim"}, {"dionysus_theme": 2}):
+            with self.assertRaises(themes.ThemeError, msg=bad):
+                themes.validate(dict(base, **bad))
+        for t in themes.everything({}):
+            back = json.loads(themes.download(t))
+            self.assertIn("about", back)
+            self.assertEqual(themes.validate(back)["colors"], t["colors"])
+        self.assertNotIn("about", themes.validate(json.loads(themes.download(themes.everything({})[0]))))
+
+    def test_theme_routes(self):
+        """/theme.css holds every theme's colours, /theme.js names the one to show (never kept by the browser); a theme
+        downloads as a file, uploads into the settings (one of the same id replaced), shows when chosen, and goes back to
+        the default when removed while in use. Auto names a light and a dark theme."""
+        status, body, headers = self.req("GET", "/theme.css")
+        self.assertEqual((status, headers["Cache-Control"]), (200, "no-store"))
+        self.assertIn("text/css", headers["Content-Type"])
+        for tid in ("classic-light", "classic-dark", "dionysus-light", "dionysus-dark"):
+            self.assertIn(f':root[data-theme="{tid}"]{{--bg:'.encode(), body)
+        status, body, headers = self.req("GET", "/theme.js")
+        self.assertIn("javascript", headers["Content-Type"])
+        self.assertIn(b'"selected":"dionysus-light"', body)
+        status, body, headers = self.req("GET", "/api/themes/download?id=dionysus-dark")
+        self.assertEqual(status, 200)
+        self.assertIn('filename="dionysus-theme-dionysus-dark-copy.json"', headers["Content-Disposition"])
+        theme = json.loads(body)
+        self.assertEqual((theme["id"], theme["based_on"]), ("dionysus-dark-copy", "dionysus-dark"))
+        self.assertEqual(self.req("GET", "/api/themes/download?id=nope")[0], 404)
+        theme["name"], theme["colors"]["accent"] = "Wine Cellar", "#C04070"
+        status, body, _ = self.req("POST", "/api/themes/upload", {"theme": theme})
+        self.assertEqual((status, json.loads(body)["id"]), (200, "dionysus-dark-copy"))
+        self.assertEqual(self.req("POST", "/api/themes/upload", {"theme": dict(theme, colors={"bg": "red"})})[0], 400)
+        self.assertEqual(self.req("POST", "/api/themes/upload", {"theme": "nope"})[0], 400)
+        self.assertIn({"id": "dionysus-dark-copy", "name": "Wine Cellar", "mode": "dark", "builtin": False, "decor": theme["decor"]}, self.app.state()["themes"])
+        self.assertIn(b':root[data-theme="dionysus-dark-copy"]{--bg:#111513', self.req("GET", "/theme.css")[1])
+        self.assertIn(b"--accent:#C04070", self.req("GET", "/theme.css")[1])
+        self.assertEqual(self.req("POST", "/api/settings", {"themes": {"selected": "dionysus-dark-copy"}})[0], 200)
+        self.assertIn(b'"selected":"dionysus-dark-copy"', self.req("GET", "/theme.js")[1])
+        self.assertEqual(self.req("POST", "/api/settings", {"themes": {"selected": "<b>"}})[0], 400)
+        self.assertEqual(self.req("POST", "/api/themes/remove", {"id": "dionysus-dark-copy"})[0], 200)
+        self.assertEqual((self.app.settings.section("themes")["selected"], self.app.settings.section("themes")["custom"]), ("dionysus-light", {}))
+        self.assertEqual(self.req("POST", "/api/settings", {"themes": {"selected": "auto", "auto_dark": "classic-dark"}})[0], 200)
+        self.assertIn(b'{"selected":"auto","light":"dionysus-light","dark":"classic-dark"}', self.req("GET", "/theme.js")[1])
+        self.app.settings.update({"themes": {"selected": "dionysus-light", "auto_dark": "dionysus-dark"}})
+        # the fonts that ship with the app are served with their type
+        status, _, headers = self.req("GET", "/static/fonts/cinzel-latin.woff2")
+        self.assertEqual((status, headers["Content-Type"]), (200, "font/woff2"))
+        self.assertEqual(self.req("GET", "/static/fonts/../app.css")[0], 404)
+
+    def test_every_page_wears_the_theme(self):
+        """The sign-in page and the app load the theme before they draw, and the decorations after; the app's pages are
+        drawn by one function that hands each page to the decorations, so none goes without."""
+        for name in ("index.html", "login.html"):
+            html = _read(self._root("plexcache", "web", name), encoding="utf-8")
+            head = html[:html.index("</head>")]
+            self.assertIn('<link rel="stylesheet" href="/theme.css">', head, name)
+            self.assertIn('<script src="/theme.js"></script>', head, name)
+            self.assertIn('<script src="/static/decor.js"></script>', html, name)
+        js = _read(self._root("plexcache", "web", "app.js"), encoding="utf-8")
+        self.assertEqual(js.count("main.innerHTML = PAGES[page]();"), 1)
+        draw = js[js.index("main.innerHTML = PAGES[page]();"):]
+        self.assertLess(draw.index("PCDECOR.paint(main)"), draw.index("\n  }"))
+
+    def test_system_page_themes_card(self):
+        """System → Themes: the theme to show, the light and dark pair for Auto, every theme with its Download, an uploaded
+        one's Remove, and Upload a Theme."""
+        st = copy.deepcopy(self.app.state())
+        st["themes"].append({"id": "mine", "name": "Mine", "mode": "light", "builtin": False, "decor": {}})
+        html = PageStructureTests._render(self, st, "system")["html"]
+        card = html[html.index('id="themes"'):]
+        card = card[:card.index("</section>")]
+        self.assertIn('data-set="themes.selected"', card)
+        self.assertNotIn('data-set="themes.auto_light"', card)
+        for tid in ("classic-light", "classic-dark", "dionysus-light", "dionysus-dark", "mine"):
+            self.assertIn(f'data-act="theme-download" data-id="{tid}"', card)
+        self.assertEqual(re.findall(r'data-act="theme-remove" data-id="([^"]+)"', card), ["mine"])
+        self.assertIn('data-act="theme-upload"', card)
+        st["settings"]["themes"]["selected"] = "auto"
+        card = PageStructureTests._render(self, st, "system")["html"]
+        self.assertIn('data-set="themes.auto_light"', card)
+        self.assertIn('data-set="themes.auto_dark"', card)
+
+
 class ReportTests(unittest.TestCase):
     """The Activity report: verdict, numbers and what needs attention."""
 
@@ -4012,6 +4147,18 @@ class TestRunnerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 130)
         self.assertIn("Stopped: 1 of 3 tests ran, 2 not run", out)
         self.assertNotIn("fail", out.lower())
+
+    @unittest.skipUnless(os.path.isdir(os.path.join(ROOT, ".git")), "a copy, not the checkout: no git record to read")
+    def test_tnsync_stays_executable(self):
+        """dev/tnsync is run as `tnsync`, so git must record it executable (100755). An editor or tool that
+        rewrites the file can drop the bit, and a commit then makes every checkout say 'permission denied'."""
+        import subprocess
+        listed = subprocess.run(["git", "-C", ROOT, "ls-files", "-s", "--", "dev/tnsync"],
+                                capture_output=True, text=True, check=True).stdout.split()
+        self.assertTrue(listed, "dev/tnsync isn't tracked")
+        self.assertEqual(listed[0], "100755", "git records dev/tnsync as not executable: run `chmod +x dev/tnsync` and commit")
+        self.assertTrue(os.access(os.path.join(ROOT, "dev", "tnsync"), os.X_OK),
+                        "dev/tnsync lost its executable bit: run `chmod +x dev/tnsync`")
 
 
 
@@ -13678,6 +13825,72 @@ class FutureTests(unittest.TestCase):
             with open(os.path.join(d, "future.json"), "w", encoding="utf-8") as fh:
                 json.dump({"at": time.time(), "key": "3.16 trixie arm64", "picks": [vars(p) for p in picks[:2]]}, fh)
             self.assertEqual(upkeep.future_track(), "Python 3.16.0a2 (alpha), ffmpeg " + picks[1].version + " (snapshot)")
+
+
+class CssBuildTests(unittest.TestCase):
+    """The app's CSS (dev/css.js, its settings in dev/package.json): written without browser prefixes (-webkit-, -moz-, -ms-,
+    -o-) and passing Stylelint; built for the image by Autoprefixer, which adds the prefixes its targets need, and cssnano."""
+
+    VENDOR = re.compile(r"(?<![\w-])-(?:webkit|moz|ms|o)-[a-z]")
+
+    def _css_js(self, *args):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        dev = os.path.join(ROOT, "dev")
+        for package in json.loads(_read(os.path.join(dev, "package.json"), encoding="utf-8"))["devDependencies"]:
+            self.assertTrue(os.path.isdir(os.path.join(dev, "node_modules", package)), f"{package} isn't installed: npm ci --prefix dev")
+        import subprocess
+        return subprocess.run([node, os.path.join(dev, "css.js"), *args], capture_output=True, text=True, timeout=120)
+
+    def test_css_has_no_browser_prefixes(self):
+        """Not in the stylesheets, not in the pages' or scripts' own styles, not in the themes' CSS (served at /theme.css)."""
+        from plexcache import themes
+        web = os.path.join(ROOT, "plexcache", "web")
+        found = []
+        for name in sorted(os.listdir(web)):
+            if name.endswith((".css", ".html", ".js")):
+                for n, line in enumerate(_read(os.path.join(web, name), encoding="utf-8").splitlines(), 1):
+                    if self.VENDOR.search(line):
+                        found.append(f"plexcache/web/{name}:{n}: {line.strip()[:120]}")
+        for n, line in enumerate(themes.css({}).splitlines(), 1):
+            if self.VENDOR.search(line):
+                found.append(f"/theme.css:{n}: {line.strip()[:120]}")
+        self.assertEqual(found, [], "a browser prefix written by hand: leave it to Autoprefixer (dev/css.js)")
+
+    def test_css_passes_stylelint(self):
+        """Stylelint on plexcache/web/*.css, with dev/package.json's rules: its recommended ones, and no browser prefixes."""
+        got = self._css_js("lint")
+        self.assertEqual(got.returncode, 0, got.stderr)
+        rules = json.loads(_read(os.path.join(ROOT, "dev", "package.json"), encoding="utf-8"))["stylelint"]["rules"]
+        for rule in ("property-no-vendor-prefix", "value-no-vendor-prefix", "selector-no-vendor-prefix",
+                     "media-feature-name-no-vendor-prefix", "at-rule-no-vendor-prefix"):
+            self.assertIs(rules.get(rule), True, rule)
+
+    def test_css_builds_cleanly_for_its_targets(self):
+        """Autoprefixer runs on app.css with no warnings (a property it can't prefix as written, an old syntax) and only adds
+        to it; minified, it's smaller. The image build runs it and ships what it makes; GitHub installs it for these tests."""
+        src = os.path.join(ROOT, "plexcache", "web", "app.css")
+        css = _read(src, encoding="utf-8")
+        with tempfile.TemporaryDirectory() as d:
+            prefixed, built = os.path.join(d, "prefixed.css"), os.path.join(d, "built.css")
+            got = self._css_js("build", "--no-minify", src, prefixed)
+            self.assertEqual(got.returncode, 0, got.stderr)
+            got = self._css_js("build", src, built)
+            self.assertEqual(got.returncode, 0, got.stderr)
+            prefixed, built = _read(prefixed, encoding="utf-8"), _read(built, encoding="utf-8")
+        # what Autoprefixer adds is prefixed declarations (or a prefixed copy of a value): taken out again, it's the source
+        strip = lambda text: re.sub(r"(?<=[{;])\s*[\w-]+:\s*-(?:webkit|moz|ms|o)-[^;{}]*;|(?<=[{;])\s*-(?:webkit|moz|ms|o)-[\w-]+:[^;{}]*;", "", text)
+        self.assertEqual(strip(prefixed), strip(css))
+        self.assertLess(len(built), len(css))
+        self.assertEqual(self.VENDOR.findall(built) != [], self.VENDOR.findall(prefixed) != [])  # (minifying keeps the prefixes)
+        self.assertTrue(json.loads(_read(os.path.join(ROOT, "dev", "package.json"), encoding="utf-8"))["browserslist"])
+        # the image ships the built copy, made from the same files; GitHub's test job installs the packages for these tests
+        docker = _read(os.path.join(ROOT, "Dockerfile"), encoding="utf-8")
+        self.assertIn("RUN node dev/css.js build plexcache/web/app.css plexcache/web/app.css", docker)
+        self.assertIn("COPY --from=css /css/plexcache/web/app.css /app/plexcache/web/app.css", docker)
+        self.assertLess(docker.index("COPY plexcache /app/plexcache"), docker.index("COPY --from=css /css/plexcache/web/app.css"))
+        self.assertIn("npm ci --prefix dev", _read(os.path.join(ROOT, ".github", "workflows", "build.yml"), encoding="utf-8"))
 
 
 class UpkeepTests(unittest.TestCase):

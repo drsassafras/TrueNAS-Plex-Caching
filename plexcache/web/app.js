@@ -3822,7 +3822,8 @@ PCI18N.ready.then(function () {
     prefs: '<path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
     updates: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
     speed: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
-    mappings: '<path d="m16 3 4 4-4 4M20 7H4M8 21l-4-4 4-4M4 17h16"/>'
+    mappings: '<path d="m16 3 4 4-4 4M20 7H4M8 21l-4-4 4-4M4 17h16"/>',
+    themes: '<path d="M12 22a10 10 0 1 1 10-10c0 2.8-2.2 4-4.5 4H15a2 2 0 0 0-1.5 3.3c.4.5.5 1 .5 1.5 0 .7-.6 1.2-2 1.2z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10.5" cy="7" r="1.2"/><circle cx="15.5" cy="7.5" r="1.2"/>'
   };
   // a place's icon by its name: a tool's from its definition, the rest from ICONS — the one way an icon is drawn
   function icon(name) {
@@ -4132,6 +4133,51 @@ PCI18N.ready.then(function () {
       H("Both servers converted one after the other, the folder sync kept off the new dataset and the old folder, and a conversion left partway on either side found. <a href=\"/dataset\" data-nav>Tools → Convert Folder to Child Dataset</a>") + "</div></div></div></section>";
     return out + "</div>";
   }
+  // ---- Themes (plexcache/themes.py): how every page looks, the built-in themes and any uploaded; a theme downloads as a
+  // file that shows every value it sets, to change and upload as one's own
+  var THEME_NAMES = { "classic-light": N("Classic Light"), "classic-dark": N("Classic Dark"), "dionysus-light": N("Dionysus Light"), "dionysus-dark": N("Dionysus Dark") };
+  function themeName(t) { return t.builtin && THEME_NAMES[t.id] ? T(THEME_NAMES[t.id]) : t.name; }
+  function themesCard() {
+    var list = ST.themes || [], ts = S.themes || {};
+    var opts = function (mode) { return list.filter(function (t) { return !mode || t.mode === mode; }).map(function (t) { return [t.id, themeName(t)]; }); };
+    var rows = list.map(function (t) {
+      return '<div class="row themerow"><div class="grow"><div class="what">' + esc(themeName(t)) + "</div>" +
+        '<div class="det">' + (t.mode === "dark" ? H("Dark") : H("Light")) + " · " + (t.builtin ? H("Comes with Dionysus") : H("Added by you")) + "</div></div>" +
+        '<button class="btn sm" type="button" data-act="theme-download" data-id="' + esc(t.id) + '">' + H("Download") + "</button>" +
+        (t.builtin ? "" : '<button class="btn sm danger" type="button" data-act="theme-remove" data-id="' + esc(t.id) + '">' + H("Remove") + "</button>") + "</div>";
+    }).join("");
+    return '<section class="card" id="themes"><h2>' + icon("themes") + H("Themes") + '</h2><p class="hint">' +
+      H("How Dionysus looks, on every page. Kept with its settings, so every browser that opens it shows the same theme.") + "</p>" +
+      '<div class="grid">' +
+      select("themes", "selected", T("Theme"), [["auto", T("Auto: light or dark, as the device is set")]].concat(opts()),
+        { s: H("Auto follows each device’s own light or dark setting, and changes with it."),
+          more: H("Phones, tablets and computers can be set to a light or a dark look (often dark at night). With Auto, Dionysus shows the light theme or the dark theme you pick below to match it.") }) +
+      (ts.selected === "auto" ? select("themes", "auto_light", T("Light theme for Auto"), opts("light")) + select("themes", "auto_dark", T("Dark theme for Auto"), opts("dark")) : "") +
+      "</div>" +
+      '<div class="themelist">' + rows + "</div>" +
+      '<div class="acts"><button class="btn" type="button" data-act="theme-upload">' + H("Upload a Theme") + "</button>" +
+      '<input type="file" id="theme-file" accept=".json,application/json" hidden>' +
+      '<span class="muted" style="font-size:13px">' + H("To make your own, download a theme, change its colours, give it a new name and upload it.") +
+      info(H("A theme file lists every colour it sets (as #hex), its two fonts and its decorations, each with what it colours or does. Any colour left out comes from the theme it was based on."), T("Themes")) + "</span></div></section>";
+  }
+  // the theme the settings name, put on the page (theme.js: PCTHEME) as soon as it changes here or on another browser
+  var themeKey = "";
+  function applyTheme() {
+    if (!window.PCTHEME || !S || !S.themes || !ST || !ST.themes) return;
+    var ts = S.themes, info = {}, ids = {};
+    ST.themes.forEach(function (t) { info[t.id] = { mode: t.mode, decor: t.decor }; ids[t.id] = 1; });
+    var pick = function (v, d) { return ids[v] ? v : d; };
+    var sel = { selected: ts.selected === "auto" ? "auto" : pick(ts.selected, "dionysus-light"), light: pick(ts.auto_light, "dionysus-light"), dark: pick(ts.auto_dark, "dionysus-dark") };
+    var key = JSON.stringify(sel) + Object.keys(ids).join(",");
+    if (key === themeKey) return;
+    var themesChanged = themeKey && themeKey.split("}")[1] !== Object.keys(ids).join(",");
+    themeKey = key;
+    if (themesChanged) {  // (a theme added or removed: its colours fetched again)
+      var link = document.querySelector('link[href^="/theme.css"]');
+      if (link) link.href = "/theme.css?r=" + Date.now();
+    }
+    window.PCTHEME.use(sel, info);
+  }
   function pageSystem() {
     var c = ST.connections || {}, testing = ST.testing;
     var out = top(T("System"), H("Connections and system-wide options. Stored in the app’s config folder, so they survive updates."),
@@ -4223,6 +4269,7 @@ PCI18N.ready.then(function () {
           "<strong>The copies the action keeps</strong>: where an action sets files aside rather than deleting them (Duplicate Versions, Child Dataset), those are the backup. An action that keeps none asks for a snapshot or a backup instead.") }) +
       number("general", "backup_days", T("Keep backups for (days)"), 1, 365, H("How long a backup made before files change is kept: a snapshot the app takes is deleted after this long, by the app itself (TrueNAS keeps a snapshot for ever otherwise); files set aside or copied as a backup are deleted after it too. Until then a backup holds the space the changed files took, and a change can be reverted from it.") + " " + H("A backup of Plex’s records is kept as long, then deleted by the app.")) +
       "</div></section>";
+    out += themesCard();
     // ---- Updates
     out += '<section class="card" id="updates"><h2>' + icon("updates") + H("Updates") + '</h2>' +
       '<div class="chk" style="margin-top:8px">' + info(H("Every 6 hours the app asks GitHub for the branch’s newest finished build — a small download, nothing about your setup is sent — " +
@@ -5704,12 +5751,14 @@ PCI18N.ready.then(function () {
       }
       document.querySelector(".shell").appendChild(bar);
     }
+    applyTheme();
     main.innerHTML = PAGES[page]();
     fitBars();
     fitPosters();
     reattachInfo();
     stickHeights();
     comets();
+    if (window.PCDECOR) window.PCDECOR.paint(main);  // the theme's decorations (decor.js): vines round the cards, film under the title
   }
   // Library Health's legend stays at the top of the window, and the table's column names just under it
   function stickHeights() {
@@ -6021,7 +6070,12 @@ PCI18N.ready.then(function () {
   });
 
   function action(act, el) {
-    if (act === "recheck") { api("/api/checks", { rescan: true }).then(function () { toast(T("Checking…")); ST.checking = true; render(); }); }
+    if (act === "theme-download") { location.href = "/api/themes/download?id=" + encodeURIComponent(el.dataset.id); }
+    else if (act === "theme-upload") { var tf = document.getElementById("theme-file"); if (tf) tf.click(); }
+    else if (act === "theme-remove") {
+      api("/api/themes/remove", { id: el.dataset.id }).then(function (r) { S = r.settings; if (ST) ST.settings = S; toast(T("Removed")); return load(); }).catch(function (e) { toast(e.message, true); });
+    }
+    else if (act === "recheck") { api("/api/checks", { rescan: true }).then(function () { toast(T("Checking…")); ST.checking = true; render(); }); }
     else if (act === "optimize-sel") {
       // the files ticked in one library — every one of them (All): the whole library, its conflict copies too
       var ok = el.dataset.key, ou = TOOL.optimizer, opaths = (optState(ok).data || {}).paths || [];
@@ -6449,6 +6503,17 @@ PCI18N.ready.then(function () {
   });
   main.addEventListener("change", function (e) {
     var el = e.target;
+    if (el.id === "theme-file") {  // a theme file to add (System → Themes)
+      var file = el.files && el.files[0];
+      el.value = "";
+      if (!file) return;
+      file.text().then(function (txt) {
+        var theme;
+        try { theme = JSON.parse(txt); } catch (err) { throw new Error(T("That file isn’t a theme: it isn’t JSON")); }
+        return api("/api/themes/upload", { theme: theme });
+      }).then(function (r) { S = r.settings; if (ST) ST.settings = S; toast(T("Theme added")); return load(); }).catch(function (err) { toast(err.message, true); });
+      return;
+    }
     if (el.dataset.set) {
       var p = el.dataset.set.split(".");
       queueSave(p[0], p[1], parseVal(p[0], p[1], el), el.tagName === "SELECT");

@@ -14,13 +14,17 @@ The dependencies: the Python the image runs (PYTHON_TAG in the Dockerfile; a new
 is a line there and one in build.yml, after dev/future.py is clean on it), the Debian that tag's image is built on (a new
 Debian is a prompt), the tools the image installs — MKVToolNix from its own repository, ffmpeg built from its release,
 oxipng and libjpeg-turbo from theirs, each an ARG in the Dockerfile moved here once upstream has the release (every
-MKVToolNix release is taken, since each carries fixes) — and pyright (its pin in build.yml; patch and minor releases taken).
+MKVToolNix release is taken, since each carries fixes) — pyright (its pin in build.yml; patch and minor releases taken), and
+what builds the CSS: the Node of the image build's css stage (NODE_TAG in the Dockerfile, an LTS major; a new LTS is a prompt)
+and the packages of dev/css.js — Autoprefixer, caniuse-lite (its browser data), PostCSS, cssnano, Stylelint and its
+recommended rules — pinned in dev/package.json (moved with npm, so dev/package-lock.json moves too; a major is a prompt).
 """
 
 import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -31,6 +35,7 @@ from dataclasses import dataclass, field
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCKERFILE = os.path.join(ROOT, "Dockerfile")
 BUILD = os.path.join(ROOT, ".github", "workflows", "build.yml")
+PACKAGE = os.path.join(ROOT, "dev", "package.json")  # what checks and builds the CSS (dev/css.js): Autoprefixer and the rest
 CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "plex-cache", "upkeep.json")
 FUTURE = os.path.join(os.path.dirname(CACHE), "future.json")  # what dev/future.py last chose to run on (its day's choices)
 A_DAY = 24 * 3600
@@ -199,6 +204,37 @@ def _bump_pyright(new: str) -> str:
     return _repin(BUILD, r"pyright@(\d+(?:\.\d+)+)", new)
 
 
+def node_lts() -> str:
+    """The newest LTS release line of Node ("26"), from nodejs.org's index."""
+    for r in _json("https://nodejs.org/dist/index.json"):
+        if r.get("lts"):
+            return r["version"].lstrip("v").split(".")[0]
+    raise ValueError("no LTS release listed at nodejs.org")
+
+
+def _package_pin(package: str) -> Callable[[], str]:
+    """A pin in dev/package.json."""
+    return lambda: json.loads(_read(PACKAGE))["devDependencies"][package]
+
+
+def _bump_package(package: str) -> Callable[[str], str]:
+    """Moves a pin in dev/package.json with npm, so dev/package-lock.json moves with it (and dev/node_modules)."""
+    def bump(new: str) -> str:
+        old = _package_pin(package)()
+        got = subprocess.run(["npm", "install", "--prefix", os.path.dirname(PACKAGE), "--save-exact", "--no-audit", "--no-fund", f"{package}@{new}"],
+                             capture_output=True, text=True, timeout=300)
+        if got.returncode:
+            raise ValueError(f"npm couldn't install {package}@{new}: {(got.stderr or got.stdout).strip()[-300:]}")
+        return f"dev/package.json (and its lock): {package} {old} → {new}"
+    return bump
+
+
+def _css_dep(package: str) -> "Dep":
+    return Dep(package, _package_pin(package), npm_latest(package), "its pin in dev/package.json", bump=_bump_package(package),
+               cant=f"{package} in dev/package.json (npm install --prefix dev --save-exact {package}@<version>); "
+                    "CssBuildTests then say whether the CSS still passes and builds.")
+
+
 DEPS = [
     Dep("Python", image_python, lambda: python_cycles()[0]["cycle"], "PYTHON_TAG in the Dockerfile (and python-version in build.yml)",
         major=2, cant="A new Python: dev/future.py clean on it first, then PYTHON_TAG in the Dockerfile and python-version in build.yml."),
@@ -217,6 +253,9 @@ DEPS = [
         bump=_bump_arg("LIBJPEG_TURBO", lambda v: f"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/{v}/libjpeg-turbo-{v}.tar.gz"),
         cant="ARG LIBJPEG_TURBO in the Dockerfile; CoverArtTests inside the image say whether jpegtran still does."),
     Dep("pyright", lambda: _pin(BUILD, r"pyright@(\d+(?:\.\d+)+)"), npm_latest("pyright"), "its pin in build.yml", bump=_bump_pyright),
+    Dep("Node", lambda: _pin(DOCKERFILE, r"ARG NODE_TAG=(\d+)"), node_lts, "NODE_TAG in the Dockerfile (the css stage)",
+        cant="A new Node LTS: NODE_TAG in the Dockerfile; the image build then says whether the CSS still builds."),
+    *(_css_dep(p) for p in ("autoprefixer", "caniuse-lite", "postcss", "cssnano", "stylelint", "stylelint-config-recommended")),
 ]
 
 

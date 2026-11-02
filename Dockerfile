@@ -17,6 +17,8 @@ ARG LIBJPEG_TURBO=3.2.1
 # FFMPEG_STAMP the week, so the layer is built again when it changes. Empty: the release above.
 ARG FFMPEG_SOURCE=""
 ARG FFMPEG_STAMP=""
+# The Node that builds the app's CSS (the css stage below): its current LTS release. Only the build uses it; the image has none.
+ARG NODE_TAG=26-slim
 
 # jpegtran built from libjpeg-turbo's release: the one tool of it the optimizer uses, linked statically against it.
 FROM python:${PYTHON_TAG} AS jpegtran
@@ -45,6 +47,16 @@ RUN set -eux; \
     make -j "$(nproc)" >/dev/null; \
     install -m 755 ffmpeg ffprobe /usr/local/bin/; \
     ffmpeg -version | head -1
+
+# The app's CSS as browsers get it (dev/css.js): the browser prefixes its targets need added by Autoprefixer (the targets in
+# dev/package.json, "browserslist"), then minified by cssnano. The CSS in plexcache/web is written without prefixes; this
+# copy of it replaces that one in the image.
+FROM node:${NODE_TAG} AS css
+WORKDIR /css
+COPY dev/package.json dev/package-lock.json dev/css.js dev/
+RUN npm ci --prefix dev --no-audit --no-fund
+COPY plexcache/web/app.css plexcache/web/app.css
+RUN node dev/css.js build plexcache/web/app.css plexcache/web/app.css
 
 FROM python:${PYTHON_TAG}
 ARG MKVTOOLNIX
@@ -92,6 +104,7 @@ COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
 
 WORKDIR /app
 COPY plexcache /app/plexcache
+COPY --from=css /css/plexcache/web/app.css /app/plexcache/web/app.css
 # Library Health names codecs the way the MKVToolNix in this image does: its release's own list
 # (the committed one stays if it can't be read)
 COPY dev/codecs.py /app/dev/codecs.py

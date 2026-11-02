@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+node_modules/
 
 # Local run settings (contain your Plex token and TrueNAS API key)
 .dev-config/

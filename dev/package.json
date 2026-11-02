@@ -1,0 +1,31 @@
+{
+  "name": "plex-cache-dev",
+  "private": true,
+  "description": "What builds and checks the app's CSS (dev/css.js): Autoprefixer adds the browser prefixes the targets below need, cssnano minifies, Stylelint checks the source (no prefixes written by hand). The image build runs the build; the suite runs the checks.",
+  "browserslist": [
+    "defaults"
+  ],
+  "stylelint": {
+    "extends": [
+      "stylelint-config-recommended"
+    ],
+    "rules": {
+      "property-no-vendor-prefix": true,
+      "value-no-vendor-prefix": true,
+      "selector-no-vendor-prefix": true,
+      "media-feature-name-no-vendor-prefix": true,
+      "at-rule-no-vendor-prefix": true,
+      "no-descending-specificity": null,
+      "no-duplicate-selectors": null,
+      "property-no-deprecated": null
+    }
+  },
+  "devDependencies": {
+    "autoprefixer": "10.6.2",
+    "caniuse-lite": "1.0.30001820",
+    "cssnano": "9.9.0",
+    "postcss": "8.5.32",
+    "stylelint": "17.16.0",
+    "stylelint-config-recommended": "18.0.0"
+  }
+}

@@ -14,7 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import cachemode, checks, config, mapping, prefetch, report, version_label, zfs
+from . import cachemode, checks, config, mapping, prefetch, report, themes, version_label, zfs
 from .activity import Activity
 from .cachelog import CacheLog
 from .auth import Auth
@@ -2086,6 +2086,9 @@ class App:
         out = {
             "version": self.version,
             "settings": self.settings.public(),
+            # the themes to choose from (System → Themes; themes.py), and which one shows
+            "themes": [{k: t[k] for k in ("id", "name", "mode", "builtin", "decor")}
+                       for t in themes.everything(self.settings.section("themes").get("custom"))],
             "auth": {"enabled": self.auth.enabled, "user": self.auth.username if self.auth.enabled else ""},
             # Defaults of every setting (but secrets), for the page's ↺ "back to default" buttons
             "defaults": config.public_defaults(),

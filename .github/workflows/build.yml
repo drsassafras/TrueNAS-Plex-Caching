@@ -23,6 +23,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.15"
+      # what checks and builds the app's CSS (dev/css.js: Stylelint, Autoprefixer, cssnano), for the suite's CssBuildTests
+      - run: npm ci --prefix dev --no-audit --no-fund
       - run: python -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest tests.test_plexcache -v
       # the type check (pyrightconfig.json): an error is a fault — an undefined name, a variable read before it's set — and
       # a warning an annotation that says less than the code does; both at zero, and kept there (--warnings)
