@@ -14,6 +14,7 @@
 // {"shots": {"<id>": [{"label", "before", "after", "same", "diff"}, ...]}}: the pictures of each look, two by two.
 "use strict";
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { chromium } = require("playwright");
 
@@ -104,7 +105,8 @@ async function shoot(sides, file) {
 }
 
 // Before and After pixel for pixel: the same (no pixel off), or not, with a picture of the After that marks what's
-// different (the rest faded).
+// different (the rest faded), a box round each area of it (so a few pixels off in a whole page are found), and how
+// many pixels differ in how many areas.
 let judge = null;
 async function compare(before, after, diffFile) {
   if (!before || !after) return { same: false };
@@ -123,23 +125,61 @@ async function compare(before, after, diffFile) {
       else { const v = 255 - (255 - (db.data[i] + db.data[i + 1] + db.data[i + 2]) / 3) * 0.25; out.data.set([v, v, v, 255], i); }
     }
     if (!off && ia.width === ib.width && ia.height === ib.height) return { same: true };
-    const c = document.createElement("canvas"); c.width = w; c.height = h; c.getContext("2d").putImageData(out, 0, 0);
-    return { same: false, png: c.toDataURL("image/png").split(",")[1] };
+    // the areas: cells of CELL px with a pixel off, those touching taken together
+    const CELL = 24, cw = Math.ceil(w / CELL), ch = Math.ceil(h / CELL), cells = new Uint8Array(cw * ch);
+    for (let i = 0; i < da.data.length; i += 4) {
+      if (out.data[i] === 230 && out.data[i + 1] === 20) { const p = i / 4; cells[Math.floor(Math.floor(p / w) / CELL) * cw + Math.floor((p % w) / CELL)] = 1; }
+    }
+    const boxes = [];
+    for (let k = 0; k < cells.length; k++) {
+      if (cells[k] !== 1) continue;
+      let x0 = cw, y0 = ch, x1 = 0, y1 = 0;
+      const todo = [k];
+      cells[k] = 2;
+      while (todo.length) {
+        const q = todo.pop(), x = q % cw, y = Math.floor(q / cw);
+        x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy, n = ny * cw + nx;
+          if (nx >= 0 && ny >= 0 && nx < cw && ny < ch && cells[n] === 1) { cells[n] = 2; todo.push(n); }
+        }
+      }
+      boxes.push({ x: x0 * CELL, y: y0 * CELL, w: (x1 - x0 + 1) * CELL, h: (y1 - y0 + 1) * CELL });
+    }
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    const g = c.getContext("2d");
+    g.putImageData(out, 0, 0);
+    g.strokeStyle = "#0a5adc"; g.lineWidth = 4;
+    for (const bx of boxes) g.strokeRect(bx.x - 6, bx.y - 6, bx.w + 12, bx.h + 12);
+    return { same: false, png: c.toDataURL("image/png").split(",")[1], px: off, areas: boxes.length };
   }, ["data:image/png;base64," + a.toString("base64"), "data:image/png;base64," + b.toString("base64")]);
   if (r.same) return { same: true };
   fs.writeFileSync(path.join(OUT, diffFile), Buffer.from(r.png, "base64"));
-  return { same: false, diff: diffFile };
+  return { same: false, diff: diffFile, px: r.px, areas: r.areas };
 }
 
 // A shipped image (theatre.svg and the like) as it draws, Before and After, at 2x on a plain card.
 async function drawFile(browser, file, out) {
   if (!file) return null;
   const p = await browser.newPage({ viewport: { width: 200, height: 200 }, deviceScaleFactor: 2 });
-  const mime = file.endsWith(".svg") ? "image/svg+xml" : "image/" + path.extname(file).slice(1);
+  const ext = path.extname(file).slice(1);
+  const mime = { svg: "image/svg+xml", ico: "image/x-icon", jpg: "image/jpeg" }[ext] || "image/" + ext;
   await p.setContent(`<body style="margin:0;display:grid;place-items:center;height:100vh;background:#fff"><img style="max-width:160px;max-height:160px" src="data:${mime};base64,${fs.readFileSync(file).toString("base64")}"></body>`);
   await p.waitForTimeout(100);
   await p.screenshot({ path: path.join(OUT, out) });
   await p.close();
+  return out;
+}
+
+// Several pages at once, in one browser (a context each): the pictures come back in the order they were asked for, so
+// the sample is the same however they were shared out.
+const WORKERS = Math.max(1, Math.min(8, os.cpus().length));
+async function pool(tasks) {
+  const out = new Array(tasks.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(WORKERS, tasks.length) }, async () => {
+    while (next < tasks.length) { const i = next++; out[i] = await tasks[i](); }
+  }));
   return out;
 }
 
@@ -154,17 +194,24 @@ async function drawFile(browser, file, out) {
   const where = {};
   const groups = {};   // page + width -> the items photographed there
   const sides = [...new Set(items.map((i) => i.side))];
-  const variants = new Set(plan.items.filter((i) => i.find.how === "pages").map((i) => JSON.stringify(i.find.judge))).size;
   let total = (items.length ? plan.pages.length * sides.length : 0) + (pages ? plan.fixed.length * plan.looks.length : 0);
-  say({ total: total });
+  say({ total: total, workers: WORKERS });
+  const finding = [];
   for (const side of sides) {
     for (const pg of plan.pages) {
-      const { ctx, p } = await open(browser, first, pg, 1280, side);
-      for (const it of items) if (it.side === side && !(it.id in where) && await find(p, it.find)) where[it.id] = pg;
-      await ctx.close();
-      say({ page: "finding the looks: " + pg + (side === "before" ? " (before)" : "") });
+      finding.push(async () => {
+        const { ctx, p } = await open(browser, first, pg, 1280, side);
+        const found = [];
+        for (const it of items) if (it.side === side && await find(p, it.find)) found.push(it.id);
+        await ctx.close();
+        say({ page: "finding the looks: " + pg + (side === "before" ? " (before)" : "") });
+        return found;
+      });
     }
   }
+  // (each look's page: the first, in the order asked, that draws it — as one page after another would have found it)
+  const pageOf = sides.flatMap(() => plan.pages);
+  (await pool(finding)).forEach((found, i) => { for (const id of found) if (!(id in where)) where[id] = pageOf[i]; });
   for (const it of items) {
     if (!(it.id in where)) continue;
     const key = where[it.id] + " " + (it.find.width || 1280) + " " + JSON.stringify(it.find.judge || null);   // (one Before per kind)
@@ -175,65 +222,84 @@ async function drawFile(browser, file, out) {
   const shots = {};
   const keep = async (id, label, before, after, tag, clip) => {
     const c = await compare(before, after, tag + "-diff.png");
-    (shots[id] = shots[id] || []).push({ label, before, after, same: c.same, diff: c.diff || null, clip: clip || null });
+    (shots[id] = shots[id] || []).push({ label, before, after, same: c.same, diff: c.diff || null, px: c.px || 0, areas: c.areas || 0, clip: clip || null });
   };
-  for (const im of images) {
+  const drawn = await pool(images.map((im) => async () => {
     const tag = "look" + im.id + "-file";
-    const before = await drawFile(browser, im.find.files.before, tag + "-before.png");
-    const after = await drawFile(browser, im.find.files.after, tag + "-after.png");
+    return { im, tag, before: await drawFile(browser, im.find.files.before, tag + "-before.png"), after: await drawFile(browser, im.find.files.after, tag + "-after.png") };
+  }));
+  for (const { im, tag, before, after } of drawn) {
     const label = "the file " + im.find.path + (im.find.instead ? " (Before: " + im.find.instead + ", which it stands in for)" : "");
     if (before || after) await keep(im.id, label, before, after, tag);
   }
+  // Each look seen on whole pages is judged against a Before of its own (item.find.judge: dev/style.py judged_by).
+  const variants = {};
+  for (const it of plan.items) if (it.find.how === "pages") variants[JSON.stringify(it.find.judge)] = it.find.judge;
+  const shooting = [], fixing = [];
   for (const look of plan.looks) {
     const tag = look.theme + "-" + look.mode;
     for (const [key, list] of Object.entries(groups)) {
-      const [pg, width, ...rest] = key.split(" ");
-      const judge = JSON.parse(rest.join(" "));
-      const open_ = {};
-      for (const side of SIDES) open_[side] = await open(browser, look, pg, Number(width), side, judge);
-      for (const it of list) {
-        const sides = {};
-        for (const side of SIDES) {
-          const p = open_[side].p;
-          sides[side] = { p, box: (await find(p, it.find)) ? await box(p) : null };
+      shooting.push(async () => {
+        const [pg, width, ...rest] = key.split(" ");
+        const judge = JSON.parse(rest.join(" "));
+        const open_ = {};
+        for (const side of SIDES) open_[side] = await open(browser, look, pg, Number(width), side, judge);
+        const got = [];
+        for (const it of list) {
+          const sides = {};
+          for (const side of SIDES) {
+            const p = open_[side].p;
+            sides[side] = { p, box: (await find(p, it.find)) ? await box(p) : null };
+          }
+          got.push({ it, pg, shot: await shoot(sides, (side) => "look" + it.id + "-" + tag + "-" + side + ".png") });
         }
-        const got = await shoot(sides, (side) => "look" + it.id + "-" + tag + "-" + side + ".png");
-        if (got.before || got.after) await keep(it.id, lookName(look) + " · /" + pg, got.before || null, got.after || null, "look" + it.id + "-" + tag, got.clip);
-      }
-      for (const side of SIDES) await open_[side].ctx.close();
-      say({ page: lookName(look) + ": " + pg });
+        for (const side of SIDES) await open_[side].ctx.close();
+        say({ page: lookName(look) + ": " + pg });
+        return { look, tag, got };
+      });
     }
     if (pages) {
-      // Each look seen on whole pages is judged against a Before of its own (item.find.judge: dev/style.py judged_by).
-      const variants = {};
-      for (const it of plan.items) if (it.find.how === "pages") variants[JSON.stringify(it.find.judge)] = it.find.judge;
       for (const pg of plan.fixed) {
-        const file = (side, v) => "page-" + pg + "-" + tag + "-" + side + (v ? "-" + v : "") + ".png";
-        const after = file("after");
-        let ctx, p;
-        ({ ctx, p } = await open(browser, look, pg, 1280, "after"));
-        await p.screenshot({ path: path.join(OUT, after) });
-        await ctx.close();
-        const pair = {};
-        let n = 0;
-        for (const [key, judge] of Object.entries(variants)) {
-          if (!plan.before) { pair[key] = { before: null, same: false, diff: null }; continue; }
-          const v = String(++n);
-          let before = file("before", v);
-          ({ ctx, p } = await open(browser, look, pg, 1280, "before", judge));
-          try { await p.screenshot({ path: path.join(OUT, before), timeout: 15000 }); } catch { before = null; }   // (it couldn't draw)
+        fixing.push(async () => {
+          const file = (side, v) => "page-" + pg + "-" + tag + "-" + side + (v ? "-" + v : "") + ".png";
+          const after = file("after");
+          let ctx, p;
+          ({ ctx, p } = await open(browser, look, pg, 1280, "after"));
+          await p.screenshot({ path: path.join(OUT, after) });
           await ctx.close();
-          const c = await compare(before, after, file("diff", v));
-          pair[key] = { before, same: c.same, diff: c.diff || null };
-        }
-        for (const it of plan.items) {
-          if (it.find.how !== "pages") continue;
-          const m = /^theme (\w+)(?:\/(\w+))? /.exec(it.look);   // a theme's look: only in that theme (and mode)
-          if (m && m[1] !== "font" && (m[1] !== look.theme || (m[2] && m[2] !== look.mode))) continue;
-          const b = pair[JSON.stringify(it.find.judge)];
-          (shots[it.id] = shots[it.id] || []).push({ label: lookName(look) + " · /" + pg, before: b.before, after, same: b.same, diff: b.diff });
-        }
-        say({ page: lookName(look) + ": " + pg });
+          const pair = {};
+          let n = 0;
+          for (const [key, judge] of Object.entries(variants)) {
+            if (!plan.before) { pair[key] = { before: null, same: false, diff: null }; continue; }
+            const v = String(++n);
+            let before = file("before", v);
+            ({ ctx, p } = await open(browser, look, pg, 1280, "before", judge));
+            try { await p.screenshot({ path: path.join(OUT, before), timeout: 15000 }); } catch { before = null; }   // (it couldn't draw)
+            await ctx.close();
+            const c = await compare(before, after, file("diff", v));
+            pair[key] = { before, same: c.same, diff: c.diff || null, px: c.px || 0, areas: c.areas || 0 };
+          }
+          say({ page: lookName(look) + ": " + pg });
+          return { look, pg, after, pair };
+        });
+      }
+    }
+  }
+  const [shot, fixed] = [await pool(shooting), await pool(fixing)];
+  // (in the order of before: look by look, its pages in turn)
+  for (const look of plan.looks) {
+    for (const { tag, got } of shot.filter((x) => x.look === look)) {
+      for (const { it, pg, shot: g } of got) {
+        if (g.before || g.after) await keep(it.id, lookName(look) + " · /" + pg, g.before || null, g.after || null, "look" + it.id + "-" + tag, g.clip);
+      }
+    }
+    for (const { pg, after, pair } of fixed.filter((x) => x.look === look)) {
+      for (const it of plan.items) {
+        if (it.find.how !== "pages") continue;
+        const m = /^theme (\w+)(?:\/(\w+))? /.exec(it.look);   // a theme's look: only in that theme (and mode)
+        if (m && m[1] !== "font" && (m[1] !== look.theme || (m[2] && m[2] !== look.mode))) continue;
+        const b = pair[JSON.stringify(it.find.judge)];
+        (shots[it.id] = shots[it.id] || []).push({ label: lookName(look) + " · /" + pg, before: b.before, after, same: b.same, diff: b.diff, px: b.px, areas: b.areas });
       }
     }
   }

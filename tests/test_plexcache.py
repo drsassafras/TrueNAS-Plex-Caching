@@ -3284,6 +3284,36 @@ class ThemeTests(unittest.TestCase):
         draw = js[js.index("main.innerHTML = PAGES[page]();"):]
         self.assertLess(draw.index("PCDECOR.paint(main)"), draw.index("\n  }"))
 
+    def test_the_app_installs_with_its_icons(self):
+        """Every page names the tab icon, the iPhone's home-screen icon, the manifest that lets a browser install the app
+        and the colour of its bar; the manifest names the app and its icons (an ordinary and a maskable one, each the size
+        it says), and /favicon.ico is there for a browser without SVG favicons (16, 32 and 48px). All are drawn by
+        dev/icons.js from the logo the app shows at that size (IconTests)."""
+        from plexcache import themes
+        side = themes.built_in("dionysus")["light"]["colors"]["side"]
+        for name in ("index.html", "login.html"):
+            html = _read(self._root("plexcache", "web", name), encoding="utf-8")
+            head = html[:html.index("</head>")]
+            self.assertIn('<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">', head, name)
+            self.assertIn('<link rel="manifest" href="/static/manifest.webmanifest">', head, name)
+            self.assertIn(f'<meta name="theme-color" content="{side}">', head, name)
+        status, body, headers = self.req("GET", "/static/manifest.webmanifest")
+        self.assertEqual((status, headers["Content-Type"]), (200, "application/manifest+json"))
+        manifest = json.loads(body)
+        self.assertEqual((manifest["name"], manifest["start_url"], manifest["display"]), ("Dionysus", "/", "standalone"))
+        self.assertEqual((manifest["theme_color"], manifest["background_color"]), (side, side))
+        self.assertEqual(sorted(i["purpose"] for i in manifest["icons"]), ["any", "any", "maskable"])
+        for icon in manifest["icons"]:
+            status, png, headers = self.req("GET", icon["src"])
+            self.assertEqual((status, headers["Content-Type"]), (200, "image/png"), icon["src"])
+            self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n", icon["src"])
+            self.assertEqual("%dx%d" % struct.unpack(">II", png[16:24]), icon["sizes"], icon["src"])
+        status, png, _ = self.req("GET", "/static/apple-touch-icon.png")
+        self.assertEqual((status, struct.unpack(">II", png[16:24])), (200, (180, 180)))
+        status, ico, _ = self.req("GET", "/favicon.ico")
+        self.assertEqual((status, ico[:4]), (200, b"\x00\x00\x01\x00"))
+        self.assertEqual([ico[6 + 16 * i] for i in range(struct.unpack("<H", ico[4:6])[0])], [16, 32, 48])
+
     def test_kept_and_lost_sides(self):
         """A side-by-side card (Merge Duplicates and the like): both titles sit in an oval, and the arrow between the sides
         is text, or the Play bunch on its stem in a theme with grapes; both point at the one kept."""
@@ -4479,6 +4509,24 @@ class TestRunnerTests(unittest.TestCase):
                                                      "1.0+git.abc", "N-121234-g1a2b3c4d", "103.0")],
                          ["28.0.0-nightly", "3.16.0a1", "24.0.0-rc.1", "1.2-dev", "1.0", "snapshot", "103.0"])
 
+    def test_the_future_run_names_only_what_is_ahead_of_the_apps_pins(self):
+        """tests/run.py's line on the board, in dev/future.py's image (PLEXCACHE_PINS: the app image's pins): only what's
+        ahead of them — the next Python, a Node nightly, an ffmpeg snapshot — not one the app ships too (MKVToolNix at its
+        pin), and one with no pin only when it's a pre-release. On a run of its own (Current Tests) everything it ran on."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("run_tool", os.path.join(ROOT, "tests", "run.py"))
+        assert spec and spec.loader
+        run = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(run)
+        pins = {"Python": "3.15", "Node": "26", "MKVToolNix": "103.0", "ffmpeg": "9.0.2"}
+        got = {name: run.ahead(v, pins.get(name), True) for name, v in (("Python", "3.16.0a1"), ("Node", "28.0.0-nightly202611022758c59105"),
+               ("MKVToolNix", "103.0"), ("ffmpeg", "N-121234-g1a2b3c4d"), ("OpenSSL", "4.1.0"))}
+        self.assertEqual(got, {"Python": True, "Node": True, "MKVToolNix": False, "ffmpeg": True, "OpenSSL": False})
+        self.assertFalse(run.ahead("3.15.2", "3.15", True))       # (the pin's line: the app's Python)
+        self.assertTrue(run.ahead("104.0", "103.0", True))        # (a newer release than the pin)
+        self.assertTrue(run.ahead("4.2.0-beta1", None, True))     # (no pin: a pre-release only)
+        self.assertTrue(run.ahead("103.0", "103.0", False))       # (no pins at all, Current Tests: everything)
+
     def test_a_two_step_section_waits_between_its_steps_and_ends_when_the_second_has_nothing_to_do(self):
         """A section of two steps ("then": the dependencies' look, then their pins moved once the checks pass): between
         them, WAITING: CHECKS (blue), no bar (none at work) and what its first step said; when the first says its second
@@ -4562,6 +4610,135 @@ class TestRunnerTests(unittest.TestCase):
             s.finished(0)
             self.assertTrue(s.lines(60)[0].startswith(colour), first)
 
+    def test_style_approval_makes_the_sample_while_the_board_runs(self):
+        """tnsync's Style Approval: once its check says looks wait, the block's second step ("then", after nothing) makes
+        their sample there and then, the block saying so (LOOKS WAITING: MAKING SAMPLE), then LOOKS WAITING as the check
+        left it; a sample that can't be made leaves it LOOKS WAITING: NO SAMPLE, what it said above the board — never a
+        failure."""
+        import subprocess
+        folder = tempfile.mkdtemp(dir=TMP)
+        told = r"""printf '\036{"then": 1}\n\036{"said": "6 looks need your approval: python3 dev/style.py review"}\n'; exit 1"""
+        for then, state, said in (("echo made", "warn", "Style Approval: LOOKS WAITING (6 looks need your approval"),
+                                  ("echo the sample broke; exit 1", "warn", "Style Approval: LOOKS WAITING: NO SAMPLE (6 looks")):
+            plan = [{"id": "style", "title": "Style Approval", "cmd": told, "warn": {"rc": 1, "note": "looks waiting"},
+                     "then": {"cmd": then, "after": [], "doing": "looks waiting: making sample", "fail_note": "looks waiting: no sample"}}]
+            with open(os.path.join(folder, "plan.json"), "w", encoding="utf-8") as fh:
+                json.dump(plan, fh)
+            got = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "board.py"), os.path.join(folder, "plan.json"), os.path.join(folder, "res")],
+                                 capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+            res = dict(line.split("=", 1) for line in _read(os.path.join(folder, "res"), encoding="utf-8").splitlines())
+            self.assertEqual((res["style"], res["style_rc"]), (state, "1"), got.stdout)
+            self.assertIn(said, got.stdout)
+            self.assertIn("==> Style Approval: " + then, got.stdout)   # (its second step: run)
+        self.assertIn("\nthe sample broke\n", got.stdout)                 # (what it said, above the board)
+        from dev import board
+        s = board.Section(plan[0], folder)
+        self.addCleanup(s.out.close)
+        s.state, s.phase = "running", 1
+        self.assertIn("LOOKS WAITING: MAKING SAMPLE", s.lines(100)[0])
+
+    def test_the_review_stops_once_its_page_is_closed(self):
+        """dev/style.py review stops by itself once its page is closed: each open tab beats (/alive) and says goodbye as it
+        goes (/bye); it stops a moment after the last goodbye (a reload comes back sooner), or once no tab has beaten for a
+        while — and says so. A beat isn't a use of it: the hour's limit is on what's done on the page."""
+        import importlib.util
+        import re as _re
+        import threading
+        import urllib.request
+        spec = importlib.util.spec_from_file_location("style_tool_bye", os.path.join(ROOT, "dev", "style.py"))
+        assert spec and spec.loader
+        s = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(s)
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "index.html"), "w", encoding="utf-8") as f:
+                f.write("<script>var R=window.REVIEW;</script>")
+            with open(os.path.join(tmp, "sample.json"), "w", encoding="utf-8") as f:
+                json.dump({"items": []}, f)
+            for goodbye in (True, False):
+                urls, got, log = [], [], os.path.join(tmp, "review.log")
+                t = threading.Thread(target=lambda: got.append(s.review(tmp, terminal=True, open_browser=False, log=log, gone=(0.3, 1.0),
+                                                                         ready=lambda server, url: urls.append(url))))
+                t.start()
+                for _ in range(100):
+                    if urls:
+                        break
+                    time.sleep(0.05)
+                page = urllib.request.urlopen(urls[0]).read().decode()
+                self.assertIn("sendBeacon('/bye'", page)
+                token = _re.search(r'token:"([^"]+)"', page).group(1)
+                q = f"?tab=one&t={urllib.parse.quote(token)}"
+                post = lambda path: urllib.request.urlopen(urllib.request.Request(urls[0].rstrip("/") + path, data=b"", method="POST")).status
+                self.assertEqual(post("/alive" + q), 204)
+                with self.assertRaises(urllib.error.HTTPError):   # (not without the token)
+                    post("/alive?tab=one&t=wrong")
+                time.sleep(0.5)
+                self.assertTrue(t.is_alive())   # (a tab open: it keeps on)
+                if goodbye:
+                    post("/bye" + q)
+                started = time.time()
+                t.join(10)
+                self.assertFalse(t.is_alive())
+                self.assertLess(time.time() - started, 3)
+                self.assertEqual(got, [0])
+                self.assertIn("The review page was closed.", _read(log, encoding="utf-8"))
+
+    def test_one_style_sample_at_a_time(self):
+        """dev/style.py sample while another is being made (tnsync's board makes one; r, or a terminal, another): it waits
+        for that one, and once it's done, and shows what waits, makes none of its own."""
+        import fcntl
+        import importlib.util
+        import threading
+        spec = importlib.util.spec_from_file_location("style_tool_lock", os.path.join(ROOT, "dev", "style.py"))
+        assert spec and spec.loader
+        s = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(s)
+        with tempfile.TemporaryDirectory() as tmp:
+            held = open(os.path.join(tmp, ".sampling"), "w")
+            fcntl.flock(held, fcntl.LOCK_EX)
+            made, got = [], []
+            with mock.patch.object(s, "pending", lambda: {"new": {"css .a": "x"}, "changed": {}, "gone": {}}), \
+                    mock.patch.object(s, "sample_shows", lambda diff, out: True), mock.patch.object(s, "_sample", lambda *a: made.append(1) or 0), \
+                    contextlib.redirect_stdout(io.StringIO()) as said:
+                t = threading.Thread(target=lambda: got.append(s.sample(tmp)))
+                t.start()
+                time.sleep(0.5)
+                self.assertTrue(t.is_alive())   # (waiting for the one being made)
+                held.close()                    # (that one done)
+                t.join(10)
+            self.assertEqual((got, made), ([0], []))   # (it showed what waits: none made)
+            self.assertIn("A sample is already being made", said.getvalue())
+
+    def test_the_review_shows_what_the_style_check_flags(self):
+        """The board's r key (dev/style.py review --board) and the check agree on what waits for approval — one function,
+        pending, for both: when the sample in dev/style-sample doesn't show every look the check flags (made before a new
+        image, say), the review makes it again first, rather than serving the old page that says all of it is approved."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("style_tool_r", os.path.join(ROOT, "dev", "style.py"))
+        assert spec and spec.loader
+        s = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(s)
+        guide = s.load_guide()
+        now = {**guide["looks"], "file plexcache/web/new-icon.png": "sha256 abc"}
+        diff = s.pending(guide, now)
+        self.assertEqual(s.problems(guide, now), ["new: file plexcache/web/new-icon.png"])   # (the check flags what pending has)
+        self.assertEqual(diff["new"], {"file plexcache/web/new-icon.png": "sha256 abc"})
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "index.html"), "w", encoding="utf-8") as f:
+                f.write("x")
+            with open(os.path.join(tmp, "sample.json"), "w", encoding="utf-8") as f:   # (a sample of looks approved since)
+                json.dump({"fingerprint": "old", "items": [{"id": 0, "state": "new", "look": "css .old", "was": None, "now": "gap:0"}]}, f)
+            self.assertFalse(s.sample_shows(diff, tmp))
+            made, served = [], []
+            with mock.patch.object(s, "SAMPLE", tmp), mock.patch.object(s, "pending", lambda: diff), \
+                    mock.patch.object(s, "sample", lambda: made.append(1) or 0), mock.patch.object(s, "review", lambda log=None, **_: served.append(log) or 0):
+                self.assertEqual(s.main(["style.py", "review", "--board"]), 0)
+                self.assertEqual((made, served), ([1], [os.path.join(tmp, "review.log")]))   # (made again, then served)
+                with open(os.path.join(tmp, "sample.json"), "w", encoding="utf-8") as f:   # (one that shows it)
+                    json.dump({"fingerprint": s.fingerprint(diff)}, f)
+                self.assertTrue(s.sample_shows(diff, tmp))
+                self.assertEqual(s.main(["style.py", "review", "--board"]), 0)
+                self.assertEqual(made, [1])   # (not made again)
+
     def test_a_key_on_the_board_opens_the_review(self):
         """The style guide's block, once it says looks wait and while the board runs: r starts its review page (on the
         terminal, in a session of its own, so it outlives the board), the block saying "press r" in place of the
@@ -4597,7 +4774,7 @@ class TestRunnerTests(unittest.TestCase):
         s.helper.wait(5)
         s.helped()
         self.assertIn("the review page has closed", s.note)
-        s.key["cmd"] = "echo \"There's no sample to review: run python3 dev/style.py sample first.\" >&2; exit 1"
+        s.key["cmd"] = "echo \"There's no sample to review. To make it: python3 dev/style.py sample\" >&2; exit 1"
         s.press(null)
         s.helper.wait(5)
         s.helped()
@@ -4616,6 +4793,120 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn('review --board', _read(os.path.join(ROOT, "dev", "tnsync"), encoding="utf-8"))
 
     @unittest.skipUnless(shutil.which("rsync") and shutil.which("bash"), "no rsync here (tnsync copies with it)")
+    def test_no_sample_keeps_the_style_check_as_it_was(self):
+        """tnsync --no-sample: Style Approval is the check alone, as before the sample was made on the board — no second
+        step, and its bar every look against the guide by its one process, nothing of a sample on it (TNSYNC_SAMPLE=0)."""
+        import subprocess
+        from dev.progress import record
+        got = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "style.py"), "check"], cwd=ROOT, capture_output=True, text=True, timeout=120,
+                             env=dict(os.environ, PLEXCACHE_PROGRESS="feed", TNSYNC_SAMPLE="0"))
+        bars = [r for r in map(record, got.stdout.split("\n")) if r and "bar" in r]
+        self.assertEqual([(b["label"], b["workers"], b["done"] == b["total"]) for b in bars], [("looks · against the style guide", 1, True)])
+        self.assertNotIn("sample", " ".join(str(b) for b in bars))
+        tnsync = _read(os.path.join(ROOT, "dev", "tnsync"), encoding="utf-8")
+        self.assertIn('local then=", \\"env\\": {\\"TNSYNC_SAMPLE\\": \\"0\\"}"', tnsync)   # (--no-sample: no "then", the check as it was)
+        self.assertIn('if [ "$NO_SAMPLE" != 1 ] && [[ "$TN_STYLE" == *" check" ]]; then', tnsync)
+
+    def test_tnsync_opens_the_review_once_the_board_is_done(self):
+        """Once the rest of the board is done with looks waiting (Style Approval LOOKS WAITING, none failed), their review is
+        the block's last step, on the board (TN_STYLE's check made review --step: IN REVIEW while the page is open), then
+        the check again: ALL APPROVED once nothing waits. Not with --no-sample, not without a terminal, nor when a check
+        failed: the block's line says the command then. Its exit code is the run's."""
+        import pty
+        import subprocess
+        folder = tempfile.mkdtemp(dir=TMP)
+        project, nas, fake = (os.path.join(folder, d) for d in ("project", "nas", "bin"))
+        for d in (os.path.join(project, "app"), nas, fake):
+            os.makedirs(d)
+        with open(os.path.join(fake, "ssh"), "w", encoding="utf-8") as fh:
+            fh.write('#!/bin/bash\nwhile [ $# -gt 0 ]; do case "$1" in -o|-p|-l) shift 2 ;; -O) exit 0 ;; -*) shift ;; *) break ;; esac; done\n'
+                     'shift; [ $# -eq 0 ] && exit 0; exec bash -c "$*"\n')
+        style = os.path.join(fake, "style")
+        with open(style, "w", encoding="utf-8") as fh:   # (dev/style.py as tnsync sees it: check, sample, review)
+            fh.write(f'#!/bin/bash\ncase "$1" in check) [ -n "$TNSYNC_RECHECK" ] && [ -f {folder}/reviewed ] && exit 0; '
+                     f'echo "2 looks not in the style guide, for the maintainer to look at and approve: x"; '
+                     f"printf '\\036{{\"then\": 0}}\\n'; exit 1 ;; review) echo \"review $*\" >> {folder}/reviewed; sleep 0.6; "
+                     f"printf '\\036{{\"said\": \"2 approved just now · commit dev/style-guide.json and dev/style-approved.zip\"}}\\n' ;; esac\n")
+        os.chmod(os.path.join(fake, "ssh"), 0o755)
+        os.chmod(style, 0o755)
+        with open(os.path.join(folder, "config"), "w", encoding="utf-8") as fh:
+            fh.write("TN_HOST=nas.example\nTN_USER=me\n")
+        env = dict(os.environ, PATH=fake + os.pathsep + os.environ.get("PATH", ""), TNSYNC_CONFIG=os.path.join(folder, "config"),
+                   XDG_STATE_HOME=os.path.join(folder, "state"), TMPDIR=folder)
+        env.pop("PLEXCACHE_PROGRESS", None)
+
+        def run(*args, test="echo 1 test passed", terminal=True):
+            with open(os.path.join(project, ".tnsync"), "w", encoding="utf-8") as fh:
+                fh.write(f"TN_APP=myapp\nTN_DEST={nas}\nTN_PATHS=app\nTN_TEST={test}\nTN_STYLE={style} check\n")
+            with open(os.path.join(project, "app", "code.py"), "w", encoding="utf-8") as fh:   # (something to copy each time)
+                fh.write(f"{time.time()}\n")
+            if os.path.exists(os.path.join(folder, "reviewed")):
+                os.remove(os.path.join(folder, "reviewed"))
+            cmd = [os.path.join(ROOT, "dev", "tnsync"), "local", *args]
+            if not terminal:
+                got = subprocess.run(cmd, cwd=project, env=env, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+                return got.returncode, got.stdout + got.stderr
+            pid, fd = pty.fork()
+            if pid == 0:   # (tnsync on a terminal of its own)
+                os.chdir(project)
+                os.execve(cmd[0], cmd, env)
+            out = b""
+            while True:
+                try:
+                    chunk = os.read(fd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+            _, status = os.waitpid(pid, 0)
+            os.close(fd)
+            return os.waitstatus_to_exitcode(status), re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.decode("utf-8", "replace"))
+        reviewed = lambda: _read(os.path.join(folder, "reviewed"), encoding="utf-8") if os.path.exists(os.path.join(folder, "reviewed")) else ""
+        rc, out = run()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(reviewed(), "review review --step\n")   # (a step of the board's: what it says sent to it)
+        self.assertIn("IN REVIEW", out)                             # (blue while it's open)
+        self.assertRegex(out, r"Style Approval +ALL APPROVED")     # (then the check again: nothing waits)
+        self.assertIn("2 approved just now · commit dev/style-guide.json and dev/style-approved.zip", out)
+        for args, kw in ((("--no-sample",), {}), ((), {"terminal": False}), ((), {"test": "echo 1/1 test failed; exit 1"})):
+            rc, out = run(*args, **kw)
+            self.assertEqual(rc, 1 if kw.get("test") else 0, out)
+            self.assertEqual(reviewed(), "", (args, kw))
+            self.assertNotIn("IN REVIEW", out)
+
+    def test_enter_skips_a_sections_last_step(self):
+        """A section's last step ("finale": tnsync's review on the board), under way: blue, what it does its status, its
+        bar's label, Enter offered to skip it; Enter puts the section back as it was (LOOKS WAITING, its line)."""
+        from dev import board
+        from dev.progress import FEED
+        folder = tempfile.mkdtemp(dir=TMP)
+        b = board.Board({"sections": [{"id": "style", "title": "Style Approval", "cmd": "true", "warn": {"rc": 1, "note": "looks waiting"},
+                                       "finale": {"cmd": "sleep 30", "doing": "in review", "label": "looks · review page open", "enter": "Skip review"}}]},
+                        folder, True)
+        s = b.sections[0]
+        self.addCleanup(s.out.close)
+        b.stdin_tty = True
+        s.state = "running"
+        s.line(FEED + json.dumps({"bar": "style", "done": 6, "total": 6, "label": "looks · sample from 05:10"}))
+        s.line(FEED + json.dumps({"said": "6 looks need your approval: python3 dev/style.py review"}))
+        s.finished(1)
+        self.assertTrue(b.finale_due(s))
+        b.step()
+        drawn = [re.sub(r"\033\[[0-9;]*m", "", x) for x in s.lines(100)]
+        self.assertEqual(s.state, "running")
+        self.assertIn("IN REVIEW", drawn[0])
+        self.assertIn("6/6  looks · review page open", drawn[1])
+        with mock.patch.object(sys, "stdout", io.StringIO()) as out, mock.patch("shutil.get_terminal_size", return_value=os.terminal_size((101, 40))):
+            b.frame()
+        self.assertIn("[Enter] Skip review", out.getvalue())
+        b.enter()
+        self.assertEqual((s.state, s.final_phase, s.proc), ("warn", 3, None))
+        drawn = [re.sub(r"\033\[[0-9;]*m", "", x) for x in s.lines(100)]
+        self.assertIn("LOOKS WAITING", drawn[0])
+        self.assertIn("6 looks need your approval", drawn[2])
+        self.assertFalse(b.finale_due(s))   # (skipped: not again)
+
     def test_tnsync_runs_its_steps_at_once(self):
         """tnsync local -y: the copy (and restart) and every check .tnsync sets run at the same time, each a section of
         the board (each passing only while the other two run); nothing is said again after it, the result kept, so
@@ -4677,6 +4968,8 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn("Current Tests: ALREADY PASSED", out)
         self.assertNotIn("ALREADY IN SYNC  -", out)   # (no box of its own: its block says it)
         # the NAS out of reach: the Sync block says so, red, with what ssh said; the checks run all the same
+        rc, out = tnsync("-y", "--no-sample")   # (Style Approval only checks: said in the header's modes)
+        self.assertRegex(out, r"\nLocal Copy[^\n]* · No sample")
         rc, out = tnsync("-y", NAS_DOWN="1")
         self.assertEqual(rc, 1, out)
         self.assertIn("Sync to nas.example: CAN'T CONNECT: NOTHING COPIED (ssh: connect to host nas.example: timed out)", out)
@@ -4695,7 +4988,7 @@ class TestRunnerTests(unittest.TestCase):
         rc, out = tnsync()
         self.assertEqual(rc, 0, out)
         self.assertEqual(_read(os.path.join(nas, "app", "code.py"), encoding="utf-8"), "two\n")
-        self.assertIn("not restarted ('tnsync local -y' restarts it)", out)
+        self.assertIn("not restarted · to restart it too: tnsync local -y", out)
         self.assertEqual(_read(os.path.join(folder, "restarts"), encoding="utf-8").count("\n"), 1)
 
 
@@ -11595,6 +11888,9 @@ class LoginTests(unittest.TestCase):
         self.assertEqual(self.req("GET", "/healthz")[0], 200)
         self.assertEqual(self.req("GET", "/static/app.css")[0], 200)
         self.assertIn(b'id="login"', self.req("GET", "/login")[1])
+        # and what a browser fetches for the tab and for "Install app" before anyone signs in
+        self.assertEqual(self.req("GET", "/favicon.ico")[0], 200)
+        self.assertEqual(self.req("GET", "/static/manifest.webmanifest")[0], 200)
 
     def test_cookie_session(self):
         status, cookie = self.sign_in()
@@ -14682,6 +14978,30 @@ class WebBuildTests(unittest.TestCase):
         self.assertIn("npm ci --prefix dev", _read(os.path.join(ROOT, ".github", "workflows", "build.yml"), encoding="utf-8"))
 
 
+class IconTests(unittest.TestCase):
+    """The app's icons (favicon.ico, the iPhone's apple-touch-icon.png, the installed app's icon-*.png): each is what
+    dev/icons.js draws now from the logo the app shows at its size (the tab icon, plexcache/web/theatre-tab.svg, for
+    favicon.ico; the full theatre playing, plexcache/web/theatre-playing.svg, for the rest), so a changed logo can't
+    leave an old icon behind. Remake them with NODE_PATH=$(npm root -g) node dev/icons.js; like every image the app
+    ships, they're in the style guide (StyleGuideTests)."""
+
+    def test_icons_are_what_the_tab_icon_draws(self):
+        import importlib.util
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node isn't installed")
+        spec = importlib.util.spec_from_file_location("style_tool", os.path.join(ROOT, "dev", "style.py"))
+        assert spec and spec.loader
+        style = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(style)
+        env = dict(os.environ, NODE_PATH=style._node_path())
+        if subprocess.run([node, "-e", "require.resolve('playwright')"], env=env, capture_output=True).returncode:
+            self.skipTest("Playwright isn't installed (npm i -g playwright && npx playwright install chromium)")
+        r = subprocess.run([node, os.path.join(ROOT, "dev", "icons.js"), "check"], env=env, capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
 class StyleGuideTests(unittest.TestCase):
     """The style guide (dev/style.py, dev/style-guide.json): every look the app wears — each CSS rule, inline style,
     drawing, decoration, theme colour, font, image — is one the maintainer approved from a sample. A look that's new,
@@ -14996,7 +15316,7 @@ class StyleGuideTests(unittest.TestCase):
     def test_check_tells_tnsync_where_the_review_is(self):
         s = self.style
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(s.review_line(3, tmp, self.now), "3 looks need your approval: python3 dev/style.py sample, then review")
+            self.assertEqual(s.review_line(3, tmp, self.now), "3 looks need your approval: python3 dev/style.py review")
             with open(os.path.join(tmp, "index.html"), "w") as f:
                 f.write("x")
             with open(os.path.join(tmp, "sample.json"), "w") as f:
@@ -15011,7 +15331,7 @@ class StyleGuideTests(unittest.TestCase):
             now = {**s.load_guide()["looks"], "css .zz": "gap:1px"}
             self.assertEqual(s.review_line(1, tmp, now), "1 look needs your approval: python3 dev/style.py review")
             now["css .zz"] = "gap:3px"                      # (but not as the sample showed it: out of date)
-            self.assertEqual(s.review_line(1, tmp, now), "1 look needs your approval: python3 dev/style.py sample, then review")
+            self.assertEqual(s.review_line(1, tmp, now), "1 look needs your approval: python3 dev/style.py review")
 
 
 class UpkeepTests(unittest.TestCase):

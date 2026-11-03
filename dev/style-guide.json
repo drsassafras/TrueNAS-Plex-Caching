@@ -66,9 +66,15 @@
    "sample": "f42ca2cac4b678c02e5f3835b28043fd9490283cd3bb19db19f717798c7b9c07",
    "looks": 8,
    "on": "review page"
+  },
+  {
+   "date": "2026-11-03",
+   "sample": "0163246fe37ab0d5c4d5135eff5b1087a8d0104a6a1f33c559635af100655674",
+   "looks": 6,
+   "on": "review page"
   }
  ],
- "seal": "ec5e46c79d91e57a74f8f5148aac177ff3fc1918e01a9f915868916eb03684f2",
+ "seal": "8066c54809295931d58c14be5685bda8887209d4930cd377598e235488504fe4",
  "looks": {
   "css #convert select[data-convhold]": "width:auto",
   "css #disk-speed input[data-speed]": "font:inherit;font-size:14px;width:110px;min-height:40px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:var(--panel);color:var(--ink);margin-right:6px",
@@ -849,6 +855,8 @@
   "css input.secret": "font-family:var(--mono)",
   "css summary": "cursor:pointer;font-weight:600;color:var(--accent);min-height:32px;display:flex;align-items:center",
   "css svg.edgevine": "position:absolute;overflow:visible;pointer-events:none;z-index:-1",
+  "file plexcache/web/apple-touch-icon.png": "a4ec2321afe2e20e25d72db9c24f584b15022b35af02d76b099867a6e8007d66",
+  "file plexcache/web/favicon.ico": "d3eabe23533fe4e265a60c4c64c4abb1ef85d0662190c96083a49c64d3925437",
   "file plexcache/web/fonts/cinzel-latin-ext.woff2": "8fc2606f8ae6c569f444e138dba052d9a6e3f0657f9031796503bbb94eced600",
   "file plexcache/web/fonts/cinzel-latin.woff2": "09941fb1c169c38fd414536b37690057fc01b3117a5c63dd6571186540c8f370",
   "file plexcache/web/fonts/sourcesans3-cyrillic.woff2": "b6b721e08d0324b9e743858e8260463085d4c5e1e684f036f9d4a8ca6c62996f",
@@ -859,8 +867,12 @@
   "file plexcache/web/fonts/sourcesans3-italic-latin.woff2": "5fbc14d56cea35e60596c72ca969b349443c6a536f74e11748eed8b3a396e61d",
   "file plexcache/web/fonts/sourcesans3-latin-ext.woff2": "a85a7459bdb3cdc1136751e151a506bae653fc29ada3ca86237477df6f1b59e6",
   "file plexcache/web/fonts/sourcesans3-latin.woff2": "19143dca075972bc84e3fd9eab7416dd40cc565dccb2435a044bdfabe060c7d5",
+  "file plexcache/web/icon-192.png": "dea9122cdd2d4a5c6da0cbe88e92f304fc0f508a98a5736e77ea587eda01a0cd",
+  "file plexcache/web/icon-512.png": "13abac34ca776f9bd3ed82802e8b01e76b566b4cc22397c898f4dfc4ed9a9698",
+  "file plexcache/web/icon-maskable-512.png": "6129e0c64978df5846111f149c11a2886176f366d21c959064e3cd2810276e42",
   "file plexcache/web/logo.svg": "5dc3e347802ee125eb3492031db295647eb8dfdc154cc88bb433720b760a3a72",
   "file plexcache/web/theatre-light.svg": "437f70a3e91fb3406c88b2673b15bb29996f971b8192a9d2ff2ed0e2f0dd8eed",
+  "file plexcache/web/theatre-playing.svg": "4b85ba976c570d2960780fd8d664ec69d568ea60866b559979b6552cc4808466",
   "file plexcache/web/theatre-tab.svg": "2bae01fbcba5d5fc60a168b6ddb9ebba846e7a70331c602fee51cbaefe9d8905",
   "file plexcache/web/theatre.svg": "b1f19018c55186358b1dc07ab2d851953182be9852ea855454113deecfc419d4",
   "inline --P:…px;--period:…s": "",

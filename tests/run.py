@@ -35,6 +35,7 @@ the run says how many tests ran and how many weren't run, and exits with 130.
 
 import json
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -51,6 +52,7 @@ from dev.progress import OFF, RED, Progress, drawn, feeding, short_version, tall
 from dev.progress import result as result_line  # noqa: E402 — (``result`` is run's: the result line every dev tool says)
 
 FEED = feeding()  # (read before main() takes PLEXCACHE_PROGRESS out of the tests' environment)
+PINS = json.loads(os.environ.get("PLEXCACHE_PINS") or "{}")  # (dev/future.py's run: the app image's pins, to say only what's ahead)
 
 TIMES = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "plex-cache", "test-times.json")
 
@@ -64,7 +66,6 @@ def ran_on() -> list[str]:
     if not FEED:
         return []
     import platform
-    import re
     import ssl
 
     def tool(cmd: list[str], pattern: str) -> str:
@@ -77,7 +78,20 @@ def ran_on() -> list[str]:
     found = [("Python", platform.python_version()), ("Node", tool(["node", "--version"], r"v(\S+)")),
              ("MKVToolNix", tool(["mkvmerge", "--version"], r"mkvmerge v(\S+)")), ("ffmpeg", tool(["ffmpeg", "-version"], r"ffmpeg version (\S+)")),
              ("OpenSSL", (re.search(r"OpenSSL (\S+)", ssl.OPENSSL_VERSION) or [None, ""])[1])]
-    return [f"{name} {short_version(version)}" for name, version in found if version]
+    return [f"{name} {short_version(version)}" for name, version in found if version and ahead(version, PINS.get(name), bool(PINS))]
+
+
+def ahead(version: str, pin: str | None, pinned: bool) -> bool:
+    """Whether a version is worth naming on the suite's line: always, on a run of its own (``pinned`` False: what this
+    machine has); in dev/future.py's image, only when it's ahead of the app image's pin — a pre-release, a nightly or
+    snapshot, a newer release — so one the app ships too (MKVToolNix at its pin) is left out, and one with no pin
+    (OpenSSL, Debian's) only when it's a pre-release. ``pin`` may be the release itself (103.0) or its line (3.15, 26)."""
+    if not pinned:
+        return True
+    pre = bool(re.search(r"[a-z]", short_version(version)))   # (3.16.0a1, 28.0.0-nightly, snapshot)
+    if pin is None:
+        return pre
+    return pre or not (version == pin or version.startswith(pin + "."))
 
 
 def _name(test) -> str:

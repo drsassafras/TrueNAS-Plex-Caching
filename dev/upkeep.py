@@ -473,7 +473,7 @@ def lookup(fresh: bool = False, saved: bool = False, progress=None) -> tuple[dic
     whole = bool(cache.get("found")) and {d.name for d in DEPS} <= set(cache["found"])  # (a dependency added since: asked again)
     if saved:
         if not whole:
-            raise Offline("no saved answers for every dependency yet (python3 dev/upkeep.py looks)")
+            raise Offline("no saved answers for every dependency yet. To look them up: python3 dev/upkeep.py")
         return cache["found"], time.time() - cache.get("at", 0) >= A_DAY
     if not fresh and whole and time.time() - cache.get("at", 0) < A_DAY:
         if progress is not None:   # (its bar all the same: every one known, from the day's answers, by this process alone)
@@ -639,7 +639,7 @@ def check(apply: bool = True, fresh: bool = False, saved: bool = False, progress
         elif what == "report":
             out.lines.append(f"{d.name} {have} → {newest}: to be moved")
             on = out.moves_on
-            out.prompts.append(f"{d.name} {have} → {newest}: moved on {on} (python3 dev/upkeep.py, or tnsync, with {on} checked out)")
+            out.prompts.append(f"{d.name} {have} → {newest}: moved on {on} by itself (tnsync does it, with {on} checked out). To move it now, on {on}: python3 dev/upkeep.py")
             out.news.append((d.name, have, newest, "minor", f"Moves on {on} by itself: at the next tnsync (or python3 dev/upkeep.py) with {on} checked out."))
         else:
             why = f"a {level} release behind ({d.where})" if d.bump else f"behind ({d.where})"

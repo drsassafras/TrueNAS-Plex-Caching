@@ -22,7 +22,11 @@ section's output is kept beside the results (their folder's logs/, which tnsync 
                             # own, so it outlives the board; it says what it has to say to a file of its own. Its
                             # last line says "line" in place of what follows its last ": " while the key works (the
                             # command to run instead, once the board is done)
-     "then": {"cmd": "…", "after": ["…"]}}   # (optional) a second command, once those are done, however they went
+     "finale": {"cmd": "…", "check": "…", "doing": "…", "label": "…", "enter": "…", "pass_note": "…"},   # (optional,
+                            # Section's: its last step, once the rest is done, on a terminal)
+     "then": {"cmd": "…", "after": ["…"],   # (optional) a second command, once those are done, however they went (after
+              "cwd": "…", "doing": "…",     # []: at once), the first's result standing when it passes; its own folder, what
+              "fail_note": "…"}}            # the header says while it runs, and when it fails, the first's result with that
 
 Each section is a block — blue while it runs (or waits), then green, orange, red or grey (COLOUR) — with the bars its command sends
 (dev/progress.py's, PLEXCACHE_PROGRESS=feed: drawn here with the same code) and the last line it printed. Its full
@@ -99,10 +103,16 @@ class Section:
         self.not_run_rc = spec.get("not_run_rc")
         warn = spec.get("warn") or {}   # (optional) {"rc": 1, "note": "…"}: that exit code is a warning (orange), its output not printed
         self.warn_rc, self.warn_note = warn.get("rc"), warn.get("note")
+        # (optional) its last step, once every other section is done, it's ended in a warning and none has failed, on a
+        # terminal: an action of its own run as a step (blue: "doing", its bar's label "label") — tnsync's review page,
+        # open until it's closed — then its own check again ("check", with "env"), which gives its end state; Enter skips it
+        self.finale: dict = dict(spec.get("finale") or {})
+        self.final_phase = 0   # 0 not yet, 1 the action, 2 the check again, 3 done (or skipped)
+        self.kept: tuple = ()  # (its note and last line before the action: what a skip puts back)
         self.upkeep = bool(spec.get("upkeep"))
         self.doing = spec.get("doing")   # (what its header says while it's under way, for "running")
         self.info = spec.get("info")   # (a section that only tells: grey when it's done, this its header)
-        self.then = spec.get("then")
+        self.then: dict = dict(spec.get("then") or {})
         self.key = dict(spec.get("key") or {})   # (its key, once it has warned: {"key", "cmd", "cwd", "does", "opens"})
         self.helper: subprocess.Popen | None = None   # (what its key started)
         self.live = False   # (the board is running and reads keys: its key works)
@@ -124,6 +134,7 @@ class Section:
         self.first = ""               # (the dependencies: the first line of the command that counts)
         self.looked = ""              # (the first line of its first step's)
         self.then_work: int | None = None   # (what its second step has to do, as its first said: 0, it isn't run)
+        self.then_failed = False            # (its second step failed, and said so: then's fail_note)
         self.said: str | None = None   # (what the tool said came of it, for the line under its bar: dev/progress.said)
 
     @property
@@ -179,9 +190,9 @@ class Section:
         self.note = f"{self.warn_note}: {self.key.get('opens', 'it')} " + ("has closed" if rc == 0 else "didn't open")
         self.key_said = "" if rc == 0 else said or f"(exit {rc})"   # (why, in its last line)
 
-    def start(self, cmd: str):
-        env = dict(os.environ, PLEXCACHE_PROGRESS="feed", PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1", **self.env)
-        self.proc = subprocess.Popen(["bash", "-c", cmd], cwd=self.cwd, env=env, stdin=subprocess.DEVNULL,
+    def start(self, cmd: str, cwd: str | None = None, more: dict | None = None):
+        env = dict(os.environ, PLEXCACHE_PROGRESS="feed", PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1", **self.env, **(more or {}))
+        self.proc = subprocess.Popen(["bash", "-c", cmd], cwd=cwd or self.cwd, env=env, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
         os.set_blocking(self.proc.stdout.fileno(), False)  # type: ignore[union-attr]
         self.state = "running"
@@ -231,6 +242,11 @@ class Section:
         if self.state in ("stopped", "skipped"):
             self.rc = rc
             return
+        if self.final_phase == 1:   # (its action done: its check again next, the end state its)
+            self.final_phase, self.phase, self.state = 2, 2, "waiting"
+            return
+        if self.final_phase == 2:
+            self.final_phase = 3
         if self.then and self.phase == 0 and self.then_work == 0:   # (nothing for the second step: it ends with the first)
             self.then, self.first = {}, self.first or self.looked
         if self.then and self.phase == 0:   # (the first command's end: the second waits its turn, its output the log)
@@ -242,6 +258,11 @@ class Section:
             self.log = self.log[: -len(".log")] + ".then.log"
             self.out = open(self.log, "w", encoding="utf-8", errors="replace")  # noqa: SIM115
             return
+        if self.phase == 1 and not self.upkeep:   # (a second step after one with a result of its own: the first's stands —
+            if rc != 0 and self.then.get("fail_note"):   # the looks still waiting, the sample not made: said, not failed)
+                self.then_failed, rc = True, self.rc if self.rc is not None else rc
+            elif rc == 0 and self.rc:
+                rc = self.rc
         self.rc = rc
         self.ended = time.time()
         if self.info is not None:   # (a section that only tells: its header the same, red when its command failed)
@@ -252,6 +273,8 @@ class Section:
             self.last = ""
         elif rc == 0:
             self.state = "pass"
+            if self.final_phase == 3 and self.finale.get("pass_note"):   # (after its last step: "all approved")
+                self.note = str(self.finale["pass_note"])
         elif self.warn_rc is not None and rc == self.warn_rc:   # (its block says it all: the line it said, the note)
             self.state = "warn"
             self.note = self.warn_note   # (its key: in the header's keys, and its last line)
@@ -283,7 +306,13 @@ class Section:
         said = status(self.note or SAID[self.state])
         if self.doing and not self.done and not self.note:   # (what it's doing: its status while it runs)
             said = status(self.doing)
-        between = self.state == "waiting" and self.phase == 1   # (between its two steps: the second waits for the checks)
+        if self.phase == 1 and self.state == "running" and self.then.get("doing"):   # (its second step's, likewise)
+            said = status(self.then["doing"])
+        if self.final_phase in (1, 2) and not self.done:   # (its last step's: the action, then its check again)
+            said = status(self.finale.get("doing" if self.final_phase == 1 else "checking", "running"))
+        if self.then_failed and self.done:
+            said = status(self.then["fail_note"])
+        between = self.state == "waiting" and self.phase == 1 and bool(self.then.get("after"))   # (the second waits for the checks)
         if between:
             said = status("waiting: checks")
         left = f"  {self.title:<{TITLE}}{said}"
@@ -295,10 +324,14 @@ class Section:
         if shown:
             # (on its block's track, in its text colour; a failure count red while it runs, the block's own once done)
             # its workers on the right, under the time (the bar's label cut short first)
+            label = shown[-1].label
+            if self.final_phase == 1 and self.finale.get("label"):   # (what's under way, while it is: the page open, say)
+                shown[-1].label = str(self.finale["label"])
             n = shown[-1].workers
             workers = f"{n} worker{'s' if n != 1 else ''}" if n else ""
             room = width - 1 - (len(workers) + 3 if workers else 0)
             bar = shown[-1].render(room, TRACK[self.shown], FILL[self.shown], "" if self.done else RED).replace(DIM, "")
+            shown[-1].label = label
             if workers:
                 bar += " " * (width - 2 - len(workers) - len(ANSI.sub("", bar))) + workers
         # its last line: what the tool says of it; while it runs with a bar, nothing else (the bar says how it goes:
@@ -367,7 +400,24 @@ class Board:
                 return False
         return True
 
+    def finale_due(self, s: Section) -> bool:
+        """Whether a section's last step starts now: every other one done, none failed, it ended in a warning, and the
+        board on a terminal (its action is one there: a page opened in the browser)."""
+        others = [o for o in self.sections if o is not s]
+        return (bool(s.finale) and s.final_phase == 0 and s.state == "warn" and self.stdin_tty and not self.aborted
+                and all(o.done for o in others) and not any(o.state == "fail" for o in others))
+
     def step(self):
+        for s in self.sections:
+            if self.finale_due(s):
+                s.kept, s.final_phase, s.state, s.ended = (s.note, s.said), 1, "running", None
+                s.note = ""
+                s.start(s.finale["cmd"], s.finale.get("cwd"))
+                self.sel.register(s.proc.stdout, selectors.EVENT_READ, s)  # type: ignore[union-attr]
+            elif s.final_phase == 2 and s.state == "waiting" and s.proc is None:   # (its check again: at once)
+                s.state = "running"
+                s.start(s.finale.get("check") or s.cmd, s.finale.get("cwd"), s.finale.get("env"))
+                self.sel.register(s.proc.stdout, selectors.EVENT_READ, s)  # type: ignore[union-attr]
         for s in self.sections:
             if s.state == "waiting":
                 go = self.ready(s)
@@ -380,7 +430,10 @@ class Board:
                     if not self.tty:
                         self.said(s)
                 elif go:
-                    s.start(s.then["cmd"] if s.phase == 1 and s.then else s.cmd)
+                    if s.phase == 1 and s.then:   # (its second step, in its own folder if it says one)
+                        s.start(s.then["cmd"], s.then.get("cwd"))
+                    else:
+                        s.start(s.cmd)
                     self.sel.register(s.proc.stdout, selectors.EVENT_READ, s)  # type: ignore[union-attr]
                     if not self.tty:
                         print(f"==> {s.title}: {s.then['cmd'] if s.phase == 1 and s.then else s.cmd}", flush=True)
@@ -438,7 +491,9 @@ class Board:
 
     def said(self, s: Section):
         """Without a terminal: a line as each section ends."""
-        print(f"    {s.title}: {status(s.note or SAID[s.state])}" + (f" ({s.last})" if s.last else ""), flush=True)
+        said = status(s.then["fail_note"]) if s.then_failed else status(s.note or SAID[s.state])
+        last = s.said if s.said is not None else s.last   # (what the tool says of it, as its block's last line has it)
+        print(f"    {s.title}: {said}" + (f" ({last})" if last else ""), flush=True)
 
     def keys(self, typed: str):
         for ch in typed:
@@ -451,6 +506,16 @@ class Board:
                     self.pressed = True
 
     def enter(self):
+        for s in self.sections:   # (a last step under way: Enter skips it, the section as it was before it)
+            if s.final_phase in (1, 2) and not s.done:
+                self.close(s)
+                if s.proc is not None:
+                    stop_group(s.proc)
+                    s.proc.wait(5)
+                    s.proc = None
+                s.final_phase, s.state, s.ended = 3, "warn", time.time()
+                s.note, s.said = s.kept or (s.warn_note, s.said)
+                return
         if self.aborted:
             return
         self.aborted = True
@@ -487,6 +552,9 @@ class Board:
         lines: list[str] = []
         header = list(self.header) or [""]
         keys = list(self.offered) + ([s.key for s in self.sections if s.keyed] if not self.pressed else [])
+        last = [s for s in self.sections if s.final_phase in (1, 2) and not s.done]
+        if last:   # (a last step under way: Enter skips it)
+            keys = [{"key": "Enter", "does": last[0].finale.get("enter", "Skip")}]
         header.insert(1, ", ".join(f"[{k['key']}] {k.get('does', 'go on')}" for k in keys))
         took = ""
         if self.started is not None:
@@ -534,9 +602,9 @@ class Board:
             sys.stdout.write("\n\n\n\033[?25l")  # (the cursor hidden while the board moves)
         self.started = time.time()
         last = 0.0
-        while not all(s.done for s in self.sections):
+        while True:
             self.step()
-            if all(s.done for s in self.sections):
+            if all(s.done for s in self.sections) and not any(self.finale_due(s) for s in self.sections):
                 break
             self.read(FRAME)
             self.collect_stopped()
@@ -566,7 +634,7 @@ class Board:
         if s.reported or not s.done:
             return ""
         s.reported = True
-        if s.state != "fail" and not (s.upkeep and s.state in ("warn", "skipped")):   # (a warning of its own: its block says it)
+        if s.state != "fail" and not (s.upkeep and s.state in ("warn", "skipped")) and not s.then_failed:   # (a warning of its own: its block says it)
             return ""
         s.out.flush()
         with open(s.log, encoding="utf-8", errors="replace") as fh:
@@ -574,7 +642,7 @@ class Board:
         if s.upkeep:   # (its first line is the word tnsync reads; the rest, the box)
             text = "\n".join(line for line in text.split("\n")[1:] if record(line) is None).strip("\n")
         lines = text.split("\n")
-        if lines and plain(lines[-1]) == s.last:   # (its last line is in its block already: not said twice)
+        if lines and plain(lines[-1]) == s.last and s.said is None:   # (its last line is in its block already: not said twice)
             text = "\n".join(lines[:-1]).rstrip()
         if not text:
             return ""
@@ -599,12 +667,13 @@ class Board:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    if len(args) != 2:
         print((__doc__ or "").split("\n\n")[1])
         return 2
-    with open(sys.argv[1], encoding="utf-8") as fh:
+    with open(args[0], encoding="utf-8") as fh:
         plan = json.load(fh)
-    logs = os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])), "logs")
+    logs = os.path.join(os.path.dirname(os.path.abspath(args[1])), "logs")
     os.makedirs(logs, exist_ok=True)
     tty = sys.stdout.isatty()
     board = Board(plan, logs, tty)
@@ -637,7 +706,7 @@ def main() -> int:
             import termios
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, old)
     board.report()
-    with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    with open(args[1], "w", encoding="utf-8") as fh:
         fh.write(board.results())
     return 0
 

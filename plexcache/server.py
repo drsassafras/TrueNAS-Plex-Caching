@@ -96,8 +96,10 @@ _ASSET = re.compile(r'(/static/[A-Za-z0-9_.-]+\.(?:js|css))"')
 
 # Reachable without signing in: the sign-in page's own files and the container health check.
 _UNMATCHED = object()   # (a part of do_POST that doesn't know the path: the next one is asked)
-OPEN_PATHS = {"/healthz", "/login", "/theme.css", "/theme.js"}  # (the sign-in page wears the theme too)
+OPEN_PATHS = {"/healthz", "/login", "/theme.css", "/theme.js", "/favicon.ico"}  # (the sign-in page wears the theme too;
+# a browser asks for /favicon.ico before anyone signs in)
 mimetypes.add_type("font/woff2", ".woff2")
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 
 # The local network: private and link-local addresses, this machine, and the shared range VPNs such as
@@ -307,6 +309,8 @@ def make_handler(app):
                 return self._file(os.path.join(WEB_DIR, "index.html"))
             if path == "/login":
                 return self._file(os.path.join(WEB_DIR, "login.html" if auth.enabled else "index.html"))
+            if path == "/favicon.ico":  # where a browser without SVG favicons looks (dev/icons.js makes it)
+                return self._file(os.path.join(WEB_DIR, "favicon.ico"))
             if path.startswith("/static/"):
                 name = path[len("/static/"):]
                 if not re.fullmatch(r"(i18n/|fonts/)?[a-zA-Z0-9_-][a-zA-Z0-9_.-]*", name):

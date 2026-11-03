@@ -419,7 +419,7 @@ def build_image(tag: str, args: list[str], verbose: bool) -> bool:
     cmd = ["docker", "buildx", "build", "--load", "--progress=plain"] if buildkit else ["docker", "build"]
     cmd += ["--pull", "--build-arg", f"PYTHON_TAG={tag}", *args, "-t", IMAGE, ROOT]
     if not buildkit:
-        print(f"    {DIM}(docker's legacy builder; for BuildKit: brew install docker-buildx, then add its folder to ~/.docker/config.json as brew says){OFF}")
+        print(f"    {DIM}(docker's legacy builder. For BuildKit, add docker-buildx's folder to ~/.docker/config.json as brew says when it installs it: brew install docker-buildx){OFF}")
     if verbose:
         return subprocess.run(cmd).returncode == 0
     line = Line(f"Building the image on python:{tag}")
@@ -513,7 +513,11 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
     elif not tty and os.environ.get("PLEXCACHE_PROGRESS") == "bar":
         tty = ["-e", "PLEXCACHE_PROGRESS=bar", "-e", f"COLUMNS={os.environ.get('COLUMNS') or 100}"]
     print(f"    Adding node {node_pick.version if tarball and node_pick else '(Debian’s)'} to the container, then running the suite:", flush=True)
-    run = ["docker", "run", "--rm", *tty, "-e", "CI=1", *WEB_TARGETS, "--user", "0", "-v", f"{ROOT}:/src:ro", *mount, "-w", "/src", "--entrypoint", "sh", IMAGE, "-c",
+    # the app image's pins (the Dockerfile's, dev/upkeep.py moves them): on the board the suite's line names only what's
+    # ahead of them (tests/run.py's ran_on), not what this image shares with the app's
+    pins = {"Python": upkeep._arg("PYTHON_TAG")().split("-")[0], "Node": upkeep._arg("NODE_TAG")().split("-")[0],
+            "MKVToolNix": upkeep._arg("MKVTOOLNIX")(), "ffmpeg": upkeep._arg("FFMPEG")()}
+    run = ["docker", "run", "--rm", *tty, "-e", "CI=1", "-e", f"PLEXCACHE_PINS={json.dumps(pins)}", *WEB_TARGETS, "--user", "0", "-v", f"{ROOT}:/src:ro", *mount, "-w", "/src", "--entrypoint", "sh", IMAGE, "-c",
            f"{node}; exec {suite}"]
     if feeding():   # (on the board: the suite's output passed on as it comes, its result line kept for the block's)
         last = ""

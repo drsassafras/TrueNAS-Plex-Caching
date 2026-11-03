@@ -17,6 +17,8 @@
 #   --skip-tests     don't run the project's tests and checks at all
 #   --skip-future    run the current tests only, not the future ones (TN_FUTURE)
 #   --release        the release checks too (TN_RELEASE), and the tests as for a release: for dev before it's released
+#   --no-sample      Style Approval only checks: no sample made of the looks waiting, and no review opened once the
+#                    rest is done (r makes the sample first then)
 #   -h, --help       this help
 #
 # Everything runs at once, on a board of sections redrawn as they go (dev/board.py):
@@ -107,6 +109,7 @@ SKIP_TESTS=0
 SKIP_FUTURE=0
 TESTS_FIRST=0
 RELEASE=0
+NO_SAMPLE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -n|--dry-run)    DRY_RUN=1 ;;
@@ -116,6 +119,7 @@ while [ $# -gt 0 ]; do
         --skip-future)   SKIP_FUTURE=1 ;;
         --tests-first)   TESTS_FIRST=1 ;;
         --release)       RELEASE=1 ;;
+        --no-sample)     NO_SAMPLE=1 ;;
         -h|--help)       usage 0 ;;
         --version)       say "tnsync $TNSYNC_VERSION"; exit 0 ;;
         -*)              die "unknown option: $1 (see tnsync --help)" ;;
@@ -232,11 +236,11 @@ if [ "$MODE" = "init" ]; then
     exit 0
 fi
 
-ROOT="$(find_project_root)" || die "no .tnsync file here or in any parent folder. Run 'tnsync init' in your project first."
+ROOT="$(find_project_root)" || die "no .tnsync file here or in any parent folder. In your project, run: tnsync init"
 load_conf "$GLOBAL_CONF"
 load_conf "$ROOT/.tnsync"
 
-[ -n "$TN_HOST" ] || die "TN_HOST isn't set. Put it in $GLOBAL_CONF (or run 'tnsync init')."
+[ -n "$TN_HOST" ] || die "TN_HOST isn't set: put it in $GLOBAL_CONF, or run: tnsync init"
 [ -n "$TN_APP" ]  || die "TN_APP isn't set in $ROOT/.tnsync"
 [ -n "$TN_DEST" ] || die "TN_DEST isn't set in $ROOT/.tnsync"
 [[ "$TN_APP" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "TN_APP '$TN_APP' doesn't look like a TrueNAS app name"
@@ -342,12 +346,12 @@ case "$MODE" in
         fi
         ;;
     master|main|dev|release|beta)
-        git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || die "'tnsync $MODE' needs a git repository; use 'tnsync local'"
+        git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || die "'tnsync $MODE' needs a git repository. For your folder as it is, run: tnsync local"
         info "Fetching from GitHub…"
         git -C "$ROOT" fetch --quiet --tags origin || fail "CAN'T REACH GITHUB  -  NOTHING WAS COPIED" \
             "" \
             "git fetch failed (see the error above)." \
-            "Check that you're online, then run 'tnsync $MODE' again."
+            "Check that you're online, then run it again: tnsync $MODE"
         if [ "$MODE" = "master" ] || [ "$MODE" = "main" ]; then
             ref="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
             if [ -z "$ref" ]; then
@@ -513,7 +517,7 @@ sync_step() {
         feed "$n" "$n" "files · rsync to $TN_APP"; say "No files changed · $TN_APP not restarted"; return 0
     fi
     if [ "$RESTART" != "yes" ]; then
-        feed "$n" "$n" "files · rsync to $TN_APP"; say "Copied $(files_n "$changed") · $TN_APP not restarted ('tnsync $MODE -y' restarts it)"; return 0
+        feed "$n" "$n" "files · rsync to $TN_APP"; say "Copied $(files_n "$changed") · $TN_APP not restarted · to restart it too: tnsync $MODE -y"; return 0
     fi
     feed "$n" "$((n + 1))" "restarting $TN_APP (TrueNAS redeploys it)" ticking
     say "Restarting $TN_APP…"
@@ -670,7 +674,19 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
         if [ -t 0 ] && [[ "$TN_STYLE" == *" check" ]]; then
             key=", \"key\": {\"key\": \"r\", \"cmd\": $(json_str "${TN_STYLE% check} review --board"), \"cwd\": $(json_str "$ROOT"), \"does\": \"Review Style Changes\", \"opens\": \"the review page\", \"line\": \"press r to review them\"}"
         fi
-        plan_add "{\"id\": \"style\", \"title\": \"Style Approval\", \"cmd\": $(json_str "$TN_STYLE"), \"cwd\": $(json_str "$SRC"), \"stoppable\": true, \"warn\": {\"rc\": 1, \"note\": \"looks waiting\"}$key}"
+        # and, once it says looks wait, their sample made there and then (TN_STYLE's "check" made "sample"), in your
+        # folder, so r opens the page at once; not with --no-sample (r makes it first then)
+        local then=", \"env\": {\"TNSYNC_SAMPLE\": \"0\"}"   # (--no-sample: the check as it was, nothing of a sample on it)
+        if [ "$NO_SAMPLE" != 1 ] && [[ "$TN_STYLE" == *" check" ]]; then
+            then=", \"then\": {\"cmd\": $(json_str "${TN_STYLE% check} sample"), \"cwd\": $(json_str "$ROOT"), \"after\": [], \"doing\": \"looks waiting: making sample\", \"fail_note\": \"looks waiting: no sample\"}"
+            # and, once every other block is done (none failed) with looks still waiting, their review there and then,
+            # on the board (blue while its page is open; Enter skips it), then the check again: green once all are
+            # approved. Not on a dry run.
+            if [ "$DRY_RUN" != 1 ]; then
+                then="$then, \"finale\": {\"cmd\": $(json_str "${TN_STYLE% check} review --step"), \"check\": $(json_str "$TN_STYLE"), \"cwd\": $(json_str "$ROOT"), \"env\": {\"TNSYNC_SAMPLE\": \"0\", \"TNSYNC_RECHECK\": \"1\"}, \"doing\": \"in review\", \"checking\": \"checking again\", \"label\": \"looks · review page open\", \"enter\": \"Skip review\", \"pass_note\": \"all approved\"}"
+            fi
+        fi
+        plan_add "{\"id\": \"style\", \"title\": \"Style Approval\", \"cmd\": $(json_str "$TN_STYLE"), \"cwd\": $(json_str "$SRC"), \"stoppable\": true, \"warn\": {\"rc\": 1, \"note\": \"looks waiting\"}$key$then}"
     fi
     # the board's header: what's sent and tested (where it goes is the Sync block's to say), the run's modes, the
     # commit, and how to stop it
@@ -678,6 +694,7 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
     [ "$RELEASE" != 1 ] || head="$head · Release"
     [ "$TESTS_FIRST" != 1 ] || head="$head · Tests first"
     [ "$DRY_RUN" != 1 ] || head="$head · Dry run"
+    [ "$NO_SAMPLE" != 1 ] || [ -z "$TN_STYLE" ] || head="$head · No sample"
     if [ -t 0 ] && [ "${#CHECK_IDS[@]}" != 0 ]; then keys="{\"key\": \"Enter\", \"does\": \"Cancel\"}"; fi
     printf '{"header": [%s], "commit": %s, "keys": [%s], "sections": [%s]}\n' "$(json_str "$head")" "$(json_str "$SRC_COMMIT")" "$keys" "$PLAN" > "$BOARD_DIR/plan.json"
     python3 "$BOARD" "$BOARD_DIR/plan.json" "$RES"
