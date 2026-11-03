@@ -41,6 +41,11 @@ jobs:
       - name: Python validation
         if: ${{ !cancelled() }}
         run: python dev/typecheck.py   # (each tool at its version in dev/tools.toml, moved by dev/upkeep.py)
+      # the build validation (dev/buildcheck.py), as tnsync's Build Validation block runs it: ShellCheck on dev/tnsync,
+      # actionlint on these workflows (and ShellCheck on each step's script), hadolint on the Dockerfile; kept at zero
+      - name: Build validation
+        if: ${{ !cancelled() }}
+        run: python dev/buildcheck.py
 
   image:
     needs: test

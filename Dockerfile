@@ -24,6 +24,8 @@ ARG NODE_TAG=26-slim
 # jpegtran built from libjpeg-turbo's release: the one tool of it the optimizer uses, linked statically against it.
 FROM python:${PYTHON_TAG} AS jpegtran
 ARG LIBJPEG_TURBO
+# (bash, with a pipe's failure the step's: a download that fails can't pass by its tar)
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates curl build-essential cmake nasm; \
@@ -40,6 +42,7 @@ FROM python:${PYTHON_TAG} AS ffmpeg
 ARG FFMPEG
 ARG FFMPEG_SOURCE
 ARG FFMPEG_STAMP
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates curl xz-utils bzip2 build-essential nasm pkg-config zlib1g-dev; \
@@ -50,8 +53,9 @@ RUN set -eux; \
         src="https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n${FFMPEG}.tar.gz"; echo "ffmpeg.org not reached: ffmpeg from $src"; \
         fetch "$src"; \
     fi; \
-    mkdir ffmpeg-src; tar xaf "${src##*/}" -C ffmpeg-src --strip-components=1; \
-    cd ffmpeg-src; \
+    mkdir /ffmpeg-src; tar xaf "${src##*/}" -C /ffmpeg-src --strip-components=1
+WORKDIR /ffmpeg-src
+RUN set -eux; \
     ./configure --disable-doc --disable-debug --disable-ffplay --disable-autodetect --enable-zlib --disable-shared --enable-static >/dev/null; \
     make -j "$(nproc)" >/dev/null; \
     install -m 755 ffmpeg ffprobe /usr/local/bin/; \
@@ -72,6 +76,7 @@ RUN for f in plexcache/web/*.css plexcache/web/*.js plexcache/web/*.html; do nod
 FROM python:${PYTHON_TAG}
 ARG MKVTOOLNIX
 ARG OXIPNG
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 LABEL org.opencontainers.image.title="Dionysus" \
       org.opencontainers.image.description="Keeps Plex media warm in ZFS ARC/L2ARC on TrueNAS" \
@@ -109,9 +114,11 @@ RUN set -eux; \
     rm -rf /tmp/oxipng-*; \
     apt-get purge -y --auto-remove curl; \
     rm -rf /var/lib/apt/lists/*; \
-    mkvmerge --version; ffmpeg -version | head -1; oxipng --version
+    mkvmerge --version; oxipng --version
 COPY --from=jpegtran /usr/local/bin/jpegtran /usr/local/bin/jpegtran
 COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
+# (ffmpeg's here only from now: before, its check above ran with no ffmpeg, and passed only because nothing failed a pipe)
+RUN ffmpeg -version | head -1; jpegtran -version
 
 WORKDIR /app
 COPY plexcache /app/plexcache

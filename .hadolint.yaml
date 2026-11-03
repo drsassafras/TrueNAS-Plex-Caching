@@ -1,0 +1,7 @@
+# hadolint (dev/buildcheck.py, tnsync's Build Validation block): the Dockerfile's checks. A rule is only turned off here
+# with the maintainer's say, and says why.
+ignored:
+  # Pin each apt package's version: the image takes Debian's newest patches on purpose, rebuilt weekly (build.yml's
+  # schedule), so a fix reaches it within a week; the tools that matter are pinned as ARGs and moved by dev/upkeep.py.
+  # (The maintainer's call, 2026-11-03.)
+  - DL3008

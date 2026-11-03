@@ -65,12 +65,22 @@ def _whole(tmp: str, final: str, exe: str) -> None:
             raise
 
 
+_BAR: list[Progress] = []   # the bar run() draws, while it runs: a tool fetched the first time says so on it
+
+
+def _fetching(tool: dict) -> None:
+    """A tool fetched (or installed) the first time, its run waiting on that: said on the bar, so a slow first run says why."""
+    for bar in _BAR:
+        bar.show(f"fetching {tool['name']} {tool['version']} (the first run only)", ticking=True)
+
+
 def _pip(key: str, tool: dict) -> tuple[list[str] | None, str]:
     venv = os.path.join(CACHE, f"{key}-{tool['version']}")
     exe = os.path.join(venv, "bin", tool.get("binary") or tool["package"])
     if os.path.exists(exe):
         return [exe], ""
     tmp = f"{venv}.{os.getpid()}"
+    _fetching(tool)
     try:
         os.makedirs(CACHE, exist_ok=True)
         subprocess.run([sys.executable, "-m", "venv", tmp], check=True, capture_output=True, text=True, timeout=TIMEOUT)
@@ -121,6 +131,7 @@ def _release(key: str, tool: dict) -> tuple[list[str] | None, str]:
     if os.path.exists(exe):
         return [exe], ""
     tmp = f"{folder}.{os.getpid()}"
+    _fetching(tool)
     try:
         data = fetch(asset_url(tool, plat))
         got = hashlib.sha256(data).hexdigest()
@@ -220,6 +231,7 @@ def run(checks: list[Check], bar: str = "main", stream=None) -> int:
     if progress:
         progress.workers = len(checks)
         progress.show(", ".join(c.name for c in checks), ticking=True)
+        _BAR.append(progress)
     outcomes: list[Outcome | None] = [None] * len(checks)
 
     def one(i: int, c: Check):
@@ -246,6 +258,7 @@ def run(checks: list[Check], bar: str = "main", stream=None) -> int:
             if ON_GITHUB:
                 stream.write(annotate(f) + "\n")
     if progress:
+        _BAR.remove(progress)
         progress.finished = " · ".join(f"{o.tool} {o.version}".strip() for o in done)
         progress.clear()
     line = result(*(fact for o in done for fact in o.said()))

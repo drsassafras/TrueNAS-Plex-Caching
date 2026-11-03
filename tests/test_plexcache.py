@@ -5011,16 +5011,18 @@ class TestRunnerTests(unittest.TestCase):
         with open(os.path.join(folder, "config"), "w", encoding="utf-8") as fh:
             fh.write("TN_HOST=nas.example\nTN_USER=me\n")
 
-        def together(me: str, said: str) -> str:   # a check that passes only while the other two run too
-            others = " && ".join(f"[ -f {folder}/{o} ]" for o in ("test", "validate", "types") if o != me)
+        def together(me: str, said: str) -> str:   # a check that passes only while the others run too
+            others = " && ".join(f"[ -f {folder}/{o} ]" for o in ("test", "validate", "types", "build") if o != me)
             return (f"touch {folder}/{me}; for i in $(seq 200); do {others} && break; sleep 0.05; done; "
                     f"{others} && echo {said}; s=$?; sleep 0.3; rm -f {folder}/{me}; exit $s")
 
         def settings(failing: bool = False):
-            checks = ("echo the failure; echo 1/1 test failed; exit 1", "echo checked", "echo 0 errors") if failing else \
-                (together("test", "12 tests passed"), together("validate", "checked"), together("types", "0 errors"))
+            checks = ("echo the failure; echo 1/1 test failed; exit 1", "echo checked", "echo 0 errors", "echo 0 findings") if failing else \
+                (together("test", "12 tests passed"), together("validate", "checked"), together("types", "0 errors"),
+                 together("build", "0 ShellCheck findings"))
             with open(os.path.join(project, ".tnsync"), "w", encoding="utf-8") as fh:
                 fh.write(f"TN_APP=myapp\nTN_DEST={nas}\nTN_PATHS=app\nTN_TEST={checks[0]}\nTN_VALIDATE={checks[1]}\nTN_TYPES={checks[2]}\n"
+                         f"TN_BUILD={checks[3]}\n"
                          "TN_UPKEEP=echo current; echo DEPENDENCIES  -  ALL UP TO DATE; echo; echo upkeep: $TNSYNC_UPKEEP\n"
                          "TN_AUDIT=echo 3 lines no audit has seen; exit 1\n"   # (code to audit: a warning, straight away)
                          "TN_STYLE=echo '  new: css .a'; echo 2 looks need your approval: /the/page.html; exit 1\n")
@@ -5034,14 +5036,14 @@ class TestRunnerTests(unittest.TestCase):
             return got.returncode, got.stdout + got.stderr
         settings()
         rc, out = tnsync("-y")
-        self.assertEqual(rc, 0, out)   # (the three checks at once, each passing only while the others run: not one after the other)
+        self.assertEqual(rc, 0, out)   # (the four checks at once, each passing only while the others run: not one after the other)
         self.assertEqual(_read(os.path.join(nas, "app", "code.py"), encoding="utf-8"), "one\n")
         self.assertRegex(out, r"Copied \d+ files? · restarted myapp")   # (rsync's count: openrsync, on a Mac, lists a folder too)
         self.assertEqual(_read(os.path.join(folder, "restarts"), encoding="utf-8"), "call -j app.redeploy myapp\n")
         self.assertNotIn("ALL CHECKS PASSED", out)   # (each section said its own: nothing said again)
         self.assertNotIn("\n  DEPENDENCIES  -  ALL UP TO DATE", out)   # (its box: none when all are current)
         for said in ("Current Tests: PASSED (12 tests passed)", "HTML/JS/CSS Validation: PASSED (checked)", "Python Validation: PASSED (0 errors)",
-                     "Dependencies: UP TO DATE", "==> Dependencies: export TNSYNC_UPKEEP=move",
+                     "Build Validation: PASSED (0 ShellCheck findings)", "Dependencies: UP TO DATE", "==> Dependencies: export TNSYNC_UPKEEP=move",
                      "Style Approval: LOOKS WAITING (2 looks need your approval: /the/page.html)",
                      "Security Audit: CODE TO AUDIT (3 lines no audit has seen)"):
             self.assertIn(said, out)
@@ -5053,6 +5055,7 @@ class TestRunnerTests(unittest.TestCase):
         self.assertRegex(out, r"Python Validation: ALREADY PASSED \(Passed just now \(\d{4}-\d\d-\d\d \d\d:\d\d\) · 0 errors\)")
         self.assertIn("Security Audit: CODE TO AUDIT (3 lines no audit has seen)", out)   # (the audits, read again)
         self.assertNotIn("passed on this code", out)
+        self.assertIn("Build Validation: ALREADY PASSED", out)
         self.assertNotIn("ALREADY IN SYNC  -", out)   # (no box of its own: its block says it)
         if shutil.which("git"):   # a change outside what's copied (the tests, the dev tools) is a change to the code too: tested again
             subprocess.run(["git", "init", "-q", project], check=True)
@@ -15804,7 +15807,7 @@ class CheckToolTests(unittest.TestCase):
     """The check tools' shared code (dev/checks.py): every check tool at its version in dev/tools.toml, fetched by it, its
     findings said one way, the board's bar and the result line its; no check tool of its own beside it."""
 
-    WRAPPERS = ("typecheck.py",)   # (each check tool's section on tnsync's board, run through dev/checks.py)
+    WRAPPERS = ("typecheck.py", "buildcheck.py")   # (each check tool's section on tnsync's board, run through dev/checks.py)
 
     def test_every_check_tool_runs_through_the_shared_code(self):
         from dev import checks
@@ -15823,6 +15826,33 @@ class CheckToolTests(unittest.TestCase):
             if tool["get"] == "release":
                 self.assertEqual(set(tool["assets"]), set(tool["sha256"]), f"{key}: a sha256 for every platform it has")
                 self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", h) for h in tool["sha256"].values()), key)
+
+    def test_build_validation_checks_every_script_workflow_and_dockerfile(self):
+        """dev/buildcheck.py (tnsync's Build Validation block, and GitHub's): ShellCheck on every shell script the project
+        has, actionlint on its workflows, hadolint on its Dockerfiles; a rule hadolint passes over says why."""
+        import subprocess
+
+        from dev import buildcheck
+        tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True).stdout.split()
+        if not tracked:
+            self.skipTest("not a git checkout")
+        scripts = []
+        for f in tracked:
+            try:
+                with open(os.path.join(ROOT, f), "rb") as fh:
+                    first = fh.readline(80)
+            except OSError:
+                continue
+            if f.endswith((".sh", ".bash")) or re.match(rb"#!.*\b(ba)?sh\b", first):
+                scripts.append(f)
+        self.assertEqual(sorted(buildcheck.SCRIPTS), sorted(scripts))
+        self.assertEqual(sorted(buildcheck.DOCKERFILES), sorted(f for f in tracked if os.path.basename(f).startswith("Dockerfile")))
+        build = _read(os.path.join(ROOT, ".github", "workflows", "build.yml"), encoding="utf-8")
+        self.assertIn("run: python dev/buildcheck.py", build)   # (GitHub runs what tnsync's block runs)
+        self.assertIn("TN_BUILD=python3 dev/buildcheck.py", _read(os.path.join(ROOT, "dev", "README.md"), encoding="utf-8"))
+        hadolint = _read(os.path.join(ROOT, ".hadolint.yaml"), encoding="utf-8")
+        for rule in re.findall(r"(?m)^\s*-\s*(DL\d+|SC\d+)", hadolint):
+            self.assertRegex(hadolint, rf"(?s)#[^\n]*\n(?:\s*#[^\n]*\n)*\s*-\s*{rule}", f"{rule}: turned off without a word on why")
 
     def test_result_line_and_exit_code(self):
         from dev import checks
@@ -15847,16 +15877,18 @@ class CheckToolTests(unittest.TestCase):
         data = b"#!/bin/sh\necho hi\n"
         good = {"name": "T", "version": "1.0", "get": "release", "url": "https://example.invalid/{version}/{asset}", "binary": "",
                 "assets": {checks.platform(): "t"}, "sha256": {checks.platform(): hashlib.sha256(data).hexdigest()}}
+        bar = mock.Mock()   # (the bar of a run under way: a first run's wait is said on it)
         with tempfile.TemporaryDirectory() as cache, mock.patch.object(checks, "CACHE", cache), \
-                mock.patch.object(checks, "fetch", return_value=data) as fetched:
+                mock.patch.object(checks, "fetch", return_value=data) as fetched, mock.patch.object(checks, "_BAR", [bar]):
             with mock.patch.object(checks, "tools", return_value={"t": good}):
                 cmd, why = checks.command("t")
+                bar.show.assert_called_once_with("fetching T 1.0 (the first run only)", ticking=True)
                 with open(cmd[0], "rb") as fh:
                     self.assertEqual((why, fh.read()), ("", data))
                 self.assertTrue(os.access(cmd[0], os.X_OK))
                 self.assertEqual(fetched.call_args[0][0], "https://example.invalid/1.0/t")
                 self.assertEqual(checks.command("t")[0], cmd)   # (the second time: the cached copy)
-                self.assertEqual(fetched.call_count, 1)
+                self.assertEqual((fetched.call_count, bar.show.call_count), (1, 1))
             bad = {**good, "version": "2.0", "sha256": {checks.platform(): "0" * 64}}
             with mock.patch.object(checks, "tools", return_value={"t": bad}):
                 cmd, why = checks.command("t")

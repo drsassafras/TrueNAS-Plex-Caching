@@ -26,6 +26,7 @@
 # code being copied — TN_TEST (the current tests), TN_FUTURE (the suite on the
 # next Python, say: stopped if the current tests fail), TN_VALIDATE (the HTML,
 # scripts and CSS checked), TN_TYPES (the Python validation: the type check),
+# TN_BUILD (the build validation: the shell script, the workflows, the Dockerfile),
 # TN_AUDIT (the security audits: which code no audit has seen, past its grace window: orange; red only on a --release
 # run, where the release rules are a check like the others),
 # TN_STYLE (the looks waiting for your approval: orange, a line that says how many and where to see them;
@@ -55,7 +56,7 @@
 # Settings come from two files (KEY=value lines):
 #   ~/.config/tnsync/config   shared:      TN_HOST, TN_USER, TN_PORT
 #   <project>/.tnsync         per project: TN_APP, TN_DEST, TN_PATHS, TN_EXCLUDE, TN_TEST, TN_VALIDATE, TN_TYPES,
-#                              TN_AUDIT, TN_FUTURE, TN_STYLE, TN_RELEASE, TN_UPKEEP (and may override any shared setting)
+#                              TN_BUILD, TN_AUDIT, TN_FUTURE, TN_STYLE, TN_RELEASE, TN_UPKEEP (and may override any shared setting)
 #
 # Written for the bash 3.2 that ships with macOS.
 
@@ -67,14 +68,14 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tnsync"   # last test result pe
 
 # ----------------------------------------------------------------- output
 if [ -t 1 ]; then
-    C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'; C_BLU=$'\033[34m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
+    C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'; C_BLU=$'\033[34m'; C_OFF=$'\033[0m'
     # (the board's colours too, dev/board.py: blue under way, then green, orange, red, or grey for the record)
     C_BAD=$'\033[1;97;48;5;88m'    # bold white on deep red
     C_GOOD=$'\033[1;97;48;5;22m'   # bold white on forest green
     C_MEH=$'\033[1;30;48;5;214m'   # bold black on orange
     C_GREY=$'\033[1;97;48;5;240m'  # bold white on grey: a run that couldn't be set up, not one that failed
 else
-    C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_DIM=""; C_OFF=""; C_BAD=""; C_GOOD=""; C_MEH=""; C_GREY=""
+    C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_OFF=""; C_BAD=""; C_GOOD=""; C_MEH=""; C_GREY=""
 fi
 say()  { printf '%s\n' "$*"; }
 info() { printf '%s==>%s %s\n' "$C_BLU" "$C_OFF" "$*"; }
@@ -98,7 +99,9 @@ banner() {   # banner <colour> <line>...
     printf '\n'
 }
 red_banner()    { banner "$C_BAD" "$@" >&2; }
+# shellcheck disable=SC2329 # (run from cleanup, the exit trap)
 green_banner()  { banner "$C_GOOD" "$@"; }
+# shellcheck disable=SC2329 # (run from cleanup, the exit trap)
 yellow_banner() { banner "$C_MEH" "$@"; }
 fail() { red_banner "$@"; exit 1; }   # a red block, then stop
 
@@ -139,7 +142,7 @@ esac
 
 # ----------------------------------------------------------------- config
 TN_HOST=""; TN_USER="truenas_admin"; TN_PORT="22"
-TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""; TN_VALIDATE=""; TN_TYPES=""; TN_AUDIT=""; TN_FUTURE=""; TN_STYLE=""; TN_RELEASE=""; TN_UPKEEP=""
+TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""; TN_VALIDATE=""; TN_TYPES=""; TN_BUILD=""; TN_AUDIT=""; TN_FUTURE=""; TN_STYLE=""; TN_RELEASE=""; TN_UPKEEP=""
 
 # Read KEY=value lines. The file is parsed, never executed.
 load_conf() {
@@ -160,7 +163,7 @@ load_conf() {
             \'*\') val="${val#\'}"; val="${val%\'}" ;;
         esac
         case "$key" in
-            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST|TN_VALIDATE|TN_TYPES|TN_AUDIT|TN_FUTURE|TN_STYLE|TN_RELEASE|TN_UPKEEP) printf -v "$key" '%s' "$val" ;;
+            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST|TN_VALIDATE|TN_TYPES|TN_BUILD|TN_AUDIT|TN_FUTURE|TN_STYLE|TN_RELEASE|TN_UPKEEP) printf -v "$key" '%s' "$val" ;;
             *) warn "$file line $n: unknown setting $key" ;;
         esac
     done < "$file"
@@ -212,10 +215,11 @@ TN_EXCLUDE=.git .DS_Store __pycache__ *.pyc
 # The tests, run in the code being copied while it's copied (or first, with --tests-first).
 # e.g. TN_TEST=python3 -m unittest   or   TN_TEST=npm test
 TN_TEST=
-# Checks of their own, each in a section beside the tests: the HTML, scripts and CSS; the types.
-# e.g. TN_VALIDATE=npx eslint .   TN_TYPES=npx pyright
+# Checks of their own, each in a section beside the tests: the HTML, scripts and CSS; the types; the build's files.
+# e.g. TN_VALIDATE=npx eslint .   TN_TYPES=npx pyright   TN_BUILD=shellcheck *.sh
 TN_VALIDATE=
 TN_TYPES=
+TN_BUILD=
 # The security audits: which code no audit has seen past its grace window (orange; with --release, the release rules: red).
 # e.g. TN_AUDIT=python3 dev/audit.py
 TN_AUDIT=
@@ -281,6 +285,7 @@ BOARD_DIR=""   # the board's plan, results and logs (dev/board.py), while it's t
 # UPKEEP_OUT: what the board's Dependencies section said (else the command is run here, now).
 UPKEEP_READY=0
 UPKEEP_OUT=""
+# shellcheck disable=SC2329 # (run from cleanup, the exit trap)
 upkeep_banner() {
     local out status line lines=()
     [ -n "$TN_UPKEEP" ] && [ "$UPKEEP_READY" = 1 ] || return 0
@@ -299,6 +304,7 @@ upkeep_banner() {
         *)       banner "$C_GREY" "DEPENDENCIES NOT CHECKED" "" "$TN_UPKEEP said:" "${status:0:66}" "${lines[@]}" ;;
     esac
 }
+# shellcheck disable=SC2329 # (run by the trap below, when tnsync exits)
 cleanup() {
     local rc=$?
     [ -z "${TNSYNC_STEP:-}" ] || return 0   # (the copy's section: the connection is the run's that started it)
@@ -390,8 +396,10 @@ fi
 
 # ----------------------------------------------------------------- copy
 REMOTE="$TN_USER@$TN_HOST"
-SSH_OPTS="-o ControlMaster=auto -o ControlPath=$SSH_CTL -o ControlPersist=120 -p $TN_PORT"
-ssh_run() { ssh $SSH_OPTS "$REMOTE" "$@"; }
+SSH_ARGS=(-o ControlMaster=auto -o "ControlPath=$SSH_CTL" -o ControlPersist=120 -p "$TN_PORT")
+SSH_OPTS="${SSH_ARGS[*]}"   # (the same, as one string: rsync's -e)
+# shellcheck disable=SC2029 # (the commands are put together here on purpose: each is run as written on the NAS)
+ssh_run() { ssh "${SSH_ARGS[@]}" "$REMOTE" "$@"; }
 
 if [ -z "${TNSYNC_STEP:-}" ]; then
     UPKEEP_READY=1   # (from here on a run ends with the dependencies' box)
@@ -439,7 +447,8 @@ code_sig() {
 }
 CODE_SIG="$(code_sig)"
 TEST_SIG="$TN_TEST"
-[ -z "$TN_VALIDATE$TN_TYPES" ] || TEST_SIG="$TN_TEST | $TN_VALIDATE | $TN_TYPES"
+[ -z "$TN_VALIDATE$TN_TYPES$TN_BUILD" ] || TEST_SIG="$TN_TEST | $TN_VALIDATE | $TN_TYPES"
+[ -z "$TN_BUILD" ] || TEST_SIG="$TEST_SIG | $TN_BUILD"   # (as it was without it: a .tnsync without TN_BUILD isn't tested again)
 [ "$RELEASE" != 1 ] || TEST_SIG="$TEST_SIG | release: $TN_RELEASE"   # (a release run's checks: those, the release checks too)
 # The future tests asked for this run: TN_FUTURE, or nothing with --skip-future (or no tests at all).
 FUTURE_CMD=""
@@ -457,7 +466,7 @@ last_tests_not_passed() {
     elif [ "$RELEASE" = 1 ] && [ "$(state_get release)" != 1 ]; then
         say "The last tests weren't a release run (--release)."
     elif [ "$(state_get test)" != "$TEST_SIG" ]; then
-        say "TN_TEST, TN_VALIDATE or TN_TYPES has changed since the last test run."
+        say "TN_TEST, TN_VALIDATE, TN_TYPES or TN_BUILD has changed since the last test run."
     elif [ -n "$CODE_SIG" ] && [ "$(state_get code)" != "$CODE_SIG" ]; then
         say "The code has changed since the last test run (the tests or the dev tools, if not the app)."
     elif [ "$(state_get mode)" != "$MODE" ]; then
@@ -681,6 +690,7 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
         [ -z "$FUTURE_CMD" ] || [ "$(state_get future)" != pass ] || passed_section future "Future Tests" "$FUTURE_CMD" "$(was future)"
         passed_section validate "HTML/JS/CSS Validation" "$TN_VALIDATE" "$(was validate)"
         passed_section types "Python Validation" "$TN_TYPES" "$(was types)"
+        passed_section build "Build Validation" "$TN_BUILD" "$(was build)"
         [ "$RELEASE" != 1 ] || passed_section release "Release checks" "$TN_RELEASE" "$(was release)"
         audit_section
     elif [ "$SKIP_TESTS" != 1 ] && [ "$want_copy" != "nothing" ]; then
@@ -690,11 +700,12 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
         [ -n "$FUTURE_CMD" ] || [ -z "$TN_FUTURE" ] || told_section future "Future Tests" "skipped" "TN_FUTURE wasn't run: tnsync $MODE --skip-future."
         check_section validate "HTML/JS/CSS Validation" "$TN_VALIDATE"
         check_section types "Python Validation" "$TN_TYPES"
+        check_section build "Build Validation" "$TN_BUILD"
         [ "$RELEASE" != 1 ] || check_section release "Release checks" "$TN_RELEASE"
         audit_section
         [ "$RELEASE" != 1 ] || [ -n "$TN_RELEASE" ] || told_section release "Release checks" "not set up" "No TN_RELEASE in .tnsync, so no release checks were run."
     elif [ "$SKIP_TESTS" = 1 ]; then
-        told_section checks "Tests and checks" "skipped" "None of TN_TEST, TN_VALIDATE, TN_TYPES, TN_AUDIT or TN_FUTURE was run (--skip-tests)."
+        told_section checks "Tests and checks" "skipped" "None of TN_TEST, TN_VALIDATE, TN_TYPES, TN_BUILD, TN_AUDIT or TN_FUTURE was run (--skip-tests)."
     fi
     local checks="[]"
     [ "${#CHECK_IDS[@]}" = 0 ] || checks="$(json_ids "${CHECK_IDS[@]}")"
@@ -795,7 +806,7 @@ if [ -n "$UNREACHABLE" ]; then
 fi
 CHANGES="$(pending_changes)" || exit 1
 if [ -z "$CHANGES" ]; then
-    if [ -z "$TN_TEST$TN_VALIDATE$TN_TYPES" ] || [ "$SKIP_TESTS" = 1 ]; then
+    if [ -z "$TN_TEST$TN_VALIDATE$TN_TYPES$TN_BUILD" ] || [ "$SKIP_TESTS" = 1 ]; then
         told_sync "already in sync" 0 "Nothing copied · $TN_HOST already has these files · $TN_APP not restarted"
         run_board nothing
         exit 0
