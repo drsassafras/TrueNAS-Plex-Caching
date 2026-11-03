@@ -24,8 +24,8 @@ import os
 
 from ..i18n import M
 from ..libdata import link_of
-from . import MAX_ROWS, Tool
 from ..paging import sort_key
+from . import MAX_ROWS, Tool
 
 
 class UnlinkFiles(Tool):

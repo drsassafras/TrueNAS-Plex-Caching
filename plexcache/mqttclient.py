@@ -15,7 +15,6 @@ import time
 
 from .i18n import M
 
-
 MAX_PACKET = 1024 * 1024
 MAX_LENGTH = 268_435_455  # the most a Remaining Length can say (four bytes)
 
@@ -121,7 +120,7 @@ class MQTTClient:
             self.sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         except socket.gaierror:
             raise MQTTError(M("can’t find {host} — check the address", host=self.host), "broker") from None
-        except socket.timeout:
+        except TimeoutError:
             raise MQTTError(M("no answer from {host}:{port} — check the address, port and firewall{hint}",
                               host=self.host, port=str(self.port), hint=self._other_ports()), "broker") from None
         except ConnectionRefusedError:
@@ -195,11 +194,11 @@ class MQTTClient:
         try:
             self._send(_packet(0x10, body))
             kind, data = self._read_packet(self.timeout)
-        except socket.timeout:
+        except TimeoutError:
             self.close()
             hint = M(" — does the broker expect TLS on this port?") if not self.tls else ""
             raise MQTTError(M("connected, but the broker didn’t answer the MQTT login{hint}", hint=hint), "login") from None
-        except MQTTError as e:
+        except MQTTError:
             self.close()
             hint = M(" — does the broker expect TLS on this port?") if not self.tls else ""
             raise MQTTError(M("the broker hung up instead of answering the login{hint}", hint=hint), "login") from None
@@ -280,7 +279,7 @@ class MQTTClient:
                 return out
             try:
                 kind, data = self._read_packet(left)
-            except socket.timeout:
+            except TimeoutError:
                 return out
             if kind & 0xF0 == 0x30:  # PUBLISH
                 qos = (kind >> 1) & 3
@@ -325,7 +324,7 @@ class MQTTClient:
             sock.settimeout(max(0.01, deadline - time.monotonic()))
             try:
                 chunk = sock.recv(65536)
-            except socket.timeout:
+            except TimeoutError:
                 raise
             except OSError as e:
                 raise MQTTError(M("connection lost: {why}", why=str(e))) from None

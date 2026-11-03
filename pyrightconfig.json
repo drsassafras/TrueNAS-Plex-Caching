@@ -1,5 +1,5 @@
 {
-  // Type checking (pyright: npm install -g pyright; pyright). Errors are what would fail at run time — a name that isn't
+  // Type checking (pyright at build.yml's pin, run beside Ruff by python3 dev/typecheck.py). Errors are what would fail at run time — a name that isn't
   // defined, a variable read before it's set; those gate the build. The rest is a warning: an annotation that says less than
   // the code does, kept at zero (dev/README.md).
   "include": ["plexcache", "dev"],

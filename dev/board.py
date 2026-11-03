@@ -135,6 +135,7 @@ class Section:
         self.looked = ""              # (the first line of its first step's)
         self.then_work: int | None = None   # (what its second step has to do, as its first said: 0, it isn't run)
         self.then_failed = False            # (its second step failed, and said so: then's fail_note)
+        self.issues: list[dict] = []        # (what it found, as it said: {"level", "text", "fix"} — dev/progress.issue)
         self.said: str | None = None   # (what the tool said came of it, for the line under its bar: dev/progress.said)
 
     @property
@@ -215,6 +216,9 @@ class Section:
         rec = record(text)
         if rec is not None and "said" in rec:   # (the line under its bar: what came of it, as the tool puts it)
             self.said = str(rec["said"])
+            return
+        if rec is not None and isinstance(rec.get("issue"), dict):   # (something it found: in the board's Issues at the end)
+            self.issues.append({k: str(rec["issue"].get(k) or "") for k in ("level", "text", "fix")})
             return
         if rec is not None and isinstance(rec.get("then"), int):   # (what its second step has to do: 0, nothing)
             self.then_work = rec["then"]
@@ -336,7 +340,8 @@ class Section:
                 bar += " " * (width - 2 - len(workers) - len(ANSI.sub("", bar))) + workers
         # its last line: what the tool says of it; while it runs with a bar, nothing else (the bar says how it goes:
         # no stray line, a warning on stderr say — that's kept for the failure printout); once done, what it printed last
-        last = self.said if self.said is not None else "" if self.upkeep or (self.bars and not self.done) else self.last
+        # (stopped or skipped part way, likewise: what it printed last is where it was, not a result)
+        last = self.said if self.said is not None else "" if self.upkeep or (self.bars and (not self.done or self.state in ("stopped", "skipped"))) else self.last
         if self.keyed and self.key.get("line") and ": " in last:   # (while its key works: the key, not the command)
             last = last.rsplit(": ", 1)[0] + ": " + self.key["line"]
         last = self.key_said or last
@@ -650,13 +655,44 @@ class Board:
 
     def report(self):
         """Without a terminal, what there is to say of each section, after the board (on one, it went above it as each
-        ended: frame)."""
+        ended: frame); then, either way, the Issues: every section's errors, warnings and notices, under the board."""
         for s in self.sections:
             text = self.told(s)
             if text:
                 sys.stdout.write(text)
             s.out.close()
+        sys.stdout.write(self.issues())
         sys.stdout.flush()
+
+    def found(self, s: Section) -> list[dict]:
+        """A section's issues: what it said it found; or, a section that failed (or warned) and said nothing of it,
+        its result as one — so every red or yellow block is in the Issues."""
+        got = list(s.issues)
+        last = s.said if s.said is not None else s.last
+        if s.state == "fail" and not any(i["level"] == "error" for i in got):
+            got.insert(0, {"level": "error", "text": last or "failed", "fix": ""})
+        elif s.state == "warn" and not got:
+            got.append({"level": "warning", "text": last or status(s.note or SAID[s.state]).lower(), "fix": ""})
+        return got
+
+    def issues(self) -> str:
+        """The Issues, under the board: how many of each, then each section's, one a line, worst first, a fix on its own
+        line (to paste as it is); nothing when there are none."""
+        from dev.progress import LEVELS
+        per = [(s, sorted(self.found(s), key=lambda i: LEVELS.index(i["level"]) if i["level"] in LEVELS else 9)) for s in self.sections]
+        per = [(s, f) for s, f in per if f]
+        if not per:
+            return ""
+        every = [i for _, f in per for i in f]
+        head = " · ".join(f"{n} {lv}{'s' if n != 1 else ''}" for lv in LEVELS if (n := sum(i["level"] == lv for i in every)))
+        out = [f"\n  Issues: {head}"]
+        for s, f in per:
+            out.append(f"    {s.title}")
+            for i in f:
+                out.append(f"      {i['level']:<8} {i['text']}")
+                if i["fix"]:
+                    out.append(f"      {'':<8} {i['fix']}")
+        return "\n".join(out) + "\n"
 
     def results(self) -> str:
         out = [f"aborted={1 if self.aborted else 0}"]

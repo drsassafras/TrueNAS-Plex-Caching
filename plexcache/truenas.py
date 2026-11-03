@@ -8,8 +8,8 @@ import itertools
 import json
 import urllib.parse
 
-from .wsclient import WebSocket, WebSocketError
 from .i18n import M
+from .wsclient import WebSocket, WebSocketError
 
 
 class TrueNASError(Exception):

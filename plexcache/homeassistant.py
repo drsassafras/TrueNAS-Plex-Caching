@@ -15,8 +15,7 @@ import threading
 import time
 from typing import Any
 
-from . import CHANNEL, REPO_URL, __version__
-from . import prefetch
+from . import CHANNEL, REPO_URL, __version__, prefetch
 from .config import SettingsError
 from .i18n import M, msg, render
 from .mqttclient import MQTTClient, MQTTError, topic_matches
@@ -79,7 +78,7 @@ def _iso(ts) -> str | None:
             ts = dt.datetime.fromisoformat(ts).timestamp()
         except ValueError:
             return None
-    return dt.datetime.fromtimestamp(ts, dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+    return dt.datetime.fromtimestamp(ts, dt.UTC).astimezone().isoformat(timespec="seconds")
 
 
 # --------------------------------------------------------------------- state
@@ -440,7 +439,7 @@ def control_availability(app, s: dict, wu: dict) -> dict:
         "run_warmup": l2arc and not wu.get("running"),
         "stop_warmup": bool(wu.get("running")),
     }
-    assert set(out) == set(AVAILABLE_WHEN)
+    assert set(out) == set(AVAILABLE_WHEN)  # noqa: S101 — (the code against itself, not input)
     return out
 
 
@@ -795,11 +794,11 @@ class HomeAssistantBridge:
                         self._step(later, "off", "")
                 else:  # dropped after being connected
                     self._step("publish", "fail", why)
-                self.status.update(state="error", error=why, since=time.time())
+                # (and when it tries again, in the same update: an error is never seen without its next attempt)
+                self.status.update(state="error", error=why, since=time.time(), next_retry=time.time() + backoff)
                 if why != last_error:  # don't fill the log with the same failure every retry
                     self.app.activity.event("mqtt", M("MQTT: {why}", why=why), "warn")
                     last_error = why
-                self.status["next_retry"] = time.time() + backoff
                 self._sleep(backoff, cfg)
                 backoff = min(RETRY_MAX, backoff * 2)
         self._disconnect()

@@ -174,6 +174,7 @@ class Conversions:
             reason = getattr(err, "reason", None) or str(err)
             try:
                 import json
+
                 from .optimizing import error_body
                 if isinstance(err, urllib.error.HTTPError):
                     reason = json.loads(error_body(err) or b"{}").get("error") or reason  # (an HTTP error's own reason)

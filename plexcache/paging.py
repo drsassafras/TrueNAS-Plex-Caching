@@ -40,7 +40,7 @@ def page_ranges(labels: list[str], per_page: int) -> list[dict]:
     first and last label cut to the shortest prefix that tells it from the page before and after."""
     if per_page < 1 or not labels:
         return []
-    pages = [{"offset": i * per_page, "first": plain(page[0]), "last": plain(page[-1])} for i, page in enumerate(itertools.batched(labels, per_page))]
+    pages = [{"offset": i * per_page, "first": plain(page[0]), "last": plain(page[-1])} for i, page in enumerate(itertools.batched(labels, per_page, strict=False))]
     out = []
     for i, p in enumerate(pages):
         k_from = _common(pages[i - 1]["last"], p["first"]) + 1 if i else 1

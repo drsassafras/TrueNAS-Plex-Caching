@@ -3,14 +3,14 @@
 import base64
 import hashlib
 import json
-import re
 import os
-import time
+import re
 import ssl
 import struct
 import tempfile
-import urllib.parse
 import threading
+import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from xml.sax.saxutils import quoteattr
 

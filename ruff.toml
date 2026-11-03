@@ -1,0 +1,38 @@
+# Ruff: the lint beside pyright's type check (dev/typecheck.py runs both, at build.yml's pins): tnsync's Python Validation
+# block and GitHub's build. A finding is something to change in the code, or, where the rule is wrong for
+# this code, a `# noqa: <code>` that says why on that line; a rule is only turned off here with the maintainer's say.
+# Not the formatter: the code keeps its own layout (`ruff format` would rewrite nearly every file).
+target-version = "py315"
+line-length = 120   # (only how a sorted import is wrapped: a long line isn't a finding, E501 isn't on)
+extend-exclude = ["dev/style-sample", "dev/node_modules"]
+
+[lint]
+select = [
+    "F",                 # pyflakes: unused imports and variables, undefined names, redefinitions
+    "E4", "E7", "E9",    # pycodestyle's defaults: imports, statements (E731: a lambda given a name), syntax
+    "B",                 # bugbear: likely bugs (a closure over a loop's variable, zip() without strict=…)
+    "UP",                # pyupgrade: what Python 3.15 says more simply
+    "I",                 # the imports in order
+    "S",                 # bandit: security
+    "BLE",               # a blind `except Exception` (the code's `noqa: BLE001` say why each is meant)
+    "SIM115", "N802", "A002",   # the other rules the code's noqa comments already name
+    "RUF100",            # a noqa that no longer stops anything
+]
+ignore = [
+    "S104",    # binding to 0.0.0.0: the app is a server in a container, its port mapped by compose
+    "S110", "S112",   # try/except/pass and continue: best-effort steps, each meant (BLE says which are blind)
+    "S310",    # urlopen: the URLs are the ones the settings name (Plex, TrueNAS, Syncthing, MQTT's peers)
+    "S311",    # random: jitter, sampling and test data, never a secret (secrets.token_* is used for those)
+    "S314",    # xml.etree: the XML is the user's own Plex's and MKVToolNix's; Python's expat refuses entity bombs
+    "S603", "S607",   # subprocess with a list of arguments, the tools by name (zfs, mkvmerge, ffmpeg…) on the image's PATH
+    "UP031",   # %-formatting: Home Assistant's Jinja templates read better with it than with {{{{ doubled }}}} braces
+]
+
+[lint.per-file-ignores]
+# The suite and the dev tools: asserts are the point, the passwords and temp files are fakes, and tests name handlers
+# as unittest and http.server call them (startTest, do_GET).
+"tests/**" = ["S", "N802", "E731", "E741"]
+"dev/**" = ["S101"]
+
+[lint.isort]
+known-first-party = ["plexcache", "dev", "tests"]

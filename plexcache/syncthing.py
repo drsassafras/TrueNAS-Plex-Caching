@@ -22,6 +22,7 @@ way (covering())."""
 
 import base64
 import hashlib
+import ipaddress as _ipaddress
 import json
 import logging
 import os
@@ -59,7 +60,6 @@ HEALTH = "/rest/noauth/health"  # answers {"status": "OK"} without a key: how a 
 DISCOVER_EVERY = 3600           # seconds between looks for one while no address is set
 HOT_HOLD, CALM_HOLD = 30, 60     # the throttle: seconds the disks must be busy before Syncthing is held back, and calm before it's let go
 NET_GRACE = 60                   # the give-way: seconds after the last remote stream before the internet devices are let go
-import ipaddress as _ipaddress
 TAILNET = _ipaddress.ip_network("100.64.0.0/10")  # Tailscale's range (CGNAT): a tailnet device is reached over the internet, whatever its address looks like
 THROTTLE_FILE = "syncthing-throttle.json"  # what was held back and the limits it had, so a restart lets go of it too
 # Every call the app makes, by what it's for (as truenas.METHODS): checked against this Syncthing when it's connected
@@ -360,7 +360,7 @@ class Syncthing:
     def _refresh_safe(self) -> None:
         try:
             self.refresh()
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("syncthing")
         finally:
             self.busy = False
@@ -474,7 +474,7 @@ class Syncthing:
                     if f is None:
                         f, rel = covering(folders, cands)
                         how = "name"
-                    pick = byid.get(((chosen.get(key) or {}).get("folder") or ""))
+                    pick = byid.get((chosen.get(key) or {}).get("folder") or "")
                     if pick is not None:
                         f, rel, how = pick, (rel if f is pick and rel else name), "chosen"
                     if f is not None:
@@ -483,24 +483,24 @@ class Syncthing:
                             byid[f["id"]]["libraries"].append(key)
             for row in folders:  # (each folder's state and ignore patterns: the migration's folder needn't be a mirrored library's)
                 try:
-                    ds = tried("a folder's state", lambda: c.folder_status(row["id"])) or {}
+                    ds = tried("a folder's state", lambda row=row: c.folder_status(row["id"])) or {}
                     row.update(state=ds.get("state"), need_files=ds.get("needFiles"), need_bytes=ds.get("needBytes"))
                 except SyncthingError as e:
                     row.update(state="error", error=e.why)
                 try:
-                    row["ignores"] = tried("a folder's ignore patterns", lambda: c.ignores(row["id"]))
+                    row["ignores"] = tried("a folder's ignore patterns", lambda row=row: c.ignores(row["id"]))
                 except SyncthingError:
                     row["ignores"] = None
                 row["need"], row["remote_need"] = [], {}
                 if row["libraries"] and not row["paused"]:  # (what's on its way, in and out, for the folders over our libraries; a paused folder's database is stopped: nothing to ask)
                     try:
-                        row["need"] = tried("what's still to come", lambda: c.need(row["id"])) or []
+                        row["need"] = tried("what's still to come", lambda row=row: c.need(row["id"])) or []
                     except SyncthingError:
                         pass
                     for d in row["devices"]:
                         if d["connected"]:
                             try:
-                                row["remote_need"][d["id"]] = tried("what a device still needs", lambda: c.remote_need(row["id"], d["id"])) or []
+                                row["remote_need"][d["id"]] = tried("what a device still needs", lambda row=row, d=d: c.remote_need(row["id"], d["id"])) or []
                             except SyncthingError:
                                 pass
             # the calls that change something, tried with nothing to change (an empty change answers 200 where the call exists);
@@ -631,7 +631,7 @@ class Syncthing:
             if f is None:
                 continue
             prefix = (e["rel"].strip("/") + "/") if e["rel"] and e["rel"].strip("/") else ""
-            within = lambda n: n[len(prefix):] if n.startswith(prefix) else None  # noqa: E731
+            within = lambda n, prefix=prefix: n[len(prefix):] if n.startswith(prefix) else None  # noqa: E731
             for n in f.get("need") or []:
                 p = within(n)
                 if p:

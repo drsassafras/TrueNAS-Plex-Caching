@@ -51,7 +51,7 @@ def _problem_server(host: str, port: int, message: str) -> ThreadingHTTPServer:
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, format, *args):
+        def log_message(self, format, *args):  # noqa: A002 — (http.server's name for it)
             pass
 
     httpd = ThreadingHTTPServer((host, port), Handler)

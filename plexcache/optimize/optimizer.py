@@ -33,10 +33,9 @@ import threading
 import time
 import zlib
 
-from . import VERSION
+from . import VERSION, mkv
 from . import compare as version_of
 from . import images as imgs
-from . import mkv
 from .tools import ToolError, VerifyError, run
 
 SAMPLE = 4 * 1024 * 1024  # bytes of each attachment test-compressed to sort them
@@ -344,7 +343,7 @@ def optimize_file(path: str, images: str = "compress", cover: bytes | None = Non
                 check_dir = os.path.join(work, "check")
                 os.makedirs(check_dir)
                 run("mkvextract", out, "attachments", *[f"{g['id']}:{os.path.join(check_dir, str(g['id']))}" for g in got])
-                for g, a in zip(got, order):
+                for g, a in zip(got, order, strict=False):
                     if _sha256(os.path.join(check_dir, str(g["id"]))) != _sha256(files[a["id"]]):
                         raise VerifyError(f"attachment {a['name']} changed")
         else:
@@ -386,7 +385,7 @@ def resolve_conflict(copy: str, original: str, log=lambda text: None) -> dict:
     log("comparing the streams")
     if stream_hashes(copy) != stream_hashes(original):
         return {"result": "kept", "reason": "the streams differ"}
-    atts = lambda p: [(x.get("file_name"), x.get("size")) for x in json.loads(run("mkvmerge", "-J", p)).get("attachments") or []]
+    atts = lambda p: [(x.get("file_name"), x.get("size")) for x in json.loads(run("mkvmerge", "-J", p)).get("attachments") or []]  # noqa: E731
     if atts(copy) != atts(original):
         return {"result": "kept", "reason": "the attachments differ"}
     os.remove(copy)
@@ -407,7 +406,7 @@ def _prepare(path: str) -> tuple[os.stat_result, str, str]:
     vfs = os.statvfs(folder)
     if vfs.f_bavail * vfs.f_frsize < st.st_size * 1.1 + 1024 ** 3:
         raise Skipped("not enough free space on the dataset for a copy")
-    tag = hashlib.sha1(path.encode()).hexdigest()[:10]
+    tag = hashlib.sha1(path.encode(), usedforsecurity=False).hexdigest()[:10]
     # A work folder left by an optimizer stopped mid-way (a restart) for this same file: one job runs
     # at a time, so it's nobody's now — and in a container the process ID is the same every time
     for name in os.listdir(folder):

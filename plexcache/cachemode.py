@@ -18,7 +18,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-
 L2ARC, RAM = "l2arc", "ram"
 FALLBACK_KEEP = 24 * 3600  # how long Health keeps showing a fallback after the last one
 

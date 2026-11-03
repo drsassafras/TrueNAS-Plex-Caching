@@ -273,7 +273,7 @@ SSH_CTL="/tmp/tnsync-$(id -u)-%C"
 BOARD_DIR=""   # the board's plan, results and logs (dev/board.py), while it's there
 # The last box: the dependencies (TN_UPKEEP), from your folder — where a version it moves belongs — not the copy. Once a
 # run, at its end, whatever the tests did; not when tnsync was interrupted (Ctrl-C) or stopped before it got going.
-# UPKEEP_OUT: what the board's Dependency Versions section said (else the command is run here, now).
+# UPKEEP_OUT: what the board's Dependencies section said (else the command is run here, now).
 UPKEEP_READY=0
 UPKEEP_OUT=""
 upkeep_banner() {
@@ -662,7 +662,7 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
         [ -z "$checks_plan" ] || plan_add "$checks_plan"
     fi
     if [ -n "$TN_UPKEEP" ]; then
-        plan_add "{\"id\": \"upkeep\", \"title\": \"Dependency Versions\", \"cmd\": $(json_str "export TNSYNC_UPKEEP=look; $TN_UPKEEP"), \"cwd\": $(json_str "$ROOT"), \"upkeep\": true, \"then\": {\"cmd\": $(json_str "export TNSYNC_UPKEEP=move; $TN_UPKEEP"), \"after\": $checks}}"
+        plan_add "{\"id\": \"upkeep\", \"title\": \"Dependencies\", \"cmd\": $(json_str "export TNSYNC_UPKEEP=look; $TN_UPKEEP"), \"cwd\": $(json_str "$ROOT"), \"upkeep\": true, \"then\": {\"cmd\": $(json_str "export TNSYNC_UPKEEP=move; $TN_UPKEEP"), \"after\": $checks}}"
     fi
     # the looks to approve, the last block: every time (it's quick, and approving them changes no code tested), on their own — not a
     # check the copy waits for, nor one whose warning fails the run

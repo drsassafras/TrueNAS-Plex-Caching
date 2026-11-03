@@ -38,9 +38,6 @@ def code_lines(path: str) -> set[int]:
 
 
 def main() -> int:
-    if sys.version_info < (3, 12):
-        print("Needs Python 3.12 or later (sys.monitoring).")
-        return 2
     show_missing = "--missing" in sys.argv
     mon = sys.monitoring
     hit: dict[str, set[int]] = {}
@@ -58,7 +55,8 @@ def main() -> int:
     os.chdir(ROOT)
     try:
         suite = unittest.defaultTestLoader.loadTestsFromName("tests.test_plexcache")
-        result = unittest.TextTestRunner(verbosity=0, stream=open(os.devnull, "w")).run(suite)
+        with open(os.devnull, "w") as quiet:
+            result = unittest.TextTestRunner(verbosity=0, stream=quiet).run(suite)
     finally:
         mon.set_events(TOOL, 0)
         mon.free_tool_id(TOOL)

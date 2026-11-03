@@ -120,7 +120,7 @@ def copy_tree(src: str, dst: str, ctl: Paused, report=lambda **kw: None, mirror:
     if not os.path.isdir(src) or not os.path.isdir(dst):
         raise OSError("both folders must exist")
     total_files = total_bytes = 0
-    for dirpath, dirnames, filenames in os.walk(src):
+    for dirpath, _dirnames, filenames in os.walk(src):
         if ctl.stop.is_set():  # (a big folder takes a while to count: stopped here too, not only once copying)
             raise InterruptedError("stopped")
         for n in filenames:
@@ -183,7 +183,7 @@ def copy_tree(src: str, dst: str, ctl: Paused, report=lambda **kw: None, mirror:
             c["files_done"] += 1
             report(**c)
     if mirror:
-        for dirpath, dirnames, filenames in os.walk(dst, topdown=False):
+        for dirpath, _dirnames, filenames in os.walk(dst, topdown=False):
             rel = os.path.relpath(dirpath, dst)
             source = src if rel == "." else os.path.join(src, rel)
             for n in filenames:
@@ -211,7 +211,7 @@ def compare(src: str, dst: str) -> dict:
     "missing": [...], "different": [...], "extra": [...]} (up to 20 of each)."""
     def listing(root):
         out = {}
-        for dirpath, dirnames, filenames in os.walk(root):
+        for dirpath, _dirnames, filenames in os.walk(root):
             for n in filenames:
                 if n.endswith(PART):
                     continue

@@ -79,7 +79,7 @@ def snap_call(app, tn, what: str, params: list):
     for api in apis:
         try:
             out = tn.call(f"{api}.{what}", params)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             last = e
             if api != apis[-1] and "exist" in str(e).lower():  # (this TrueNAS hasn't got it: the other name)
                 continue

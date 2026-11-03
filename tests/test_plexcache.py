@@ -1,26 +1,27 @@
 import contextlib
 import copy
 import datetime as dt
+import errno
 import hashlib
 import html
 import io
 import json
 import logging
-from unittest import mock
 import os
 import re
+import shlex
 import shutil
+import socket
 import struct
 import sys
 import tempfile
-import errno
-import socket
 import threading
 import time
 import types
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -56,9 +57,10 @@ def en(v) -> str:
 # (no information); BlockSizeTests checks the real function and what Health makes of it.
 REAL_BLOCK_SIZES = zfs.block_sizes
 zfs.block_sizes = lambda paths: (lambda n: {"checked": n, "single": n, "sizes": {}})(len(list(paths)))
+import plexcache.plex as _plexmod  # noqa: E402
 from plexcache import peerlink as _peerlink  # noqa: E402
 from plexcache.app import App  # noqa: E402
-import plexcache.plex as _plexmod  # noqa: E402
+
 _plexmod.PLEX_TV = "http://127.0.0.1:9"  # never plex.tv itself: nothing listens there (a test wanting it starts FakePlexTV)
 from plexcache.i18n import M, from_json, jsonable  # noqa: E402
 from plexcache.plex import PlexClient, PlexError  # noqa: E402
@@ -375,6 +377,7 @@ class ReaderAndPlanTests(unittest.TestCase):
 
     def test_warmup_run_counts_errors_separately(self):
         import threading
+
         from plexcache.plex import MediaFile
         files = [MediaFile(m["path"], m["kbps"], m["size"], "movie") for m in CAT["movies"]]
         files.append(MediaFile("/missing/file.mkv", 8000, 10 * MiB, "movie"))
@@ -391,6 +394,7 @@ class ReaderAndPlanTests(unittest.TestCase):
         came from the disks, a sample of at most 30 files for the next-day check — and a plan that
         only just fits, and a schedule worked out from the caching mode alone."""
         import threading
+
         from plexcache import warmup
         from plexcache.plex import MediaFile
         d = tempfile.mkdtemp(dir=TMP)
@@ -416,6 +420,7 @@ class ReaderAndPlanTests(unittest.TestCase):
 
     def test_next_day_check(self):
         import threading
+
         from plexcache.plex import MediaFile
         from plexcache.warmup import next_day_check
         files = [MediaFile(m["path"], m["kbps"], m["size"], "movie") for m in CAT["movies"]]
@@ -436,6 +441,7 @@ class ReaderAndPlanTests(unittest.TestCase):
 
     def test_warmup_skips_lead_ins_in_their_cooldown(self):
         import threading
+
         from plexcache.cachelog import CacheLog
         from plexcache.plex import MediaFile
         files = [MediaFile(m["path"], m["kbps"], m["size"], "movie") for m in CAT["movies"]]
@@ -583,7 +589,8 @@ class PrefetchPlanTests(unittest.TestCase):
         self.assertNotIn("next_group", [n for n, _ in steps])
 
     def test_defaults_follow_the_mode_and_fall_back(self):
-        from plexcache import cachemode as cm, prefetch as pf
+        from plexcache import cachemode as cm
+        from plexcache import prefetch as pf
         self.assertEqual(pf.resolve(cm.L2ARC, "2", "start", "default", "tv"), "library")
         self.assertEqual(pf.resolve(cm.RAM, "2", "start", "default", "tv"), "rest")
         self.assertEqual(pf.resolve(cm.L2ARC, "2", "end", "default", "tv"), "rest")
@@ -602,7 +609,8 @@ class PrefetchPlanTests(unittest.TestCase):
         self.assertEqual(pf.resolve(cm.L2ARC, "4", "start", "next_group", "music"), "whole")  # not offered for music
 
     def test_whole_file_choices(self):
-        from plexcache import cachemode as cm, prefetch as pf
+        from plexcache import cachemode as cm
+        from plexcache import prefetch as pf
         self.assertEqual(pf.resolve(cm.RAM, "2", "end", "rest", "tv"), "next")       # needs an L2ARC now
         self.assertEqual(pf.resolve(cm.L2ARC, "2", "end", "rest", "tv"), "rest")
         self.assertEqual(pf.resolve(cm.RAM, "2", "end", "none", "tv"), "none")
@@ -1019,7 +1027,7 @@ class LayoutTests(unittest.TestCase):
             ranges, info = tail_ranges(p, size, 4 * MiB)
             self.assertEqual(info["format"], "mkv", kw)
             self.assertEqual(info["parts"]["index"], m["cues_len"], kw)
-            covered = lambda off, n: any(o <= off and off + n <= o + l for o, l in ranges)
+            covered = lambda off, n, ranges=ranges: any(o <= off and off + n <= o + l for o, l in ranges)
             self.assertTrue(covered(m["cues_at"], m["cues_len"]), kw)
             if kw.get("tags_size"):
                 self.assertTrue(covered(m["tags_at"], m["tags_len"]), kw)
@@ -1152,8 +1160,9 @@ class LayoutTests(unittest.TestCase):
         """Tracks are named the way MKVToolNix names them (dev/codecs.py makes the list from its source);
         an ID it doesn't know stays as it is. The list's patterns all work in Python."""
         import importlib.util
+
         from plexcache import codec_names, filemap
-        for name, pattern in codec_names.CODECS:
+        for _name, pattern in codec_names.CODECS:
             re.compile(pattern)
         self.assertEqual([filemap.codec_name(x) for x in ("V_MPEGH/ISO/HEVC", "v_mpeg4/iso/avc", "A_AAC", "S_TEXT/UTF8", "S_VOBSUB", "S_HDMV/PGS", "X_NEW")],
                          ["HEVC/H.265/MPEG-H", "AVC/H.264/MPEG-4p10", "AAC", "SubRip/SRT", "VobSub", "HDMV PGS", ""])
@@ -1358,7 +1367,7 @@ class LayoutTests(unittest.TestCase):
         u = lambda n, k=1: n.to_bytes(k, "big")
         entry = lambda *kids: _el("AE", b"".join(kids))
         tracks = (entry(_el("D7", u(1)), _el("83", u(1)), _el("86", b"V_MPEGH/ISO/HEVC"), _el("E0", _el("B0", u(1920, 2)) + _el("BA", u(1080, 2))))
-                  + entry(_el("D7", u(2)), _el("83", u(2)), _el("86", b"A_AC3"), _el("22B59C", b"eng"), _el("536E", "Commentary".encode()))
+                  + entry(_el("D7", u(2)), _el("83", u(2)), _el("86", b"A_AC3"), _el("22B59C", b"eng"), _el("536E", b"Commentary"))
                   + entry(_el("D7", u(3)), _el("86", b"S_VOBSUB"), _el("6D80", _el("6240", _el("5034", _el("4254", u(3))))))
                   + entry(_el("D7", u(4)), _el("86", b"S_TEXT/ASS"), _el("6D80", _el("6240", _el("5034", _el("4254", u(9))))))
                   + entry(_el("D7", u(5)), _el("86", b"S_TEXT/UTF8"), _el("22B59D", b"fr-CA"), _el("22B59C", b"fre")))
@@ -1486,6 +1495,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_dataset_must_suit_all_its_libraries(self):
         from types import SimpleNamespace
+
         from plexcache import checks
         libs = [("1", "Movies", 70000, 8e10), ("2", "Concerts", 30000, 3e10), ("3", "Music", 256, 8e6)]
         app = SimpleNamespace(
@@ -1843,6 +1853,7 @@ class AppTests(unittest.TestCase):
         another library pauses the first, which carries on where it was when started again; a paused
         one stays paused; only files new or changed are read unless every one is asked for."""
         from types import SimpleNamespace
+
         from plexcache import filemap
         app = _new_app()
         d = tempfile.mkdtemp(dir=TMP)
@@ -1895,6 +1906,7 @@ class AppTests(unittest.TestCase):
         """Each check says Ideal, Pass or Warning, and the file takes the worst; the library's summary
         counts files by their worst and checks by their warnings."""
         from types import SimpleNamespace
+
         from plexcache import filechecks as fc
         M_ = 1024 * 1024
         rec = {"best": M_, "alt": 2 * M_, "rs": M_}
@@ -2159,7 +2171,7 @@ class AppTests(unittest.TestCase):
             self.app.settings.update({"warmup": {"pacing_auto": True, "pacing_percent": 10}})
         self.assertEqual(en(ok["L2ARC settings"]["detail"]), "Suited to warm-up: fills at up to 64 MiB/s.")
         # Each library's record size against the one recommended for its media, and the next best
-        K, M = 1024, 1024 * 1024
+        M = 1024 * 1024
         real_stats, real_records = self.app.stats, self.app.library_records
         self.app.stats = LibraryStats(libraries=[{"key": "1", "name": "Movies", "kind": "movie", "count": 10,
                                                   "avg_kbps": 30000, "avg_size": 30 * 10 ** 9}])
@@ -2261,7 +2273,7 @@ class AppTests(unittest.TestCase):
         root = tempfile.mkdtemp(dir=TMP)
         for sub in ("music", "music/Mine", "data", "data/TV", "data/TV/Extra"):
             os.makedirs(os.path.join(root, sub))
-        j = lambda *p: os.path.join(root, *p)  # noqa: E731
+        j = lambda *p: os.path.join(root, *p)
         fake = [{"root": "/", "mountpoint": "/", "fstype": "overlay", "source": "overlay"},
                 # a parent dataset mounted at /music, and the library's own dataset mounted inside it
                 {"root": "/", "mountpoint": j("music"), "fstype": "zfs", "source": "tank/Parent"},
@@ -2419,7 +2431,6 @@ class AppTests(unittest.TestCase):
         self.assertTrue(run["manual"])
 
     def test_playback_features(self):
-        import plexcache.playback as pb
         ep = CAT["episodes"][2]  # S01E03 -> next is S02E01
         PLEX.sessions = [{"id": "s9", "item": ep, "offset": 700000, "duration": 1200000}]
         try:
@@ -2481,7 +2492,7 @@ def evaluated(app, *keys, timeout=60):
     keys = [str(k) for k in keys] or ev.libraries()
     for key in keys:
         app.inspector.start(key)
-        wait_for(lambda: not app.inspector.left(key) and not app.inspector.running_for(key), timeout)
+        wait_for(lambda key=key: not app.inspector.left(key) and not app.inspector.running_for(key), timeout)
         for name, u in ev.units().items():
             try:
                 if name == "optimizer":
@@ -2578,7 +2589,7 @@ class PlaybackMonitorTests(unittest.TestCase):
         self.assertIsNone(mon._steps(None, types.SimpleNamespace(**dict(vars(lonely), type="track")), "music"))
 
     def test_music_plays_are_read_logged_and_measured(self):
-        app, mon = self.app, self.app.monitor
+        app = self.app
         app.library_cacheable = lambda *a, **k: True
         try:
             app.settings.update({"general": {"no_l2arc": True, "ram_cooldown_lead_in_minutes": 0, "ram_cooldown_whole_minutes": 0}})
@@ -3428,6 +3439,7 @@ class ReportTests(unittest.TestCase):
 
     def test_periods_and_chart_buckets(self):
         import datetime as dt
+
         from plexcache import report
         now = dt.datetime(2026, 3, 15, 13, 30).timestamp()
         app = App(tempfile.mkdtemp(dir=TMP))
@@ -3835,6 +3847,7 @@ class StartupTests(unittest.TestCase):
 
     def test_unwritable_config_waits_with_an_explanation(self):
         import http.client
+
         from plexcache import __main__ as entry
         d = tempfile.mkdtemp(dir=TMP)
         blocker = os.path.join(d, "config")
@@ -3968,7 +3981,7 @@ class AppEdgeTests(unittest.TestCase):
         app.start_warmup = lambda manual, libs=None, why=None: started.append(manual) or self.assertEqual(libs, {"2"})
         waits = iter([False, True])
         app.stopping.wait = lambda t: next(waits)
-        real_due, real_time = appmod.due, appmod.time
+        real_due = appmod.due
         appmod.due = lambda *a: True
         try:
             app._scheduler_loop()
@@ -4182,6 +4195,7 @@ class AppEdgeTests(unittest.TestCase):
         in the log), and a stop signal shutting everything down."""
         import logging
         import signal
+
         import plexcache.__main__ as main_mod
         root = logging.getLogger()
         saved_handlers, saved_level = list(root.handlers), root.level
@@ -4327,6 +4341,7 @@ class TestRunnerTests(unittest.TestCase):
         instead of drawing it; the board puts that into a bar of its own and draws it with the same code — the line a
         terminal would have had, the seconds of a step under way counted there."""
         import io
+
         from dev.progress import FEED, Progress, feeding, record
         out = io.StringIO()
         bar = Progress(3, stream=out, feed=True, bar="tests")
@@ -4362,6 +4377,7 @@ class TestRunnerTests(unittest.TestCase):
         """The bar's label: the test running now, its seconds counting from when it started — on the board too (the
         record says how long it's been going), whichever of the workers' tests it is."""
         import io
+
         from dev.progress import Progress, record
         out = io.StringIO()
         bar = Progress(4, stream=out, feed=True)
@@ -4377,6 +4393,7 @@ class TestRunnerTests(unittest.TestCase):
         """dev/upkeep.py on the board: the box in a line under its bar (dev/progress.said) — what moved and what's new
         upstream, each from → to; all current; or upstream not reached."""
         import io
+
         from dev import board, upkeep
         from dev.progress import FEED, said
         out = io.StringIO()
@@ -4385,7 +4402,7 @@ class TestRunnerTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": ""}):
             said("not on the board", out)
         self.assertEqual(out.getvalue().count(FEED), 1)
-        s = board.Section({"id": "upkeep", "title": "Dependency Versions", "cmd": "true", "upkeep": True}, tempfile.mkdtemp(dir=TMP))
+        s = board.Section({"id": "upkeep", "title": "Dependencies", "cmd": "true", "upkeep": True}, tempfile.mkdtemp(dir=TMP))
         s.state = "running"
         s.line("behind")
         s.line(out.getvalue().rstrip("\n"))
@@ -4393,9 +4410,39 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn("postcss-preset-env 11.6.1 → 11.6.2", s.lines(80)[2])
         r = upkeep.Report(moved=["Node 24.1.0 → 24.2.0"], bumped=["Node: Dockerfile: 24.1.0 → 24.2.0"],
                           news=[("pyright", "1.1.400", "2.0.0", "major", "by hand")])
-        self.assertEqual(upkeep.summary(r), "Moved Node 24.1.0 → 24.2.0 · pyright 1.1.400 → 2.0.0 (major)")
+        # how many of each first (an error, a warning, a notice: upkeep.found), then what moved and what's new
+        self.assertEqual(upkeep.summary(r), "1 warning · 1 notice · moved Node 24.1.0 → 24.2.0 · pyright 1.1.400 → 2.0.0 (major)")
+        self.assertEqual(upkeep.found(r), [("notice", "moved Node 24.1.0 → 24.2.0: test it, then commit", ""),
+                                           ("warning", "pyright 1.1.400 → 2.0.0 (major)", "")])
         self.assertEqual(upkeep.summary(upkeep.Report()), f"{len(upkeep.DEPS)} dependencies up to date")
-        self.assertEqual(upkeep.summary(None, "timed out"), "Upstream not reached · timed out")
+        self.assertEqual(upkeep.summary(None, "timed out"), "1 error · upstream not reached · timed out")
+        self.assertEqual(upkeep.found(None, "timed out"), [("error", "upstream not reached: timed out", "python3 dev/upkeep.py")])
+        stylelint = upkeep.Report(news=[("stylelint", "17.16.0", "18.0.0", "major", "by hand")])   # (a package: its fix the npm command)
+        self.assertEqual(upkeep.found(stylelint), [("warning", "stylelint 17.16.0 → 18.0.0 (major)", "npm install --prefix dev --save-exact stylelint@18.0.0")])
+
+    def test_the_board_lists_every_issue_under_it(self):
+        """Under the board, at the end: its Issues — each section's errors, warnings and notices, as it sent them
+        (dev/progress.issue), a fix on a line of its own; a section that failed or warned and sent none, its result as
+        one; nothing at all when there are none."""
+        import subprocess
+        folder = tempfile.mkdtemp(dir=TMP)
+        issue = lambda level, text, fix="": "printf '%s\\n' " + shlex.quote("\x1e" + json.dumps({"issue": {"level": level, "text": text, "fix": fix}}))
+        plan = [{"id": "deps", "title": "Dependencies", "cmd": f"echo current; {issue('warning', 'stylelint 17.16.0 → 18.0.0 (major)', 'npm i x@18')}; {issue('notice', 'moved Node')}", "upkeep": True},
+                {"id": "bad", "title": "Current Tests", "cmd": "echo 3/550 tests failed; exit 1"},
+                {"id": "fine", "title": "Python Validation", "cmd": "echo 0 errors"}]
+        with open(os.path.join(folder, "plan.json"), "w", encoding="utf-8") as fh:
+            json.dump(plan, fh)
+        got = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "board.py"), os.path.join(folder, "plan.json"), os.path.join(folder, "res")],
+                             capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        issues = got.stdout[got.stdout.index("  Issues: "):]
+        self.assertEqual(issues, "  Issues: 1 error · 1 warning · 1 notice\n"
+                                 "    Dependencies\n      warning  stylelint 17.16.0 → 18.0.0 (major)\n               npm i x@18\n      notice   moved Node\n"
+                                 "    Current Tests\n      error    3/550 tests failed\n")
+        with open(os.path.join(folder, "plan.json"), "w", encoding="utf-8") as fh:
+            json.dump([plan[2]], fh)
+        got = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "board.py"), os.path.join(folder, "plan.json"), os.path.join(folder, "res")],
+                             capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        self.assertNotIn("Issues", got.stdout)   # (none: nothing said)
 
     def test_run_py_sends_its_bar_to_the_board_and_can_leave_a_class_out(self):
         """tests/run.py on the board (PLEXCACHE_PROGRESS=feed): its bar as records (bar "tests"), its summary as text;
@@ -4403,6 +4450,7 @@ class TestRunnerTests(unittest.TestCase):
         shared out among workers."""
         import subprocess
         import textwrap
+
         from dev.progress import record
         folder = tempfile.mkdtemp(dir=TMP)
         with open(os.path.join(folder, "feed_probe_tests.py"), "w", encoding="utf-8") as fh:
@@ -4446,7 +4494,7 @@ class TestRunnerTests(unittest.TestCase):
                 {"id": "next", "title": "Next", "cmd": "echo after one", "after": ["slow1"]},
                 {"id": "never", "title": "Never", "cmd": "echo ran", "after": ["bad"]},
                 {"id": "unset", "title": "Unset", "cmd": "echo download failed; exit 3", "not_run_rc": 3},
-                {"id": "deps", "title": "Dependency Versions", "cmd": "echo current; echo looked: $TNSYNC_PHASE", "env": {"TNSYNC_PHASE": "look"}, "upkeep": True,
+                {"id": "deps", "title": "Dependencies", "cmd": "echo current; echo looked: $TNSYNC_PHASE", "env": {"TNSYNC_PHASE": "look"}, "upkeep": True,
                  "then": {"cmd": "echo behind; echo moved", "after": ["slow1", "slow2", "bad", "gone"]}}]
         with open(os.path.join(folder, "plan.json"), "w", encoding="utf-8") as fh:
             json.dump(plan, fh)
@@ -4535,7 +4583,7 @@ class TestRunnerTests(unittest.TestCase):
         from dev.progress import FEED
         folder = tempfile.mkdtemp(dir=TMP)
         bar = FEED + json.dumps({"bar": "upkeep", "done": 26, "total": 26, "label": "looked up"})
-        s = board.Section({"id": "upkeep", "title": "Dependency Versions", "cmd": "true", "upkeep": True,
+        s = board.Section({"id": "upkeep", "title": "Dependencies", "cmd": "true", "upkeep": True,
                            "then": {"cmd": "echo moved", "after": ["current"]}}, folder)
         self.addCleanup(lambda s=s: s.out.close())
         s.state = "running"
@@ -4547,7 +4595,7 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn("WAITING: CHECKS", drawn[0])
         self.assertEqual(drawn[1].strip(), "")   # (no full bar while it isn't working)
         self.assertIn("26/26 looked up · 2 to move once the checks pass", drawn[2])
-        s = board.Section({"id": "upkeep", "title": "Dependency Versions", "cmd": "true", "upkeep": True,
+        s = board.Section({"id": "upkeep", "title": "Dependencies", "cmd": "true", "upkeep": True,
                            "then": {"cmd": "echo moved", "after": ["current"]}}, folder)
         self.addCleanup(lambda s=s: s.out.close())
         s.state = "running"
@@ -4656,7 +4704,7 @@ class TestRunnerTests(unittest.TestCase):
                 json.dump({"items": []}, f)
             for goodbye in (True, False):
                 urls, got, log = [], [], os.path.join(tmp, "review.log")
-                t = threading.Thread(target=lambda: got.append(s.review(tmp, terminal=True, open_browser=False, log=log, gone=(0.3, 1.0),
+                t = threading.Thread(target=lambda got=got, log=log, urls=urls: got.append(s.review(tmp, terminal=True, open_browser=False, log=log, gone=(0.3, 1.0),
                                                                          ready=lambda server, url: urls.append(url))))
                 t.start()
                 for _ in range(100):
@@ -4667,7 +4715,7 @@ class TestRunnerTests(unittest.TestCase):
                 self.assertIn("sendBeacon('/bye'", page)
                 token = _re.search(r'token:"([^"]+)"', page).group(1)
                 q = f"?tab=one&t={urllib.parse.quote(token)}"
-                post = lambda path: urllib.request.urlopen(urllib.request.Request(urls[0].rstrip("/") + path, data=b"", method="POST")).status
+                post = lambda path, urls=urls: urllib.request.urlopen(urllib.request.Request(urls[0].rstrip("/") + path, data=b"", method="POST")).status
                 self.assertEqual(post("/alive" + q), 204)
                 with self.assertRaises(urllib.error.HTTPError):   # (not without the token)
                     post("/alive?tab=one&t=wrong")
@@ -4675,12 +4723,13 @@ class TestRunnerTests(unittest.TestCase):
                 self.assertTrue(t.is_alive())   # (a tab open: it keeps on)
                 if goodbye:
                     post("/bye" + q)
-                started = time.time()
-                t.join(10)
-                self.assertFalse(t.is_alive())
+                started = time.time()   # (it says so within the grace, 0.3 s after a goodbye or 1 s without a beat:
+                while "The review page was closed." not in _read(log, encoding="utf-8") and time.time() - started < 10:
+                    time.sleep(0.05)    # what it says after — what's left to approve, the looks read again — takes its own time)
                 self.assertLess(time.time() - started, 3)
+                t.join(60)
+                self.assertFalse(t.is_alive())
                 self.assertEqual(got, [0])
-                self.assertIn("The review page was closed.", _read(log, encoding="utf-8"))
 
     def test_one_style_sample_at_a_time(self):
         """dev/style.py sample while another is being made (tnsync's board makes one; r, or a terminal, another): it waits
@@ -4693,7 +4742,7 @@ class TestRunnerTests(unittest.TestCase):
         s = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(s)
         with tempfile.TemporaryDirectory() as tmp:
-            held = open(os.path.join(tmp, ".sampling"), "w")
+            held = open(os.path.join(tmp, ".sampling"), "w")  # noqa: SIM115 — (held open: the lock it takes)
             fcntl.flock(held, fcntl.LOCK_EX)
             made, got = [], []
             with mock.patch.object(s, "pending", lambda: {"new": {"css .a": "x"}, "changed": {}, "gone": {}}), \
@@ -4744,6 +4793,7 @@ class TestRunnerTests(unittest.TestCase):
         terminal, in a session of its own, so it outlives the board), the block saying "press r" in place of the
         command; once the board is done, the command again, and r does nothing."""
         import io
+
         from dev import board
         from dev.progress import FEED
         folder = tempfile.mkdtemp(dir=TMP)
@@ -4797,6 +4847,7 @@ class TestRunnerTests(unittest.TestCase):
         """tnsync --no-sample: Style Approval is the check alone, as before the sample was made on the board — no second
         step, and its bar every look against the guide by its one process, nothing of a sample on it (TNSYNC_SAMPLE=0)."""
         import subprocess
+
         from dev.progress import record
         got = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "style.py"), "check"], cwd=ROOT, capture_output=True, text=True, timeout=120,
                              env=dict(os.environ, PLEXCACHE_PROGRESS="feed", TNSYNC_SAMPLE="0"))
@@ -4958,7 +5009,7 @@ class TestRunnerTests(unittest.TestCase):
         self.assertNotIn("ALL CHECKS PASSED", out)   # (each section said its own: nothing said again)
         self.assertNotIn("\n  DEPENDENCIES  -  ALL UP TO DATE", out)   # (its box: none when all are current)
         for said in ("Current Tests: PASSED (12 tests passed)", "HTML/JS/CSS Validation: PASSED (checked)", "Python Validation: PASSED (0 errors)",
-                     "Dependency Versions: ALL UP TO DATE", "==> Dependency Versions: export TNSYNC_UPKEEP=move",
+                     "Dependencies: ALL UP TO DATE", "==> Dependencies: export TNSYNC_UPKEEP=move",
                      "Style Approval: LOOKS WAITING (2 looks need your approval: /the/page.html)"):
             self.assertIn(said, out)
         self.assertNotIn("\n  new: css .a\n", out)   # (the looks waiting: its block says how many and where, the rest not printed; nor a failure: rc 0)
@@ -4997,7 +5048,9 @@ class _RawWS:
     """A one-shot plain-text WebSocket server that sends scripted frames after the handshake."""
 
     def __init__(self, frames=(), handshake=None, raw_reply=None):
-        import base64, hashlib, socket
+        import base64
+        import hashlib
+        import socket
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(1)
@@ -5064,6 +5117,7 @@ class TrueNASEdgeTests(unittest.TestCase):
     def test_probe_survives_a_silent_tls_port(self):
         """Something accepts the connection but never answers TLS: that's "not TrueNAS", not a crash."""
         import socket
+
         from plexcache.truenas import probe
         srv = socket.socket()
         srv.bind(("127.0.0.1", 0))
@@ -5808,7 +5862,7 @@ class PageStructureTests(unittest.TestCase):
         rows = re.findall(r"<tr>(.*?)</tr>", html[html.index('id="mirrorlibs"'):], re.S)
         by = {t: r for r in rows for t in ("Movies", "TV Shows", "Audiobooks", "Music") if re.sub(r"<[^>]+>", "", r.split("</td>")[0]).strip() == t}
         self.assertEqual(set(by), {"Movies", "TV Shows", "Audiobooks", "Music"})
-        plain = lambda r: re.sub(r"<[^>]+>", " ", r)  # noqa: E731
+        plain = lambda r: re.sub(r"<[^>]+>", " ", r)
         self.assertIn("Mirrored", plain(by["Movies"]))
         self.assertIn('data-p2lib="1"', by["Movies"])                                               # (its mirror: the list)
         self.assertRegex(by["Movies"], r'<option value="xyz:\d+" selected>Movies \(Starlit\)</option>')  # (Starlit's Movies, by key, named with its server)
@@ -6060,7 +6114,7 @@ class PageStructureTests(unittest.TestCase):
             fh.write(b"x" * 100)
         plex.cat["movies"].append({"path": avi, "size": 100, "kbps": 1, "key": "301", "title": "Old Film", "year": 2001, "guid": "plex://movie/301", "duration": 5400000})
         app.scan_library()
-        for name, tool in app.tools.items():
+        for tool in app.tools.values():
             tt._run(tool, tool.scan_async("1"))
         evaluated(app)
         st = app.state()
@@ -6129,7 +6183,7 @@ class PageStructureTests(unittest.TestCase):
         for i, m in enumerate(_p2.cat["movies"]):
             m["title"] = f"Movie & Friends {i}"
         app2.scan_library()
-        for name, tool in app2.tools.items():
+        for tool in app2.tools.values():
             tt._run(tool, tool.scan_async("1"))
         st2 = app2.state()
         for name in tool_pages:
@@ -6188,7 +6242,7 @@ class PageStructureTests(unittest.TestCase):
             fh.write(b"x" * 100)
         plex.cat["movies"].append({"path": avi, "size": 100, "kbps": 1, "key": "301", "title": "Old Film", "year": 2001, "guid": "plex://movie/301", "duration": 5400000})
         app.scan_library()
-        for name, tool in app.tools.items():
+        for _name, tool in app.tools.items():
             tt._run(tool, tool.scan_async("1"))
         evaluated(app)  # (the scans' refreshes move the data on: the earlier tools' counts worked out again, every library's)
         return app, tt
@@ -6617,7 +6671,7 @@ class PageStructureTests(unittest.TestCase):
                 c, tot = st["counts"][name]["libraries"]["1"], st["counts"][name]["total"]
                 if c["s"] != "na":                                                                  # (the page's count is the tool's)
                     self.assertEqual(c, {"s": "done", "n": st["tool_counts"][name]["libraries"]["1"]})
-                chip = lambda c: "fail" if stopped else "na" if c["s"] == "na" else "warn" if c["n"] else "ok"  # (red over the number; grey where it doesn't apply)
+                chip = lambda c, stopped=stopped: "fail" if stopped else "na" if c["s"] == "na" else "warn" if c["n"] else "ok"  # (red over the number; grey where it doesn't apply)
                 self.assertRegex(tools, r'<a href="/' + name + r'" data-nav><svg[^>]*>.*?</svg>[^<]*</a> <span class="count ' + chip(tot) + '"')
                 self.assertRegex(html, r'(?s)data-tool="' + name + r'" data-key="1">(?:(?!</button>).)*<span class="count ' + chip(c) + '"')
                 reds += bool(stopped)
@@ -6779,10 +6833,18 @@ class PageStructureTests(unittest.TestCase):
         self.assertFalse(hc["stale"])
         got = app.library_health("1")
         self.assertIs(app.library_health("1"), got)                                                   # (kept: not worked out again)
-        # a check switched: the count is a placeholder until worked out again, by itself (the page asking for the state)
+        # a check switched: the count is a placeholder until worked out again, by itself (the page asking for the state).
+        # The evaluator held while that's looked at (idle, then not started: the switch doesn't wake it), so a quick
+        # one can't have worked it out again before the placeholder is seen; then let go
+        for _ in range(200):
+            if not app.evaluator.working:
+                break
+            time.sleep(0.05)
+        app.evaluator.started = False
         app.settings.update({"library_health": {"checks": {"linked_file": False}}})
         self.assertTrue(app._health_counts_now()["1"]["stale"])
         self.assertEqual(app.evaluator.count("filechecks", "1")["s"], "pending")
+        app.evaluator.start()
         for _ in range(200):
             app.state()
             if not app._health_counts_now()["1"]["stale"]:
@@ -6807,7 +6869,7 @@ class PageStructureTests(unittest.TestCase):
         for page in self.PAGES_DRAWN + ("filechecks", "plexchecks"):
             with self.subTest(page=page):
                 got = self._render(st, page)
-                for k, html in got["info"].items():
+                for _k, html in got["info"].items():
                     seen += 1
                     m = escaped.search(re.sub(r"<code>.*?</code>", "", html))  # (in code, <tool> is a placeholder written as such)
                     self.assertIsNone(m, f"{page}: an ⓘ shows code as text: {m and m.group(0)!r} in {html[:120]!r}")
@@ -6866,7 +6928,7 @@ class PageStructureTests(unittest.TestCase):
             fh.write(b"x" * 100)
         plex.cat["movies"].append({"path": avi, "size": 100, "kbps": 1, "key": "301", "title": "Old Film", "year": 2001, "guid": "plex://movie/301", "duration": 5400000})
         app.scan_library()
-        for name, tool in app.tools.items():
+        for tool in app.tools.values():
             tt._run(tool, tool.scan_async("1"))
         st = app.state()
         st["_ready"] = safety.readiness(app, "1", 0)
@@ -7077,7 +7139,7 @@ class PageStructureTests(unittest.TestCase):
         tools = re.findall(r'\n    \{ page: "(\w+)", name: N\("((?:[^"\\]|\\.)*)"\),[^\n]*\n      blurb: N\("((?:[^"\\]|\\.)*)"\)', js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES = ")])
         nav = set(re.findall(r"(\w+): 1", re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)))
         self.assertEqual({t[0] for t in tools}, nav, "every page under the Tools nav has a card (name and text) on the Tools page")
-        for name, title, text in tools:
+        for name, _title, text in tools:
             sentences = [x for x in re.split(r"(?<=[.!?])\s+(?=[A-Z])", text.strip()) if x]
             self.assertTrue(1 <= len(sentences) <= 2, f"{name}: the card's text is {len(sentences)} sentences, not one or two: {text!r}")
         # the templates take the card's text, and no tool page brings a description of its own
@@ -7152,9 +7214,9 @@ class PageStructureTests(unittest.TestCase):
         ]
         got = self._node(fn + "\nconsole.log(JSON.stringify({lib: " + json.dumps([c[:2] for c in cases]) + ".map(function (c) { return libAutoPlan(c[0], c[1]); }), tools: " +
                          json.dumps([t[:3] + t[4:] for t in tools]) + ".map(function (t) { return toolAutoPlan(t[0], t[1], t[2], t[3]); })}));")
-        for c, out in zip(cases, got["lib"]):
+        for c, out in zip(cases, got["lib"], strict=False):
             self.assertEqual(out, c[2], c)
-        for t, out in zip(tools, got["tools"]):
+        for t, out in zip(tools, got["tools"], strict=False):
             self.assertEqual(out, t[3], t)
 
     def test_no_info_button_inside_another(self):
@@ -7392,6 +7454,7 @@ class PlexEdgeTests(unittest.TestCase):
         """Episodes without numbers are named by title; libraries of a kind that isn't cached have no
         files; a limit stops paging; posters come back as Plex has them; plex.tv down is an error."""
         import xml.etree.ElementTree as ET
+
         from plexcache import plex
         ep = ET.Element("Video", {"type": "episode", "title": "Pilot", "grandparentTitle": "Harbour Street"})
         self.assertEqual(plex.title_of(ep), "Harbour Street · Pilot")
@@ -7635,7 +7698,8 @@ class OptimizerTests(unittest.TestCase):
     def test_copy_meta_on_an_acl_dataset(self):
         """TrueNAS datasets with ACLs (aclmode=restricted) refuse chmod on a file with a full ACL:
         the ACL is copied first, and sets the permissions."""
-        from plexcache.optimize import migrate, optimizer as opt
+        from plexcache.optimize import migrate
+        from plexcache.optimize import optimizer as opt
         src, dst = self.path("a"), self.path("b")
         for p, mode in ((src, 0o770), (dst, 0o644)):
             open(p, "wb").close()
@@ -7989,7 +8053,6 @@ class OptimizerTests(unittest.TestCase):
         app.libraries[0]["locations"] = [d]
         self.assertEqual(app.sync.peers(), ["otherbox1"])
         # discovery: a sample of this library's files looked for on each account server's libraries, by path
-        from plexcache import plex as plexmod
         found = [{"id": "zzz", "name": "Cabin", "owned": True, "token": "t", "connections": [{"uri": "http://c", "local": False, "relay": False}]}]
         sample = [types.SimpleNamespace(path="/srv/Movies/A/a.mkv"), types.SimpleNamespace(path="/srv/Movies/Z/z.mkv")]
         app.libraries[0]["locations"] = ["/data/Movies"]
@@ -8594,7 +8657,7 @@ class OptimizerTests(unittest.TestCase):
                                  {"foreign_tags": False, "tags_size": 300})
         self.assertEqual([[opt.strips_tags(m, c) for c in (big, small, ours_only)] for m in opt.TAG_MODES],
                          [[False, False, False], [True, False, False], [True, True, False]])
-        from plexcache.config import SettingsError, Settings
+        from plexcache.config import Settings, SettingsError
         settings = Settings(tempfile.mkdtemp(dir=TMP))
         settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "tags": "strip"}}}})
         self.assertEqual(settings.get()["optimizer"]["libraries"]["1"]["tags"], "strip")
@@ -9027,6 +9090,7 @@ class OptimizerTests(unittest.TestCase):
         """python -m plexcache.optimize: check files, optimize them (each result said), or run the service."""
         import contextlib
         import io
+
         from plexcache.optimize import __main__ as cli
         from plexcache.optimize.optimizer import Skipped
         from plexcache.optimize.tools import ToolError
@@ -9068,6 +9132,7 @@ class OptimizerTests(unittest.TestCase):
     def test_healthcheck(self):
         """The image's health check: either service answering is healthy."""
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
         from plexcache import healthcheck
 
         class H(BaseHTTPRequestHandler):
@@ -9094,6 +9159,7 @@ class OptimizerTests(unittest.TestCase):
         """The optimizer service's folder steps, its answers to bad requests, how each failure is
         reported (never stuck busy), and how it starts."""
         from http.server import ThreadingHTTPServer
+
         from plexcache.optimize import optimizer as opt
         from plexcache.optimize import server as osrv
         from plexcache.optimize import tools
@@ -9211,6 +9277,7 @@ class OptimizerTests(unittest.TestCase):
 
     def test_service(self):
         from http.server import ThreadingHTTPServer
+
         from plexcache.optimize import server as osrv
         d = tempfile.mkdtemp(dir=TMP)
         good = os.path.join(d, "a.mkv")
@@ -9273,6 +9340,7 @@ class OptimizerTests(unittest.TestCase):
 
     def _app(self, names=("ok.mkv", "todo.mkv", "a.mp4"), comp="zstd"):
         from types import SimpleNamespace
+
         from plexcache.optimizing import Optimizing
         app = _new_app()
         app.scan_library()
@@ -9298,7 +9366,6 @@ class OptimizerTests(unittest.TestCase):
         return app, app.optimizing, client, d, state
 
     def test_app_survey_checks_and_job(self):
-        from plexcache import checks
         from plexcache.optimize import VERSION
         app, op, client, d, state = self._app()
         lib = lambda: op.snapshot()["libraries"]["1"]
@@ -9470,6 +9537,7 @@ class OptimizerTests(unittest.TestCase):
         """The app's side of the optimizer: each call over HTTP, answers kept a few seconds, and why a
         file isn't sent (playing, gone, just written, no poster) or doesn't get done (refused, stopped)."""
         from http.server import ThreadingHTTPServer
+
         from plexcache import optimizing
         from plexcache.optimize import server as osrv
         from plexcache.plex import PlexError
@@ -9518,6 +9586,7 @@ class OptimizerTests(unittest.TestCase):
     def test_space_on_disk_once_settled(self):
         """A written file's space on the pool, read once ZFS has committed it: two looks in a row agree."""
         from types import SimpleNamespace
+
         from plexcache import optimizing
         looks = iter([900, 700, 400, 400, 999])                                   # shrinking as ZFS compresses it
         naps = []
@@ -9808,6 +9877,7 @@ class OptimizerTests(unittest.TestCase):
         tagged has no known original and is left out (counted)."""
         import shutil
         from types import SimpleNamespace
+
         from plexcache import filehistory, optimizing
         from plexcache.optimize import VERSION
         app, op, client, d, state = self._app(names=("a.mkv", "b.mp4"))
@@ -10349,7 +10419,7 @@ class MigrateTests(unittest.TestCase):
     def test_copy_job(self):
         """The copy as a file job: picked up still running after a restart, paused while something plays,
         a failure listed with the job; a copy that can't start; and the wizard's errors from the optimizer."""
-        from plexcache import jobs, migrating
+        from plexcache import migrating
         app = _new_app()
         app.run_checks_async = lambda **kw: None  # (Health is told when what's next changes: not this test's)
         statuses, calls = [], []
@@ -10459,6 +10529,7 @@ class MigrateTests(unittest.TestCase):
     def test_steps(self):
         """The wizard: nothing is copied until the dataset's record size and compression are right."""
         from types import SimpleNamespace
+
         from plexcache import checks, migrating
         from plexcache.optimize import migrate
         d = tempfile.mkdtemp(dir=TMP)
@@ -10674,6 +10745,7 @@ class MirrorMigrationTests(unittest.TestCase):
         """A library folder that can become a dataset (tank/media/Books), the optimizer and TrueNAS faked as in
         MigrateTests.test_steps, and the other side's facts as the test sets them (``self.facts["v"]``)."""
         from types import SimpleNamespace
+
         from plexcache import checks, migrating
         from plexcache.optimize import migrate
         d = tempfile.mkdtemp(dir=TMP)
@@ -10852,7 +10924,7 @@ class MirrorMigrationTests(unittest.TestCase):
         self._ready_dataset(folder, mounted, props)
         mig.plan("9", folder)
         mig.confirm("sync_checked")
-        check = lambda: self._by_id(mig.refresh())["mirror_truenas"]  # noqa: E731
+        check = lambda: self._by_id(mig.refresh())["mirror_truenas"]
         self.assertIn("pair the two Dionysus instances", en(check()["detail"]))
         app.peerlinks.link("plexB").wanted = lambda: False
         self.assertIn("there’s no Dionysus at the mirror’s site", en(check()["detail"]))
@@ -10919,7 +10991,8 @@ class MirrorMigrationTests(unittest.TestCase):
         """A conversion of the library left partway at the other site: a warning before the switch here, an error from then
         on that keeps the old folder where it is (and turns the tool and Health red), until completed or reverted there;
         the other side holding its file jobs, confirmed over the link (said only, through the marker)."""
-        from plexcache import checks, migrating as mg
+        from plexcache import checks
+        from plexcache import migrating as mg
         app, mig, d, folder, mounted, props = self._setup()
         self._ready_dataset(folder, mounted, props)
         partial = self._facts(converting={"step": "switch", "aside": True, "folder": "Books", "since": time.time() - 86400, "title": "Books"})
@@ -11101,7 +11174,9 @@ class MirrorMigrationTests(unittest.TestCase):
         file jobs; the other side's facts read from the link (its library keys turned into ours) or the marker (the paired
         one's, or the one next to the mirror's Plex)."""
         from types import SimpleNamespace
-        from plexcache import peerlink as pl, peers
+
+        from plexcache import peerlink as pl
+        from plexcache import peers
         app, mig, d, folder, mounted, props = self._setup(mirror=False)
         own = pl.own_facts(app)
         self.assertEqual(set(own), {"platform", "truenas_api", "migration"})
@@ -11150,7 +11225,7 @@ class MirrorMigrationTests(unittest.TestCase):
         app.peerlinks.link("plexA").facts = lambda: facts["v"]
         health = app.mirror_health
         health.paired = lambda: (["9"], None)
-        conv = lambda step: {"name": "Home", "libraries": {"9": {"converting": {"step": step, "folder": "Books"}}}}  # noqa: E731
+        conv = lambda step: {"name": "Home", "libraries": {"9": {"converting": {"step": step, "folder": "Books"}}}}
         facts["v"] = conv("copy")
         self.assertIsNone(health.converting("9"))
         self.assertIsNone(health.not_applicable("9"))
@@ -11270,7 +11345,6 @@ class OptimizerSetupTests(unittest.TestCase):
         app = _new_app()
         op = Optimizing(app)
         ids = lambda: [(x["id"], x["ok"]) for x in op.diagnose()["steps"]]
-        me = {"id": "abc123" + "0" * 58, "service_name": "plex-cache-dev", "state": "running"}
         containers = {"app": "plex-cache-dev", "me": "plex-cache-dev", "optimizer": None}
         hz = {"error": "[Errno 8] nodename nor servname provided"}
         st = {"error": "not set up"}
@@ -11566,6 +11640,7 @@ class CoverArtTests(unittest.TestCase):
     def test_title_of(self):
         """How Plex names an item, for lists: "Title (year)", "Show · S01E05", "Album · Track"."""
         import xml.etree.ElementTree as ET
+
         from plexcache.plex import title_of
         cases = [('<Video type="movie" title="Heat" year="1995"/>', "Heat (1995)"),
                  ('<Video type="movie" title="Heat" year="1995" editionTitle="Director\'s Cut"/>', "Heat (1995) · Director's Cut"),
@@ -11577,6 +11652,7 @@ class CoverArtTests(unittest.TestCase):
 
     def test_posters_from_plex(self):
         import xml.etree.ElementTree as ET
+
         from plexcache.plex import poster_of
         self.assertEqual(poster_of(ET.fromstring('<Video type="movie" thumb="/library/metadata/5/thumb/17"/>')),
                          "/library/metadata/5/thumb/17")
@@ -11597,6 +11673,7 @@ class CoverArtTests(unittest.TestCase):
 
     def test_cover_art_is_set_once_then_synced_on_request(self):
         from types import SimpleNamespace
+
         from plexcache.optimize.optimizer import COVER_PREFIX
         from plexcache.optimizing import Optimizing
         app = _new_app()
@@ -12006,6 +12083,7 @@ class LoginTests(unittest.TestCase):
 
     def test_default_password_is_refused(self):
         import base64
+
         from plexcache.server import serve
         app = _new_app()
         app.auth = self.authmod.Auth("plex-cache", "change-me", app.config_dir)
@@ -12325,6 +12403,7 @@ class ErrorPathTests(unittest.TestCase):
 
     def test_reader_errors(self):
         from unittest import mock
+
         from plexcache import reader
         d = tempfile.mkdtemp(dir=TMP)
         # Reading a folder fails: the error is reported, nothing counted
@@ -12423,9 +12502,9 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertIn("url", updates.UpdateChecker(app, self.url).status())
 
     def test_check(self):
+        from plexcache import updates
         from plexcache.homeassistant import update_info
         from plexcache.updates import UpdateChecker
-        from plexcache import updates
         app = _new_app()
         u = app.updates = UpdateChecker(app, self.url)
         self.assertTrue(u.check())
@@ -12812,7 +12891,7 @@ class MQTTTests(unittest.TestCase):
                             ("ram_reserve_gb", "nan"), ("poll_seconds", "7")):
             n = sum("couldn’t do" in e["message"] for e in self.app.activity.snapshot()["events"])
             self.broker.inject(f"plexcache/set/{name}", value)
-            self.assertTrue(wait_for(lambda: sum("couldn’t do" in e["message"] for e in self.app.activity.snapshot()["events"]) > n),
+            self.assertTrue(wait_for(lambda n=n: sum("couldn’t do" in e["message"] for e in self.app.activity.snapshot()["events"]) > n),
                             (name, value))
         self.broker.inject("plexcache/set/warmup_pacing_percent", "25")
         self.broker.inject("plexcache/set/ram_reserve_gb", "6")
@@ -12834,7 +12913,7 @@ class MQTTTests(unittest.TestCase):
         for name, value in (("warmup_pacing_auto", "maybe"), ("library_9999_prefetch_start", "off")):
             n = sum("couldn’t do" in e["message"] for e in self.app.activity.snapshot()["events"])
             self.broker.inject(f"plexcache/set/{name}", value)
-            self.assertTrue(wait_for(lambda: sum("couldn’t do" in e["message"] for e in self.app.activity.snapshot()["events"]) > n),
+            self.assertTrue(wait_for(lambda n=n: sum("couldn’t do" in e["message"] for e in self.app.activity.snapshot()["events"]) > n),
                             (name, value))
         self.app.settings.update({"nowplaying": {"enabled": True, "ram_percent": 20}, "general": {"poll_seconds": 5, "ram_reserve_gb": 4},
                                   "warmup": {"pacing_percent": 10, "pacing_auto": True}})
@@ -12905,6 +12984,7 @@ class MQTTTests(unittest.TestCase):
         """Every discovery message follows Home Assistant's MQTT discovery rules
         (https://www.home-assistant.io/integrations/mqtt/)."""
         import re
+
         from plexcache import homeassistant as ha
         self.enable()
         self.assertTrue(wait_for(lambda: self.app.ha.status.get("entities") and self.state() is not None, 15))
@@ -12998,6 +13078,7 @@ class MQTTTests(unittest.TestCase):
     def test_controls_match_the_web_ui(self):
         """Every setting Home Assistant can change is one the web UI offers, under the same conditions."""
         import re
+
         from plexcache import homeassistant as ha
         js = _read(os.path.join(ROOT, "plexcache", "web", "app.js"), encoding="utf-8")
 
@@ -13008,7 +13089,7 @@ class MQTTTests(unittest.TestCase):
         state = {"libraries": {"2": {"name": "TV Shows", "kind": "tv"}}}
         controls = [(c, oid) for c, oid, _ in ha.entities(state, allow_control=True) if c in ("switch", "number", "select")]
         self.assertGreater(len(controls), 5)
-        for comp, oid in controls:
+        for _comp, oid in controls:
             with self.subTest(oid):
                 if oid.startswith("library_"):
                     self.assertIn('pickHtml("lib:" + l.key + ".%s"' % oid.rsplit("_", 1)[1], js)    # a library's Prefetch choice
@@ -13028,6 +13109,7 @@ class MQTTTests(unittest.TestCase):
         """Every Home Assistant control either applies always or says when (AVAILABLE_WHEN); one that
         doesn't apply shows as unavailable. A new control has to be put in one or the other."""
         from types import SimpleNamespace
+
         from plexcache import homeassistant as ha
         state = {"libraries": {"2": {"name": "TV Shows", "kind": "tv"}}}
         controls = {oid for c, oid, _ in ha.entities(state, allow_control=True) if c in ("switch", "number", "select", "button")}
@@ -13158,6 +13240,7 @@ class MQTTTests(unittest.TestCase):
 
     def test_client_details(self):
         from unittest import mock
+
         from plexcache import mqttclient
         from plexcache.mqttclient import MQTTClient, MQTTError
         real = socket.create_connection
@@ -13165,7 +13248,7 @@ class MQTTTests(unittest.TestCase):
         def fake(open_ports, timeout_on=()):
             def connect(addr, timeout=None):
                 if addr[1] in timeout_on:
-                    raise socket.timeout()
+                    raise TimeoutError()
                 if addr[1] in open_ports:
                     return real(("127.0.0.1", self.broker.port), timeout=timeout)
                 raise ConnectionRefusedError()
@@ -13262,6 +13345,7 @@ class MQTTTests(unittest.TestCase):
         """Something that answers, but not as a broker would, a TLS port that never
         answers, and a message too big for MQTT: each a clear error, never a hang."""
         import socket
+
         from plexcache import mqttclient
         from plexcache.mqttclient import MQTTClient, MQTTError
         srv = socket.socket()
@@ -13380,7 +13464,8 @@ class CacheModeTests(unittest.TestCase):
         self.assertEqual(fb.recent(), [])
 
     def test_health_lists_fallbacks(self):
-        from plexcache import cachemode as cm, checks
+        from plexcache import cachemode as cm
+        from plexcache import checks
         from plexcache.i18n import M
 
         class FakeApp:
@@ -13411,7 +13496,7 @@ class CacheModeTests(unittest.TestCase):
         self.assertEqual(titles()["L2ARC not checked yet"], "info")
 
     def test_describe(self):
-        from plexcache import cachemode as cm, prefetch  # noqa: F401  (registers the prefetch settings)
+        from plexcache import cachemode as cm
         d = cm.describe(cm.RAM, "absent", False, cm.Fallbacks())
         self.assertEqual(d["defaults"]["prefetch.start"], "rest")
         self.assertEqual(d["settings"]["prefetch.end"], {"l2arc": "rest", "ram": "next", "l2arc_only": ["rest"]})
@@ -13481,8 +13566,8 @@ class MQTTStandardsTests(unittest.TestCase):
 
     def test_client_id(self):
         # Letters and digits, 1 to 23: what every broker must accept [MQTT-3.1.3-5]
+
         from plexcache.homeassistant import mqtt_client_id
-        import re
         for node in ("plexcache_1a2b3c4d5e6f", "plexcache_x", "plexcache_" + "f" * 40, "", "plexcache_ü-ß"):
             self.assertRegex(mqtt_client_id(node), r"^[0-9A-Za-z]{1,23}$", node)
         self.assertEqual(mqtt_client_id("plexcache_1a2b3c4d5e6f"), "plexcache1a2b3c4d5e6f")
@@ -13841,7 +13926,7 @@ class SyncthingTests(unittest.TestCase):
             sy.add_device_address("NOBODY-" + fakes.ST_OTHER_ID[7:])
         # the throttle, on from the start
         self.assertEqual(config.DEFAULTS["syncthing"]["throttle"], True)
-        light = lambda: sy.lights()["throttle"]  # noqa: E731
+        light = lambda: sy.lights()["throttle"]
         app.settings.update({"syncthing": {"throttle": False}})
         app.settings.update({"syncthing": {"giveway": False}})
         self.assertEqual((light()["status"], en(light()["text"])), ("off", "Not held back for the disks or the internet"))
@@ -13931,7 +14016,7 @@ class SyncthingTests(unittest.TestCase):
         certificate its sync port presents to anyone (no key); else this app's own key. Carried over the link, so each side
         shows the other's; and checked against the devices the folder is shared with."""
         from plexcache import peerlink as pl
-        from plexcache.syncthing import cert_device_id, device_id_from_cert, luhn32, ALPHA32
+        from plexcache.syncthing import ALPHA32, cert_device_id, device_id_from_cert, luhn32
         did = device_id_from_cert(b"a certificate")
         groups = did.split("-")
         self.assertEqual([len(g) for g in groups], [7] * 8)
@@ -14337,9 +14422,10 @@ class IntegrationStandardTests(unittest.TestCase):
         # the custom access URLs: well-formed, this server's, reachable from here; and this NAS's tailnet address to add
         import ipaddress
         import urllib.parse
+
         from plexcache.plex import PlexClient as _PC
         self.assertEqual(en(c["plex_urls"]["text"]), "No custom access URLs")
-        light = lambda: app._urls_light(PLEX.prefs["customConnections"], "abc")  # noqa: E731
+        light = lambda: app._urls_light(PLEX.prefs["customConnections"], "abc")
         PLEX.prefs["customConnections"] = "nonsense"
         self.assertEqual((light()["status"], en(light()["text"])), ("warn", "A custom access URL isn’t this server’s: nonsense"))
         PLEX.prefs["customConnections"] = PLEX.url
@@ -14475,7 +14561,7 @@ class LiveSyncthingTests(unittest.TestCase):
             self.skipTest("no live Syncthing (SYNCTHING_LIVE_URL, SYNCTHING_LIVE_KEY)")
 
     def test_every_call_answers(self):
-        from plexcache.syncthing import CALLS, SyncthingClient, covering, device_id_from_cert, cert_device_id
+        from plexcache.syncthing import CALLS, SyncthingClient, cert_device_id, covering
         c = SyncthingClient(self.url, self.key, timeout=20)
         self.assertTrue(c.healthy())
         my = c.status()["myID"]
@@ -14627,6 +14713,7 @@ class TranslationTests(unittest.TestCase):
 
     def test_untranslated_falls_back_to_english(self):
         from unittest import mock
+
         from plexcache import i18n
         i18n._catalogs["xx-test"] = {"Idle": None, "{n} files": {"one": None, "other": None}}
         try:
@@ -14642,8 +14729,9 @@ class TranslationTests(unittest.TestCase):
         numbers with each language's separators, lists, and messages that keep their template."""
         import copy
         import pickle
+
         from plexcache import i18n
-        from plexcache.i18n import M, Fixed
+        from plexcache.i18n import Fixed, M
         plurals = [("ja", 1, "other"), ("fr", 0, "one"), ("fr", 2, "other"), ("ru", 1, "one"), ("ru", 3, "few"), ("ru", 11, "many"),
                    ("ru", 1.5, "other"), ("uk", 22, "few"), ("pl", 1, "one"), ("pl", 23, "few"), ("pl", 25, "many"), ("pl", 2.5, "other"),
                    ("en", 1, "one"), ("en", 1.0, "one"), ("en", 2, "other"), ("en", "x", "other"), ("en", True, "other")]
@@ -15154,7 +15242,7 @@ class StyleGuideTests(unittest.TestCase):
         s = self.style
         items = [{"id": i, "state": "changed", "look": f"css .l{i}", "was": "gap:0", "now": "gap:1px", "find": {"how": "selector"}}
                  for i in range(4)]
-        pair = lambda label, same: {"label": label, "before": label + "-b.png", "after": label + "-a.png", "same": same,  # noqa: E731
+        pair = lambda label, same: {"label": label, "before": label + "-b.png", "after": label + "-a.png", "same": same,
                                     "diff": None if same else label + "-d.png"}
         shots = {"0": [pair("Classic light", True), pair("Dionysus light", True)],     # the same everywhere
                  "1": [pair("Classic light", True), pair("Dionysus light", False)],    # different in Dionysus
@@ -15323,7 +15411,6 @@ class StyleGuideTests(unittest.TestCase):
                 json.dump({"fingerprint": s.fingerprint(s.compare(s.load_guide()["looks"], self.now))}, f)
             self.assertEqual(s.review_line(1, tmp, self.now), "1 look needs your approval: python3 dev/style.py review")
             # some of it approved since: what's left is all in the sample as it showed it, so it's not out of date
-            diff = s.compare(s.load_guide()["looks"], {**s.load_guide()["looks"], "css .zz": "gap:1px", "css .zy": "gap:2px"})
             with open(os.path.join(tmp, "sample.json"), "w") as f:
                 json.dump({"fingerprint": "x", "items": [{"id": 0, "state": "new", "look": "css .zz", "was": None, "now": "gap:1px"},
                                                          {"id": 1, "state": "new", "look": "css .zy", "was": None, "now": "gap:2px"},
@@ -15356,7 +15443,7 @@ class UpkeepTests(unittest.TestCase):
                         upkeep.main()
                     self.assertEqual(check.call_args.kwargs["apply"], phase_moves, (where, phase))
         found = {d.name: [d.have(), d.have()] for d in upkeep.DEPS}
-        fits = lambda lines: [l for l in lines if len(l) > upkeep.WIDTH]  # noqa: E731
+        fits = lambda lines: [l for l in lines if len(l) > upkeep.WIDTH]
         with mock.patch.object(upkeep, "lookup", return_value=(found, False)):
             got = upkeep.box(upkeep.check(apply=False), "dev")
         self.assertEqual((got[0], got[1]), ("current", "DEPENDENCIES  -  ALL UP TO DATE"))
@@ -15426,6 +15513,7 @@ class UpkeepTests(unittest.TestCase):
         slow) is said, not a crash; when the one install of them all fails, each is tried alone, to say which."""
         import io
         import subprocess
+
         from dev import upkeep
         from dev.progress import Progress
         moved, installs = [], []
@@ -15489,6 +15577,7 @@ class UpkeepTests(unittest.TestCase):
         stale; with none, upstream not reached) and the bar says which host it's waiting on. A host's addresses are tried
         IPv4 first, CONNECT seconds each, so an IPv6 that goes nowhere doesn't cost TIMEOUT for each address in turn."""
         import io
+
         from dev import upkeep
         from dev.progress import Progress
         hang = threading.Event()
@@ -15542,7 +15631,7 @@ class UpkeepTests(unittest.TestCase):
         except upkeep.Offline as e:
             self.skipTest(str(e))
         moves = upkeep.may_move()
-        left = [p for p, n in zip(r.prompts, r.news) if not (moves and n[3] == "minor")]
+        left = [p for p, n in zip(r.prompts, r.news, strict=False) if not (moves and n[3] == "minor")]
         if left:
             self.fail("behind upstream — move it, or hold it by choice (dev/upkeep.py):\n  " + "\n  ".join(left))
 
@@ -15563,6 +15652,7 @@ class HomeAssistantRulesTests(unittest.TestCase):
 
     def test_a_key_it_no_longer_takes_is_a_prompt(self):
         import urllib.error
+
         from dev import upkeep
         def get(url):
             for path, text in self.SOURCES.items():
@@ -15583,12 +15673,42 @@ class HomeAssistantRulesTests(unittest.TestCase):
         self.assertTrue(upkeep.parse(next(d for d in upkeep.DEPS if d.name.startswith("Home Assistant")).have()))
 
 
+class TypeCheckTests(unittest.TestCase):
+    """Python Validation (dev/typecheck.py): pyright and Ruff at build.yml's pins, as tnsync's block and GitHub run them."""
+
+    def test_ruffs_findings_as_it_says_them(self):
+        from dev import typecheck
+        def f(code, safe=False):
+            return {"code": code, "message": "m", "filename": os.path.join(ROOT, "a.py"), "location": {"row": 3, "column": 1},
+                    "fix": {"applicability": "safe"} if safe else None}
+        self.assertEqual(typecheck.ruff_lines([f("F401", True), f("B023")]), ["  a.py:3:1: F401 [*] m", "  a.py:3:1: B023 m"])
+
+    def test_pins_are_build_ymls_and_upkeeps(self):
+        from dev import typecheck, upkeep
+        deps = {d.name: d for d in upkeep.DEPS}
+        self.assertEqual(deps["pyright"].have(), typecheck.pin())
+        self.assertEqual(deps["Ruff"].have(), typecheck.ruff_pin())
+        self.assertEqual(deps["Ruff"].major, 2)   # (a Ruff minor changes what its rules find: a prompt, not moved by itself)
+        build = _read(os.path.join(ROOT, ".github", "workflows", "build.yml"), encoding="utf-8")
+        self.assertIn("run: python dev/typecheck.py", build)   # (GitHub runs what tnsync's block runs)
+        written = {}
+        with mock.patch.object(upkeep, "_read", return_value=build), mock.patch.object(upkeep, "_write", side_effect=written.__setitem__):
+            self.assertEqual(upkeep._bump_ruff("9.9.9"), f".github/workflows/build.yml: {typecheck.ruff_pin()} → 9.9.9")
+            self.assertIn("ruff==9.9.9", written[upkeep.BUILD])
+        # Ruff reads the code as the Python pyright and the image do
+        import tomllib
+        with open(os.path.join(ROOT, "ruff.toml"), "rb") as fh:
+            ruff = tomllib.load(fh)
+        pyright = json.loads(re.sub(r"(?m)^\s*//.*$", "", _read(os.path.join(ROOT, "pyrightconfig.json"), encoding="utf-8")))
+        self.assertEqual(ruff["target-version"], "py" + pyright["pythonVersion"].replace(".", ""))
+
+
 class ReleaseTests(unittest.TestCase):
     """The release checks (dev/release.py): what tnsync --release checks before dev is released, and only then."""
 
     def test_version_is_a_new_minor_or_major(self):
         from dev import release
-        text = lambda v: f'__version__ = "{v}"\n'  # noqa: E731
+        text = lambda v: f'__version__ = "{v}"\n'
         with mock.patch.object(release, "released", return_value=((0, 15, 0), "main has 0.15.0")), \
                 mock.patch.object(release, "_git", return_value=""):
             for v, ok in (("0.16.0", True), ("0.17.0", True), ("1.0.0", True), ("0.16.22", False), ("0.15.0", False),
@@ -15932,7 +16052,8 @@ class ToolsTests(unittest.TestCase):
         the pairs, the tools' mirrored(), converting's wait, Health's question; discovery scores each library here against each
         library found, so a server that mirrors some libraries and not others is told apart; the old settings (one choice for
         every library, an ignore list, string pairs) become states on load."""
-        from plexcache import checks, sync as syncmod
+        from plexcache import checks
+        from plexcache import sync as syncmod
         from plexcache.config import Settings
         from plexcache.plex import Library
         from plexcache.tools import mirrored
@@ -16139,7 +16260,8 @@ class ToolsTests(unittest.TestCase):
         of its own is kept, the other set aside in the library's .plexcache-trash through the optimizer,
         and Plex asked to scan. It's deleted for good once Plex no longer lists it and the hold is over —
         or put back, or kept set aside. Health says when one is held too long."""
-        from plexcache import checks, trash as trash_mod
+        from plexcache import checks
+        from plexcache import trash as trash_mod
         app, plex, client, cat, _ = self._app()
         tool, tr = app.tools["versions"], app.trash
         m = cat["movies"][0]
@@ -16228,7 +16350,7 @@ class ToolsTests(unittest.TestCase):
         from plexcache.tools import versions as vmod
         # the rule itself: the files of a server ({path: record}); a record whose files are all deleted goes
         idx = {"/a": "1", "/b": "1", "/c": "2"}
-        ending = lambda paths: vmod._ending(idx, vmod._held(idx), [{"path": p} for p in paths], lambda p: [p])  # noqa: E731
+        ending = lambda paths: vmod._ending(idx, vmod._held(idx), [{"path": p} for p in paths], lambda p: [p])
         self.assertEqual((ending(["/c"]), ending(["/b"]), ending(["/a", "/b"]), ending(["/x"])), ({"/c"}, set(), {"/a", "/b"}, set()))
         app, plex, client, cat, other = self._app(mirror=True)
         tool = app.tools["versions"]
@@ -16244,7 +16366,7 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual((x["there"], x["ends_record_there"], x["ends_record"], row["blocked"]), (True, True, False, False))  # (there: grey, not blocking)
         # the page: the two cards, which is which said; the record there said in grey, the row tickable
         got = PageStructureTests._render(self, app.state(), "versions")
-        html, text = got["html"], got["text"]
+        html = got["html"]
         self.assertIn('<div class="mgkeep"><div class="mgkeeplbl">This file kept</div>', html)
         self.assertIn('<div class="mgdrop"><div class="mgdroplbl">This file deleted</div>', html)
         self.assertLess(html.index("This file kept"), html.index("This file deleted"))             # (the tool's pick on the left)
@@ -17758,7 +17880,8 @@ class CountStandardTests(unittest.TestCase):
         before it: a finding that the item's files aren't the same at the two sites stops its row (a red tag, Apply
         refusing it) until it's put right, ignored there, or its check switched off; and the folder sync not carrying
         .plexcache holds it, as it holds the file tools."""
-        from plexcache import libhealth, mirrorhealth as mh
+        from plexcache import libhealth
+        from plexcache import mirrorhealth as mh
         app, _plex, _client, _cat, _other = ToolsTests()._app()
         ev = app.evaluator
         d = app.libdata.data("1")
@@ -17910,7 +18033,6 @@ class CountStandardTests(unittest.TestCase):
         c = ev.count("optimizer", "1")
         self.assertEqual(c["s"], "done")
         self.assertEqual(c["n"], ((app.optimizing.summary or {}).get("1") or {}).get("todo") or 0)
-        lib = app.settings.get().get("optimizer") or {}
         app.optimizing.options = lambda key: {"sync": False, "mkv": False}
         c = ev.count("optimizer", "1")
         self.assertEqual(c["s"], "na")
@@ -18414,7 +18536,7 @@ class ConversionTests(unittest.TestCase):
         self.assertTrue(conv._check(e))                                                               # (Plex can't be asked: said, tried again)
         self.assertEqual(e["note"], "Plex down")
         app.plex_fail = False
-        F = lambda path, rk: types.SimpleNamespace(path=path, rating_key=rk)  # noqa: E731
+        F = lambda path, rk: types.SimpleNamespace(path=path, rating_key=rk)
         app.files = [F("/plex/a.avi", "9"), F("/plex/a MKV-AVI.mkv", "9")]                            # (merged in Plex since: one item again)
         app.playing = {orig}
         e["checked"] = 0
@@ -18603,7 +18725,7 @@ class SyncApplyTests(unittest.TestCase):
             syncapply.ends(app, "1", "here")
         src, dst = mock.Mock(), mock.Mock()
         logs = []
-        log = lambda m: logs.append(en(m))  # noqa: E731
+        log = lambda m: logs.append(en(m))
         e = {"src": src, "dst": dst, "section": "9", "name": "Cabin", "server": "mirror"}
         out = syncapply.apply({"scan": ["/a", "/b"]}, ["missing"], e, log)
         self.assertEqual((out["scanned"], out["done"], logs[-1]), (["/a", "/b"], ["missing"], "Cabin’s Plex asked to scan 2 folders"))
@@ -18931,7 +19053,7 @@ class ServerRouteTests(unittest.TestCase):
             self.assertEqual(self.req("GET", "/api/state?focus=optimizer:1")[0], 200)
             focus.assert_called_once_with("optimizer", "1")
         self.assertEqual(self.req("GET", "/api/tools/readiness?key=9")[0], 404)
-        fake = lambda app, key, need, keeps=False, retained=0, tool="": {"key": key, "need": need, "keeps": keeps, "retained": retained, "tool": tool}  # noqa: E731
+        fake = lambda app, key, need, keeps=False, retained=0, tool="": {"key": key, "need": need, "keeps": keeps, "retained": retained, "tool": tool}
         with self._lib(), mock.patch("plexcache.safety.readiness", side_effect=fake), mock.patch.object(self.app.optimizing, "summary", {"1": {"todo_bytes": 77}}):
             self.assertEqual(self.req("GET", "/api/tools/readiness?key=1&needed=abc&retained=x&keeps=1")[1], {"key": "1", "need": 0, "keeps": True, "retained": 0, "tool": ""})
             self.assertEqual(self.req("GET", "/api/tools/readiness?key=1&needed=largest&tool=optimizer")[1], {"key": "1", "need": "largest", "keeps": False, "retained": 77, "tool": "optimizer"})
@@ -19837,6 +19959,7 @@ class OptimizerClientTests(unittest.TestCase):
 
     def test_calls_and_errors(self):
         import base64
+
         from plexcache import optimizing
         client = optimizing.OptimizerClient("http://127.0.0.1:1", "a-long-test-token-123456")
         sent = []
@@ -19866,7 +19989,6 @@ class Plex2EdgeTests(unittest.TestCase):
 
     def test_listing_using_and_reaching_the_server(self):
         from plexcache import plex2 as plex2mod
-        from plexcache.plex import Library
         app = _new_app()
         other = app.mirrors
         self.assertEqual(other.libraries("zzz"), [])                                                  # (no such server reached)
@@ -19961,7 +20083,7 @@ class ConvertEdgeTests(unittest.TestCase):
     def test_verification_and_refused_deletions(self):
         from plexcache.optimize import convert
         probes = {}
-        V = lambda codec, n: {"codec_type": "video", "codec_name": codec, "nb_read_packets": n}  # noqa: E731
+        V = lambda codec, n: {"codec_type": "video", "codec_name": codec, "nb_read_packets": n}
         S = {"codec_type": "subtitle", "codec_name": "mov_text"}
         with mock.patch.object(convert, "_probe", side_effect=lambda p, count=False: probes[p]):
             probes["a"], probes["b"] = {"streams": [V("h264", 100)]}, {"streams": [V("hevc", 100)]}
@@ -20011,7 +20133,7 @@ class OptimizerServiceRouteTests(unittest.TestCase):
         f = os.path.join(root, "a.mkv")
         with open(f, "wb") as fh:
             fh.write(b"x" * 10)
-        act = lambda **body: osrv.folder_action(svc, body)  # noqa: E731
+        act = lambda **body: osrv.folder_action(svc, body)
         self.assertEqual(act(action="mark", path=root, instance="!!", info={})[0], 400)
         self.assertEqual(act(action="mark", path=root, instance="0123456789abcdef", info={"big": "x" * 9000}), (400, {"error": "too much to publish"}))
         self.assertEqual(act(action="mark", path=root, instance="0123456789abcdef", info={"name": "A"})[0], 200)
@@ -20166,7 +20288,8 @@ class SmallEdgeTests2(unittest.TestCase):
         self.assertIsNone(peers.tool_conflict(app, "1", "folders", {"fresh": {"by_library": {}}}))
 
     def test_catalogs_platform_and_scrubs(self):
-        from plexcache import i18n, pauses, platform as platform_mod
+        from plexcache import i18n, pauses
+        from plexcache import platform as platform_mod
         i18n._catalogs.pop("de", None)
         self.assertIsInstance(i18n._load("de"), dict)
         self.assertIsNone(i18n.lookup("no such string at all", "de"))
@@ -20392,6 +20515,7 @@ class PlexEdgeTests2(unittest.TestCase):
 
     def test_helpers_and_client_edges(self):
         import xml.etree.ElementTree as ET
+
         from plexcache import plex as plexmod
         self.assertFalse(plexmod._int("abc"))
         st = ET.Element("Stream", {"streamType": "2", "index": "1", "codec": "AAC", "channels": "6", "bitrate": "640", "languageTag": "en", "forced": "1", "default": "true",
@@ -20802,7 +20926,7 @@ class MigratingEdgeTests2(unittest.TestCase):
             with mock.patch.object(mig, "_mirror", return_value=None):
                 self.assertIn("not heard from", en(mig.mirror_view()["title"]))
         checks = []
-        check = lambda cid, ok, title, detail="", *a, **k: checks.append((cid, ok, en(detail)))  # noqa: E731
+        check = lambda cid, ok, title, detail="", *a, **k: checks.append((cid, ok, en(detail)))
         st = {"folder": "/m/A", "library": "1"}
         mig._check_mirror_files(st, check, None, "Cabin", {"key": "7"}, False)
         with mock.patch.object(mig, "_compare_with_mirror", side_effect=RuntimeError("quiet")):
@@ -20844,7 +20968,7 @@ class FileChecksEdgeTests(unittest.TestCase):
         mp4 = {"format": "mp4", "size": 10_000_000, "blksize": None, "video_start": 500_000, "tracks": [{"type": "video"}], "attachments": [], "parts": []}
         self.assertIn("only rewrites MKV", run(mp4)["front"][1])
         found = []
-        add = lambda cid, status, text: found.append((cid, status, en(text)))  # noqa: E731
+        add = lambda cid, status, text: found.append((cid, status, en(text)))
         d = tempfile.mkdtemp(dir=TMP)
         avi, p = os.path.join(d, "a.avi"), os.path.join(d, "a.mkv")
         for x in (avi, p):

@@ -486,8 +486,8 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
     if not built:
         print(f"\nThe image doesn't build on python:{tag} (no such tag yet, or the build fails there).")
         return 1
-    run = lambda *args: subprocess.run(["docker", "run", "--rm", "-v", f"{ROOT}:/src:ro", "-w", "/src", "--entrypoint", "python", IMAGE, *args],
-                                       stdout=None if verbose else subprocess.DEVNULL, stderr=None if verbose else subprocess.DEVNULL).returncode  # noqa: E731
+    run = lambda *args: subprocess.run(["docker", "run", "--rm", "-v", f"{ROOT}:/src:ro", "-w", "/src", "--entrypoint", "python", IMAGE, *args],  # noqa: E731
+                                       stdout=None if verbose else subprocess.DEVNULL, stderr=None if verbose else subprocess.DEVNULL).returncode
     if run("-c", "import sys, compression.zstd; print('Python', sys.version.split()[0])"):
         print("\nThe image's Python lacks the stdlib zstd the block estimates use.")
         return 1
@@ -577,7 +577,7 @@ def syncthing_route(verbose: bool) -> int:
             shutil.copyfileobj(r, fh)
         if archive.endswith(".zip"):
             with zipfile.ZipFile(archive) as z:
-                z.extractall(d)
+                z.extractall(d)  # noqa: S202 — (zipfile keeps every member inside d)
         else:
             with tarfile.open(archive) as t:
                 t.extractall(d, filter="data")
@@ -588,7 +588,7 @@ def syncthing_route(verbose: bool) -> int:
     if not binary:
         print("\nNot run: the archive holds no syncthing binary.")
         return 3
-    os.chmod(binary, 0o755)
+    os.chmod(binary, 0o755)  # noqa: S103 — (the binary it runs: executable)
     home = tempfile.mkdtemp(prefix="syncthing-home-")
     subprocess.run([binary, "generate", "--home", home, "--no-default-folder", "--skip-port-probing"], check=True, stdout=None if verbose else subprocess.DEVNULL, stderr=subprocess.STDOUT)
     cfg = os.path.join(home, "config.xml")

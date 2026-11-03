@@ -6,11 +6,11 @@ bitrates are kbps, so bytes = kbps * 125 * seconds everywhere.
 """
 
 import math
-from collections.abc import Callable
-from typing import Any
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from . import cachemode
 from .i18n import M

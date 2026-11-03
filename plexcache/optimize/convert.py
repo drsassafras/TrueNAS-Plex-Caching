@@ -21,7 +21,7 @@ import shutil
 import time
 
 from . import VERSION, mkv
-from .optimizer import Skipped, _GUI_PROGRESS, _copy_meta, _identity, _prepare, optimize_file
+from .optimizer import _GUI_PROGRESS, Skipped, _copy_meta, _identity, _prepare, optimize_file
 from .tools import VerifyError, run
 
 # The containers that can be converted, by the file's extension. (WebM is Matroska already;
@@ -160,7 +160,7 @@ def verify(path: str, out: str, captions: bool) -> None:
         sb = sorted((s.get("codec_name"), int(s.get("nb_read_packets") or 0)) for s in b if _kind(s) == kind)
         if [c for c, _ in sa] != [c for c, _ in sb]:
             raise VerifyError(f"the MKV's {kind} tracks differ from the original's")
-        for (_, na), (_, nb) in zip(sa, sb):
+        for (_, na), (_, nb) in zip(sa, sb, strict=False):
             if abs(na - nb) > max(2, na // 1000):
                 raise VerifyError(f"a {kind} track lost packets ({na} → {nb})")
     if sum(1 for s in a if _kind(s) == "subtitles") != sum(1 for s in b if _kind(s) == "subtitles"):

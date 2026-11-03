@@ -18,12 +18,12 @@ import dataclasses
 import os
 import threading
 import time
-from typing import Any
 from dataclasses import dataclass, field
+from typing import Any
 
 from . import cachemode, prefetch, zfs
-from .layout import min_head, tail_ranges
 from .i18n import M, duration_text, join, msg, size_text
+from .layout import min_head, tail_ranges
 from .pauses import L2arcPauses, busy_percent
 from .plex import PlexClient, PlexError
 from .reader import MiB, Pacer, ReadResult, Stopped, is_probe_hit, read_range
@@ -321,7 +321,7 @@ class PlaybackMonitor:
                 if self.last_error != str(e):
                     self.app.activity.event("playback", M("can’t read Plex sessions: {why}", why=msg(e)), "warn")
                 self.last_error = msg(e)
-            except Exception as e:  # never let the monitor die
+            except Exception as e:  # noqa: BLE001 — (never let the monitor die)
                 self.last_error = M("unexpected error: {why}", why=str(e))
                 self.app.activity.event("playback", self.last_error, "warn")
             self.stop.wait(settings["general"]["poll_seconds"])

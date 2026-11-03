@@ -10,8 +10,8 @@ import os
 import re
 import shutil
 import subprocess
-from typing import Literal, overload
 import threading
+from typing import Literal, overload
 
 NAMES = ("mkvmerge", "mkvextract", "ffmpeg", "ffprobe")
 OPTIONAL = ("oxipng", "jpegtran")

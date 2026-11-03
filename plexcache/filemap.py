@@ -13,13 +13,13 @@ What caching takes from each file comes from the same reading of its layout as c
 import json
 import os
 import struct
-from compression import zstd
 import threading
 import time
+from compression import zstd
 
 from . import layout
-from .layout import _element, _pread
 from .i18n import M
+from .layout import _element, _pread
 
 STORE = "file-maps.json"
 MAP_VERSION = 7  # what's read from each file; a map from an older version is read again (2: JPEG tables, 3: mix, 4: audio files, 5: LZ4, 6: ZFS rounding apart, 7: track flags)
@@ -40,6 +40,7 @@ COMPRESSION = {0: "zlib", 1: "bzlib", 2: "lzo", 3: "header stripping"}
 def codec_name(codec_id: str) -> str:
     """A codec ID's name as MKVToolNix shows it ("HEVC/H.265/MPEG-H"), or "" when it doesn't know it."""
     import re
+
     from .codec_names import CODECS
     for name, pattern in CODECS:
         if re.fullmatch(f"(?:{pattern})", codec_id or "", re.I):
@@ -240,7 +241,7 @@ def _mkv(fd: int, size: int) -> dict:
     # contents), then every part from there to the end
     tail_from = None
     try:
-        for sid, spos in _seek_targets(fd, buf, seg, size):
+        for _sid, spos in _seek_targets(fd, buf, seg, size):
             at = seg + spos
             if at > video_start and (tail_from is None or at < tail_from):
                 tail_from = at
@@ -277,7 +278,7 @@ def _id3(fd: int, size: int) -> tuple[list[dict], list[dict], int]:
     if head[:3] != b"ID3" or size < 10:
         return [], [], 0
     ver, flags = head[3], head[5]
-    syncsafe = lambda b: (b[0] << 21) | (b[1] << 14) | (b[2] << 7) | b[3]
+    syncsafe = lambda b: (b[0] << 21) | (b[1] << 14) | (b[2] << 7) | b[3]  # noqa: E731
     total = min(10 + syncsafe(head[6:10]) + (10 if flags & 0x10 else 0), size)
     parts, pics = [{"part": "id3", "pos": 0, "size": 10}], []
     if ver not in (3, 4):  # (ID3v2.2: read as one block of tags)

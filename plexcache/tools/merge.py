@@ -19,11 +19,11 @@ import os
 import re
 
 from ..i18n import M
+from ..libdata import link_of
 from ..libhealth import file_title_year
+from ..paging import sort_key
 from ..sync import _compare_pair, side
 from . import MAX_ROWS, Tool
-from ..libdata import link_of
-from ..paging import sort_key
 
 TOP_TYPE = {"movie": 1, "show": 2}  # the records that get duplicated: films, and shows
 LEN_PCT, LEN_SECS = 4, 30  # running times may differ this much (whichever is more) and still be one film
@@ -200,7 +200,7 @@ class MergeDuplicates(Tool):
             kinds: list[str] = []
             changes: list[dict] = []
             for o in others:  # what the folded records have that the kept one hasn't: lost in the merge
-                _compare_pair(o, keep, WHAT, lambda kind, _a, frm, to, _b=None: (kinds.append(kind) if kind not in kinds else None, changes.append({"kind": kind, "from": str(frm), "to": str(to)})))
+                _compare_pair(o, keep, WHAT, lambda kind, _a, frm, to, _b=None, kinds=kinds, changes=changes: (kinds.append(kind) if kind not in kinds else None, changes.append({"kind": kind, "from": str(frm), "to": str(to)})))
             linked = []  # files of these records that are links: merging them is unsafe until each is a file of its own
             for rec in cluster:
                 for path, _ in rec.get("files") or []:

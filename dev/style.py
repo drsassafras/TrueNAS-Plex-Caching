@@ -1333,7 +1333,7 @@ def review(out: str = SAMPLE, terminal: bool | None = None, open_browser: bool =
     if open_browser:
         webbrowser.open(url)
     def watch():   # (closes it once everything is approved, its page is closed, or after an hour unused)
-        while not ended.wait(min(1.0, idle)):
+        while not ended.wait(min(1.0, idle, gone[0] / 2, gone[1] / 4)):   # (often enough for the times it keeps to)
             now = time.time()
             if now - used[0] > idle:
                 print(f"No one has used the page for {round(idle / 60)} minutes, so it's closed: python3 dev/style.py review opens it again.")

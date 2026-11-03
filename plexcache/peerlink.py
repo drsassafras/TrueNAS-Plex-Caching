@@ -259,7 +259,7 @@ class PeerLinks:
         return self.app.optimizing.instance()
 
     # ------------------------------------------------------------ the links
-    def link(self, server: str) -> "PeerLink":
+    def link(self, server: str) -> PeerLink:
         """The link to the Dionysus at the site of the mirrored server (its machine id), made as needed."""
         with self.lock:
             lk = self.links.get(server)
@@ -267,11 +267,11 @@ class PeerLinks:
                 lk = self.links[server] = PeerLink(self, server)
             return lk
 
-    def used(self) -> list["PeerLink"]:
+    def used(self) -> list[PeerLink]:
         """The links of the servers some library is mirrored by, in the order chosen."""
         return [self.link(sid) for sid in self.app.mirrors.used()]
 
-    def for_library(self, key: str) -> "PeerLink | None":
+    def for_library(self, key: str) -> PeerLink | None:
         """The link to the Dionysus at the site of the library's mirror, or None (no mirror, or none looked for there)."""
         sid = self.app.mirrors.server_of(str(key))
         if not sid:
@@ -279,7 +279,7 @@ class PeerLinks:
         lk = self.link(sid)
         return lk if lk.wanted() else None
 
-    def for_server(self, server: str) -> "PeerLink | None":
+    def for_server(self, server: str) -> PeerLink | None:
         return self.link(server) if server else None
 
     def wanted(self) -> bool:
@@ -380,8 +380,8 @@ class PeerLinks:
     def handle_reach(self, data: dict) -> dict:
         """The other side's Plex tried from here at each of its addresses ("urls": http(s) only, REACH_MAX at most) — its
         /identity, which needs no token, answering as that server ("machine"). {"results": [{"url", "ok", "why"}]}."""
-        from .plex import PlexClient, PlexError
         from .i18n import render
+        from .plex import PlexClient, PlexError
         machine = str(data.get("machine") or "")
         out = []
         for url in [u for u in data.get("urls") or [] if isinstance(u, str)][:REACH_MAX]:
@@ -470,7 +470,7 @@ class PeerLinks:
         except Exception:  # noqa: BLE001
             return {}
 
-    def verify(self, headers, method: str, path: str, body: bytes) -> "PeerLink":
+    def verify(self, headers, method: str, path: str, body: bytes) -> PeerLink:
         """A signed request from a paired side checked: its instance (which pairing), its time, its nonce, its signature.
         Raises PeerError when any is wrong. The link it came over."""
         inst = headers.get("X-Plexcache-Peer")
@@ -593,7 +593,7 @@ class PeerLinks:
             for lk in links:
                 try:
                     lk.tick(force)
-                except Exception:  # noqa: BLE001 — a background helper: logged, tried again next time
+                except Exception:
                     log.exception("peer link check failed (%s)", lk.server)
         finally:
             self.busy = False
@@ -1120,7 +1120,7 @@ class PeerLink:
             from . import peers
             try:
                 peers.publish(self.app)
-            except Exception:  # noqa: BLE001 — the service away: the half-hourly publish says so
+            except Exception:
                 log.debug("marker not carried to %s", self.server, exc_info=True)
         return True
 
@@ -1502,7 +1502,7 @@ def own_library(app, key: str) -> dict:
     try:
         out["folders"] = mig.folders(key) if mig is not None else None
         out["converting"] = mig.converting_info(key) if mig is not None else None
-    except Exception:  # noqa: BLE001 — not worked out: not said
+    except Exception:
         log.debug("folders of %s not told", key, exc_info=True)
     try:
         out["holding"] = bool(health.converting(key)) if health is not None else None

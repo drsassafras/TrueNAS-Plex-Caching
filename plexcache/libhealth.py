@@ -341,7 +341,7 @@ def file_checks(m: dict | None, on: dict, lang: str = DEFAULT_LANGUAGE) -> list[
         want_lang, want_text = bool(on.get("subtitles_language") and lang), bool(on.get("subtitles_text"))
         fit = [t for t in subs if (not want_lang or same_language(t.get("language"), lang)) and (not want_text or str(t.get("codec") or "").lower() in TEXT_SUBS)]
         if not fit:
-            spoken = ", ".join(sorted(language_label(l) for l in langs if l))
+            spoken = ", ".join(sorted(language_label(lg) for lg in langs if lg))
             have = ", ".join(sorted({language_label(t.get("language") or "?") + (" " + str(t.get("codec") or "") if want_text else "") for t in subs}))
             what = (M("{lang} SRT/ASS", lang=language_name(lang) or lang) if want_lang and want_text else M("{lang}", lang=language_name(lang) or lang) if want_lang
                     else M("SRT/ASS") if want_text else "")
@@ -373,7 +373,7 @@ def file_checks(m: dict | None, on: dict, lang: str = DEFAULT_LANGUAGE) -> list[
             out.append({"id": "forced_subtitles_language", "category": "file", "status": "warn",
                         "text": M("Forced {langs} subtitles, but the audio is {audio}: forced subtitles are written in the language of the audio they go with, so these were most likely made for a {langs}-dubbed version that isn’t in this file.",
                                   langs=", ".join(sorted({_lname(t.get("language")) for t in orphans})),
-                                  audio=", ".join(sorted({_lname(l) for l in langs if l})) or M("untagged"))})
+                                  audio=", ".join(sorted({_lname(lg) for lg in langs if lg})) or M("untagged"))})
     if on.get("subtitles_on_zxx") and audio and not speech and not unknown:  # (zxx said; an unknown language says nothing)
         odd = [t for t in subs if not t.get("forced")]
         if odd:

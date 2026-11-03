@@ -21,7 +21,7 @@ import os
 
 from ..i18n import M
 from ..peerlink import rel_files, rel_of
-from ..sync import _Side, _norm, compare_library
+from ..sync import _norm, _Side, compare_library
 from . import MAX_ROWS, Tool
 
 KINDS = ("movie", "tv", "audio")

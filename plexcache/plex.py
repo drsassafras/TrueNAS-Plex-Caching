@@ -1,13 +1,13 @@
 """Minimal Plex Media Server client (standard library only)."""
 
 import json
-from collections.abc import Callable
 import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from . import __version__

@@ -76,7 +76,7 @@ def _plex_lan(app) -> list:
 def _build_id() -> str:
     """A short fingerprint of the web UI's files. It changes whenever they do (after tnsync or an
     update), so pages ask for the new files by name and open tabs know to reload themselves."""
-    h = hashlib.sha1()
+    h = hashlib.sha1(usedforsecurity=False)
     for root, dirs, files in os.walk(WEB_DIR):
         dirs.sort()
         for name in sorted(files):
@@ -170,7 +170,7 @@ def make_handler(app):
         sys_version = ""
         timeout = 30  # drop connections that go quiet, so idle sockets can't pile up
 
-        def log_message(self, format, *args):  # quiet access log unless debugging
+        def log_message(self, format, *args):  # noqa: A002 — quiet access log unless debugging
             log.debug("%s - %s", self.address_string(), format % args)
 
         # ------------------------------------------------------------ utils
@@ -210,7 +210,7 @@ def make_handler(app):
             if ctype.startswith("text/") or ctype in ("application/javascript",):
                 ctype += "; charset=utf-8"
             # Always checked with the server; unchanged files are answered with a short 304.
-            etag = '"' + hashlib.sha1(body).hexdigest()[:16] + '"'
+            etag = '"' + hashlib.sha1(body, usedforsecurity=False).hexdigest()[:16] + '"'
             if etag in (self.headers.get("If-None-Match") or ""):
                 return self._send(304, b"", ctype, {"Cache-Control": "no-cache", "ETag": etag})
             self._send(200, body, ctype, {"Cache-Control": "no-cache", "ETag": etag})
@@ -370,7 +370,7 @@ def make_handler(app):
             if path.startswith("/api/library"):
                 # The Library Health page: a library's files with their layouts, or one file in full
                 q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
-                arg = lambda k, d="": (q.get(k) or [d])[0]
+                arg = lambda k, d="": (q.get(k) or [d])[0]  # noqa: E731
                 if path == "/api/library":
                     try:
                         off, lim = max(0, int(arg("offset", "0"))), min(1000, max(1, int(arg("limit", "100"))))
@@ -435,7 +435,7 @@ def make_handler(app):
             if path.startswith("/api/processes"):
                 # The Processes page: the job running now, every job in the log, a job's files, and the export
                 q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
-                arg = lambda k, d="": (q.get(k) or [d])[0]
+                arg = lambda k, d="": (q.get(k) or [d])[0]  # noqa: E731
                 if path == "/api/processes":
                     return self._json({"job": app.jobs.snapshot(), "queue": app.jobs.queued(), "jobs": app.jobs.log.jobs(),
                                        "plex_backups": plexbackup.listing(app)})  # (the backups of Plex's records: each with its Revert)

@@ -76,12 +76,13 @@ def main(argv: list[str]) -> int:
     if len(entries) < 20:
         print(f"Only {len(entries)} codecs found in {where}: its layout may have changed. Nothing written.")
         return 1
-    for name, pattern in entries:
+    for _name, pattern in entries:
         re.compile(f"(?:{pattern})", re.I)  # (fails loudly if MKVToolNix uses something Python can't read)
     old = {}
     if os.path.exists(OUT):
         ns: dict = {}
-        exec(open(OUT, encoding="utf-8").read(), ns)
+        with open(OUT, encoding="utf-8") as fh:
+            exec(fh.read(), ns)  # noqa: S102 — (the committed plexcache/codec_names.py, read back to compare)
         old = dict(ns.get("CODECS", []))
     new = dict(entries)
     for name in sorted(set(new) - set(old)):

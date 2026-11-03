@@ -16,7 +16,7 @@ from . import zfs
 from .i18n import M
 
 # Mounts that are part of the container itself, never media.
-SYSTEM_MOUNTS = ("/", "/config", "/app", "/proc", "/sys", "/dev", "/etc", "/run", "/tmp", "/var", "/usr", "/lib",
+SYSTEM_MOUNTS = ("/", "/config", "/app", "/proc", "/sys", "/dev", "/etc", "/run", "/tmp", "/var", "/usr", "/lib",  # noqa: S108 — (refused as media)
                  "/bin", "/sbin", "/root", "/home")
 SKIP_FSTYPES = {"proc", "sysfs", "tmpfs", "devpts", "mqueue", "cgroup", "cgroup2", "devtmpfs", "overlay", "shm",
                 "securityfs", "debugfs", "tracefs", "pstore", "bpf", "fusectl", "configfs", "nsfs"}

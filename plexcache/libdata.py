@@ -38,7 +38,6 @@ or a check's scan reads from a LibraryData and nothing else — no Plex call, no
 own — so one gathering serves every check, and a change reaches every one of them.
 """
 
-import json
 import os
 import threading
 import time

@@ -11,14 +11,15 @@ import json
 import math
 import os
 import re
-import urllib.parse
 import threading
+import urllib.parse
 import uuid
 
 from .i18n import CODES, M
+
 TOOL_NAMES = ("merge", "versions", "folders", "unlink", "convert", "sync")  # the tools (tools/), as the "tools" section keys them
 
-SECRET_MASK = "__unchanged__"
+SECRET_MASK = "__unchanged__"  # noqa: S105 — (what the page shows for a secret, not one)
 SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"), ("syncthing", "api_key"), ("mqtt", "password"))
 
 DEFAULTS: dict = {
@@ -321,7 +322,7 @@ def _url(section: str, value) -> str:
     if u.scheme not in ("http", "https") or not u.hostname or "@" in u.netloc or u.query or u.fragment:
         raise SettingsError(M("{setting} must be an address like 192.168.1.10 or http://nas.local:32400", setting=f"{section}.url"))
     try:
-        u.port  # raises on a bad port
+        _ = u.port  # raises on a bad port
     except ValueError:
         raise SettingsError(M("{setting} has a bad port", setting=f"{section}.url")) from None
     return value

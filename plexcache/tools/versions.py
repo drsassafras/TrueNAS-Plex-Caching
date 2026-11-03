@@ -14,9 +14,9 @@ import os
 from ..i18n import M
 from ..libdata import same_bytes
 from ..libhealth import _same_file
+from ..paging import sort_key
 from ..plex import PlexError
 from . import MAX_ROWS, Tool
-from ..paging import sort_key
 
 
 def _brief(x: dict, keep: dict | None = None) -> dict:
@@ -82,7 +82,7 @@ class DuplicateVersions(Tool):
             # clusters of the same file (union-find over the pairs)
             parent = list(range(len(infos)))
 
-            def find(i):
+            def find(i, parent=parent):
                 while parent[i] != i:
                     parent[i] = parent[parent[i]]
                     i = parent[i]

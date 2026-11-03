@@ -1,9 +1,9 @@
 """Application core: shared state and background workers."""
 
+import contextlib
 import datetime as dt
 import hashlib
 import ipaddress
-import contextlib
 import json
 import logging
 import os
@@ -14,49 +14,75 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import cachemode, checks, config, mapping, prefetch, report, themes, version_label, zfs
+from . import (
+    cachemode,
+    checks,
+    config,
+    integrations,
+    libdata,
+    mapping,
+    peers,
+    plexbackup,
+    prefetch,
+    report,
+    safety,
+    themes,
+    version_label,
+    zfs,
+)
+from . import platform as platform_mod
 from .activity import Activity
-from .cachelog import CacheLog
 from .auth import Auth
-from .homeassistant import HomeAssistantBridge
-from .i18n import Fixed, M, join, msg, size_text
-from .updates import UpdateChecker
+from .cachelog import CacheLog
 from .config import PLEX_DEFAULT_PORT, Settings
+from .converting import Conversions
 from .coverage import Coverage
 from .evaluate import Evaluator
 from .filehistory import FileHistory
 from .filemap import FileMaps, Inspector
-from .pauses import L2arcPauses
-from .jobs import Jobs
-from .converting import Conversions
-from .plex2 import Mirrors
-from .peerlink import PeerLinks
-from .mirrorhealth import MirrorHealth
-from .syncthing import Syncthing
-from . import integrations
+from .homeassistant import HomeAssistantBridge
+from .i18n import Fixed, M, join, msg, size_text
 from .integrations import api_light
-from .sync import Sync
-from .trash import Trash
-from .tools.merge import MergeDuplicates
-from .tools.versions import DuplicateVersions
-from .tools.folders import OrganizeFolders
-from .tools.unlink import UnlinkFiles
-from .tools.convert import ConvertToMkv
-from .tools.sync import SyncLibraries
+from .jobs import Jobs
+from .languages import language_name
 from .libhealth import defaults as libhealth_defaults
 from .libhealth import scans as libhealth_scans
-from .languages import language_name
 from .migrating import Migration
-from .optimizing import DEFAULTS as OPT_DEFAULTS, Optimizing
+from .mirrorhealth import MirrorHealth
+from .optimizing import DEFAULTS as OPT_DEFAULTS
+from .optimizing import Optimizing
+from .pauses import L2arcPauses
+from .peerlink import PeerLinks
 from .playback import PlaybackMonitor
 from .plex import PlexClient, PlexError
+from .plex2 import Mirrors
 from .reader import MiB, benchmark_file
-from . import platform as platform_mod
-from . import peers, plexbackup, safety
 from .scheduler import TIMED, due, next_run
-from .truenas import METHODS as TRUENAS_METHODS, TrueNASClient, TrueNASError, describe_pool, missing_methods, probe as probe_truenas, cert_fingerprint as truenas_cert_fingerprint
-from . import libdata
-from .warmup import KIND_SECONDS, KINDS, L2ARC_RATE_SHARE, NEXT_DAY, next_day_check, LibraryStats, WarmupRun, plan, resolve_schedule
+from .sync import Sync
+from .syncthing import Syncthing
+from .tools.convert import ConvertToMkv
+from .tools.folders import OrganizeFolders
+from .tools.merge import MergeDuplicates
+from .tools.sync import SyncLibraries
+from .tools.unlink import UnlinkFiles
+from .tools.versions import DuplicateVersions
+from .trash import Trash
+from .truenas import METHODS as TRUENAS_METHODS
+from .truenas import TrueNASClient, TrueNASError, describe_pool, missing_methods
+from .truenas import cert_fingerprint as truenas_cert_fingerprint
+from .truenas import probe as probe_truenas
+from .updates import UpdateChecker
+from .warmup import (
+    KIND_SECONDS,
+    KINDS,
+    L2ARC_RATE_SHARE,
+    NEXT_DAY,
+    LibraryStats,
+    WarmupRun,
+    next_day_check,
+    plan,
+    resolve_schedule,
+)
 
 GiB = 1024 ** 3
 log = logging.getLogger("plexcache")
@@ -77,7 +103,7 @@ def _no_sources(sig: tuple) -> tuple:
 
 def _rev(sig: tuple) -> str:
     """A short name for what a Library Health answer was worked out from (App._health_sig), for the page to compare."""
-    return hashlib.sha1(repr(sig).encode()).hexdigest()[:12]
+    return hashlib.sha1(repr(sig).encode(), usedforsecurity=False).hexdigest()[:12]
 
 
 def _split_host(host_header: str | None) -> tuple[str | None, int | None]:
@@ -334,7 +360,7 @@ class App:
     def _refresh_migration(self):
         try:
             self.migration.refresh()
-        except Exception:  # noqa: BLE001 — checked again next time
+        except Exception:
             log.debug("migration re-check failed", exc_info=True)
 
     def _scheduler_loop(self):
@@ -552,7 +578,7 @@ class App:
                 res["truenas_identity"] = {"id": fp, "short": fp[:7].upper(), "source": "certificate", "name": "TrueNAS"}
         try:
             self.syncthing.refresh()  # (its card's lights: System → Syncthing)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("syncthing")
         problems = [k for k in ("plex_server", "plex_token") if res[k]["status"] != "ok"]
         optional = [k for k in ("truenas_server", "truenas_key", "truenas_api") if res[k]["status"] in ("warn", "fail")]
@@ -680,6 +706,7 @@ class App:
         """Plex's LAN Networks setting read against what should be in it: this NAS's own networks (syncthing.own_networks) and
         Tailscale's range, so a viewer at home or on your tailnet is never taken for remote. (what Plex has, what's missing)"""
         import ipaddress
+
         from .syncthing import TAILNET
         have = []
         for part in (value or "").split(","):
@@ -1085,7 +1112,7 @@ class App:
                                        stamp=sig[0], rev=_rev(sig), sig=sig)
         try:
             self._save_json(HEALTH_COUNTS, {k: {x: y for x, y in v.items() if x != "sig"} for k, v in list(self.health_counts.items())})
-        except Exception:  # noqa: BLE001 — (kept for the next start only)
+        except Exception:
             log.debug("health counts not saved", exc_info=True)
 
     def _health_counts_now(self) -> dict:
@@ -1726,7 +1753,7 @@ class App:
         w = self.settings.get()["warmup"]
         record = self.record_for(key)
         rows = []
-        for f, path in list(zip(files, paths))[offset:offset + limit]:
+        for f, path in list(zip(files, paths, strict=False))[offset:offset + limit]:
             try:
                 st = os.stat(path)
                 m = self.file_maps.get(path, st)

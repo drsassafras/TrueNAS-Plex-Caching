@@ -185,7 +185,7 @@ def project(m: dict, record: int, images: str, strip_tags: bool, cover_size: int
 def tail_video(m: dict) -> int | None:
     """The video in a file's end blocks (sharing them with the metadata there): cached with it, but no
     use to the lead-in. From its layout as inspected (cache_mix's blocks); None without one."""
-    from .filemap import block_map, pieces
+    from .filemap import block_map
     mix = m.get("mix") or {}
     record, size = mix.get("record"), m.get("size") or 0
     if not record or not m.get("parts"):

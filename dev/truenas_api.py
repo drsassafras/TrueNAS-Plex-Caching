@@ -27,7 +27,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from plexcache.truenas import METHODS  # noqa: E402
+from plexcache.truenas import METHODS
 
 REPO = "https://github.com/truenas/middleware.git"
 PACKAGE = "src/middlewared/middlewared"

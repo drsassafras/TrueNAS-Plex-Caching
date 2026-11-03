@@ -20,7 +20,8 @@ The dependencies: the Python the image runs (PYTHON_TAG in the Dockerfile; a new
 is a line there and one in build.yml, after dev/future.py is clean on it), the Debian that tag's image is built on (a new
 Debian is a prompt), the tools the image installs — MKVToolNix from its own repository, ffmpeg built from its release,
 oxipng and libjpeg-turbo from theirs, each an ARG in the Dockerfile moved here once upstream has the release (every
-MKVToolNix release is taken, since each carries fixes) — pyright (its pin in build.yml; patch and minor releases taken), and
+MKVToolNix release is taken, since each carries fixes) — pyright (its pin in build.yml; patch and minor releases taken) and Ruff
+(its pin there too; patch releases taken: its minor ones change what its rules find, so they're a prompt), and
 what builds the web app's CSS, scripts and pages: the Node of the image build's web stage (NODE_TAG in the Dockerfile, an LTS
 major; a new LTS is a prompt) and the packages of dev/web.js — Browserslist, caniuse-lite and MDN's browser data, Autoprefixer,
 PostCSS, cssnano, Stylelint and its checks, ESLint and its, html-validate, Terser, html-minifier-terser: every one
@@ -282,6 +283,14 @@ def _bump_pyright(new: str) -> str:
     return _repin(BUILD, r"pyright@(\d+(?:\.\d+)+)", new)
 
 
+def _bump_ruff(new: str) -> str:
+    return _repin(BUILD, r"ruff==(\d+(?:\.\d+)+)", new)
+
+
+def pypi_latest(package: str) -> Callable[[], str]:
+    return lambda: _json(f"https://pypi.org/pypi/{package}/json")["info"]["version"]
+
+
 def node_lts() -> str:
     """The newest LTS release line of Node ("26"), from nodejs.org's index."""
     for r in _json("https://nodejs.org/dist/index.json"):
@@ -403,7 +412,7 @@ def _bump_ha(new: str) -> str:
     return _repin(HA, r'HA_CHECKED = "([^"]+)"', new)
 
 
-def _web_dep(package: str) -> "Dep":
+def _web_dep(package: str) -> Dep:
     return Dep(package, _package_pin(package), npm_latest(package), "its pin in dev/package.json", bump=_bump_package(package), package=package,
                cant=f"{package} in dev/package.json (npm install --prefix dev --save-exact {package}@<version>); "
                     "WebBuildTests then say whether the CSS and scripts still pass and build.")
@@ -427,6 +436,9 @@ DEPS = [
         bump=_bump_arg("LIBJPEG_TURBO", lambda v: f"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/{v}/libjpeg-turbo-{v}.tar.gz"),
         cant="ARG LIBJPEG_TURBO in the Dockerfile; CoverArtTests inside the image say whether jpegtran still does."),
     Dep("pyright", lambda: _pin(BUILD, r"pyright@(\d+(?:\.\d+)+)"), npm_latest("pyright"), "its pin in build.yml", bump=_bump_pyright),
+    # (Ruff's 0.x minor releases are its breaking ones — rules changed, stabilised or moved — so they're a prompt; patches move)
+    Dep("Ruff", lambda: _pin(BUILD, r"ruff==(\d+(?:\.\d+)+)"), pypi_latest("ruff"), "its pin in build.yml", major=2, bump=_bump_ruff,
+        cant="A new Ruff minor: ruff==<version> in build.yml, then python3 dev/typecheck.py says what its rules find now (fixed, or ruff.toml tuned)."),
     Dep("Node", lambda: _pin(DOCKERFILE, r"ARG NODE_TAG=(\d+)"), node_lts, "NODE_TAG in the Dockerfile (the web stage)",
         cant="A new Node LTS: NODE_TAG in the Dockerfile; the image build then says whether the CSS and scripts still build."),
     # Home Assistant's MQTT discovery rules: each release, every key the discovery messages use is looked for in its
@@ -465,6 +477,20 @@ def _save_cache(found: dict) -> None:
         json.dump({"at": time.time(), "found": found}, fh)
 
 
+def _pins_now(found: dict) -> dict:
+    """The day's answers with each pin as it is now: the pins are read here (the files), only upstream's newest is the
+    day's — a pin moved since (npm, a commit, another branch) is seen at once, not a day later."""
+    out = {}
+    for d in DEPS:
+        have, newest = found[d.name]
+        try:
+            have = d.have()
+        except (OSError, ValueError, KeyError, TypeError):
+            pass   # (one that can't be read now: as it was)
+        out[d.name] = [have, newest]
+    return out
+
+
 def lookup(fresh: bool = False, saved: bool = False, progress=None) -> tuple[dict, bool]:
     """Every dependency's (have, newest), from upstream — or, within a day, from the last look. (found, stale).
     ``saved``: the last look's answers only, however old (stale past a day), upstream never asked — Offline when there's
@@ -474,13 +500,13 @@ def lookup(fresh: bool = False, saved: bool = False, progress=None) -> tuple[dic
     if saved:
         if not whole:
             raise Offline("no saved answers for every dependency yet. To look them up: python3 dev/upkeep.py")
-        return cache["found"], time.time() - cache.get("at", 0) >= A_DAY
+        return _pins_now(cache["found"]), time.time() - cache.get("at", 0) >= A_DAY
     if not fresh and whole and time.time() - cache.get("at", 0) < A_DAY:
         if progress is not None:   # (its bar all the same: every one known, from the day's answers, by this process alone)
             progress.workers = 1
             progress.finished = "dependencies · the day's answers from upstream"
             progress.at(len(DEPS), len(DEPS), progress.finished)
-        return cache["found"], False
+        return _pins_now(cache["found"]), False
     found, failed = {}, []
     if progress is not None:
         progress.reset(len(DEPS), "looked up")
@@ -527,7 +553,7 @@ def lookup(fresh: bool = False, saved: bool = False, progress=None) -> tuple[dic
         old = cache.get("found") or {}
         missing = [f for f in failed if f.split(":")[0] not in old]
         if not missing:  # each one not reached now from the last look, however old: better than nothing (and not saved as new)
-            return {d.name: found.get(d.name) or old[d.name] for d in DEPS}, True
+            return _pins_now({d.name: found.get(d.name) or old[d.name] for d in DEPS}), True
         raise Offline("; ".join(failed))
     _save_cache(found)
     return found, False
@@ -699,20 +725,41 @@ def box(r: Report | None, where: str | None, error: str = "") -> list[str]:
     return out + old
 
 
-def summary(r: Report | None, error: str = "") -> str:
-    """The box in a line, for the board's Dependency Versions block (under its bar): what moved and what's new, each from → to."""
-    from dev.progress import result, tally  # (the result line every dev tool says)
+def found(r: Report | None, error: str = "") -> list[tuple[str, str, str]]:
+    """What the look found, as the board's Issues have it: (level, what, the command that fixes it, or ""). An error:
+    upstream not reached; a warning: a release you move yourself (a major, or one with no pin to move); a notice: a pin
+    moved here (to test and commit), a minor release that moves by itself, or the last day's answers used."""
     if r is None:
-        return result("upstream not reached", error or "no answer")
+        return [("error", f"upstream not reached: {error or 'no answer'}", "python3 dev/upkeep.py")]
+    out = [("notice", f"moved {m}: test it, then commit", "") for m in r.moved]
+    by = {d.name: d for d in DEPS}
+    for n, have, newest, level, _ in r.news:
+        d = by.get(n)
+        fix = f"npm install --prefix dev --save-exact {d.package}@{newest}" if d is not None and d.package else ""
+        what = f"{n} {have} → {newest}" + (" (major)" if level == "major" else "")
+        out.append(("notice", what + ": moves by itself", fix) if level == "minor" else ("warning", what, fix))
+    if r.stale:
+        out.append(("notice", "upstream not reached now: the last day's answers", ""))
+    return out
+
+
+def summary(r: Report | None, error: str = "") -> str:
+    """The box in a line, for the board's Dependencies block (under its bar): how many errors, warnings and notices,
+    then what moved and what's new, each from → to."""
+    from dev.progress import LEVELS, counted, result, tally  # (the result line every dev tool says)
+    got = found(r, error)
+    counts = [counted(n, lv) for lv in LEVELS if (n := sum(f[0] == lv for f in got))]
+    if r is None:
+        return result(*counts, "upstream not reached", error or "no answer")
     if not r.bumped and not r.news:
-        return result(tally(len(DEPS), "dependency", "up to date", "dependencies"))
+        return result(*counts, tally(len(DEPS), "dependency", "up to date", "dependencies"))
     said = [f"moved {m}" for m in r.moved] + [f"{n} {have} → {newest}" + (" (major)" if level == "major" else "")
                                               for n, have, newest, level, _ in r.news]
-    return result(*said)
+    return result(*counts, *said)
 
 
 def _progress(tnsync: bool):
-    """Where the bar goes while it looks (dev/progress.py): on tnsync's board, its Dependency Versions section (PLEXCACHE_PROGRESS=
+    """Where the bar goes while it looks (dev/progress.py): on tnsync's board, its Dependencies section (PLEXCACHE_PROGRESS=
     feed: to stdout, where the board takes it from the box's lines); else the terminal — under tnsync without its board,
     which keeps this script's output for its box, straight to it (/dev/tty); else stderr, when that's one. None: nowhere to
     show it (CI, a log)."""
@@ -743,7 +790,10 @@ def main() -> int:
     # (tnsync's board looks while the tests run, TNSYNC_UPKEEP=look, and moves pins only once they're done: =move)
     move = not args.report and where in (MOVES_ON, MINORS_ON) and os.environ.get("TNSYNC_UPKEEP") != "look"
     bar = _progress(args.tnsync)
-    from dev.progress import said  # (on the board: the box in a line, under its bar; _progress put the project on the path)
+    from dev.progress import (  # (on the board: the box in a line, under its bar, and what it found; _progress put the project on the path)
+        issue,
+        said,
+    )
     try:
         r = check(apply=move, fresh=args.fresh, progress=bar, where=where)
     except Offline as e:
@@ -755,6 +805,8 @@ def main() -> int:
                 from dev.progress import then
                 then(0)
             said(summary(None, str(e)))
+            for f in found(None, str(e)):
+                issue(*f)
             return 0
         print(f"Upstream not reached: {e}")
         return 2
@@ -768,6 +820,8 @@ def main() -> int:
                 said(result(tally(len(DEPS), "dependency", "looked up", "dependencies", of=len(DEPS)), f"{moves} to move once the checks pass"))
                 return 0
         said(summary(r))
+        for f in found(r):   # (what's left, once: the board's Issues — the look's, when there's nothing to move after it)
+            issue(*f)
         return 0
     if not args.report and not move:
         print(f"(on {where or 'a copy that is not a checkout'}: reported only; versions are moved on {MOVES_ON}, and minor ones on {MINORS_ON})")

@@ -18,9 +18,9 @@ import time
 
 from ..i18n import M
 from ..libhealth import file_title_year
+from ..paging import sort_key
 from ..plex import PlexError
 from . import MAX_ROWS, Tool
-from ..paging import sort_key
 
 WAIT, POLL = 600, 10  # how long Plex gets to list a moved file, checked every POLL seconds
 MIRROR_SCAN_EVERY, MIRROR_GIVE_UP = 15 * 60, 3 * 86400
@@ -240,7 +240,7 @@ class OrganizeFolders(Tool):
                     extra = {idx[c] for c in new} - keep
                     if keep and extra:
                         k = sorted(keep)[0]
-                        other.run(there.server, lambda c: c.merge(k, sorted(extra)))
+                        other.run(there.server, lambda c, k=k, extra=extra: c.merge(k, sorted(extra)))
                         self.app.activity.event("tools", M("{title}: its new record on {name} merged into the old one", title=e["title"], name=self.mirror_name(e["library"])))
                     if not old:
                         self._done(e, M("{name} has it at its new path", name=self.mirror_name(e["library"])) if keep or not extra else
@@ -249,7 +249,7 @@ class OrganizeFolders(Tool):
                         continue
                 if now - e["scanned"] >= MIRROR_SCAN_EVERY:
                     e["scanned"] = now
-                    other.run(there.server, lambda c, there=there: c.scan(there.key, next(iter(other.paths_there(e["library"], e["new"][0], there)), "").rsplit("/", 1)[0]))
+                    other.run(there.server, lambda c, there=there, e=e: c.scan(there.key, next(iter(other.paths_there(e["library"], e["new"][0], there)), "").rsplit("/", 1)[0]))
                     changed = True
                 if now - e["at"] > MIRROR_GIVE_UP and not e.get("stuck"):
                     e["stuck"] = True

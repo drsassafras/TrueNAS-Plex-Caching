@@ -30,6 +30,7 @@ import json
 import os
 import threading
 import time
+
 from .paging import sort_key
 
 LOG = "job-log.jsonl"

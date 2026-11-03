@@ -307,7 +307,7 @@ class MirrorHealth:
                         self.running = k
                     try:
                         got = self.check(k)
-                    except Exception as e:  # noqa: BLE001 — said on the page
+                    except Exception as e:
                         log.debug("mirror health check failed", exc_info=True)
                         got = dict(self.results.get(k) or {}, error=e.args[0] if e.args and isinstance(e.args[0], M) else str(e), at=time.time(), v=FORMAT)
                     with self.lock:
@@ -409,7 +409,7 @@ class MirrorHealth:
         if hasattr(self.app, "library_health"):
             try:
                 self.app.library_health(key)
-            except Exception:  # noqa: BLE001 — the evaluator works it out in its turn
+            except Exception:
                 log.debug("library health after mirror checks failed", exc_info=True)
 
     def blocks(self, key: str) -> dict[str, list[dict]]:

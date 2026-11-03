@@ -34,13 +34,14 @@ import time
 import urllib.error
 import urllib.request
 
-from .paging import sort_key
 from . import zfs, zfslog
-from .i18n import M, join as join_names, msg
+from .i18n import M, msg
+from .i18n import join as join_names
 from .jobs import Job
-from .optimize import VERSION, compare as version_of, convert, mkv
-from .optimize.optimizer import strips_tags
-from .optimize.optimizer import COVER_PREFIX, WORK, conflict_original
+from .optimize import VERSION, mkv
+from .optimize import compare as version_of
+from .optimize.optimizer import COVER_PREFIX, WORK, conflict_original, strips_tags
+from .paging import sort_key
 from .plex import PlexError
 from .projection import family
 
@@ -62,7 +63,7 @@ STATUS_TTL = 15
 
 
 DEFAULT_URL = "http://plex-cache-optimizer:8643"  # the second service in the app's YAML
-TOKEN_FILE = "optimizer-token"  # in the config folder, which the optimizer mounts read-only
+TOKEN_FILE = "optimizer-token"  # noqa: S105 — (a file's name) in the config folder, which the optimizer mounts read-only
 # How a missing service shows up: its name doesn't resolve (no such service in the YAML), or nothing listens
 NOT_THERE = ("name or service not known", "nodename nor servname", "name resolution", "no address associated",
              "name does not resolve", "connection refused", "not set up")
@@ -797,7 +798,7 @@ class Optimizing:
             app.activity.event("optimizer", M("optimizing {n} files in {library}", n=len(todo), library=name))
             job.log(type="plan", files=[p for p, _, _, _ in todo])  # its list shows the ones not tried yet too
             claims = Claims(self, [(p, plex) for p, plex, item, _ in todo if self._needs_claim(item)])
-            for i, (path, plex_path, item, poster) in enumerate(todo):
+            for _i, (path, _plex_path, item, poster) in enumerate(todo):
                 if not job.wait_while_paused():
                     break
                 self.run_retries(job)  # a failed file to try again: after the file in hand, before the next
@@ -878,7 +879,7 @@ class Optimizing:
                     time.sleep(RETRY_POLL)  # an optimizing job takes them between files; a copy, after
                     continue
                 self.run_retries(None)
-        except Exception:  # noqa: BLE001 — never leave the flag set
+        except Exception:
             with self.lock:
                 self._retrying = False
             raise
@@ -924,7 +925,7 @@ class Optimizing:
             else:
                 result = self._one(path, key, item, rec, poster)
         # logged as the failed job's: its result replaces the failure there
-        log = lambda **e: app.jobs.log.add(dict(e, job=it["job"], kind="optimize", mode=mode, library=key,
+        log = lambda **e: app.jobs.log.add(dict(e, job=it["job"], kind="optimize", mode=mode, library=key,  # noqa: E731
                                                 title=it.get("title"), retried=True))
         self._log_file(log, it["job"], path, rec, item or {}, result, time.time() - t0, before, poster, key)
         app.jobs.retried(it["job"], path, result)
@@ -1136,7 +1137,7 @@ class Optimizing:
         try:
             if item.get("cover"):  # Sync Cover Art: written again with the new cover art
                 cover = self._poster(poster) if item["cover"] == "plex" else None
-                send = lambda: self.client.optimize(path, item["cover"], True, cover, opts["tags"])
+                send = lambda: self.client.optimize(path, item["cover"], True, cover, opts["tags"])  # noqa: E731
             elif any(p not in SYNC_PROBLEMS for p in problems):
                 info = self._mkv_info(path, st)
                 images = self.images_mode(opts["images"], poster, item.get("matched"), info.get("ours") or {})
@@ -1146,9 +1147,9 @@ class Optimizing:
                         cover = self._poster(poster)
                     except PlexError as e:
                         return {"result": "failed", "reason": msg(e)}
-                send = lambda: self.client.optimize(path, images, False, cover, opts["tags"])
+                send = lambda: self.client.optimize(path, images, False, cover, opts["tags"])  # noqa: E731
             else:
-                send = lambda: self.client.rewrite(path)
+                send = lambda: self.client.rewrite(path)  # noqa: E731
         except PlexError as e:
             return {"result": "failed", "reason": msg(e)}
         r = self._send(path, send, st.st_size)
@@ -1327,7 +1328,7 @@ class Claims:
 
     def _key(self, plex_path: str, root_plex: str | None) -> str:
         rel = os.path.relpath(plex_path, root_plex)
-        return hashlib.sha1(rel.encode()).hexdigest()[:24]
+        return hashlib.sha1(rel.encode(), usedforsecurity=False).hexdigest()[:24]
 
     def _library(self, plex: str) -> tuple[str | None, str | None]:
         """(the library's key, its folder's Plex path) for a file's Plex path."""

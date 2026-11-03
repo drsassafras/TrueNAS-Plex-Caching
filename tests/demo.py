@@ -25,7 +25,7 @@ MOVIES = ["The Lighthouse Keeper", "Northern Lines", "Glass Harbour", "Paper Moo
           "Midnight Orchard", "Saltwater Kings", "A Quiet Signal", "The Cartographer", "Ember and Ash", "Long Way North"]
 SHOW, AUTHOR = "Harbour Street", "E. M. Hollis"
 EPISODES = ["Low Tide", "The Night Shift", "Breakwater", "Fog Bells", "Signal Fires", "Undertow", "Mooring", "Slack Water"]
-for m, title in zip(cat["movies"], MOVIES):
+for m, title in zip(cat["movies"], MOVIES, strict=False):
     m["title"] = title
     m["year"] = 2010 + cat["movies"].index(m)
     m["duration"] = 5400000 + 60000 * cat["movies"].index(m)
@@ -33,7 +33,8 @@ for m, title in zip(cat["movies"], MOVIES):
     m["guids"] = [f"tmdb://{4000 + cat['movies'].index(m)}"]
 # the Tools pages: "Glass Harbour" on a second record too (the same match); "Paper Moons" with a copy of its
 # file beside it on one record; two films loose in the library folder itself
-import shutil as _sh
+import shutil as _sh  # noqa: E402 — (where the demo uses it)
+
 _m2, _m3 = cat["movies"][2], cat["movies"][3]
 _dup = os.path.join(media, "Movies", "Glass Harbour (2012) [copy].mkv")
 _sh.copy(_m2["path"], _dup)
@@ -68,6 +69,7 @@ os.environ["PLEXCACHE_SYS"] = fakes.make_sys(tmp, {"l2arc_noprefetch": 1, "l2arc
 from plexcache import mapping, zfs  # noqa: E402
 from plexcache.app import App  # noqa: E402
 from plexcache.server import serve  # noqa: E402
+
 
 # The demo files sit on an ordinary filesystem (4K blocks). Pretend the TV dataset was moved to
 # 1M with most of its episodes still written at 128K, and everything else matches.
@@ -130,8 +132,9 @@ _ram = [[40, 0], [55, 1], [48, 2], [30, 4], [18, 6], [12, 14], [4, 15], [1, 9], 
 _ssd = [[0, 0], [12, 0], [20, 0], [34, 0], [41, 1], [60, 1], [88, 2], [120, 3], [96, 5], [70, 9], [31, 12], [6, 9], [0, 2]]
 app.cachelog.stats = {"ram": {"first": 412, "ages": _ram, "libs": {}}, "ssd": {"first": 25611, "ages": _ssd, "libs": {}}}
 # The same per library, from simulated reads: each library's data lasts a little differently.
-import math as _m
-import random as _rl
+import math as _m  # noqa: E402 — (where the demo uses it)
+import random as _rl  # noqa: E402 — (where the demo uses it)
+
 _rl.seed(7)
 _t0, _boot = time.time() - 9 * 86400, app.cachelog.boot_time
 app.cachelog.boot_time = 0
@@ -162,7 +165,8 @@ for _h in range(14 * 24):
     app.coverage.record(_files, _last, now=_t + 60)
 app.cachelog.since = time.time() - 9 * 86400
 # A week of what the playback monitor measures, for the Activity report.
-import random as _r
+import random as _r  # noqa: E402 — (where the demo uses it)
+
 _r.seed(4)
 problems = os.environ.get("DEMO_PROBLEMS") == "1"  # show the "Needs attention" side
 for i in range(37):

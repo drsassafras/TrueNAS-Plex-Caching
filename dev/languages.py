@@ -17,10 +17,12 @@ def main():
         name = en.split(";")[0].strip().replace('"', "'")
         rows += [(c, name) for c in (b, t, one) if c]
     rows.sort()
-    src = open(OUT, encoding="utf-8").read()
+    with open(OUT, encoding="utf-8") as fh:
+        src = fh.read()
     body = "\n".join(f'    "{c}": "{n}",' for c, n in rows)
     src = re.sub(r"NAMES = \{\n.*?\n\}\n", "NAMES = {\n" + body + "\n}\n", src, count=1, flags=re.S)
-    open(OUT, "w", encoding="utf-8").write(src)
+    with open(OUT, "w", encoding="utf-8") as fh:
+        fh.write(src)
     print(f"{len(rows)} codes")
 
 if __name__ == "__main__":

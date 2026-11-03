@@ -78,7 +78,7 @@ class WebSocket:
         if " 101 " not in status + " ":
             self.close()
             raise WebSocketError(f"server refused websocket upgrade: {status}")
-        expect = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
+        expect = base64.b64encode(hashlib.sha1((key + GUID).encode(), usedforsecurity=False).digest()).decode()
         if expect.lower() not in head.lower():
             self.close()
             raise WebSocketError("bad websocket handshake")

@@ -6,8 +6,8 @@ import time
 from . import zfs
 from .i18n import Fixed, M, join
 from .optimizing import HEALTHCHECK_YAML
-from .zfslog import grade as compression_grade
 from .warmup import recommend_recordsize
+from .zfslog import grade as compression_grade
 
 GB = 1e9
 GiB = 1024 ** 3
@@ -22,7 +22,7 @@ def _fmt_bytes(n: float | None) -> M:
     return M("{n} B", n=round(n))
 
 
-def item(status: str, title: str, detail: str = "", fix: str = "", fix_cmd: str = "", help: str = "") -> dict:
+def item(status: str, title: str, detail: str = "", fix: str = "", fix_cmd: str = "", help: str = "") -> dict:  # noqa: A002 — (the item's "help" key)
     """One Health result. ``help``: a longer explanation, behind an ⓘ next to the title."""
     out = {"status": status, "title": title, "detail": detail, "fix": fix, "fix_cmd": fix_cmd}
     if help:

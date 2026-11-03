@@ -108,6 +108,19 @@ def said(text: str, stream=None):
         stream.flush()
 
 
+LEVELS = ("error", "warning", "notice")   # (what an issue a tool finds is, worst first)
+
+
+def issue(level: str, text: str, fix: str = "", stream=None):
+    """On tnsync's board, something a section found, for the board's Issues at the end (so nothing scrolls away above
+    it): an error, a warning or a notice, what it is, and the command that fixes it when there's one (pasteable as it
+    is). Sent only when feeding."""
+    if feeding() and level in LEVELS:
+        stream = stream or sys.stdout
+        stream.write(FEED + json.dumps({"issue": {"level": level, "text": text, "fix": fix}}) + "\n")
+        stream.flush()
+
+
 def then(n: int, stream=None):
     """On tnsync's board, for a section of two steps (dev/upkeep.py: look, then move the pins once the checks are done):
     how much the second has to do. 0: there's nothing for it, and the section ends with the first."""

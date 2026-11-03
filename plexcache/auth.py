@@ -15,9 +15,9 @@ refused for a while (LOCKOUT_SECONDS) — signing in from elsewhere still works.
 """
 
 import base64
-import json
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import threading
@@ -26,7 +26,7 @@ import time
 COOKIE = "pc_session"
 # The example password in compose.yaml. It's public, so it's never accepted: the app can't be
 # used until it's changed (otherwise anyone who read the README could sign in).
-DEFAULT_PASSWORD = "change-me"
+DEFAULT_PASSWORD = "change-me"  # noqa: S105 — (the public example, refused: never a password that signs in)
 SESSION_DAYS = 30
 FAIL_DELAY = 1.0  # seconds added to each failed attempt, so passwords can't be guessed quickly
 LOCKOUT_FAILS, LOCKOUT_SECONDS = 10, 15 * 60  # wrong in a row from one address, then refused this long

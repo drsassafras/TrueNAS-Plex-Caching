@@ -49,10 +49,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import VERSION
-from . import claims, migrate
+from . import VERSION, claims, migrate, mkv, tools
 from . import images as imgs
-from . import mkv, tools
 from .optimizer import IMAGE_MODES, Skipped, optimize_file, resolve_conflict, rewrite_file
 
 RECENT = 200  # results kept for the app to read back
@@ -140,7 +138,7 @@ class Service:
                 res.update(migrate.copy_tree(src, dst, self.copy_ctl, report, mirror))
             except InterruptedError:
                 res.update(result="stopped")
-            except Exception as e:  # never leave the service stuck "busy"
+            except Exception as e:  # noqa: BLE001 — (never leave the service stuck "busy")
                 res.update(result="failed", reason=str(e))
             res["finished"] = time.time()
             with self.lock:
@@ -179,7 +177,7 @@ class Service:
             res.update(result="failed", reason=str(e), verified="failed")  # the new file failed a check: thrown away
         except (tools.ToolError, OSError, mkv.NotMatroska) as e:
             res.update(result="failed", reason=str(e))
-        except Exception as e:  # never leave the service stuck "busy"
+        except Exception as e:  # noqa: BLE001 — (never leave the service stuck "busy")
             res.update(result="failed", reason=f"unexpected error: {e}")
         res["finished"] = time.time()
         with self.lock:
@@ -261,7 +259,7 @@ def make_handler(svc: Service):
     class Handler(BaseHTTPRequestHandler):
         server_version = "plexcache-optimizer"
 
-        def log_message(self, format, *args):  # quiet: the app keeps the history
+        def log_message(self, format, *args):  # noqa: A002 — quiet: the app keeps the history
             pass
 
         def _send(self, code: int, body: dict) -> None:
@@ -339,7 +337,7 @@ def make_handler(svc: Service):
     return Handler
 
 
-TOKEN_FILE = "/config/optimizer-token"  # made by the app in its config folder
+TOKEN_FILE = "/config/optimizer-token"  # noqa: S105 — (a path) made by the app in its config folder
 
 
 def serve() -> int:

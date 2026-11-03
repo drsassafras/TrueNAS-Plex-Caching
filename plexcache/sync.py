@@ -24,9 +24,9 @@ import time
 import unicodedata
 
 from .i18n import M
-from .plex import EDIT_FIELDS, PlexClient, PlexError, reachable, servers
 from .optimize.claims import PEER_DAYS
 from .paging import sort_key
+from .plex import EDIT_FIELDS, PlexClient, PlexError, reachable, servers
 
 STORE = "sync-report.json"  # (the servers found: named from when a compare's report was kept in it too)
 MAX_ITEMS = 1000  # differences listed per library by default (the counts are whole)
@@ -186,7 +186,7 @@ def compare_library(src: _Side, dst: _Side, what: dict, checks_on: dict | None =
                     add(r, "missing", ", ".join(sorted(os.path.basename(x) for x in rels - orels)[:3]), M("not listed: the folder needs a scan there"))
                 if orels - rels:
                     add(r, "grouping", M("{n} files", n=len(rels)), M("{n} files: {more} more grouped with it — they stay", n=len(orels), more=len(orels - rels)))
-            _compare_pair(it, o, what, lambda kind, _it, frm, to, _o=None: add(r, kind, frm, to))
+            _compare_pair(it, o, what, lambda kind, _it, frm, to, _o=None, r=r: add(r, kind, frm, to))
             if r["kinds"]:
                 rows.append(r)
             continue
@@ -218,7 +218,7 @@ def compare_library(src: _Side, dst: _Side, what: dict, checks_on: dict | None =
         if other:
             pairs[key] = other["key"]
             r = row("pair", [it], [other], src, dst)
-            _compare_pair(it, other, what, lambda kind, _it, frm, to, _o=None: add(r, kind, frm, to))
+            _compare_pair(it, other, what, lambda kind, _it, frm, to, _o=None, r=r: add(r, kind, frm, to))
             if r["kinds"]:
                 rows.append(r)
     rows.sort(key=lambda r: sort_key(r["title"]))
@@ -347,7 +347,7 @@ class Sync:
                 used = sv["id"] in self.app.mirrors.used() and self.app.mirrors.configured(sv["id"])
                 if not used:
                     self.app.mirrors.remember(sv, url)  # (reached: its address and token kept, so choosing a library of it is instant)
-                read = (lambda fn, sid=sv["id"]: self.app.mirrors.run(sid, fn, timeout=120)) if used else (lambda fn, c=PlexClient(url, sv["token"], timeout=120): fn(c))
+                read = (lambda fn, sid=sv["id"]: self.app.mirrors.run(sid, fn, timeout=120)) if used else (lambda fn, c=PlexClient(url, sv["token"], timeout=120): fn(c))  # noqa: B008 — (one client, made once)
                 try:
                     found = of = 0
                     for there in read(lambda c: c.libraries()):

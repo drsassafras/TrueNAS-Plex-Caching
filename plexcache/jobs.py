@@ -16,9 +16,9 @@ with one banner.
 """
 
 import threading
-from collections.abc import Callable
 import time
 import uuid
+from collections.abc import Callable
 
 from .i18n import M
 from .joblog import JobLog
@@ -182,7 +182,7 @@ class Job:
         self.log(type="job", event="resumed" if s.get("resumed") else "started", done=s["done"], total=s["total"])
         try:
             self.run()
-        except Exception as e:  # never leave the job "running"
+        except Exception as e:  # noqa: BLE001 — (never leave the job "running")
             self.app.activity.event("optimizer", M("unexpected error: {why}", why=str(e)), "warn")
         finally:
             try:
@@ -240,7 +240,7 @@ class Jobs:
         """Queue work to start when the jobs before it are done (now, if none runs). None when the
         same work is queued or running already."""
         with self.lock:
-            same = lambda k, a: k == kind and a == args
+            same = lambda k, a: k == kind and a == args  # noqa: E731
             if any(same(q["kind"], q["args"]) for q in self.queue):
                 return None
             if self.job and self.job.state.get("running") and same(self.job.kind, self.job.args()):

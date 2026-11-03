@@ -139,7 +139,7 @@ def own_container_id() -> str | None:
 
 PSEUDO_FS = {"proc", "sysfs", "tmpfs", "devtmpfs", "devpts", "mqueue", "cgroup", "cgroup2", "overlay", "securityfs",
              "debugfs", "tracefs", "pstore", "bpf", "hugetlbfs", "configfs", "fusectl", "autofs", "binfmt_misc", "nsfs"}
-SYSTEM_DIRS = ("/proc", "/sys", "/dev", "/run", "/tmp", "/etc", "/usr", "/app")
+SYSTEM_DIRS = ("/proc", "/sys", "/dev", "/run", "/tmp", "/etc", "/usr", "/app")  # noqa: S108 — (folders it never touches, not a temp file)
 
 
 def writable_mounts(mount_list: list[dict] | None = None, exclude: tuple = ("/config",)) -> list[str]:

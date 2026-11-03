@@ -411,7 +411,7 @@ def _suggest_from(fc: dict | None) -> int | None:
 
 def _rows(ages: list) -> list[dict]:
     rows = []
-    for edge, (kept, gone) in zip(AGES, ages):
+    for edge, (kept, gone) in zip(AGES, ages, strict=False):
         n = kept + gone
         rows.append({"upto": edge, "kept": kept, "gone": gone, "pct": round(100 * kept / n) if n else None})
     return rows

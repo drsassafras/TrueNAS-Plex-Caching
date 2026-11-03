@@ -116,13 +116,13 @@ TRACK_TAGS = ('<?xml version="1.0"?>\n<Tags><Tag><Targets/><Simple><Name>FIXTURE
 
 def build(work):
     """The fixtures, into tests/fixtures. Returns their names."""
-    j = lambda n: os.path.join(work, n)
+    j = lambda n: os.path.join(work, n)  # noqa: E731
     os.makedirs(OUT, exist_ok=True)
     src = "testsrc=size=160x90:rate=24"
     ff("-f", "lavfi", "-i", src, "-t", "3", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", j("h264.mkv"))
     ff("-f", "lavfi", "-i", src, "-t", "3", "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=none",
        "-pix_fmt", "yuv420p10le", j("hevc.mkv"))
-    sine = lambda freq, ch: ["-f", "lavfi", "-i", f"sine=frequency={freq}:duration=3,aformat=channel_layouts={ch}"]
+    sine = lambda freq, ch: ["-f", "lavfi", "-i", f"sine=frequency={freq}:duration=3,aformat=channel_layouts={ch}"]  # noqa: E731
     ff(*sine(440, "stereo"), "-c:a", "aac", "-b:a", "48k", j("aac.mka"))
     ff(*sine(220, "5.1"), "-c:a", "ac3", "-b:a", "96k", j("ac3.mka"))
     ff(*sine(330, "stereo"), "-c:a", "libopus", "-b:a", "24k", j("opus.mka"))
@@ -141,7 +141,7 @@ def build(work):
     with open(j("Small Font.otf"), "wb") as fh:
         fh.write(b"OTTO" + b"tiny " * 40)  # small enough to sit before the video
     write(j("notes.nfo"), "Fixture notes\n" * 30)
-    att = lambda name, mime, desc=None: (["--attachment-description", desc] if desc else []) + [
+    att = lambda name, mime, desc=None: (["--attachment-description", desc] if desc else []) + [  # noqa: E731
         "--attachment-mime-type", mime, "--attach-file", j(name)]
 
     # 1. Feature-rich: H.264 with HDR colour, four audio formats, SRT/ASS/PGS/VobSub, chapters, tags, cover art

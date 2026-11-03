@@ -197,7 +197,7 @@ class _HTMLTexts(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
-        for name, val in attrs:
+        for name, _val in attrs:
             if name.startswith("data-i18n-") and name not in ("data-i18n-html",):
                 self.keys.setdefault(a.get(name[len("data-i18n-"):]) or "", None)
         if self.stack:
