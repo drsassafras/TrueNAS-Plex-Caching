@@ -40,10 +40,7 @@ jobs:
       # order, security…), each at zero and kept there; Ruff's findings are annotated on their lines
       - name: Python validation
         if: ${{ !cancelled() }}
-        env:   # (the pins, read from here by dev/typecheck.py and moved by dev/upkeep.py)
-          PYRIGHT: pyright@1.1.414
-          RUFF: ruff==0.17.3
-        run: python dev/typecheck.py
+        run: python dev/typecheck.py   # (each tool at its version in dev/tools.toml, moved by dev/upkeep.py)
 
   image:
     needs: test

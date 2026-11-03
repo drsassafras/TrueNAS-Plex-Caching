@@ -401,7 +401,7 @@ record_tests() {   # record_tests pass|fail|aborted — only if the tests actual
     if [ "$TESTS_RAN" != 1 ]; then state_clear; return 0; fi
     mkdir -p "$STATE_DIR" 2>/dev/null || return 0
     {
-        printf 'result=%s\nmode=%s\nwhen=%s\nat=%s\ntest=%s\nfuture=%s\nfuture_test=%s\nrelease=%s\n' "$1" "$MODE" "$(date '+%Y-%m-%d %H:%M')" "$(date +%s)" "$TEST_SIG" "$FUTURE_RESULT" "$FUTURE_CMD" "$RELEASE"
+        printf 'result=%s\nmode=%s\nwhen=%s\nat=%s\ntest=%s\ncode=%s\nfuture=%s\nfuture_test=%s\nrelease=%s\n' "$1" "$MODE" "$(date '+%Y-%m-%d %H:%M')" "$(date +%s)" "$TEST_SIG" "$CODE_SIG" "$FUTURE_RESULT" "$FUTURE_CMD" "$RELEASE"
         # each check's result line, for its block next time while the code stays the same (what it ran on, what it found)
         local id
         for id in "${CHECK_IDS[@]}"; do [ -z "$RES" ] || printf 'last_%s=%s\n' "$id" "$(res_get "${id}_last")"; done
@@ -422,6 +422,15 @@ ago() {   # ago <epoch seconds> — how long ago, as people say it: "just now", 
 TESTS_RAN=0            # (set when the board ran the checks)
 FUTURE_RESULT="none"   # pass | fail | none — what the state file keeps of the future tests
 # The checks this run, as one line (the current ones: a change to any of them means testing again).
+# What the checks ran on: every file of the checkout git keeps or would (not what it ignores), so a change to the tests or
+# the dev tools — not copied to TrueNAS, so not among the changes the copy finds — tests again too. Empty when it can't be
+# worked out (not a git checkout): then only the copy's changes count, as before.
+code_sig() {
+    local sum=shasum; command -v shasum >/dev/null 2>&1 || sum=sha256sum
+    command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 0
+    (cd "$ROOT" && git ls-files -z -co --exclude-standard | xargs -0 "$sum" 2>/dev/null | "$sum" | cut -d' ' -f1)
+}
+CODE_SIG="$(code_sig)"
 TEST_SIG="$TN_TEST"
 [ -z "$TN_VALIDATE$TN_TYPES" ] || TEST_SIG="$TN_TEST | $TN_VALIDATE | $TN_TYPES"
 [ "$RELEASE" != 1 ] || TEST_SIG="$TEST_SIG | release: $TN_RELEASE"   # (a release run's checks: those, the release checks too)
@@ -442,6 +451,8 @@ last_tests_not_passed() {
         say "The last tests weren't a release run (--release)."
     elif [ "$(state_get test)" != "$TEST_SIG" ]; then
         say "TN_TEST, TN_VALIDATE or TN_TYPES has changed since the last test run."
+    elif [ -n "$CODE_SIG" ] && [ "$(state_get code)" != "$CODE_SIG" ]; then
+        say "The code has changed since the last test run (the tests or the dev tools, if not the app)."
     elif [ "$(state_get mode)" != "$MODE" ]; then
         say "The last tests ran for 'tnsync $(state_get mode)', not 'tnsync $MODE'."
     elif [ "$(state_get future_test)" != "$FUTURE_CMD" ]; then

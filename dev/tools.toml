@@ -1,0 +1,29 @@
+# The check tools: each at one version, fetched at it by dev/checks.py the first time it's needed (into
+# ~/.cache/plex-cache/tools/), so tnsync's board and GitHub run the same one. dev/upkeep.py moves a patch or minor release
+# here by itself and makes a major a prompt (``major``: how many leading numbers make one, as its Dep says); dev/future.py
+# tries each one's newest pre-release where there is one.
+#
+#   get = "npx"      run through npx at the version (``package``: its npm name)
+#   get = "pip"      installed by pip into a venv of its own in the cache (``package``: its PyPI name; ``binary``: the
+#                    command, if not the package's name)
+#   get = "release"  a release binary for this computer: ``url`` with {version} and {asset} (this platform's entry of
+#                    ``assets``), checked against this platform's ``sha256`` (moved with the version by dev/upkeep.py);
+#                    ``binary`` is the file in an archive ({version} filled in), or nothing when the download is it
+#
+# ``upstream`` is where dev/upkeep.py asks for the newest release: npm, pypi or github:<owner>/<repo>.
+
+[pyright]
+name = "pyright"
+version = "1.1.414"
+get = "npx"
+package = "pyright"
+upstream = "npm"
+
+# (Ruff's 0.x minor releases are its breaking ones, rules changed, stabilised or moved, so they're a prompt; patches move)
+[ruff]
+name = "Ruff"
+version = "0.17.3"
+get = "pip"
+package = "ruff"
+upstream = "pypi"
+major = 2

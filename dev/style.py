@@ -666,8 +666,9 @@ def _sample(out: str, before: str | None, shown: str) -> int:
     if not count:
         print("Every look is in the style guide: nothing to sample.")
         return 0
-    # its bar from the start (the demos take a few seconds to answer, the pictures longer): the steps before the pictures
-    steps = Progress(4, unit="steps to the pictures")
+    # its one bar from the start (the demos take a few seconds to answer, the pictures longer): the steps before the
+    # pictures, then the pages photographed on the same count (_pictures), filled once
+    steps = Progress(4, unit="steps done", bar="style")
     steps.show("checking for Playwright", ticking=True)
     missing = _no_playwright()
     if missing:
@@ -742,10 +743,10 @@ def _sample(out: str, before: str | None, shown: str) -> int:
                    "seen": counts["seen"], "code": counts["code"], "same": counts["same"], "shots": sorted(files),
                    "items": [{k: it[k] for k in ("id", "state", "look", "was", "now")} for it in items]}, f, indent=1)
     os.remove(os.path.join(out, "plan.json"))
-    if feeding() and pool:   # (on tnsync's board: its block's bar, last, the looks sampled and how)
-        done = Progress(count, unit="looks sampled", bar="style")
-        done.workers = pool[0]
-        done.at(count, count, f"looks · sample made with {pool[0]} worker{'s' if pool[0] != 1 else ''}")
+    if feeding() and pool:   # (on tnsync's board: its block's bar, full, says how the sample was made)
+        steps.workers = pool[0]
+        steps.finished = f"{count} look{'s' if count != 1 else ''} · sample made with {pool[0]} worker{'s' if pool[0] != 1 else ''}"
+        steps.clear()
     where = os.path.relpath(os.path.join(shown, "index.html"), os.getcwd())
     print(f"The sample of {count} look{'s' if count != 1 else ''}: {where}")
     if src:
@@ -770,22 +771,24 @@ def _no_playwright() -> str:
 
 
 def _pictures(out: str, waiting: Progress | None = None, workers: list | None = None):
-    """dev/style-sample.js's pictures, with the dev tools' progress bar (in place of ``waiting``'s, the steps before
-    them, once it knows how many pages): {item id: [pair, ...]}, or None."""
+    """dev/style-sample.js's pictures, with the dev tools' progress bar (on ``waiting``'s, the steps before them: the
+    pages added to its count once it knows how many, one bar filled once): {item id: [pair, ...]}, or None."""
     node = subprocess.Popen(["node", os.path.join(ROOT, "dev", "style-sample.js"), out],
                             cwd=ROOT, env=dict(os.environ, NODE_PATH=_node_path()), stdout=subprocess.PIPE, text=True)
     assert node.stdout
-    bar, shots = None, {}
+    bar, shots, before = None, {}, 0
     for line in node.stdout:
         msg = json.loads(line)
         if msg.get("total") is not None:   # (it says again once it knows which pages it needs in each look)
             if bar:
-                bar.total = msg["total"]
+                bar.total = before + msg["total"]
             else:
-                if waiting is not None:
+                if waiting is not None:   # (the pages on the steps' count: one bar)
                     waiting.draw("pages opened")
-                    waiting.clear()
-                bar = Progress(msg["total"], unit="pages looked at")
+                    before, bar = waiting.total, waiting
+                    bar.more(msg["total"])
+                else:
+                    bar = Progress(msg["total"], unit="pages looked at")
                 bar.workers = msg.get("workers")   # (the browser's pages at once: style-sample.js's pool)
                 if workers is not None and isinstance(msg.get("workers"), int):
                     workers.append(msg["workers"])   # (kept with the sample: how it was made)
@@ -795,9 +798,8 @@ def _pictures(out: str, waiting: Progress | None = None, workers: list | None = 
         elif msg.get("shots") is not None:
             shots = msg["shots"]
     code = node.wait()
-    for b in (bar, waiting):
-        if b:
-            b.clear()
+    for b in {id(b): b for b in (bar, waiting) if b}.values():
+        b.clear()
     if code:
         print("Playwright couldn't take the pictures (see above). It needs: npm i -g playwright && npx playwright install chromium",
               file=sys.stderr)

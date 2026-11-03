@@ -4371,7 +4371,7 @@ class TestRunnerTests(unittest.TestCase):
             self.assertEqual(term.getvalue().split("\r\033[K")[-1], board.render(80))
         board.apply(recs[2])
         self.assertIsNotNone(board.since)
-        self.assertIn("looking up ffmpeg  (0 s)", re.sub(r"\033\[[0-9;]*m", "", board.render(80)))
+        self.assertIn("looking up ffmpeg  (0 s)", re.sub(r"\033\[[0-9;]*m", "", board.render(100)))
         self.assertLess(len(re.sub(r"\033\[[0-9;]*m", "", Progress(3, tty=True).render(40))), 40)
 
     def test_the_bar_names_the_test_under_way(self):
@@ -4615,7 +4615,7 @@ class TestRunnerTests(unittest.TestCase):
         self.assertEqual((s.state, s.phase, s.first), ("pass", 0, "current"))
         self.assertIn("UP TO DATE", drawn[0])
         self.assertNotIn("ALL UP TO DATE", drawn[0])
-        self.assertIn("26/26", drawn[1])
+        self.assertIn(" 26 / 26 ", drawn[1])
         self.assertIn("26 dependencies up to date", drawn[2])
 
     def test_a_section_is_blue_while_it_runs_then_green_orange_red_or_grey(self):
@@ -4641,10 +4641,12 @@ class TestRunnerTests(unittest.TestCase):
         drawn = s.lines(60)
         self.assertEqual(len(drawn), board.ROWS)
         self.assertTrue(drawn[0].startswith(board.BLUE))
-        self.assertIn("2/7", drawn[1])   # (the bar moved last)
+        plain = lambda line: re.sub(r"\033\[[0-9;]*m", "", line)
+        self.assertIn(" 0 │ 0 │ 2 / 7 ", plain(drawn[1]))   # (the bar moved last; every bar's counts in one capsule, no space kept)
         s.line(FEED + json.dumps({"bar": "tests", "done": 3, "total": 10, "bad": 0, "label": "A.test_1", "ticking": False}))
         drawn = s.lines(60)
-        self.assertIn("3/10", drawn[1])
+        self.assertIn(" 0 │ 0 │  3 / 10 ", plain(drawn[1]))   # (its fields as wide as the widest it's had: the total's)
+        self.assertIn("    0 │    0 │    3 /   10 ", plain(s.lines(100, (4, 4))[1]))   # (on the board: the widest of every bar's)
         self.assertNotIn("last line", drawn[2])   # (while its bar runs, no stray line: the bar says how it goes)
         for line in drawn:
             self.assertLessEqual(len(re.sub(r"\033\[[0-9;]*m", "", line)), 60)
@@ -4976,7 +4978,7 @@ class TestRunnerTests(unittest.TestCase):
         drawn = [re.sub(r"\033\[[0-9;]*m", "", x) for x in s.lines(100)]
         self.assertEqual(s.state, "running")
         self.assertIn("IN REVIEW", drawn[0])
-        self.assertIn("6/6  looks · review page open", drawn[1])
+        self.assertIn(" 6 / 6   looks · review page open", drawn[1])
         with mock.patch.object(sys, "stdout", io.StringIO()) as out, mock.patch("shutil.get_terminal_size", return_value=os.terminal_size((101, 40))):
             b.frame()
         self.assertIn("[Enter] Skip review", out.getvalue())
@@ -5049,6 +5051,21 @@ class TestRunnerTests(unittest.TestCase):
         self.assertRegex(out, r"Python Validation: ALREADY PASSED \(Passed just now \(\d{4}-\d\d-\d\d \d\d:\d\d\) · 0 errors\)")
         self.assertNotIn("passed on this code", out)
         self.assertNotIn("ALREADY IN SYNC  -", out)   # (no box of its own: its block says it)
+        if shutil.which("git"):   # a change outside what's copied (the tests, the dev tools) is a change to the code too: tested again
+            subprocess.run(["git", "init", "-q", project], check=True)
+            rc, out = tnsync("-y")   # (now a checkout: what the tests ran on is known, and this is the first time it is)
+            self.assertIn("The code has changed since the last test run", out)
+            rc, out = tnsync("-y")
+            self.assertRegex(out, r"Current Tests: ALREADY PASSED")
+            os.makedirs(os.path.join(project, "tests"))
+            with open(os.path.join(project, "tests", "test_it.py"), "w", encoding="utf-8") as fh:
+                fh.write("one more\n")
+            rc, out = tnsync("-y")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("Sync to nas.example: IN SYNC (The code has changed since the last test run", out)
+            self.assertIn("Current Tests: PASSED (12 tests passed)", out)
+            rc, out = tnsync("-y")
+            self.assertRegex(out, r"Current Tests: ALREADY PASSED")
         # the NAS out of reach: the Sync block says so, red, with what ssh said; the checks run all the same
         rc, out = tnsync("-y", "--no-sample")   # (Style Approval only checks: said in the header's modes)
         self.assertRegex(out, r"\nLocal Copy[^\n]* · No sample")
@@ -14808,6 +14825,40 @@ class FutureTests(unittest.TestCase):
     """The future run's channels (dev/future.py): each dependency's newest pre-release when it's ahead of the stable release,
     else that release — chosen from what upstream lists, with no network here."""
 
+    def test_the_bar_counts_the_tests_before_the_build(self):
+        """The one bar's total from its start (the build's steps and the tests): the tests counted in the checkout, as the
+        suite will load them (the classes another section runs left out), with no run before it needed."""
+        from dev import future
+        loaded = unittest.defaultTestLoader.loadTestsFromName("tests.test_plexcache")
+        style = unittest.defaultTestLoader.loadTestsFromTestCase(StyleGuideTests).countTestCases()
+        self.assertEqual(future.count_tests(["tests.test_plexcache"]), loaded.countTestCases())
+        self.assertEqual(future.count_tests(["tests.test_plexcache"], ["StyleGuideTests"]), loaded.countTestCases() - style)
+        self.assertEqual(future.count_tests(["tests.test_plexcache.FutureTests"]),
+                         unittest.defaultTestLoader.loadTestsFromTestCase(FutureTests).countTestCases())
+        self.assertEqual(future.count_tests(["tests.test_plexcache.FutureTests.test_the_bar_counts_the_tests_before_the_build",
+                                             "tests.test_plexcache.FutureTests.no_such_test"]), 1)
+
+    def test_the_build_and_the_tests_are_one_bar_with_a_total_from_the_start(self):
+        """On tnsync's board the build's steps and the tests are one bar: its total the steps and the tests counted in
+        the checkout from the first step, even from BuildKit, which never says how many steps (never "-"), and the suite
+        in the image goes on from the steps done."""
+        import io
+
+        from dev import future
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": "feed"}), mock.patch.object(sys, "stdout", out), \
+                mock.patch.object(future, "TESTS", [574]), mock.patch.object(future, "BUILD_STEPS", [0]):
+            line = future.Line("Building the image")
+            line.show("starting")
+            line.show("#5 RUN apt-get", 5, None)        # (BuildKit: a step's number, no total)
+            line.show("#23 exporting", 23, None)
+            line.end("image built")
+            steps = future.BUILD_STEPS[0]
+        got = [(r["done"], r["total"]) for r in (json.loads(x[1:]) for x in out.getvalue().split("\n") if x.startswith("\036"))]   # (split on \n: splitlines takes \036 for a break)
+        self.assertEqual(got[:3], [(0, 574), (5, 579), (23, 597)])
+        self.assertEqual(got[-1], (23, 597))
+        self.assertEqual(steps, 23)
+
     def test_channels_pick_a_prerelease_only_when_ahead(self):
         from dev import future
         # Python: Docker Hub's tags on the image's Debian — the newest prerelease stage and number; the release once it's out
@@ -15573,9 +15624,13 @@ class UpkeepTests(unittest.TestCase):
                 got = upkeep.check(apply=True, fresh=True, progress=Progress(0, tty=True, stream=out))
             return got, re.sub(r"\033\[[0-9;]*m", "", out.getvalue())                         # (its colours left out)
         r, drawn = run(deps)
-        for said in ("0/5  waiting on 5: alpha, beta, gamma, delta, eps", "beta: 2.0.9 upstream", "5/5  ",
-                     "npm install delta@4.1.0 eps@5.0.1", "2/2 packages moved with npm", "moving alpha 1.0.0 → 1.1.0", "moving beta 2.0.0 → 2.0.9", "3/3  "):
+        # one bar, filled once: the five looked up, then the three moves on the same count (npm's, alpha's, beta's —
+        # beta's a failure), never a second bar from 0
+        for said in (" 0 / 5   waiting on 5: alpha, beta, gamma, delta, eps", "beta: 2.0.9 upstream", " 5 / 5   eps",
+                     " 5 / 8   npm install delta@4.1.0 eps@5.0.1", "2/2 packages moved with npm", "moving alpha 1.0.0 → 1.1.0",
+                     "moving beta 2.0.0 → 2.0.9", " 1 │ 0 │ 7 / 8   beta 2.0.9"):
             self.assertIn(said, drawn)
+        self.assertNotIn(" 0 / 3 ", drawn)
         self.assertTrue(drawn.endswith("\r\033[K"))                                           # (gone before the box)
         self.assertEqual((moved, installs), (["1.1.0", "2.0.9"], [{"delta": "4.1.0", "eps": "5.0.1"}]))
         self.assertEqual(r.bumped, ["delta: dev/package.json (and its lock): delta 4.0.0 → 4.1.0", "eps: dev/package.json (and its lock): eps 5.0.0 → 5.0.1",
@@ -15601,7 +15656,7 @@ class UpkeepTests(unittest.TestCase):
             bar = Progress(2, stream=out)
             bar.draw("x" * 200)
         self.assertTrue(bar.tty)
-        self.assertLess(len(out.getvalue().split("\r\033[K")[-1]), 90)
+        self.assertLessEqual(len(re.sub(r"\033\[[0-9;]*m", "", out.getvalue().split("\r\033[K")[-1])), 60)   # (as seen: its colours left out)
 
     def test_a_slow_answer_doesnt_hold_the_look_up(self):
         """Every dependency is asked at once; one that hasn't answered by DEADLINE is left (its last answer used, said to be
@@ -15705,33 +15760,106 @@ class HomeAssistantRulesTests(unittest.TestCase):
 
 
 class TypeCheckTests(unittest.TestCase):
-    """Python Validation (dev/typecheck.py): pyright and Ruff at build.yml's pins, as tnsync's block and GitHub run them."""
+    """Python Validation (dev/typecheck.py): pyright and Ruff at their versions in dev/tools.toml, through the check tools'
+    shared code (dev/checks.py), as tnsync's block and GitHub run them."""
 
-    def test_ruffs_findings_as_it_says_them(self):
-        from dev import typecheck
+    def test_ruffs_findings_as_every_check_says_them(self):
+        from dev import checks, typecheck
         def f(code, safe=False):
             return {"code": code, "message": "m", "filename": os.path.join(ROOT, "a.py"), "location": {"row": 3, "column": 1},
                     "fix": {"applicability": "safe"} if safe else None}
-        self.assertEqual(typecheck.ruff_lines([f("F401", True), f("B023")]), ["  a.py:3:1: F401 [*] m", "  a.py:3:1: B023 m"])
+        self.assertEqual([checks.say(x) for x in typecheck.ruff_findings([f("F401", True), f("B023")])],
+                         ["  a.py:3:1 - error: m (Ruff F401) [*]", "  a.py:3:1 - error: m (Ruff B023)"])
+        got = {"generalDiagnostics": [{"file": os.path.join(ROOT, "b.py"), "severity": "warning", "message": "w", "rule": "reportX",
+                                       "range": {"start": {"line": 4, "character": 2}}}]}
+        self.assertEqual([checks.say(x) for x in typecheck.pyright_findings(got)], ["  b.py:5:3 - warning: w (pyright reportX)"])
 
-    def test_pins_are_build_ymls_and_upkeeps(self):
-        from dev import typecheck, upkeep
+    def test_pins_are_tools_tomls_and_upkeeps(self):
+        from dev import checks, upkeep
         deps = {d.name: d for d in upkeep.DEPS}
-        self.assertEqual(deps["pyright"].have(), typecheck.pin())
-        self.assertEqual(deps["Ruff"].have(), typecheck.ruff_pin())
+        self.assertEqual(deps["pyright"].have(), checks.version("pyright"))
+        self.assertEqual(deps["Ruff"].have(), checks.version("ruff"))
         self.assertEqual(deps["Ruff"].major, 2)   # (a Ruff minor changes what its rules find: a prompt, not moved by itself)
         build = _read(os.path.join(ROOT, ".github", "workflows", "build.yml"), encoding="utf-8")
         self.assertIn("run: python dev/typecheck.py", build)   # (GitHub runs what tnsync's block runs)
+        self.assertNotRegex(build, r"pyright@\d|ruff==\d")   # (the versions are dev/tools.toml's only)
+        tools = _read(upkeep.TOOLS, encoding="utf-8")
         written = {}
-        with mock.patch.object(upkeep, "_read", return_value=build), mock.patch.object(upkeep, "_write", side_effect=written.__setitem__):
-            self.assertEqual(upkeep._bump_ruff("9.9.9"), f".github/workflows/build.yml: {typecheck.ruff_pin()} → 9.9.9")
-            self.assertIn("ruff==9.9.9", written[upkeep.BUILD])
+        with mock.patch.object(upkeep, "_read", return_value=tools), mock.patch.object(upkeep, "_write", side_effect=written.__setitem__):
+            self.assertEqual(deps["Ruff"].bump("9.9.9"), f"dev/tools.toml: Ruff {checks.version('ruff')} → 9.9.9")
+        self.assertIn('version = "9.9.9"', written[upkeep.TOOLS])
+        self.assertEqual(written[upkeep.TOOLS].count('version = "9.9.9"'), 1)   # (Ruff's alone)
         # Ruff reads the code as the Python pyright and the image do
         import tomllib
         with open(os.path.join(ROOT, "ruff.toml"), "rb") as fh:
             ruff = tomllib.load(fh)
         pyright = json.loads(re.sub(r"(?m)^\s*//.*$", "", _read(os.path.join(ROOT, "pyrightconfig.json"), encoding="utf-8")))
         self.assertEqual(ruff["target-version"], "py" + pyright["pythonVersion"].replace(".", ""))
+
+
+class CheckToolTests(unittest.TestCase):
+    """The check tools' shared code (dev/checks.py): every check tool at its version in dev/tools.toml, fetched by it, its
+    findings said one way, the board's bar and the result line its; no check tool of its own beside it."""
+
+    WRAPPERS = ("typecheck.py",)   # (each check tool's section on tnsync's board, run through dev/checks.py)
+
+    def test_every_check_tool_runs_through_the_shared_code(self):
+        from dev import checks
+        table = checks.tools()
+        used = set()
+        for name in self.WRAPPERS:
+            text = _read(os.path.join(ROOT, "dev", name), encoding="utf-8")
+            self.assertIn("from dev import checks", text, f"dev/{name} isn't on dev/checks.py")
+            self.assertIn("checks.run(", text, f"dev/{name} doesn't report through checks.run")
+            self.assertNotRegex(text, r'"npx"|"pip"|urlopen\(|Progress\(', f"dev/{name} fetches or reports a tool its own way")
+            used |= set(re.findall(r'checks\.command\("([\w-]+)"\)', text))
+        self.assertEqual(used, set(table), "every tool in dev/tools.toml is run by a check, and only those")
+        for key, tool in table.items():
+            self.assertIn(tool["get"], ("npx", "pip", "release"), key)
+            self.assertTrue(tool.get("name") and tool.get("version") and tool.get("upstream"), key)
+            if tool["get"] == "release":
+                self.assertEqual(set(tool["assets"]), set(tool["sha256"]), f"{key}: a sha256 for every platform it has")
+                self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", h) for h in tool["sha256"].values()), key)
+
+    def test_result_line_and_exit_code(self):
+        from dev import checks
+        from dev.checks import Check, Finding, Outcome
+        clean = Check("A", lambda: Outcome("A", "1.0", []))
+        found = Check("B", lambda: Outcome("B", "2.0", [Finding("B", "x.sh", 1, 2, "warning", "m", "SC1")]))
+        broken = Check("C", lambda: Outcome("C", "3.0", None, "C couldn't be fetched: no network"))
+        def run(*cs):
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": ""}):
+                return checks.run(list(cs), stream=out), out.getvalue().splitlines()
+        self.assertEqual(run(clean), (0, ["0 A findings"]))
+        self.assertEqual(run(clean, found), (1, ["  x.sh:1:2 - warning: m (B SC1)", "0 A findings · 1 B finding"]))
+        self.assertEqual(run(found, broken), (2, ["  x.sh:1:2 - warning: m (B SC1)", "  C couldn't be fetched: no network",
+                                                   "1 B finding · C didn't run"]))
+        # a tool whose findings don't fail it (pyright's information notes) says its own facts
+        notes = Check("D", lambda: Outcome("D", "4.0", [Finding("D", "y.py", 1, 1, "information", "n")], facts=["0 errors"], failed=False))
+        self.assertEqual(run(notes), (0, ["  y.py:1:1 - information: n (D)", "0 errors"]))
+
+    def test_a_release_binary_is_the_one_named(self):
+        from dev import checks
+        data = b"#!/bin/sh\necho hi\n"
+        good = {"name": "T", "version": "1.0", "get": "release", "url": "https://example.invalid/{version}/{asset}", "binary": "",
+                "assets": {checks.platform(): "t"}, "sha256": {checks.platform(): hashlib.sha256(data).hexdigest()}}
+        with tempfile.TemporaryDirectory() as cache, mock.patch.object(checks, "CACHE", cache), \
+                mock.patch.object(checks, "fetch", return_value=data) as fetched:
+            with mock.patch.object(checks, "tools", return_value={"t": good}):
+                cmd, why = checks.command("t")
+                with open(cmd[0], "rb") as fh:
+                    self.assertEqual((why, fh.read()), ("", data))
+                self.assertTrue(os.access(cmd[0], os.X_OK))
+                self.assertEqual(fetched.call_args[0][0], "https://example.invalid/1.0/t")
+                self.assertEqual(checks.command("t")[0], cmd)   # (the second time: the cached copy)
+                self.assertEqual(fetched.call_count, 1)
+            bad = {**good, "version": "2.0", "sha256": {checks.platform(): "0" * 64}}
+            with mock.patch.object(checks, "tools", return_value={"t": bad}):
+                cmd, why = checks.command("t")
+                self.assertIsNone(cmd)
+                self.assertIn("isn't the one dev/tools.toml names", why)
+                self.assertFalse(os.path.exists(os.path.join(cache, f"t-2.0-{checks.platform()}")))
 
 
 class ReleaseTests(unittest.TestCase):

@@ -359,19 +359,58 @@ def fetch_node(pick: Pick) -> str | None:
     return path
 
 
+BUILD_STEPS = [0]   # the image build's steps, done: where the suite's count goes on from, on the board's one bar
+TESTS = [0]   # the tests the suite will run, counted in the checkout (count_tests): the bar's total until the suite counts its own
+
+
+def count_tests(tests: list[str], exclude: list[str] | None = None) -> int:
+    """How many tests a run of ``tests`` has, read from the checkout's test file (each ``def test_`` in its class, the
+    classes in ``exclude`` left out), before the image is built: close to what the suite counts (a test it skips there is
+    still one), and there's always a number, with or without a run before it. 0 when the names are none it can read."""
+    path = os.path.join(ROOT, "tests", "test_plexcache.py")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    per: dict[str, list[str]] = {}
+    cls = ""
+    for line in text.splitlines():
+        if m := re.match(r"class (\w+)\(", line):
+            cls = m.group(1)
+            per.setdefault(cls, [])
+        elif cls and (m := re.match(r"    def (test\w*)\(", line)):
+            per[cls].append(m.group(1))
+    n = 0
+    for t in tests:
+        parts = t.split(".")[2:] if t.startswith("tests.test_plexcache") else []
+        if t == "tests.test_plexcache":
+            n += sum(len(v) for k, v in per.items() if k not in (exclude or []))
+        elif len(parts) == 1:
+            n += len(per.get(parts[0], []))
+        elif len(parts) == 2:
+            n += parts[1] in per.get(parts[0], [])
+    return n
+
+
 class Line:
     """One line of the terminal, redrawn as the build moves (a plain line now and then when the output isn't a terminal).
-    On tnsync's board (PLEXCACHE_PROGRESS=feed), its Future Tests section's first bar instead: dev/progress.py's."""
+    On tnsync's board (PLEXCACHE_PROGRESS=feed), its Future Tests section's bar instead, the suite's own (bar "tests",
+    dev/progress.py's): one bar for the run, the build's steps then the tests (the suite in the image goes on from the
+    steps: PLEXCACHE_BAR_BEFORE), its total the steps and the tests in the checkout (TESTS) until the suite counts its
+    own."""
 
     def __init__(self, what: str):
         self.what, self.tty, self.started, self.last = what, sys.stdout.isatty(), time.time(), 0.0
-        self.bar = Progress(0, bar="build", unit="build steps") if feeding() else None
-        self.done = 0
+        self.bar = Progress(0, bar="tests", tests=True) if feeding() else None
+        self.done = self.total = 0
 
     def show(self, text: str, done: int | None = None, total: int | None = None) -> None:
         if self.bar is not None:
-            self.done = done if done is not None else self.done
-            self.bar.at(self.done, total or max(self.bar.total, self.done), f"{self.what}: {text}", ticking=True)
+            self.done, self.total = done if done is not None else self.done, total or self.total
+            # (BuildKit numbers its steps but never says how many: the steps so far stand for them, the bar's total
+            # those and the tests from the start, never "-")
+            self.bar.at(self.done, max(self.total, self.done) + TESTS[0], f"{self.what}: {text}", ticking=True)
             return
         elapsed = int(time.time() - self.started)
         part = f" {done}/{total}" if done is not None and total else ""
@@ -391,7 +430,8 @@ class Line:
     def end(self, text: str, ok: bool = True) -> None:
         elapsed = int(time.time() - self.started)
         if self.bar is not None:
-            self.bar.at(self.bar.total if ok else self.done, self.bar.total or self.done, text)
+            BUILD_STEPS[0] = max(self.total, self.done) if ok else 0   # (the suite's count goes on from these)
+            self.bar.show(text)
         if self.tty:
             sys.stdout.write("\r\033[K")
         colour = (GREEN if ok else RED) if self.tty else ""
@@ -478,6 +518,7 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
         tag = tag or next(p.value.split(":", 1)[1] for p in picks if p.name == "Python")
         print("The future stack — each dependency's newest pre-release, else its stable release — inside the project's image, every warning an error:")
         print(table(picks))
+    TESTS[0] = count_tests(tests, exclude)   # (the bar's total from the start: the build's steps and these)
     try:
         built = build_image(tag, args, verbose)
     except FetchFailed as e:
@@ -519,7 +560,7 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
     # ahead of them (tests/run.py's ran_on), not what this image shares with the app's
     pins = {"Python": upkeep._arg("PYTHON_TAG")().split("-")[0], "Node": upkeep._arg("NODE_TAG")().split("-")[0],
             "MKVToolNix": upkeep._arg("MKVTOOLNIX")(), "ffmpeg": upkeep._arg("FFMPEG")()}
-    run = ["docker", "run", "--rm", *tty, "-e", "CI=1", "-e", f"PLEXCACHE_PINS={json.dumps(pins)}", *WEB_TARGETS, "--user", "0", "-v", f"{ROOT}:/src:ro", *mount, "-w", "/src", "--entrypoint", "sh", IMAGE, "-c",
+    run = ["docker", "run", "--rm", *tty, "-e", "CI=1", "-e", f"PLEXCACHE_BAR_BEFORE={BUILD_STEPS[0]}", "-e", f"PLEXCACHE_PINS={json.dumps(pins)}", *WEB_TARGETS, "--user", "0", "-v", f"{ROOT}:/src:ro", *mount, "-w", "/src", "--entrypoint", "sh", IMAGE, "-c",
            f"{node}; exec {suite}"]
     if feeding():   # (on the board: the suite's output passed on as it comes, its result line kept for the block's)
         last = ""
@@ -527,7 +568,8 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
             for line in proc.stdout or []:
                 sys.stdout.write(line)
                 sys.stdout.flush()
-                if record(line) is None and line.strip():
+                rec = record(line)
+                if rec is None and line.strip():
                     last = line.strip()
         got = proc.returncode
         said(result(last))   # (the suite's result line, what it ran on with it: tests/run.py's ran_on)

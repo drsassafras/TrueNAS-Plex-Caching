@@ -20,8 +20,9 @@ The dependencies: the Python the image runs (PYTHON_TAG in the Dockerfile; a new
 is a line there and one in build.yml, after dev/future.py is clean on it), the Debian that tag's image is built on (a new
 Debian is a prompt), the tools the image installs — MKVToolNix from its own repository, ffmpeg built from its release,
 oxipng and libjpeg-turbo from theirs, each an ARG in the Dockerfile moved here once upstream has the release (every
-MKVToolNix release is taken, since each carries fixes) — pyright (its pin in build.yml; patch and minor releases taken) and Ruff
-(its pin there too; patch releases taken: its minor ones change what its rules find, so they're a prompt), and
+MKVToolNix release is taken, since each carries fixes) — the check tools, each at its version in dev/tools.toml (pyright,
+Ruff and the rest, fetched at it by dev/checks.py: patch and minor releases taken, Ruff's patch releases only, since its
+minor ones change what its rules find; a release binary's checksums moved with it), and
 what builds the web app's CSS, scripts and pages: the Node of the image build's web stage (NODE_TAG in the Dockerfile, an LTS
 major; a new LTS is a prompt) and the packages of dev/web.js — Browserslist, caniuse-lite and MDN's browser data, Autoprefixer,
 PostCSS, cssnano, Stylelint and its checks, ESLint and its, html-validate, Terser, html-minifier-terser: every one
@@ -33,6 +34,7 @@ HA_CHECKED is moved to it; a key it no longer takes is a prompt naming it.
 
 import argparse
 import ast
+import hashlib
 import http.client
 import json
 import os
@@ -44,6 +46,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -279,12 +282,80 @@ class Dep:
     package: str = ""  # a package of dev/package.json: moved with the others in one npm install (check)
 
 
-def _bump_pyright(new: str) -> str:
-    return _repin(BUILD, r"pyright@(\d+(?:\.\d+)+)", new)
+TOOLS = os.path.join(ROOT, "dev", "tools.toml")   # the check tools (dev/checks.py): each at one version
 
 
-def _bump_ruff(new: str) -> str:
-    return _repin(BUILD, r"ruff==(\d+(?:\.\d+)+)", new)
+def _tool_section(text: str, key: str) -> tuple[int, int]:
+    """Where tool ``key``'s table is in dev/tools.toml's text (its [key] line to the next table of another tool)."""
+    m = re.search(rf"(?m)^\[{re.escape(key)}\]\s*$", text)
+    if not m:
+        raise ValueError(f"no [{key}] in dev/tools.toml")
+    nxt = re.compile(r"(?m)^\[([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9_-]+)?\]\s*$")
+    end = len(text)
+    for n in nxt.finditer(text, m.end()):
+        if n.group(1) != key:
+            # (a comment block right above the next tool belongs to it)
+            end = n.start()
+            while True:
+                prev = text.rfind("\n", 0, end - 1)
+                line = text[prev + 1:end - 1] if prev >= 0 else ""
+                if line.startswith("#"):
+                    end = prev + 1
+                    continue
+                break
+            break
+    return m.start(), end
+
+
+def _tool_have(key: str) -> Callable[[], str]:
+    def have() -> str:
+        text = _read(TOOLS)
+        a, b = _tool_section(text, key)
+        got = re.search(r'(?m)^version = "([^"]+)"', text[a:b])
+        if not got:
+            raise ValueError(f"no version for [{key}] in dev/tools.toml")
+        return got.group(1)
+    return have
+
+
+def _bump_tool(key: str) -> Callable[[str], str]:
+    """A check tool moved to a version in dev/tools.toml; a release binary's sha256 for each platform with it (each
+    download hashed: what dev/checks.py checks it against)."""
+    def bump(new: str) -> str:
+        from dev import checks
+        text = _read(TOOLS)
+        a, b = _tool_section(text, key)
+        part = text[a:b]
+        old = re.search(r'(?m)^version = "([^"]+)"', part)
+        if not old:
+            raise ValueError(f"no version for [{key}] in dev/tools.toml")
+        part = part[:old.start(1)] + new + part[old.end(1):]
+        tool = checks.tools()[key]
+        if tool["get"] == "release":
+            for plat in tool.get("assets", {}):
+                digest = hashlib.sha256(checks.fetch(checks.asset_url(tool, plat, new))).hexdigest()
+                part, n = re.subn(rf'(?m)^("{re.escape(plat)}" = )"[0-9a-f]*"', lambda m, d=digest: f'{m.group(1)}"{d}"', part)
+                if not n:
+                    raise ValueError(f"no sha256 for {plat} in [{key}.sha256] of dev/tools.toml")
+        _write(TOOLS, text[:a] + part + text[b:])
+        return f"dev/tools.toml: {tool['name']} {old.group(1)} → {new}"
+    return bump
+
+
+def _tool_dep(key: str, tool: dict) -> Dep:
+    up = str(tool["upstream"])
+    newest = (npm_latest(tool["package"]) if up == "npm" else pypi_latest(tool["package"]) if up == "pypi"
+              else github_release(up.removeprefix("github:")))
+    cant = str(tool.get("cant") or f"A new {tool['name']} major: its version in dev/tools.toml, then what its check finds now "
+                                    "(fixed in the code, or its settings tuned with your say).")
+    return Dep(tool["name"], _tool_have(key), newest, "its version in dev/tools.toml", major=int(tool.get("major", 1)),
+               bump=_bump_tool(key), cant=cant)
+
+
+def tool_deps() -> list[Dep]:
+    with open(TOOLS, "rb") as fh:
+        table = tomllib.load(fh)
+    return [_tool_dep(k, t) for k, t in table.items()]
 
 
 def pypi_latest(package: str) -> Callable[[], str]:
@@ -436,10 +507,7 @@ DEPS = [
     Dep("libjpeg-turbo", _arg("LIBJPEG_TURBO"), github_release("libjpeg-turbo/libjpeg-turbo"), "ARG LIBJPEG_TURBO in the Dockerfile",
         bump=_bump_arg("LIBJPEG_TURBO", lambda v: f"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/{v}/libjpeg-turbo-{v}.tar.gz"),
         cant="ARG LIBJPEG_TURBO in the Dockerfile; CoverArtTests inside the image say whether jpegtran still does."),
-    Dep("pyright", lambda: _pin(BUILD, r"pyright@(\d+(?:\.\d+)+)"), npm_latest("pyright"), "its pin in build.yml", bump=_bump_pyright),
-    # (Ruff's 0.x minor releases are its breaking ones — rules changed, stabilised or moved — so they're a prompt; patches move)
-    Dep("Ruff", lambda: _pin(BUILD, r"ruff==(\d+(?:\.\d+)+)"), pypi_latest("ruff"), "its pin in build.yml", major=2, bump=_bump_ruff,
-        cant="A new Ruff minor: ruff==<version> in build.yml, then python3 dev/typecheck.py says what its rules find now (fixed, or ruff.toml tuned)."),
+    *tool_deps(),  # (the check tools, dev/tools.toml: pyright, Ruff and the rest)
     Dep("Node", lambda: _pin(DOCKERFILE, r"ARG NODE_TAG=(\d+)"), node_lts, "NODE_TAG in the Dockerfile (the web stage)",
         cant="A new Node LTS: NODE_TAG in the Dockerfile; the image build then says whether the CSS and scripts still build."),
     # Home Assistant's MQTT discovery rules: each release, every key the discovery messages use is looked for in its
@@ -539,7 +607,7 @@ def lookup(fresh: bool = False, saved: bool = False, progress=None) -> tuple[dic
             for name in list(pending):
                 failed.append(f"{name}: no answer in {DEADLINE} s" + (f" from {WHERE[name]}" if WHERE.get(name) else ""))
                 if progress is not None:
-                    progress.draw(f"{name}: not reached")
+                    progress.draw(f"{name}: not reached", warned=len(failed))   # (its last answer used: a warning)
                 pending.pop(name)
             break
         pending.pop(d.name, None)
@@ -548,7 +616,7 @@ def lookup(fresh: bool = False, saved: bool = False, progress=None) -> tuple[dic
         else:
             failed.append(why)
         if progress is not None:
-            progress.draw(f"{d.name}: " + (f"{got[1]} upstream" if got is not None else "not reached"))
+            progress.draw(f"{d.name}: " + (f"{got[1]} upstream" if got is not None else "not reached"), warned=len(failed))
     failed.sort(key=lambda f: [d.name for d in DEPS].index(f.split(":")[0]))  # (in DEPS' order, however they came back)
     if failed:
         old = cache.get("found") or {}
@@ -606,7 +674,7 @@ def check(apply: bool = True, fresh: bool = False, saved: bool = False, progress
     npm = {d.package: newest for d, _, newest, _, _ in moving if d.package}
     steps = len([p for p in moving if not p[0].package]) + (1 if npm else 0)
     if progress is not None and steps:
-        progress.reset(steps, "moved")
+        progress.more(steps, "done")   # (on the look's count: one bar, the dependencies then the moves)
         progress.workers = 1   # (one at a time)
         progress.finished = f"pins · moved on {where or 'this branch'}"
     failed: dict[str, str] = {}  # dependency -> why it wasn't moved
@@ -635,7 +703,7 @@ def check(apply: bool = True, fresh: bool = False, saved: bool = False, progress
                 failed.update(dict.fromkeys(npm, why))
         if progress is not None:
             from dev.progress import counted  # (a count as every dev tool says it; the bar put the project on the path)
-            progress.draw(f"{counted(len(npm) - len(failed), 'package', of=len(npm))} moved with npm")
+            progress.draw(f"{counted(len(npm) - len(failed), 'package', of=len(npm))} moved with npm", bad=progress.bad + bool(failed))
     for d, have, newest, what, level in plan:
         if what == "current":
             out.lines.append(f"{d.name} {have}: current")
@@ -654,7 +722,7 @@ def check(apply: bool = True, fresh: bool = False, saved: bool = False, progress
                 except (OSError, ValueError, subprocess.TimeoutExpired) as e:
                     failed[d.name] = _why(e)
                 if progress is not None:
-                    progress.draw(f"{d.name} {newest}")
+                    progress.draw(f"{d.name} {newest}", bad=progress.bad + (d.name in failed))
             if d.name in failed:  # (not moved now: said, and tried again next time)
                 why = failed[d.name]
                 out.lines.append(f"{d.name} {have} → {newest}: couldn't be moved — {why}")

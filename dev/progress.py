@@ -89,14 +89,29 @@ def counts(done: int, total: int, bad: int, warned: int) -> str:
     return f"{done - bad} passed · {bad} failed · {counted(warned, 'warning')} · {total} total"
 
 
-def capsule(done: int, total: int, bad: int, warned: int, bg: str = CAPSULE) -> tuple[str, str]:
-    """A run of tests' counts as its bar shows them: " 3 │ 1 │ 567 / 571 " (failed, warnings, passed / total) on ``bg``,
-    each count in its colour and a 0 grey, passed as wide as the total so nothing moves as the run counts up. Its text
-    drawn, and plain (for its width)."""
-    passed = str(done - bad).rjust(len(str(total)))
-    nums = [(str(bad), FAILED if bad else ZERO), (str(warned), WARNED if warned else ZERO), (passed, PASSED)]
-    drawn = bg + " " + f"{RULE} │ ".join(f"{colour}{n}" for n, colour in nums) + f"{RULE} / {TOTAL}{total} {OFF}"
-    return drawn, f" {bad} │ {warned} │ {passed} / {total} "
+def fields(done: int, total: int, bad: int, warned: int) -> tuple[int, int]:
+    """The capsule's two field widths these counts need: failed and warnings, then passed and the total."""
+    return max(len(str(bad)), len(str(warned))), max(len(str(max(0, done - bad))), len(str(total or "-")))
+
+
+def wider(a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+    """The larger of two widths, field by field: the running widest, that capsules are drawn to (never narrower again)."""
+    return max(a[0], b[0]), max(a[1], b[1])
+
+
+def capsule(done: int, total: int, bad: int, warned: int, bg: str = CAPSULE, widths: tuple[int, int] = (0, 0)) -> tuple[str, str]:
+    """Every bar's counts: "  3 │  1 │ 567 / 571 " (failed, warnings, passed / total) on ``bg``, each count in its
+    colour and a 0 grey. No space kept for numbers not seen: each field as wide as ``widths`` says (the widest seen on
+    every bar so far: ``wider``, so the capsules line up and a count growing a digit moves them all once) or its own
+    number, if that's wider. A total not known yet (dev/future.py's image still building) is "-". Its text drawn, and
+    plain (for its width)."""
+    small, large = wider(widths, fields(done, total, bad, warned))
+    passed = max(0, done - bad)
+    nums = [(f"{bad:>{small}}", FAILED if bad else ZERO), (f"{warned:>{small}}", WARNED if warned else ZERO),
+            (f"{passed:>{large}}", PASSED if passed else ZERO)]
+    whole = f"{total if total else '-':>{large}}"
+    drawn = bg + " " + f"{RULE} │ ".join(f"{colour}{n}" for n, colour in nums) + f"{RULE} / {TOTAL}{whole} {OFF}"
+    return drawn, " " + " │ ".join(n for n, _ in nums) + f" / {whole} "
 
 
 def tested(done: int, bad: int, warned: int, total: int | None = None, feed: bool | None = None) -> str:
@@ -185,6 +200,10 @@ class Progress:
         self.done = 0
         self.bad = 0
         self.warned = 0   # (the warnings a run of tests printed)
+        # (on the board, steps done before it in the same bar: dev/future.py's image build, PLEXCACHE_BAR_BEFORE — its
+        # bar one run, the build's steps then the tests)
+        self.before = 0
+        self.widths = (0, 0)   # (its capsule's widest fields so far: drawn to them, so it doesn't shrink back as it counts)
         self.next_report = 10
         self.label = ""
         self.since: float | None = None   # when the step under way started (ticking)
@@ -202,10 +221,11 @@ class Progress:
         except (AttributeError, ValueError, OSError):
             return int(os.environ.get("COLUMNS") or 0) or 100  # (a log shown on a terminal later: tnsync says how wide)
 
-    def render(self, width: int, track: str = TRACK, fill: str | None = None, alert: str = RED, capsule_bg: str = CAPSULE) -> str:
+    def render(self, width: int, track: str = TRACK, fill: str | None = None, alert: str = RED, capsule_bg: str = CAPSULE,
+               widths: tuple[int, int] | None = None) -> str:
         """The bar's line, narrower than ``width`` (the board draws it in its section, on its block's ``track`` with its
         ``fill`` and ``alert`` colours; ``_line`` on the terminal)."""
-        pct = min(1.0, self.done / self.total if self.total else 1)
+        pct = min(1.0, self.done / self.total if self.total else 0 if self.tests else 1)   # (tests not counted yet: empty)
         colour = fill or (RED if self.bad else GREEN)
         if GLYPHS:
             eighths = int(BAR * 8 * pct)
@@ -214,11 +234,11 @@ class Progress:
         else:
             filled = min(BAR, int(BAR * pct))
             bar = f"[{colour}{'#' * filled}{OFF}{DIM}{'-' * (BAR - filled)}{OFF}]"
-        if self.tests:   # (a run of tests: its counts in their capsule)
-            count, plain = capsule(self.done, self.total, self.bad, self.warned, capsule_bg)
-        else:
-            count = f"{self.done:>3}/{self.total}" + (f"  {alert}{self.bad} failed{OFF}" if self.bad else "")
-            plain = f"{self.done:>3}/{self.total}" + (f"  {self.bad} failed" if self.bad else "")
+        if widths is None:   # (on its own: as wide as its own counts have been; on the board, the widest of every bar's)
+            widths = self.widths = wider(self.widths, fields(self.done, self.total, self.bad, self.warned))
+        count, plain = capsule(self.done, self.total, self.bad, self.warned, capsule_bg, widths)   # (every bar's counts, one way)
+        if len(f"    [{'#' * BAR}] {plain}") + 3 > width:   # (a terminal too narrow for the capsule: the count alone)
+            count = plain = f"{self.done:>3}/{self.total}"
         secs = f"  ({time.time() - self.since:.0f} s)" if self.since is not None else ""
         # Keep the line narrower than the terminal: a line that wraps can't be redrawn with \r,
         # so each update would leave a broken copy of the bar behind.
@@ -235,7 +255,7 @@ class Progress:
         self.stream.flush()
 
     def _feed(self):
-        rec = {"bar": self.bar, "done": self.done, "total": self.total, "bad": self.bad, "warned": self.warned, "tests": self.tests, "label": self.label,
+        rec = {"bar": self.bar, "done": self.done + self.before, "total": self.total + self.before, "bad": self.bad, "warned": self.warned, "tests": self.tests, "label": self.label,
                "ticking": self.since is not None, "unit": self.unit,
                "age": round(time.time() - self.since, 1) if self.since is not None else 0}
         if self.workers:
@@ -321,6 +341,15 @@ class Progress:
         with self.lock:
             self.clear()
             self.total, self.done, self.bad, self.warned, self.next_report, self.label = total, 0, 0, 0, 10, ""
+            self.unit = unit or self.unit
+            if self.feed:
+                self._feed()
+
+    def more(self, steps: int, unit: str | None = None):
+        """More steps on the same count, after those done (dev/upkeep.py: the pins moved, after the dependencies looked
+        up): one bar that fills once, never a second from 0."""
+        with self.lock:
+            self.total += steps
             self.unit = unit or self.unit
             if self.feed:
                 self._feed()

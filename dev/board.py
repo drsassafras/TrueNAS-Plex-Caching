@@ -52,7 +52,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:  # (run as a script: dev/ is on the path, not the project)
     sys.path.insert(0, ROOT)
 
-from dev.progress import DIM, OFF, RED, Progress, counted, record  # noqa: E402 — the bar the dev tools share
+from dev.progress import DIM, OFF, RED, Progress, capsule, counted, fields, record, wider  # noqa: E402 — the bar the dev tools share
 
 # blue: under way (running, or waiting its turn); then what came of it — green passed, orange a warning (stopped with
 # Enter, the dependencies behind), red failed, grey for the record (not run, skipped, already in sync): tnsync's colours
@@ -75,6 +75,7 @@ FILL = {k: "\033[38;2;46;46;46m" if v == MEH else "\033[97m" for k, v in COLOUR.
 CAPSULES = {BLUE: "\033[48;2;11;58;82m", GOOD: "\033[48;2;11;63;11m", MEH: "\033[48;2;90;58;0m", BAD: "\033[48;2;82;8;8m",
             GREY: "\033[48;2;42;42;42m"}
 CAPSULE = {k: CAPSULES[v] for k, v in COLOUR.items()}
+HEAD_CAPSULE = "\033[48;2;6;46;46m"   # (the header's tally likewise, on deep teal #062E2E)
 ROWS = 3   # each section's lines, kept from the start
 TITLE = 24   # a block's title column: its status starts after it (and the header's commit, under it)
 SAID = {"waiting": "waiting", "running": "running", "pass": "passed", "warn": "check above", "notrun": "not run",
@@ -326,10 +327,11 @@ class Section:
         self.ended = self.ended or time.time()
 
     # ------------------------------------------------------------- drawing
-    def lines(self, width: int) -> list[str]:
+    def lines(self, width: int, widths: tuple[int, int] | None = None) -> list[str]:
         """Its block: always ROWS lines, all in its colour (so nothing moves as it fills in) — the header (what it is, how
         it stands, its time), its bar (the one it moved last: the future tests' build, then their tests) and the last line
-        it printed (once it's done, its result)."""
+        it printed (once it's done, its result). Its bar's capsule drawn to ``widths`` (the board's widest: Board.widths), or
+        its own."""
         took = ""
         if self.started is not None:
             secs = int((self.ended or time.time()) - self.started)
@@ -361,7 +363,7 @@ class Section:
             n = shown[-1].workers
             workers = f"{n} worker{'s' if n != 1 else ''}" if n else ""
             room = width - 1 - (len(workers) + 3 if workers else 0)
-            bar = shown[-1].render(room, TRACK[self.shown], FILL[self.shown], "" if self.done else RED, CAPSULE[self.shown]).replace(DIM, "")
+            bar = shown[-1].render(room, TRACK[self.shown], FILL[self.shown], "" if self.done else RED, CAPSULE[self.shown], widths).replace(DIM, "")
             shown[-1].label = label
             if workers:
                 bar += " " * (width - 2 - len(workers) - len(ANSI.sub("", bar))) + workers
@@ -412,6 +414,7 @@ class Board:
         self.by_id = {s.id: s for s in self.sections}
         self.tty = tty
         self.drawn = 0           # lines on the terminal from the last frame
+        self.widths = (0, 0)     # (the widest capsule fields any bar has had: every bar's drawn to them, so they line up)
         self.aborted = False
         self.sel = selectors.DefaultSelector()
         self.stdin_tty = tty and sys.stdin.isatty()
@@ -582,6 +585,8 @@ class Board:
         # last thing on the screen, where it was
         said = "".join(self.told(s) for s in self.sections)
         lines: list[str] = []
+        for b in (b for s in self.sections for b in s.bars.values()):   # (no space kept for what no bar has counted)
+            self.widths = wider(self.widths, fields(b.done, b.total, b.bad, b.warned))
         header = list(self.header) or [""]
         keys = list(self.offered) + ([s.key for s in self.sections if s.keyed] if not self.pressed else [])
         last = [s for s in self.sections if s.final_phase in (1, 2) and not s.done]
@@ -593,19 +598,26 @@ class Board:
             secs = int((self.ended or time.time()) - self.started)
             took = f"{secs // 60}:{secs % 60:02d}"
         for i, text in enumerate(header):
-            right = took if i == 0 else self.tally() if i == 1 else ""
-            while i == 1 and right and len(text) + len(right) + 1 > width - 4:   # (the keys first: the tally shortened, then gone)
-                right = right.rsplit(" · ", 1)[0] if " · " in right else ""
+            body = HEAD if i == 0 else HEAD.replace("[1;", "[")
+            if i == 1:   # (the keys, then the tally in line with the commit above it — after the keys when they're longer)
+                drawn, plain = self.tally()
+                keys = f"{text:<{TITLE}}" if len(text) < TITLE else text + "   "
+                if len(keys) + len(plain) > width - 4:   # (the keys first: the tally gone when there's no room)
+                    drawn = plain = keys = ""
+                if plain:
+                    line = f"{body}  {keys}{drawn}{body}"
+                    lines.append(line + " " * (width - 2 - len(keys) - len(plain)) + OFF)
+                    continue
+            right, drawn = (took, took) if i == 0 else ("", "")
             room = width - 4 - (len(right) + 1 if right else 0)
             if i == 0 and self.commit:   # (the commit after it, cut first when there's no room)
                 text = f"{text:<{TITLE}}" if len(text) < TITLE else text + "   "   # (in line with the blocks' statuses)
                 rest = room - len(text)
                 text = (text + (self.commit if len(self.commit) <= rest else self.commit[: rest - 1] + "…" if rest > 1 else "")).rstrip()
             text = text if len(text) <= room else text[: room - 1] + "…"
-            body = HEAD if i == 0 else HEAD.replace("[1;", "[")
-            lines.append(f"{body}  {text}{' ' * (width - 4 - len(text) - len(right))}{right}  {OFF}")
+            lines.append(f"{body}  {text}{' ' * (width - 4 - len(text) - len(right))}{drawn}{body}  {OFF}")
         for s in self.sections:   # (a blank line between blocks, so each stands apart)
-            lines += ([""] if lines else []) + s.lines(width)
+            lines += ([""] if lines else []) + s.lines(width, self.widths)
         out = f"\033[{self.drawn}F" if self.drawn else ""
         if said:
             out += "\033[J" + said.replace("\n", "\033[K\n") + "\n"
@@ -615,17 +627,13 @@ class Board:
         sys.stdout.flush()
         self.drawn = len(lines)
 
-    def tally(self) -> str:
-        """How far the board is, on the header's right: "6 of 8 done · 1 failed" (the failed and warnings when there are)."""
-        n = len(self.sections)
-        out = [f"{sum(s.done for s in self.sections)}/{n} done"]
+    def tally(self) -> tuple[str, str]:
+        """How far the board is, under the header's commit: its sections' counts in every bar's capsule — failed,
+        warnings, passed / total (" 0 │ 1 │ 6 / 7 "), no space kept (the bars' widths aren't its) — on a deep shade of the
+        header's teal. Drawn, and plain."""
         failed = sum(s.state == "fail" for s in self.sections)
         warned = sum(s.state == "warn" for s in self.sections)
-        if failed:
-            out.append(f"{failed} failed")
-        if warned:
-            out.append(f"{warned} warning" + ("s" if warned != 1 else ""))
-        return " · ".join(out)
+        return capsule(sum(s.done for s in self.sections), len(self.sections), failed, warned, HEAD_CAPSULE)
 
     def run(self) -> None:
         if not self.tty and self.header:

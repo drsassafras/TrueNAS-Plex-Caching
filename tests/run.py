@@ -55,6 +55,8 @@ from dev.progress import OFF, RED, Progress, drawn, feeding, short_version, test
 from dev.progress import result as result_line  # noqa: E402 — (``result`` is run's: the result line every dev tool says)
 
 FEED = feeding()  # (read before main() takes PLEXCACHE_PROGRESS out of the tests' environment)
+# (dev/future.py's run: the image build's steps, before the tests on the board's one bar — not the tests' own)
+BEFORE = int(os.environ.pop("PLEXCACHE_BAR_BEFORE", "") or 0) if FEED else 0
 PINS = json.loads(os.environ.get("PLEXCACHE_PINS") or "{}")  # (dev/future.py's run: the app image's pins, to say only what's ahead)
 
 WARNED = [0]   # the warnings this process has printed (count_warnings)
@@ -121,6 +123,7 @@ class ProgressResult(unittest.TextTestResult):
     def __init__(self, stream, descriptions, verbosity, total: int, tty: bool):
         super().__init__(stream, descriptions, 0)
         self.progress = Progress(total, tty, feed=FEED, bar="tests", tests=True)
+        self.progress.before = BEFORE
         self.progress.workers = 1   # (this process alone: on the board, at the bar's right)
         self.on_stop = None   # the SIGTERM handler main() sets, kept in place between tests
 
@@ -314,6 +317,7 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
     # the longest first (last run's times; a class not timed yet, by its number of tests), so none is left to the end
     queue = sorted(units, key=lambda u: -times.get(u[0], len(u[1]) * 0.5))
     progress = Progress(total, tty, feed=FEED, bar="tests", tests=True)
+    progress.before = BEFORE
     failures: list[str] = []
     workers: list[Worker] = []
     sel = selectors.DefaultSelector()
