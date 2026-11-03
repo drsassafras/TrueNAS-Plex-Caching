@@ -138,6 +138,8 @@ class Section:
         self.out = open(self.log, "w", encoding="utf-8", errors="replace")  # noqa: SIM115 — (kept open while it runs)
         self.phase = 0                # 1: its "then" command
         self.reported = False         # (what it had to say beyond its block: said)
+        self.telling: list[str] = []  # (failures said as they came, not yet put above the board)
+        self.live_tell = False        # (the board on a terminal: those go above it at once)
         self.first = ""               # (the dependencies: the first line of the command that counts)
         self.looked = ""              # (the first line of its first step's)
         self.then_work: int | None = None   # (what its second step has to do, as its first said: 0, it isn't run)
@@ -239,6 +241,12 @@ class Section:
             return
         if rec is not None and isinstance(rec.get("issue"), dict):   # (something it found: in the board's Issues at the end)
             self.issues.append({k: str(rec["issue"].get(k) or "") for k in ("level", "text", "fix")})
+            return
+        if rec is not None and isinstance(rec.get("tell"), str):   # (a failure as it comes: above the board now, on a terminal)
+            if self.live_tell:
+                self.telling.append(rec["tell"])
+            else:   # (no terminal: with the rest of what it printed, once it's done)
+                self.out.write(rec["tell"] + "\n")
             return
         if rec is not None and isinstance(rec.get("then"), int):   # (what its second step has to do: 0, nothing)
             self.then_work = rec["then"]
@@ -363,7 +371,7 @@ class Section:
             n = shown[-1].workers
             workers = f"{n} worker{'s' if n != 1 else ''}" if n else ""
             room = width - 1 - (len(workers) + 3 if workers else 0)
-            bar = shown[-1].render(room, TRACK[self.shown], FILL[self.shown], "" if self.done else RED, CAPSULE[self.shown], widths).replace(DIM, "")
+            bar = shown[-1].render(room, TRACK[self.shown], FILL[self.shown], "" if self.done else RED, CAPSULE[self.shown], widths, indent=2 + TITLE).replace(DIM, "")
             shown[-1].label = label
             if workers:
                 bar += " " * (width - 2 - len(workers) - len(ANSI.sub("", bar))) + workers
@@ -421,6 +429,7 @@ class Board:
         self.pressed = False     # (a section's key has been pressed)
         for s in self.sections:
             s.live = self.stdin_tty
+            s.live_tell = tty
 
     def ready(self, s: Section) -> bool | None:
         """Whether a waiting section may start: True, None (not yet), False (never: a section it waits on didn't pass)."""
@@ -583,7 +592,7 @@ class Board:
         width = min(WIDTH, shutil.get_terminal_size((WIDTH, 40)).columns - 1)
         # what a section that ended has to say goes above the board, into the terminal's scrollback; the board stays the
         # last thing on the screen, where it was
-        said = "".join(self.told(s) for s in self.sections)
+        said = "".join(self.telling(s) + self.told(s) for s in self.sections)
         lines: list[str] = []
         for b in (b for s in self.sections for b in s.bars.values()):   # (no space kept for what no bar has counted)
             self.widths = wider(self.widths, fields(b.done, b.total, b.bad, b.warned))
@@ -599,16 +608,9 @@ class Board:
             took = f"{secs // 60}:{secs % 60:02d}"
         for i, text in enumerate(header):
             body = HEAD if i == 0 else HEAD.replace("[1;", "[")
-            if i == 1:   # (the keys, then the tally in line with the commit above it — after the keys when they're longer)
-                drawn, plain = self.tally()
-                keys = f"{text:<{TITLE}}" if len(text) < TITLE else text + "   "
-                if len(keys) + len(plain) > width - 4:   # (the keys first: the tally gone when there's no room)
-                    drawn = plain = keys = ""
-                if plain:
-                    line = f"{body}  {keys}{drawn}{body}"
-                    lines.append(line + " " * (width - 2 - len(keys) - len(plain)) + OFF)
-                    continue
-            right, drawn = (took, took) if i == 0 else ("", "")
+            right, drawn = (took, took) if i == 0 else self.tally()[::-1] if i == 1 else ("", "")
+            if i == 1 and len(text) + len(right) + 1 > width - 4:   # (the keys first: the tally gone when there's no room)
+                right = drawn = ""
             room = width - 4 - (len(right) + 1 if right else 0)
             if i == 0 and self.commit:   # (the commit after it, cut first when there's no room)
                 text = f"{text:<{TITLE}}" if len(text) < TITLE else text + "   "   # (in line with the blocks' statuses)
@@ -628,7 +630,7 @@ class Board:
         self.drawn = len(lines)
 
     def tally(self) -> tuple[str, str]:
-        """How far the board is, under the header's commit: its sections' counts in every bar's capsule — failed,
+        """How far the board is, on the header's right: its sections' counts in every bar's capsule — failed,
         warnings, passed / total (" 0 │ 1 │ 6 / 7 "), no space kept (the bars' widths aren't its) — on a deep shade of the
         header's teal. Drawn, and plain."""
         failed = sum(s.state == "fail" for s in self.sections)
@@ -667,6 +669,11 @@ class Board:
         for s in self.sections:
             if s.proc is not None:
                 stop_group(s.proc)
+
+    def telling(self, s: Section) -> str:
+        """The failures a section said as they came (tests/run.py's "tell" records), since the last frame: above the board."""
+        text, s.telling = "".join(f"\n{t.rstrip()}\n" for t in s.telling), []
+        return text
 
     def told(self, s: Section) -> str:
         """What there is to say of a section beyond its block, once it's done: what a failed one printed, as it came (the

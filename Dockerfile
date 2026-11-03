@@ -2,6 +2,10 @@
 # an argument so dev/future.py can build the same image on the next Python (--build-arg PYTHON_TAG=3.16-rc-slim-trixie).
 # Debian, because MKVToolNix's own repository (mkvtoolnix.download) builds for it: each release there within days.
 ARG PYTHON_TAG=3.15-slim-trixie
+# The Debian that jpegtran and ffmpeg are built on (the stages below): the Python image's own, without Python — neither
+# uses it, so a new Python (dev/future.py's alpha, or the image refreshed upstream) doesn't build ffmpeg again (minutes).
+# Moved with PYTHON_TAG's Debian (the suite checks the two agree).
+ARG DEBIAN_TAG=trixie-slim
 
 # The tools the optimizer service (the app's second container) runs. MKVToolNix (mkvmerge, mkvpropedit, mkvextract)
 # rewrites files; ffmpeg checks every stream is unchanged before a swap; oxipng and jpegtran (libjpeg-turbo) compress cover
@@ -22,7 +26,7 @@ ARG FFMPEG_STAMP=""
 ARG NODE_TAG=26-slim
 
 # jpegtran built from libjpeg-turbo's release: the one tool of it the optimizer uses, linked statically against it.
-FROM python:${PYTHON_TAG} AS jpegtran
+FROM debian:${DEBIAN_TAG} AS jpegtran
 ARG LIBJPEG_TURBO
 # (bash, with a pipe's failure the step's: a download that fails can't pass by its tar)
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -38,7 +42,7 @@ RUN set -eux; \
 # ffmpeg (with ffprobe) built from its release, with no external libraries (zlib for PNG cover art). A few minutes of the build.
 # The release's tarball is fetched from ffmpeg.org, tried again a few times; if ffmpeg.org still can't be reached, the same
 # release's tag from FFmpeg's own mirror on GitHub (the snapshot has only ffmpeg.org).
-FROM python:${PYTHON_TAG} AS ffmpeg
+FROM debian:${DEBIAN_TAG} AS ffmpeg
 ARG FFMPEG
 ARG FFMPEG_SOURCE
 ARG FFMPEG_STAMP

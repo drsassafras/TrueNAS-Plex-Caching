@@ -8,7 +8,7 @@ dev/tnsync), the workflows (actionlint on .github/workflows, with ShellCheck on 
 All three run through dev/checks.py, the code every check tool shares: each fetched at its version the first time (into
 ~/.cache/plex-cache/tools/), what they find said one way (file:line:column - severity: message (Tool CODE)), then the
 result line every dev tool says ("0 ShellCheck findings · 0 actionlint findings · 0 hadolint findings"). On tnsync's board
-(PLEXCACHE_PROGRESS=feed: its Build Validation section) its bar is the checks done. Every finding counts, ShellCheck's
+(PLEXCACHE_PROGRESS=feed: its Build Validation section) its bar is the files checked. Every finding counts, ShellCheck's
 and hadolint's notes and style too: they're kept at zero, fixed in the code; a rule wrong for a line says so there
 (``# shellcheck disable=SC… — why``), and a rule is only turned off (.hadolint.yaml) with the maintainer's say. Exit 0
 clean, 1 something found, else one of them couldn't run.
@@ -81,7 +81,9 @@ def hadolint() -> Outcome:
 
 
 def main() -> int:
-    return checks.run([Check("ShellCheck", shellcheck), Check("actionlint", actionlint), Check("hadolint", hadolint)], bar="build")
+    return checks.run([Check("ShellCheck", shellcheck, lambda: list(SCRIPTS)),
+                       Check("actionlint", actionlint, lambda: checks.project_files("*.yml", "*.yaml", under=(WORKFLOWS,))),
+                       Check("hadolint", hadolint, lambda: list(DOCKERFILES))], bar="build")
 
 
 if __name__ == "__main__":

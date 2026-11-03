@@ -51,6 +51,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
+from dev.progress import FEED as FEED_MARK  # noqa: E402 — (a record's mark: run's FEED says whether there's a board)
 from dev.progress import OFF, RED, Progress, drawn, feeding, short_version, tested, timed  # noqa: E402 — the bar the dev tools share (dev/upkeep.py's too)
 from dev.progress import result as result_line  # noqa: E402 — (``result`` is run's: the result line every dev tool says)
 
@@ -319,6 +320,14 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
     progress = Progress(total, tty, feed=FEED, bar="tests", tests=True)
     progress.before = BEFORE
     failures: list[str] = []
+
+    def failed(text: str):
+        """A failure, kept for the end; on tnsync's board said now too (a "tell" record: the board puts it above itself as
+        it comes, not once the run is over), so it isn't printed again at the end there."""
+        failures.append(text)
+        if FEED:
+            sys.stdout.write(FEED_MARK + json.dumps({"tell": text}) + "\n")
+            sys.stdout.flush()
     workers: list[Worker] = []
     sel = selectors.DefaultSelector()
     unit_started: dict[str, float] = {}
@@ -333,7 +342,7 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
         if tty:
             sys.stdout.write("\r\033[K")
         bad = len(failures)
-        if bad:
+        if bad and not FEED:   # (on the board each was said as it came: ``failed``)
             print()
             for block in failures:
                 print(block)
@@ -374,7 +383,7 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
                     running.pop(w, None)
                     if w.unit is not None:  # mid-class: the tests it hadn't finished are errors, and someone else goes on
                         lost = [t for t in w.unit[1] if t not in w.reported]
-                        failures.append(f"{'=' * 70}\nERROR: {w.unit[0]}\n{'-' * 70}\nThe worker running it ended (exit code {code}) "
+                        failed(f"{'=' * 70}\nERROR: {w.unit[0]}\n{'-' * 70}\nThe worker running it ended (exit code {code}) "
                                         f"with {len(lost)} of its tests not finished:\n  " + "\n  ".join(lost) + "\n")
                         for t in lost:
                             progress.draw(t.rsplit(".", 2)[-2] + "." + t.rsplit(".", 1)[-1], len(failures), progress.warned)
@@ -401,7 +410,7 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
                         progress.show(msg["name"], ticking=True)
                     elif msg["t"] == "test":
                         if msg.get("text"):
-                            failures.append(msg["text"])
+                            failed(msg["text"])
                         if msg.get("id"):
                             w.reported.add(msg["id"])
                             running.pop(w, None)

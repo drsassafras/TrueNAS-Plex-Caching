@@ -109,7 +109,7 @@ def capsule(done: int, total: int, bad: int, warned: int, bg: str = CAPSULE, wid
     passed = max(0, done - bad)
     nums = [(f"{bad:>{small}}", FAILED if bad else ZERO), (f"{warned:>{small}}", WARNED if warned else ZERO),
             (f"{passed:>{large}}", PASSED if passed else ZERO)]
-    whole = f"{total if total else '-':>{large}}"
+    whole = f"{total if total else '-':<{large}}"   # (the total against its slash)
     drawn = bg + " " + f"{RULE} │ ".join(f"{colour}{n}" for n, colour in nums) + f"{RULE} / {TOTAL}{whole} {OFF}"
     return drawn, " " + " │ ".join(n for n, _ in nums) + f" / {whole} "
 
@@ -222,7 +222,7 @@ class Progress:
             return int(os.environ.get("COLUMNS") or 0) or 100  # (a log shown on a terminal later: tnsync says how wide)
 
     def render(self, width: int, track: str = TRACK, fill: str | None = None, alert: str = RED, capsule_bg: str = CAPSULE,
-               widths: tuple[int, int] | None = None) -> str:
+               widths: tuple[int, int] | None = None, indent: int = 4) -> str:
         """The bar's line, narrower than ``width`` (the board draws it in its section, on its block's ``track`` with its
         ``fill`` and ``alert`` colours; ``_line`` on the terminal)."""
         pct = min(1.0, self.done / self.total if self.total else 0 if self.tests else 1)   # (tests not counted yet: empty)
@@ -237,18 +237,20 @@ class Progress:
         if widths is None:   # (on its own: as wide as its own counts have been; on the board, the widest of every bar's)
             widths = self.widths = wider(self.widths, fields(self.done, self.total, self.bad, self.warned))
         count, plain = capsule(self.done, self.total, self.bad, self.warned, capsule_bg, widths)   # (every bar's counts, one way)
-        if len(f"    [{'#' * BAR}] {plain}") + 3 > width:   # (a terminal too narrow for the capsule: the count alone)
+        pad = " " * indent   # (on the board: in line with its block's status, above it)
+        if len(f"{pad}[{'#' * BAR}] {plain}") + 3 > width:   # (a terminal too narrow for the capsule: the count alone)
             count = plain = f"{self.done:>3}/{self.total}"
-        secs = f"  ({time.time() - self.since:.0f} s)" if self.since is not None else ""
+        # (its step's seconds — not on the board, whose block has its own timer: one timer a block)
+        secs = f"  ({time.time() - self.since:.0f} s)" if self.since is not None and indent == 4 else ""
         # Keep the line narrower than the terminal: a line that wraps can't be redrawn with \r,
         # so each update would leave a broken copy of the bar behind.
-        visible = len(f"    [{'#' * BAR}] {plain}") + 2
+        visible = len(f"{pad}[{'#' * BAR}] {plain}") + 2
         room = width - visible - 1
         secs = secs if room - len(secs) > 1 else ""
         room -= len(secs)  # (the seconds stay in sight: it's the label that's cut short)
         name = self.label if len(self.label) <= room else (self.label[: max(0, room - 1)] + "…" if room > 1 else "")
         name += secs
-        return f"    {bar} {count}  {DIM}{name}{OFF}"
+        return f"{pad}{bar} {count}  {DIM}{name}{OFF}"
 
     def _line(self):
         self.stream.write("\r\033[K" + self.render(self._width()))

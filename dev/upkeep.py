@@ -495,7 +495,7 @@ DEPS = [
         major=2, cant="A new Python: dev/future.py clean on it first, then PYTHON_TAG in the Dockerfile and python-version in build.yml."),
     Dep("Debian", lambda: _debian_number(debian_of_tag()), lambda: _debian_number(debian_newest()), "the python image's tag",
         cant="A new Debian: dev/future.py --python 3.15 --tag 3.15-slim-<codename> clean on it first (MKVToolNix's repository has to build "
-             "for it too), then PYTHON_TAG in the Dockerfile."),
+             "for it too), then PYTHON_TAG and DEBIAN_TAG in the Dockerfile."),
     Dep("MKVToolNix", _arg("MKVTOOLNIX"), mkvtoolnix_latest, "ARG MKVTOOLNIX in the Dockerfile", major=0, bump=_mkvtoolnix_bump,
         cant="ARG MKVTOOLNIX in the Dockerfile, once mkvtoolnix.download has the release for the image's Debian."),
     Dep("ffmpeg", _arg("FFMPEG"), ffmpeg_latest, "ARG FFMPEG in the Dockerfile",

@@ -488,7 +488,7 @@ def release_check(m: Map, audits: list[Audit], have_private: bool, rule: dict, n
     if release and not tag:
         found.append(Finding("Audit", "git tags", 0, 0, sev, "no release candidate tagged (vX.Y.Z-rc.N) on this code", "release"))
     elif tag and made is not None and now - made < soak * DAY:
-        found.append(Finding("Audit", "git tags", 0, 0, sev, f"{tag} has soaked {(now - made) / DAY:.1f} of {soak:g} days", "release"))
+        found.append(Finding("Audit", "git tags", 0, 0, sev, f"{tag} has soaked {max(0.0, now - made) / DAY:.1f} of {soak:g} days", "release"))
     block = rule.get("block_open", "high")
     for a in audits:
         for f in a.findings:

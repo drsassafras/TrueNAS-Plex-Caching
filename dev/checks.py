@@ -8,7 +8,8 @@ fetched at its version in dev/tools.toml, what it finds said one way, the board'
 A finding is said as ``  path:line:col - severity: message (Tool CODE)``, `` [*]`` after it when the tool's own --fix
 makes it; on GitHub it's annotated on its line too (an error, a warning or a notice). Then the result line every dev
 tool says (dev/progress.py: "0 errors · 0 warnings · 0 Ruff findings"): each tool's own facts, in the order the checks
-are given. On tnsync's board (PLEXCACHE_PROGRESS=feed) the bar is the checks done, each named as it ends.
+are given. On tnsync's board (PLEXCACHE_PROGRESS=feed) the bar is the files checked (what each check says it reads:
+``files``, from project_files; a file counted once every check that reads it is done), each check named as it ends.
 
 The exit code: 0 clean, 1 something found, 2 a tool couldn't run (not installed, no network for its download…).
 """
@@ -222,26 +223,66 @@ class Outcome:
 class Check:
     name: str
     run: Callable[[], Outcome]
+    files: Callable[[], list[str]] | None = None   # what it reads (project_files): the bar counts them; None: the checks
+
+
+def project_files(*patterns: str, under: tuple[str, ...] = ("",), skip: tuple[str, ...] = ()) -> list[str]:
+    """The project's files (from its root) whose names match one of ``patterns`` (fnmatch: "*.py", "Dockerfile"), in the
+    folders ``under`` ("" the whole project), none in ``skip``: what git keeps or would (not what it ignores), or, with
+    no git, every file but .git, node_modules and __pycache__."""
+    import fnmatch
+    try:
+        got = subprocess.run(["git", "-C", ROOT, "ls-files", "-z", "-co", "--exclude-standard"], capture_output=True, timeout=30)
+        listed = [p for p in got.stdout.decode("utf-8", "replace").split("\0") if p] if got.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        listed = None
+    if listed is None:
+        listed = []
+        for dirpath, dirs, names in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__")]
+            listed += [os.path.relpath(os.path.join(dirpath, n), ROOT).replace(os.sep, "/") for n in names]
+
+    def within(path: str, folders: tuple[str, ...]) -> bool:
+        return any(not f or path == f or path.startswith(f.rstrip("/") + "/") for f in folders)
+    return sorted(p for p in listed if within(p, under) and not within(p, skip) and os.path.isfile(os.path.join(ROOT, p))
+                  and any(fnmatch.fnmatch(os.path.basename(p), pat) for pat in patterns))
 
 
 def run(checks: list[Check], bar: str = "main", stream=None) -> int:
     """Every check at once; what each found, in their order, then the result line. The exit code (above)."""
     stream = stream or sys.stdout
-    progress = Progress(len(checks), unit="checks done", bar=bar, stream=stream) if feeding() else None
-    if progress:
+    # what the bar counts: the files the checks read (each once), when every check says which; else the checks
+    read = [c.files() if c.files else None for c in checks] if feeding() else []
+    readers: dict[str, set[int]] = {}
+    if read and all(r is not None for r in read):
+        for i, r in enumerate(read):
+            for f in r or []:
+                readers.setdefault(f, set()).add(i)
+    progress = None
+    if feeding():
+        progress = Progress(len(readers), unit="files checked", bar=bar, stream=stream) if readers else \
+            Progress(len(checks), unit="checks done", bar=bar, stream=stream)
         progress.workers = len(checks)
         progress.show(", ".join(c.name for c in checks), ticking=True)
         _BAR.append(progress)
     outcomes: list[Outcome | None] = [None] * len(checks)
+    lock = threading.Lock()
 
     def one(i: int, c: Check):
         try:
             got = c.run()
         except Exception as e:   # noqa: BLE001 — one tool falling over is said as that, the others still report
             got = Outcome(c.name, "", None, f"{c.name} fell over: {e!r}")
-        outcomes[i] = got
-        if progress:
-            progress.draw(f"{c.name} {got.version}".strip(), bad=sum(1 for o in outcomes if o and (o.bad() or o.findings is None)))
+        with lock:
+            outcomes[i] = got
+            bad = sum(1 for o in outcomes if o and (o.bad() or o.findings is None))
+            name = f"{c.name} {got.version}".strip()
+            if progress and readers:   # (a file is checked once every check that reads it is done)
+                done = sum(1 for who in readers.values() if all(outcomes[j] is not None for j in who))
+                progress.bad = bad
+                progress.at(done, len(readers), name)
+            elif progress:
+                progress.draw(name, bad=bad)
 
     threads = [threading.Thread(target=one, args=(i, c), name=c.name) for i, c in enumerate(checks)]
     for t in threads:

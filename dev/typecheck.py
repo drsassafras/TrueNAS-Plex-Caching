@@ -12,14 +12,16 @@ that Python (Homebrew's takes no pip installs).
 
 Both run through dev/checks.py, the code every check tool shares: what they find is said one way
 (file:line:column - severity: message (Tool CODE)), then the result line every dev tool says ("0 errors · 0 warnings ·
-0 Ruff findings"). On tnsync's board (PLEXCACHE_PROGRESS=feed: its Python Validation section) its bar is the checks done.
+0 Ruff findings"). On tnsync's board (PLEXCACHE_PROGRESS=feed: its Python Validation section) its bar is the files checked.
 On GitHub, the findings are annotated on their lines too. Exit 0 clean, 1 something found, else one of them couldn't run.
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+import tomllib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -76,6 +78,21 @@ def ruff(fix: bool) -> Outcome:
     return Outcome("Ruff", version, ruff_findings(got))
 
 
+def pyright_files() -> list[str]:
+    """What pyright reads: the Python in pyrightconfig.json's include (its // comments left out)."""
+    import re
+    with open(os.path.join(ROOT, "pyrightconfig.json"), encoding="utf-8") as fh:
+        config = json.loads(re.sub(r"^\s*//.*$", "", fh.read(), flags=re.M))
+    return checks.project_files("*.py", under=tuple(config.get("include") or [""]), skip=tuple(config.get("exclude") or ()))
+
+
+def ruff_files() -> list[str]:
+    """What Ruff reads: the project's Python, but ruff.toml's extend-exclude (and what git ignores, as Ruff does)."""
+    with open(os.path.join(ROOT, "ruff.toml"), "rb") as fh:
+        config = tomllib.load(fh)
+    return checks.project_files("*.py", skip=tuple(config.get("extend-exclude") or ()))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--fix", action="store_true", help="make Ruff's safe fixes first (in the files), then check")
@@ -84,8 +101,8 @@ def main() -> int:
     # pyright reads the files only when asked for, so --fix runs them one after the other)
     if args.fix:
         fixed = ruff(True)
-        return checks.run([Check("pyright", pyright), Check("Ruff", lambda: fixed)], bar="types")
-    return checks.run([Check("pyright", pyright), Check("Ruff", lambda: ruff(False))], bar="types")
+        return checks.run([Check("pyright", pyright, pyright_files), Check("Ruff", lambda: fixed, ruff_files)], bar="types")
+    return checks.run([Check("pyright", pyright, pyright_files), Check("Ruff", lambda: ruff(False), ruff_files)], bar="types")
 
 
 if __name__ == "__main__":

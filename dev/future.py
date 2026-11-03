@@ -403,6 +403,8 @@ class Line:
     def __init__(self, what: str):
         self.what, self.tty, self.started, self.last = what, sys.stdout.isatty(), time.time(), 0.0
         self.bar = Progress(0, bar="tests", tests=True) if feeding() else None
+        if self.bar is not None:
+            self.bar.workers = 1   # (docker's build, one at a time; the suite says its own once it starts)
         self.done = self.total = 0
 
     def show(self, text: str, done: int | None = None, total: int | None = None) -> None:
@@ -410,7 +412,7 @@ class Line:
             self.done, self.total = done if done is not None else self.done, total or self.total
             # (BuildKit numbers its steps but never says how many: the steps so far stand for them, the bar's total
             # those and the tests from the start, never "-")
-            self.bar.at(self.done, max(self.total, self.done) + TESTS[0], f"{self.what}: {text}", ticking=True)
+            self.bar.at(self.done, max(self.total, self.done) + TESTS[0], f"build {text}", ticking=True)   # (the step first: "build #8 [ffmpeg 3/3] RUN …")
             return
         elapsed = int(time.time() - self.started)
         part = f" {done}/{total}" if done is not None and total else ""
@@ -457,6 +459,9 @@ def build_image(tag: str, args: list[str], verbose: bool) -> bool:
     that moves, the full output kept in LOG and its tail shown when the build fails."""
     buildkit = has_buildkit()
     cmd = ["docker", "buildx", "build", "--load", "--progress=plain"] if buildkit else ["docker", "build"]
+    debian = re.search(r"-(\w+)$", tag)   # (the tools' stages on the same Debian as this Python: DEBIAN_TAG)
+    if debian and debian.group(1) in upkeep.DEBIAN:
+        args = ["--build-arg", f"DEBIAN_TAG={debian.group(1)}-slim", *args]
     cmd += ["--pull", "--build-arg", f"PYTHON_TAG={tag}", *args, "-t", IMAGE, ROOT]
     if not buildkit:
         print(f"    {DIM}(docker's legacy builder. For BuildKit, add docker-buildx's folder to ~/.docker/config.json as brew says when it installs it: brew install docker-buildx){OFF}")
@@ -537,6 +542,9 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
     # suite runs through tests/run.py (its progress bar on a terminal: -t) unless particular tests are named; CI=1: the
     # dependency check, dev/upkeep.py, is for a run by hand in the checkout, not this one.
     leave = "".join(f" --exclude {c}" for c in exclude or [])   # (classes another section runs: tnsync's style guide)
+    # its workers as the host's would be (two per core): the container's own count is the docker VM's few cores, and the
+    # tests mostly wait rather than compute
+    leave += f" -j{2 * (os.cpu_count() or 1)}"
     suite = f"python {' '.join(WARN)} tests/run.py{leave}" if tests == ["tests.test_plexcache"] else f"python {' '.join(WARN)} -m unittest -q {' '.join(tests)}"
     tarball = fetch_node(node_pick) if node_pick else None
     mount = ["-v", f"{tarball}:/node.tar.xz:ro"] if tarball else []
@@ -547,15 +555,17 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
     node = ("if [ -f /node.tar.xz ]; then python -c \"import tarfile; tarfile.open('/node.tar.xz').extractall('/opt', filter='tar')\" && "
             "PATH=\"$(echo /opt/node-*/bin):$PATH\" && export PATH; fi; "
             "command -v node >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends nodejs) >/dev/null 2>&1 || echo '    node not added: the page tests skip'; "
-            # and rsync, which tnsync's tests copy with (the image has no use for it)
-            "command -v rsync >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends rsync) >/dev/null 2>&1 || echo '    rsync not added'")
+            # and rsync, which tnsync's tests copy with, and git, which the build check's test lists the checkout with (the
+            # image has no use for either; the checkout is the host's, so git is told it's safe to read)
+            "command -v rsync >/dev/null 2>&1 && command -v git >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends rsync git) "
+            ">/dev/null 2>&1 || echo '    rsync and git not added'; git config --global --add safe.directory /src 2>/dev/null || true")
     tty = ["-t"] if sys.stdout.isatty() else []
     if feeding():  # (on tnsync's board: tests/run.py's bar sent to it, through docker's output)
         tty = ["-e", "PLEXCACHE_PROGRESS=feed"]
     # shown on a terminal later (a log, PLEXCACHE_PROGRESS=bar): tests/run.py's bar all the same, as wide as that terminal
     elif not tty and os.environ.get("PLEXCACHE_PROGRESS") == "bar":
         tty = ["-e", "PLEXCACHE_PROGRESS=bar", "-e", f"COLUMNS={os.environ.get('COLUMNS') or 100}"]
-    print(f"    Adding node {node_pick.version if tarball and node_pick else '(Debian’s)'} and rsync to the container, then running the suite:", flush=True)
+    print(f"    Adding node {node_pick.version if tarball and node_pick else '(Debian’s)'}, rsync and git to the container, then running the suite:", flush=True)
     # the app image's pins (the Dockerfile's, dev/upkeep.py moves them): on the board the suite's line names only what's
     # ahead of them (tests/run.py's ran_on), not what this image shares with the app's
     pins = {"Python": upkeep._arg("PYTHON_TAG")().split("-")[0], "Node": upkeep._arg("NODE_TAG")().split("-")[0],

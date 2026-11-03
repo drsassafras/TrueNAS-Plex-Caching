@@ -4618,6 +4618,31 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn(" 26 / 26 ", drawn[1])
         self.assertIn("26 dependencies up to date", drawn[2])
 
+    def test_a_failure_goes_above_the_board_as_it_comes(self):
+        """tests/run.py on the board says each failure as it comes (a "tell" record): on a terminal the board puts it above
+        itself at its next frame, once, and the failed section doesn't print it again at its end; with no terminal it's
+        with the rest of what the section printed."""
+        from dev import board
+        from dev.progress import FEED
+        folder = tempfile.mkdtemp(dir=TMP)
+        b = board.Board({"sections": [{"id": "x", "title": "Future Tests", "cmd": "true"}]}, folder, True)
+        s = b.sections[0]
+        self.addCleanup(s.out.close)
+        s.state = "running"
+        s.line(FEED + json.dumps({"tell": "FAIL: test_x (A.test_x)\nAssertionError: 1 != 2"}))
+        self.assertIn("AssertionError: 1 != 2", b.telling(s))
+        self.assertEqual(b.telling(s), "")                                     # (said once)
+        s.finished(1)
+        self.assertNotIn("AssertionError", b.told(s))                          # (not again at its end)
+        b = board.Board({"sections": [{"id": "x", "title": "Future Tests", "cmd": "true"}]}, folder, False)
+        s = b.sections[0]
+        self.addCleanup(s.out.close)
+        s.state = "running"
+        s.line(FEED + json.dumps({"tell": "FAIL: test_x (A.test_x)\nAssertionError: 1 != 2"}))
+        s.finished(1)
+        self.assertEqual(b.telling(s), "")
+        self.assertIn("AssertionError: 1 != 2", b.told(s))                     # (no terminal: at its end)
+
     def test_a_section_is_blue_while_it_runs_then_green_orange_red_or_grey(self):
         """Each of the board's sections: a block of three lines from the start, so nothing moves as it fills in, all of it
         blue while it runs (or waits), then green (passed), orange (stopped with Enter, the dependencies behind), red
@@ -4638,18 +4663,18 @@ class TestRunnerTests(unittest.TestCase):
         s.line(FEED + json.dumps({"bar": "tests", "done": 3, "total": 10, "bad": 0, "label": "A.test_" + "x" * 200, "ticking": False}))
         s.line("\033[32mlast line\033[0m " + "y" * 200)
         s.line(FEED + json.dumps({"bar": "build", "done": 2, "total": 7, "bad": 0, "label": "step 2", "ticking": False}))
-        drawn = s.lines(60)
+        drawn = s.lines(80)
         self.assertEqual(len(drawn), board.ROWS)
         self.assertTrue(drawn[0].startswith(board.BLUE))
         plain = lambda line: re.sub(r"\033\[[0-9;]*m", "", line)
         self.assertIn(" 0 │ 0 │ 2 / 7 ", plain(drawn[1]))   # (the bar moved last; every bar's counts in one capsule, no space kept)
         s.line(FEED + json.dumps({"bar": "tests", "done": 3, "total": 10, "bad": 0, "label": "A.test_1", "ticking": False}))
-        drawn = s.lines(60)
+        drawn = s.lines(80)
         self.assertIn(" 0 │ 0 │  3 / 10 ", plain(drawn[1]))   # (its fields as wide as the widest it's had: the total's)
-        self.assertIn("    0 │    0 │    3 /   10 ", plain(s.lines(100, (4, 4))[1]))   # (on the board: the widest of every bar's)
+        self.assertIn("    0 │    0 │    3 / 10   ", plain(s.lines(100, (4, 4))[1]))   # (on the board: the widest of every bar's)
         self.assertNotIn("last line", drawn[2])   # (while its bar runs, no stray line: the bar says how it goes)
         for line in drawn:
-            self.assertLessEqual(len(re.sub(r"\033\[[0-9;]*m", "", line)), 60)
+            self.assertLessEqual(len(re.sub(r"\033\[[0-9;]*m", "", line)), 80)
             self.assertTrue(line.startswith((board.BLUE, board.BODY["running"])))
         s.line(FEED + json.dumps({"said": "3 tests passed"}))
         self.assertIn("3 tests passed", s.lines(60)[2])   # (what the tool says of it: shown, running or not)
@@ -14831,6 +14856,20 @@ class FutureTests(unittest.TestCase):
     """The future run's channels (dev/future.py): each dependency's newest pre-release when it's ahead of the stable release,
     else that release — chosen from what upstream lists, with no network here."""
 
+    def test_the_tools_are_built_on_the_pythons_debian_without_python(self):
+        """jpegtran and ffmpeg are built on plain Debian (DEBIAN_TAG), so a new Python doesn't build ffmpeg again; that
+        Debian is PYTHON_TAG's, in the Dockerfile and in dev/future.py's build on another Python."""
+        from dev import future, upkeep
+        df = _read(os.path.join(ROOT, "Dockerfile"), encoding="utf-8")
+        self.assertIn("FROM debian:${DEBIAN_TAG} AS jpegtran", df)
+        self.assertIn("FROM debian:${DEBIAN_TAG} AS ffmpeg", df)
+        self.assertEqual(re.search(r"^ARG DEBIAN_TAG=(\S+)", df, re.M).group(1), f"{upkeep.debian_of_tag()}-slim")
+        ran = []
+        with mock.patch.object(future, "has_buildkit", return_value=True), mock.patch.object(future, "LOG", os.path.join(TMP, "future-build.log")), \
+                mock.patch.object(future.subprocess, "run", side_effect=lambda cmd, **kw: ran.append(cmd) or mock.Mock(returncode=0)):
+            future.build_image("3.16.0a1-slim-trixie", [], verbose=True)
+        self.assertIn("DEBIAN_TAG=trixie-slim", ran[0])
+
     def test_the_bar_counts_the_tests_before_the_build(self):
         """The one bar's total from its start (the build's steps and the tests): the tests counted in the checkout, as the
         suite will load them (the classes another section runs left out), with no run before it needed."""
@@ -15871,6 +15910,38 @@ class CheckToolTests(unittest.TestCase):
         # a tool whose findings don't fail it (pyright's information notes) says its own facts
         notes = Check("D", lambda: Outcome("D", "4.0", [Finding("D", "y.py", 1, 1, "information", "n")], facts=["0 errors"], failed=False))
         self.assertEqual(run(notes), (0, ["  y.py:1:1 - information: n (D)", "0 errors"]))
+
+    def test_the_bar_counts_the_files_checked(self):
+        """On tnsync's board a check tool's bar is the files its checks read, each counted once every check that reads it is
+        done (a file two tools read: when the second ends); a check that doesn't say what it reads: the checks done."""
+        from dev import checks
+        from dev.checks import Check, Outcome
+        self.assertEqual(checks.project_files("tnsync", under=("dev",)), ["dev/tnsync"])
+        self.assertIn("dev/checks.py", checks.project_files("*.py", under=("dev",)))
+        self.assertNotIn("dev/checks.py", checks.project_files("*.py", skip=("dev",)))
+        gate = threading.Event()
+
+        def slow():
+            gate.wait(10)
+            return Outcome("B", "2.0", [])
+        a = Check("A", lambda: Outcome("A", "1.0", []), lambda: ["x.py", "y.py"])
+        b = Check("B", slow, lambda: ["y.py", "z.sh"])
+        out = io.StringIO()
+        sent = []
+
+        def run(cs):
+            with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": "feed"}):
+                return checks.run(cs, stream=out)
+        with mock.patch("dev.progress.Progress._feed", lambda self: sent.append((self.done, self.total, self.unit))):
+            threading.Timer(0.3, gate.set).start()
+            self.assertEqual(run([a, b]), 0)
+            self.assertEqual(sent[0], (0, 3, "files checked"))
+            self.assertIn((1, 3, "files checked"), sent)    # (A done: x.py; y.py waits for B too)
+            self.assertEqual(sent[-1][:2], (3, 3))
+            sent.clear()
+            gate.set()
+            self.assertEqual(run([Check("A", lambda: Outcome("A", "1.0", [])), b]), 0)
+            self.assertEqual((sent[0], sent[-1][:2]), ((0, 2, "checks done"), (2, 2)))
 
     def test_a_release_binary_is_the_one_named(self):
         from dev import checks
