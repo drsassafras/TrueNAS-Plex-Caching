@@ -26,6 +26,11 @@ import time
 
 BAR = 24
 GREEN, RED, DIM, OFF = "\033[32m", "\033[31m", "\033[2m", "\033[0m"
+# a run of tests' counts on its bar, in a capsule (``capsule``): failed, warnings and passed in their colours (a 0 grey),
+# the total bold white
+CAPSULE = "\033[48;2;38;38;38m"   # (on a terminal; on the board, a deep shade of its block's colour)
+FAILED, WARNED, PASSED = "\033[1;38;2;255;143;143m", "\033[1;38;2;255;201;77m", "\033[1;38;2;166;255;166m"
+ZERO, RULE, TOTAL = "\033[22;38;2;138;138;138m", "\033[22;38;2;153;153;153m", "\033[1;97m"
 TRACK = "\033[48;5;237m"   # (the bar's empty part on a terminal: a faint track; on the board, its block's colour darkened)
 EIGHTHS = " ▏▎▍▌▋▊▉"      # (the cell being filled: 1/8 to 7/8 of it)
 GLYPHS = locale.getpreferredencoding(False).lower().replace("-", "") == "utf8"   # (else # and -: a locale without them)
@@ -62,18 +67,44 @@ def short_version(v: str) -> str:
 
 
 class Shown(str):
-    """A count the bar already shows, on tnsync's board: its outcome only, and only when the line has nothing else."""
+    """A count the bar already shows, on tnsync's board, and what came of it, which its block's header says: never said."""
 
 
 def tally(n: int, unit: str, outcome: str, plural: str = "", of: int | None = None, feed: bool | None = None) -> str:
     """A count and what came of it, the fact of a result line: "550 tests passed", "3/550 tests failed". On tnsync's
-    board the bar says the count already: the whole of it (n of n) is left out — "Python 3.15.2 · …", or just
-    "Up to date" when there's nothing else to say — and part of it is said without the total: "3 failed"."""
+    board the bar says the count already, and the block's header what came of it: the whole of it (n of n) is left
+    out — "Python 3.15.2 · …", or nothing when there's nothing else to say — and part of it is said without the total:
+    "3 failed"."""
     if not (feeding() if feed is None else feed):
         return f"{counted(n, unit, plural, of)} {outcome}"
     if of is not None and n != of:
         return f"{n} {outcome}"
     return Shown(outcome)
+
+
+def counts(done: int, total: int, bad: int, warned: int) -> str:
+    """A run of tests' counts in words, as its result line and a log say them: "568 passed · 3 failed · 2 warnings ·
+    571 total" (passed: what ran and didn't fail; warnings: those the run printed). All four, always, so they read the
+    same each time; its bar shows the same four in a capsule (``capsule``)."""
+    return f"{done - bad} passed · {bad} failed · {counted(warned, 'warning')} · {total} total"
+
+
+def capsule(done: int, total: int, bad: int, warned: int, bg: str = CAPSULE) -> tuple[str, str]:
+    """A run of tests' counts as its bar shows them: " 3 │ 1 │ 567 / 571 " (failed, warnings, passed / total) on ``bg``,
+    each count in its colour and a 0 grey, passed as wide as the total so nothing moves as the run counts up. Its text
+    drawn, and plain (for its width)."""
+    passed = str(done - bad).rjust(len(str(total)))
+    nums = [(str(bad), FAILED if bad else ZERO), (str(warned), WARNED if warned else ZERO), (passed, PASSED)]
+    drawn = bg + " " + f"{RULE} │ ".join(f"{colour}{n}" for n, colour in nums) + f"{RULE} / {TOTAL}{total} {OFF}"
+    return drawn, f" {bad} │ {warned} │ {passed} / {total} "
+
+
+def tested(done: int, bad: int, warned: int, total: int | None = None, feed: bool | None = None) -> str:
+    """A run of tests' counts as a fact of its result line (``counts``). On tnsync's board its bar says them, so they
+    aren't said again (nor passed or failed: its header says it)."""
+    if feeding() if feed is None else feed:
+        return Shown("failed" if bad else "passed")
+    return counts(done, done if total is None else total, bad, warned)
 
 
 def result(*facts: str) -> str:
@@ -82,8 +113,8 @@ def result(*facts: str) -> str:
     timer has it), no workers (its bar's row has them: ``timed`` adds those off the board) and no count the bar shows
     (``tally``)."""
     facts = tuple(f for f in facts if f and f.strip())
-    if any(not isinstance(f, Shown) for f in facts):   # (the bar's count: left out when there's anything else)
-        facts = tuple(f for f in facts if not isinstance(f, Shown))
+    # the bar's count, and what came of it (passed, up to date, approved): left out — its block's header says that
+    facts = tuple(f for f in facts if not isinstance(f, Shown))
     text = " · ".join(f.strip().rstrip(".") for f in facts)
     return text[:1].upper() + text[1:]
 
@@ -143,8 +174,9 @@ def drawn(stream) -> bool:
 
 class Progress:
     def __init__(self, total: int, tty: bool | None = None, stream=None, unit: str = "tests done", bar: str = "main",
-                 feed: bool | None = None):
+                 feed: bool | None = None, tests: bool = False):
         self.stream = stream or sys.stdout
+        self.tests = tests   # (a run of tests: its counts passed, failed, warnings and the total, ``counts``, not n/total)
         self.total = total
         self.feed = feeding() if feed is None else feed   # (to the board: a record each change, nothing drawn)
         self.bar = bar
@@ -152,6 +184,7 @@ class Progress:
         self.unit = unit
         self.done = 0
         self.bad = 0
+        self.warned = 0   # (the warnings a run of tests printed)
         self.next_report = 10
         self.label = ""
         self.since: float | None = None   # when the step under way started (ticking)
@@ -169,7 +202,7 @@ class Progress:
         except (AttributeError, ValueError, OSError):
             return int(os.environ.get("COLUMNS") or 0) or 100  # (a log shown on a terminal later: tnsync says how wide)
 
-    def render(self, width: int, track: str = TRACK, fill: str | None = None, alert: str = RED) -> str:
+    def render(self, width: int, track: str = TRACK, fill: str | None = None, alert: str = RED, capsule_bg: str = CAPSULE) -> str:
         """The bar's line, narrower than ``width`` (the board draws it in its section, on its block's ``track`` with its
         ``fill`` and ``alert`` colours; ``_line`` on the terminal)."""
         pct = min(1.0, self.done / self.total if self.total else 1)
@@ -181,24 +214,28 @@ class Progress:
         else:
             filled = min(BAR, int(BAR * pct))
             bar = f"[{colour}{'#' * filled}{OFF}{DIM}{'-' * (BAR - filled)}{OFF}]"
-        note = f"  {alert}{self.bad} failed{OFF}" if self.bad else ""
+        if self.tests:   # (a run of tests: its counts in their capsule)
+            count, plain = capsule(self.done, self.total, self.bad, self.warned, capsule_bg)
+        else:
+            count = f"{self.done:>3}/{self.total}" + (f"  {alert}{self.bad} failed{OFF}" if self.bad else "")
+            plain = f"{self.done:>3}/{self.total}" + (f"  {self.bad} failed" if self.bad else "")
         secs = f"  ({time.time() - self.since:.0f} s)" if self.since is not None else ""
         # Keep the line narrower than the terminal: a line that wraps can't be redrawn with \r,
         # so each update would leave a broken copy of the bar behind.
-        visible = len(f"    [{'#' * BAR}] {self.done:>3}/{self.total}") + (len(f"  {self.bad} failed") if self.bad else 0) + 2
+        visible = len(f"    [{'#' * BAR}] {plain}") + 2
         room = width - visible - 1
         secs = secs if room - len(secs) > 1 else ""
         room -= len(secs)  # (the seconds stay in sight: it's the label that's cut short)
         name = self.label if len(self.label) <= room else (self.label[: max(0, room - 1)] + "…" if room > 1 else "")
         name += secs
-        return f"    {bar} {self.done:>3}/{self.total}{note}  {DIM}{name}{OFF}"
+        return f"    {bar} {count}  {DIM}{name}{OFF}"
 
     def _line(self):
         self.stream.write("\r\033[K" + self.render(self._width()))
         self.stream.flush()
 
     def _feed(self):
-        rec = {"bar": self.bar, "done": self.done, "total": self.total, "bad": self.bad, "label": self.label,
+        rec = {"bar": self.bar, "done": self.done, "total": self.total, "bad": self.bad, "warned": self.warned, "tests": self.tests, "label": self.label,
                "ticking": self.since is not None, "unit": self.unit,
                "age": round(time.time() - self.since, 1) if self.since is not None else 0}
         if self.workers:
@@ -217,19 +254,22 @@ class Progress:
                 age = rec.get("age")
                 self.since = time.time() - (age if isinstance(age, (int, float)) else 0)
             self.label = label
-            for key in ("done", "total", "bad"):
+            for key in ("done", "total", "bad", "warned"):
                 if isinstance(rec.get(key), int):
                     setattr(self, key, rec[key])
+            self.tests = bool(rec.get("tests", self.tests))
             self.unit = str(rec.get("unit") or self.unit)
             if isinstance(rec.get("workers"), int):
                 self.workers = rec["workers"]
 
-    def draw(self, name: str, bad: int | None = None):
-        """A step finished: the count moves on, its name shown."""
+    def draw(self, name: str, bad: int | None = None, warned: int | None = None):
+        """A step finished: the count moves on, its name shown (and, for a run of tests, the failures and warnings so far)."""
         with self.lock:
             self.done += 1
             if bad is not None:
                 self.bad = bad
+            if warned is not None:
+                self.warned = warned
             self.label, self.since = name, None
             pct = self.done / self.total if self.total else 1
             if self.feed:
@@ -237,7 +277,10 @@ class Progress:
             elif self.tty:
                 self._line()
             elif pct * 100 >= self.next_report or self.done == self.total:
-                self.stream.write(f"    {self.done}/{self.total} {self.unit}" + (f", {self.bad} failed" if self.bad else "") + "\n")
+                if self.tests:
+                    self.stream.write(f"    {counts(self.done, self.total, self.bad, self.warned)}\n")
+                else:
+                    self.stream.write(f"    {self.done}/{self.total} {self.unit}" + (f", {self.bad} failed" if self.bad else "") + "\n")
                 self.stream.flush()
                 while self.next_report <= pct * 100:
                     self.next_report += 10
@@ -277,7 +320,7 @@ class Progress:
         """A new count, from 0 (dev/upkeep.py: the dependencies looked up, then the pins moved)."""
         with self.lock:
             self.clear()
-            self.total, self.done, self.bad, self.next_report, self.label = total, 0, 0, 10, ""
+            self.total, self.done, self.bad, self.warned, self.next_report, self.label = total, 0, 0, 0, 10, ""
             self.unit = unit or self.unit
             if self.feed:
                 self._feed()

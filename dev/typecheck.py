@@ -113,11 +113,31 @@ def annotate(found: list[dict]) -> None:
         print(f"::error file={path},line={f['location']['row']},col={f['location']['column']},title=Ruff {f.get('code') or 'syntax'}::{msg}")
 
 
+def python_files() -> int:
+    """How many Python files pyright checks (pyrightconfig.json's "include"): its bar's total while it runs."""
+    try:
+        with open(os.path.join(ROOT, "pyrightconfig.json"), encoding="utf-8") as fh:
+            got = re.search(r'"include"\s*:\s*\[([^\]]*)\]', fh.read())
+    except OSError:
+        return 0
+    n = 0
+    for folder in re.findall(r'"([^"]+)"', got.group(1) if got else ""):
+        for _, dirs, files in os.walk(os.path.join(ROOT, folder)):
+            dirs[:] = [d for d in dirs if d not in ("node_modules", "__pycache__") and not d.startswith(".")]
+            n += sum(f.endswith(".py") for f in files)
+    return n
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--fix", action="store_true", help="make Ruff's safe fixes first (in the files), then check")
     args = ap.parse_args()
     version, ruff_version = pin(), ruff_pin()
+    # on tnsync's board, its bar from the start (pyright says nothing until it's done: its seconds count meanwhile)
+    bar = Progress(python_files(), unit="files checked", bar="types") if feeding() else None
+    if bar is not None:
+        bar.workers = 1   # (pyright's one process: no --threads given)
+        bar.at(0, bar.total, f"Python files · pyright {version} · Ruff {ruff_version} checking", ticking=True)
     # pyright, the slow one, under way while Ruff is installed (the first time) and runs
     pyright = subprocess.Popen(["npx", "--yes", f"pyright@{version}", "--warnings", "--outputjson"], cwd=ROOT,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -141,9 +161,8 @@ def main() -> int:
         print(f"  {why}")
     total = got.get("summary") or {}
     files = int(total.get("filesAnalyzed") or 0)
-    if feeding() and files:
-        bar = Progress(files, unit="files checked", bar="types")
-        bar.workers = 1   # (pyright's one process: no --threads given)
+    if bar is not None:
+        files = files or bar.total
         bar.at(files, files, f"Python files · pyright {got.get('version') or version} · Ruff {ruff_version}")
     notes = int(total.get("informationCount") or 0)
     line = result(counted(int(total.get("errorCount") or 0), "error"), counted(int(total.get("warningCount") or 0), "warning"),

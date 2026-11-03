@@ -4259,7 +4259,7 @@ class TestRunnerTests(unittest.TestCase):
                                     env=dict(os.environ, PYTHONPATH=folder))
         try:
             self.assertTrue(wait_for(lambda: "running" in _read(log, encoding="utf-8"), timeout=30), _read(log, encoding="utf-8"))
-            self.assertEqual(_read(log, encoding="utf-8").split(), ["1/3", "tests", "done", "running"])
+            self.assertEqual(_read(log, encoding="utf-8").splitlines(), ["    1 passed · 0 failed · 0 warnings · 3 total", "running"])
             proc.send_signal(signal.SIGTERM)
             proc.wait(timeout=30)
         finally:
@@ -4268,8 +4268,8 @@ class TestRunnerTests(unittest.TestCase):
                 proc.wait()
         out = _read(log, encoding="utf-8")
         self.assertEqual(proc.returncode, 130)
-        self.assertIn("Stopped · 1/3 tests ran · 2 not run", out)
-        self.assertNotIn("fail", out.lower())
+        self.assertIn("Stopped · 1 passed · 0 failed · 0 warnings · 3 total · 2 not run", out)
+        self.assertNotRegex(out, r"[1-9]\d* failed|FAIL|ERROR")   # (the test it was in: not a failure)
 
     def test_classes_are_shared_out_among_workers(self):
         """tests/run.py -j N shares the tests out among N worker processes: a class with setUpClass stays in one worker, in order;
@@ -4300,7 +4300,8 @@ class TestRunnerTests(unittest.TestCase):
                         self.skipTest("on purpose")
                 class Dies(unittest.TestCase):
                     def test_a_fine(self):
-                        pass
+                        import warnings
+                        warnings.warn("said on purpose")   # (printed by its worker: counted in the run's warnings)
                     def test_b_ends_the_process(self):
                         os._exit(3)
             """))
@@ -4312,15 +4313,15 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn("ERROR: share_probe_tests.Dies", got.stdout)
         self.assertIn("share_probe_tests.Dies.test_b_ends_the_process", got.stdout)
         self.assertNotIn("Kept", got.stdout)
-        self.assertIn("2/6 tests failed", got.stdout)
-        self.assertIn("6/6 tests done", got.stdout)
+        self.assertIn("said on purpose", got.stderr)
+        self.assertEqual(got.stdout.count("4 passed · 2 failed · 1 warning · 6 total"), 2, got.stdout)   # (its line at 100%, then its result line)
         # the next run takes the slowest class first: how long each took is kept
         with open(os.path.join(folder, "plex-cache", "test-times.json"), encoding="utf-8") as fh:
             self.assertLessEqual({"share_probe_tests.Kept", "share_probe_tests.Fails.test_wrong"}, set(json.load(fh)))
         # -j 1: in this process, as before
         got = subprocess.run([sys.executable, runner, "-j", "1", "share_probe_tests.Kept"], capture_output=True, text=True, timeout=60,
                              env=dict(os.environ, PYTHONPATH=folder, XDG_CACHE_HOME=folder, PROBE_PARENT="x"))
-        self.assertIn("2 tests passed", got.stdout, got.stdout + got.stderr)
+        self.assertIn("2 passed · 0 failed · 0 warnings · 2 total", got.stdout, got.stdout + got.stderr)
         self.assertNotIn("workers", got.stdout)
 
     @unittest.skipUnless(os.path.isdir(os.path.join(ROOT, ".git")) and shutil.which("git"),
@@ -4403,6 +4404,7 @@ class TestRunnerTests(unittest.TestCase):
             said("not on the board", out)
         self.assertEqual(out.getvalue().count(FEED), 1)
         s = board.Section({"id": "upkeep", "title": "Dependencies", "cmd": "true", "upkeep": True}, tempfile.mkdtemp(dir=TMP))
+        self.addCleanup(lambda s=s: s.out.close())
         s.state = "running"
         s.line("behind")
         s.line(out.getvalue().rstrip("\n"))
@@ -4545,14 +4547,21 @@ class TestRunnerTests(unittest.TestCase):
         """dev/progress.py's result line, which every dev tool's last line on the board is made with: facts joined with
         " · ", sentence case, no full stop; counts n/total; the count the bar shows left out on the board (part of it
         said without the total); versions short (a nightly's build stamp off, a git snapshot "snapshot")."""
-        from dev.progress import counted, result, short_version, tally
+        from dev.progress import counted, counts, result, short_version, tally, tested
         self.assertEqual((counted(1, "test"), counted(550, "test"), counted(3, "test", of=550), counted(2, "dependency", "dependencies")),
                          ("1 test", "550 tests", "3/550 tests", "2 dependencies"))
         self.assertEqual(result("copied 2 files.", "", "restarted myapp"), "Copied 2 files · restarted myapp")
         self.assertEqual(result(tally(550, "test", "passed", feed=False), "Python 3.15.2"), "550 tests passed · Python 3.15.2")   # (off the board)
         self.assertEqual(result(tally(550, "test", "passed", feed=True), "Python 3.15.2"), "Python 3.15.2")                    # (the bar says 550/550)
         self.assertEqual(result(tally(3, "test", "failed", of=550, feed=True), "Python 3.15.2"), "3 failed · Python 3.15.2")
-        self.assertEqual(result(tally(26, "dependency", "up to date", "dependencies", feed=True)), "Up to date")                 # (nothing else to say)
+        self.assertEqual(result(tally(26, "dependency", "up to date", "dependencies", feed=True)), "")                           # (its header says it)
+        # a run of tests: passed, failed, warnings and the total, always all four; on the board its bar says them, so
+        # its result line doesn't (only passed or failed, with nothing else to say)
+        self.assertEqual(counts(571, 571, 3, 2), "568 passed · 3 failed · 2 warnings · 571 total")
+        self.assertEqual(counts(1, 3, 0, 1), "1 passed · 0 failed · 1 warning · 3 total")
+        self.assertEqual(result(tested(571, 3, 2, feed=False), "Python 3.16.0a1"), "568 passed · 3 failed · 2 warnings · 571 total · Python 3.16.0a1")
+        self.assertEqual(result(tested(571, 3, 2, feed=True), "Python 3.16.0a1"), "Python 3.16.0a1")
+        self.assertEqual((result(tested(571, 3, 0, feed=True)), result(tested(571, 0, 0, feed=True))), ("", ""))   # (FAILED, PASSED: its header)
         self.assertEqual([short_version(v) for v in ("28.0.0-nightly202611022758c59105", "3.16.0a1", "24.0.0-rc.1", "1.2-dev-20261102-abc123",
                                                      "1.0+git.abc", "N-121234-g1a2b3c4d", "103.0")],
                          ["28.0.0-nightly", "3.16.0a1", "24.0.0-rc.1", "1.2-dev", "1.0", "snapshot", "103.0"])
@@ -4604,7 +4613,8 @@ class TestRunnerTests(unittest.TestCase):
         s.finished(0)
         drawn = [re.sub(r"\033\[[0-9;]*m", "", x) for x in s.lines(100)]
         self.assertEqual((s.state, s.phase, s.first), ("pass", 0, "current"))
-        self.assertIn("ALL UP TO DATE", drawn[0])
+        self.assertIn("UP TO DATE", drawn[0])
+        self.assertNotIn("ALL UP TO DATE", drawn[0])
         self.assertIn("26/26", drawn[1])
         self.assertIn("26 dependencies up to date", drawn[2])
 
@@ -4618,7 +4628,9 @@ class TestRunnerTests(unittest.TestCase):
         folder = tempfile.mkdtemp(dir=TMP)
 
         def section(**spec):
-            return board.Section({"id": "x", "title": "Current Tests", "cmd": "true", **spec}, folder)
+            s = board.Section({"id": "x", "title": "Current Tests", "cmd": "true", **spec}, folder)
+            self.addCleanup(lambda: s.out.close())   # (its log, open while it runs)
+            return s
         s = section()
         self.assertEqual(len(s.lines(60)), board.ROWS)
         self.assertTrue(all(line.startswith((board.WAIT, board.BODY["waiting"])) for line in s.lines(60)))   # (blue: under way)
@@ -4657,6 +4669,21 @@ class TestRunnerTests(unittest.TestCase):
             s.line(first)
             s.finished(0)
             self.assertTrue(s.lines(60)[0].startswith(colour), first)
+        # a run of tests: red from its first failure and orange from its first warning, while it runs; passed with
+        # warnings, orange, its result a pass; the counts in their capsule (failed │ warnings │ passed / total)
+        for bad, warned, colour in ((0, 0, board.BLUE), (1, 0, board.BAD), (0, 2, board.MEH), (1, 2, board.BAD)):
+            s = section()
+            s.state = "running"
+            s.line(FEED + json.dumps({"bar": "tests", "done": 30, "total": 571, "bad": bad, "warned": warned, "tests": True, "label": "A.test_1"}))
+            drawn = s.lines(100)
+            self.assertTrue(drawn[0].startswith(colour), (bad, warned))
+            self.assertIn(f" {bad} │ {warned} │ {30 - bad:>3} / 571 ", re.sub(r"\033\[[0-9;]*m", "", drawn[1]))
+        s = section()
+        s.state = "running"
+        s.line(FEED + json.dumps({"bar": "tests", "done": 571, "total": 571, "bad": 0, "warned": 2, "tests": True, "label": "A.test_1"}))
+        s.finished(0)
+        self.assertEqual((s.state, s.lines(60)[0].startswith(board.MEH)), ("pass", True))   # (a pass, in orange)
+        self.assertIn("PASSED · 2 WARNINGS", s.lines(60)[0])
 
     def test_style_approval_makes_the_sample_while_the_board_runs(self):
         """tnsync's Style Approval: once its check says looks wait, the block's second step ("then", after nothing) makes
@@ -4717,8 +4744,9 @@ class TestRunnerTests(unittest.TestCase):
                 q = f"?tab=one&t={urllib.parse.quote(token)}"
                 post = lambda path, urls=urls: urllib.request.urlopen(urllib.request.Request(urls[0].rstrip("/") + path, data=b"", method="POST")).status
                 self.assertEqual(post("/alive" + q), 204)
-                with self.assertRaises(urllib.error.HTTPError):   # (not without the token)
+                with self.assertRaises(urllib.error.HTTPError) as cm:   # (not without the token)
                     post("/alive?tab=one&t=wrong")
+                cm.exception.close()
                 time.sleep(0.5)
                 self.assertTrue(t.is_alive())   # (a tab open: it keeps on)
                 if goodbye:
@@ -4897,22 +4925,23 @@ class TestRunnerTests(unittest.TestCase):
             if not terminal:
                 got = subprocess.run(cmd, cwd=project, env=env, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
                 return got.returncode, got.stdout + got.stderr
-            pid, fd = pty.fork()
-            if pid == 0:   # (tnsync on a terminal of its own)
-                os.chdir(project)
-                os.execve(cmd[0], cmd, env)
-            out = b""
-            while True:
-                try:
-                    chunk = os.read(fd, 65536)
-                except OSError:
-                    break
-                if not chunk:
-                    break
-                out += chunk
-            _, status = os.waitpid(pid, 0)
+            # tnsync on a terminal of its own: a pty's far end as its stdin, stdout and stderr, started by subprocess (not
+            # pty.fork: forking a process with threads running, as the suite's are, can deadlock the child)
+            fd, far = pty.openpty()
+            with subprocess.Popen(cmd, cwd=project, env=env, stdin=far, stdout=far, stderr=far, start_new_session=True) as proc:
+                os.close(far)
+                out = b""
+                while True:
+                    try:
+                        chunk = os.read(fd, 65536)
+                    except OSError:   # (EIO: the terminal's last user has gone)
+                        break
+                    if not chunk:
+                        break
+                    out += chunk
+                rc = proc.wait(120)
             os.close(fd)
-            return os.waitstatus_to_exitcode(status), re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.decode("utf-8", "replace"))
+            return rc, re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.decode("utf-8", "replace"))
         reviewed = lambda: _read(os.path.join(folder, "reviewed"), encoding="utf-8") if os.path.exists(os.path.join(folder, "reviewed")) else ""
         rc, out = run()
         self.assertEqual(rc, 0, out)
@@ -5009,14 +5038,16 @@ class TestRunnerTests(unittest.TestCase):
         self.assertNotIn("ALL CHECKS PASSED", out)   # (each section said its own: nothing said again)
         self.assertNotIn("\n  DEPENDENCIES  -  ALL UP TO DATE", out)   # (its box: none when all are current)
         for said in ("Current Tests: PASSED (12 tests passed)", "HTML/JS/CSS Validation: PASSED (checked)", "Python Validation: PASSED (0 errors)",
-                     "Dependencies: ALL UP TO DATE", "==> Dependencies: export TNSYNC_UPKEEP=move",
+                     "Dependencies: UP TO DATE", "==> Dependencies: export TNSYNC_UPKEEP=move",
                      "Style Approval: LOOKS WAITING (2 looks need your approval: /the/page.html)"):
             self.assertIn(said, out)
         self.assertNotIn("\n  new: css .a\n", out)   # (the looks waiting: its block says how many and where, the rest not printed; nor a failure: rc 0)
         rc, out = tnsync("-y")
         self.assertEqual(rc, 0, out)
         self.assertIn("Sync to nas.example: ALREADY IN SYNC (Nothing copied · nas.example already has these files", out)   # (in its block, as each check is)
-        self.assertIn("Current Tests: ALREADY PASSED", out)
+        self.assertRegex(out, r"Current Tests: ALREADY PASSED \(Passed just now \(\d{4}-\d\d-\d\d \d\d:\d\d\) · 12 tests passed\)")   # (when, and its result from then)
+        self.assertRegex(out, r"Python Validation: ALREADY PASSED \(Passed just now \(\d{4}-\d\d-\d\d \d\d:\d\d\) · 0 errors\)")
+        self.assertNotIn("passed on this code", out)
         self.assertNotIn("ALREADY IN SYNC  -", out)   # (no box of its own: its block says it)
         # the NAS out of reach: the Sync block says so, red, with what ssh said; the checks run all the same
         rc, out = tnsync("-y", "--no-sample")   # (Style Approval only checks: said in the header's modes)

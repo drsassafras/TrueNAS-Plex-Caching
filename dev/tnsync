@@ -400,8 +400,24 @@ state_clear() { rm -f "$STATE_FILE"; }
 record_tests() {   # record_tests pass|fail|aborted — only if the tests actually ran (aborted: stopped with Enter; tested again next time)
     if [ "$TESTS_RAN" != 1 ]; then state_clear; return 0; fi
     mkdir -p "$STATE_DIR" 2>/dev/null || return 0
-    printf 'result=%s\nmode=%s\nwhen=%s\ntest=%s\nfuture=%s\nfuture_test=%s\nrelease=%s\n' "$1" "$MODE" "$(date '+%Y-%m-%d %H:%M')" "$TEST_SIG" "$FUTURE_RESULT" "$FUTURE_CMD" "$RELEASE" \
-        > "$STATE_FILE" 2>/dev/null || true
+    {
+        printf 'result=%s\nmode=%s\nwhen=%s\nat=%s\ntest=%s\nfuture=%s\nfuture_test=%s\nrelease=%s\n' "$1" "$MODE" "$(date '+%Y-%m-%d %H:%M')" "$(date +%s)" "$TEST_SIG" "$FUTURE_RESULT" "$FUTURE_CMD" "$RELEASE"
+        # each check's result line, for its block next time while the code stays the same (what it ran on, what it found)
+        local id
+        for id in "${CHECK_IDS[@]}"; do [ -z "$RES" ] || printf 'last_%s=%s\n' "$id" "$(res_get "${id}_last")"; done
+    } > "$STATE_FILE" 2>/dev/null || true
+}
+ago() {   # ago <epoch seconds> — how long ago, as people say it: "just now", "4 minutes ago", "1 week ago"
+    local s=$(( $(date +%s) - $1 )) n unit
+    if [ "$s" -lt 60 ]; then printf 'just now'; return; fi
+    if [ "$s" -lt 3600 ]; then n=$(( s / 60 )); unit=minute
+    elif [ "$s" -lt 86400 ]; then n=$(( s / 3600 )); unit=hour
+    elif [ "$s" -lt 604800 ]; then n=$(( s / 86400 )); unit=day
+    elif [ "$s" -lt 2629800 ]; then n=$(( s / 604800 )); unit=week
+    elif [ "$s" -lt 31557600 ]; then n=$(( s / 2629800 )); unit=month
+    else n=$(( s / 31557600 )); unit=year; fi
+    [ "$n" = 1 ] || unit="${unit}s"
+    printf '%s %s ago' "$n" "$unit"
 }
 TESTS_RAN=0            # (set when the board ran the checks)
 FUTURE_RESULT="none"   # pass | fail | none — what the state file keeps of the future tests
@@ -628,12 +644,16 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
     RES="$BOARD_DIR/results"
     PLAN=""; CHECK_IDS=()
     if [ "$want_copy" = "passed" ]; then
-        local when; when="$(state_get when)"
-        passed_section current "Current Tests" "$TN_TEST" "passed on this code ($when)"
-        [ -z "$FUTURE_CMD" ] || [ "$(state_get future)" != pass ] || passed_section future "Future Tests" "$FUTURE_CMD" "passed on this code too ($when)"
-        passed_section validate "HTML/JS/CSS Validation" "$TN_VALIDATE" "passed on this code ($when)"
-        passed_section types "Python Validation" "$TN_TYPES" "passed on this code ($when)"
-        [ "$RELEASE" != 1 ] || passed_section release "Release checks" "$TN_RELEASE" "passed on this code ($when)"
+        # (each block's line: when it passed, then its result line from then — what it ran on, what it found)
+        # ("Passed 4 minutes ago (2026-11-03 13:51)"; a result kept before tnsync kept its time in seconds: "Passed 2026-11-03 13:51")
+        local when at; when="$(state_get when)"; at="$(state_get at)"
+        case "$at" in ''|*[!0-9]*) ;; *) when="$(ago "$at") ($when)" ;; esac
+        was() { local l; l="$(state_get "last_$1")"; printf '%s' "Passed $when${l:+ · $l}"; }
+        passed_section current "Current Tests" "$TN_TEST" "$(was current)"
+        [ -z "$FUTURE_CMD" ] || [ "$(state_get future)" != pass ] || passed_section future "Future Tests" "$FUTURE_CMD" "$(was future)"
+        passed_section validate "HTML/JS/CSS Validation" "$TN_VALIDATE" "$(was validate)"
+        passed_section types "Python Validation" "$TN_TYPES" "$(was types)"
+        [ "$RELEASE" != 1 ] || passed_section release "Release checks" "$TN_RELEASE" "$(was release)"
     elif [ "$SKIP_TESTS" != 1 ] && [ "$want_copy" != "nothing" ]; then
         check_section current "Current Tests" "$TN_TEST"
         [ -n "$TN_TEST" ] || told_section current "Current Tests" "not set up" "No TN_TEST in .tnsync, so no tests were run."
@@ -756,7 +776,7 @@ if [ -z "$CHANGES" ]; then
         run_board passed
         exit 0
     fi
-    told_sync "in sync: testing again" 0 "${why%.} · nothing copied · $TN_APP not restarted"
+    told_sync "in sync" 0 "${why%.} · nothing copied · $TN_APP not restarted"
     run_board insync
     rc=0; finish_board insync || rc=$?
     exit "$rc"

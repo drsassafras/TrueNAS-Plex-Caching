@@ -505,14 +505,16 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
         mount += ["-v", f"{modules}:/src/dev/node_modules:ro"]
     node = ("if [ -f /node.tar.xz ]; then python -c \"import tarfile; tarfile.open('/node.tar.xz').extractall('/opt', filter='tar')\" && "
             "PATH=\"$(echo /opt/node-*/bin):$PATH\" && export PATH; fi; "
-            "command -v node >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends nodejs) >/dev/null 2>&1 || echo '    node not added: the page tests skip'")
+            "command -v node >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends nodejs) >/dev/null 2>&1 || echo '    node not added: the page tests skip'; "
+            # and rsync, which tnsync's tests copy with (the image has no use for it)
+            "command -v rsync >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends rsync) >/dev/null 2>&1 || echo '    rsync not added'")
     tty = ["-t"] if sys.stdout.isatty() else []
     if feeding():  # (on tnsync's board: tests/run.py's bar sent to it, through docker's output)
         tty = ["-e", "PLEXCACHE_PROGRESS=feed"]
     # shown on a terminal later (a log, PLEXCACHE_PROGRESS=bar): tests/run.py's bar all the same, as wide as that terminal
     elif not tty and os.environ.get("PLEXCACHE_PROGRESS") == "bar":
         tty = ["-e", "PLEXCACHE_PROGRESS=bar", "-e", f"COLUMNS={os.environ.get('COLUMNS') or 100}"]
-    print(f"    Adding node {node_pick.version if tarball and node_pick else '(Debian’s)'} to the container, then running the suite:", flush=True)
+    print(f"    Adding node {node_pick.version if tarball and node_pick else '(Debian’s)'} and rsync to the container, then running the suite:", flush=True)
     # the app image's pins (the Dockerfile's, dev/upkeep.py moves them): on the board the suite's line names only what's
     # ahead of them (tests/run.py's ran_on), not what this image shares with the app's
     pins = {"Python": upkeep._arg("PYTHON_TAG")().split("-")[0], "Node": upkeep._arg("NODE_TAG")().split("-")[0],

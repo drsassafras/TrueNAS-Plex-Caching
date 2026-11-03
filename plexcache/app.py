@@ -1584,11 +1584,11 @@ class App:
         def work():
             try:
                 r = next_day_check(run["sample"])
-                self.activity.update_run(run["started"], sample=None, next_day=r["pct"], next_day_checked=r["checked"])
-                if r["pct"] is not None:
+                if r["pct"] is not None:   # (said before the run shows it: whoever sees the run's result sees the event too)
                     when = dt.datetime.fromtimestamp(run["started"]).strftime("%Y-%m-%d %H:%M")
                     self.activity.event("warm-up", M("a day after the warm-up of {when}: {pct}% of a sample of its lead-ins still on the SSD",
                                                      when=when, pct=r["pct"]))
+                self.activity.update_run(run["started"], sample=None, next_day=r["pct"], next_day_checked=r["checked"])
             except Exception:  # never let it stop the scheduler
                 log.exception("next-day check failed")
                 self.activity.update_run(run["started"], sample=None)

@@ -392,6 +392,7 @@ def ha_check(version: str) -> list[str]:
         try:
             sources[path] = _get(HA_SOURCE.format(tag=version, path=path))
         except urllib.error.HTTPError as e:   # (a file the release doesn't have: its keys are elsewhere; the abbreviations it must)
+            e.close()   # (its response closed: an error left open warns when it's dropped)
             if e.code != 404 or path == HA_FILES[0]:
                 raise
     taken, gone = ha_rules(sources)

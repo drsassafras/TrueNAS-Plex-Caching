@@ -22,9 +22,11 @@ and dev/future.py.
 
 On a terminal, one line is redrawn as tests finish:
 
-    [##########----------]  59/118  ServerTests.test_export_has_no_secrets
+    [##########----------]  57 passed · 2 failed · 1 warning · 118 total  ServerTests.test_export_has_no_secrets
 
-When the output isn't a terminal (CI, a log file), it prints a line every 10%.
+The counts are the same everywhere (dev/progress.py's ``counts``): passed, failed, the warnings the run printed, and
+the total — on the bar, in its result line at the end, and on tnsync's board (where the result line leaves them to the
+bar). When the output isn't a terminal (CI, a log file), it prints a line every 10%.
 Failures are listed in full at the end, as unittest normally does, and the
 exit code is non-zero if anything failed.
 
@@ -43,16 +45,31 @@ import subprocess
 import sys
 import time
 import unittest
+import warnings
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
-from dev.progress import OFF, RED, Progress, drawn, feeding, short_version, tally, timed  # noqa: E402 — the bar the dev tools share (dev/upkeep.py's too)
+from dev.progress import OFF, RED, Progress, drawn, feeding, short_version, tested, timed  # noqa: E402 — the bar the dev tools share (dev/upkeep.py's too)
 from dev.progress import result as result_line  # noqa: E402 — (``result`` is run's: the result line every dev tool says)
 
 FEED = feeding()  # (read before main() takes PLEXCACHE_PROGRESS out of the tests' environment)
 PINS = json.loads(os.environ.get("PLEXCACHE_PINS") or "{}")  # (dev/future.py's run: the app image's pins, to say only what's ahead)
+
+WARNED = [0]   # the warnings this process has printed (count_warnings)
+
+
+def count_warnings():
+    """Counts each warning this process prints, as it prints it (what a test records itself, with catch_warnings or
+    assertWarns, isn't printed, nor counted): the warnings of the run's counts."""
+    shown = warnings.showwarning
+
+    def showwarning(*args, **kwargs):
+        WARNED[0] += 1
+        shown(*args, **kwargs)
+    warnings.showwarning = showwarning
+
 
 TIMES = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "plex-cache", "test-times.json")
 
@@ -103,7 +120,7 @@ class ProgressResult(unittest.TextTestResult):
 
     def __init__(self, stream, descriptions, verbosity, total: int, tty: bool):
         super().__init__(stream, descriptions, 0)
-        self.progress = Progress(total, tty, feed=FEED, bar="tests")
+        self.progress = Progress(total, tty, feed=FEED, bar="tests", tests=True)
         self.progress.workers = 1   # (this process alone: on the board, at the bar's right)
         self.on_stop = None   # the SIGTERM handler main() sets, kept in place between tests
 
@@ -112,7 +129,7 @@ class ProgressResult(unittest.TextTestResult):
         return self.progress.done
 
     def _draw(self, test):
-        self.progress.draw(_name(test), len(self.failures) + len(self.errors))
+        self.progress.draw(_name(test), len(self.failures) + len(self.errors), WARNED[0])
 
     def startTest(self, test):
         # A test can leave its own SIGTERM handler behind (the app's main() sets one); put ours back,
@@ -173,8 +190,7 @@ def run_here(module: str, suite, total: int, tty: bool, started: float) -> int:
         bad = len(result.failures) + len(result.errors)
         if bad:
             result.printErrors()
-            print(f"\n    {RED if tty else ''}{result_line(tally(bad, 'test', 'failed', of=result.done, feed=FEED))}{OFF if tty else ''}")
-        print(f"    {result_line('stopped', tally(result.done, 'test', 'ran', of=total, feed=FEED), f'{total - result.done} not run')}")
+        print(f"\n    {result_line('stopped', tested(result.done, bad, WARNED[0], total, feed=FEED), f'{total - result.done} not run')}")
         sys.stdout.flush()
         _cleanup_module(module)
         os._exit(130)
@@ -191,9 +207,9 @@ def run_here(module: str, suite, total: int, tty: bool, started: float) -> int:
     bad = len(result.failures) + len(result.errors)
     if bad:
         result.printErrors()
-        print(f"\n    {RED if tty else ''}{result_line(tally(bad, 'test', 'failed', of=result.testsRun, feed=FEED), *ran_on())}{OFF if tty else ''}{timed(f'{took:.0f} s', feed=FEED)}")
+        print(f"\n    {RED if tty else ''}{result_line(tested(result.testsRun, bad, WARNED[0], feed=FEED), *ran_on())}{OFF if tty else ''}{timed(f'{took:.0f} s', feed=FEED)}")
         return 1
-    print(f"    {result_line(tally(result.testsRun, 'test', 'passed', feed=FEED), *ran_on())}{timed(f'{took:.0f} s', feed=FEED)}")
+    print(f"    {result_line(tested(result.testsRun, 0, WARNED[0], feed=FEED), *ran_on())}{timed(f'{took:.0f} s', feed=FEED)}")
     return 0
 
 
@@ -297,7 +313,7 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
     times = _load_times()
     # the longest first (last run's times; a class not timed yet, by its number of tests), so none is left to the end
     queue = sorted(units, key=lambda u: -times.get(u[0], len(u[1]) * 0.5))
-    progress = Progress(total, tty, feed=FEED, bar="tests")
+    progress = Progress(total, tty, feed=FEED, bar="tests", tests=True)
     failures: list[str] = []
     workers: list[Worker] = []
     sel = selectors.DefaultSelector()
@@ -319,13 +335,11 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
                 print(block)
         took = time.time() - started
         if stopped:
-            if bad:
-                print(f"\n    {RED if tty else ''}{result_line(tally(bad, 'test', 'failed', of=progress.done, feed=FEED))}{OFF if tty else ''}")
-            print(f"    {result_line('stopped', tally(progress.done, 'test', 'ran', of=total, feed=FEED), f'{total - progress.done} not run')}")
+            print(f"\n    {result_line('stopped', tested(progress.done, bad, progress.warned, total, feed=FEED), f'{total - progress.done} not run')}")
         elif bad:
-            print(f"\n    {RED if tty else ''}{result_line(tally(bad, 'test', 'failed', of=progress.done, feed=FEED), *ran_on())}{OFF if tty else ''}{timed(f'{took:.0f} s', f'{started_workers} workers', feed=FEED)}")
+            print(f"\n    {RED if tty else ''}{result_line(tested(progress.done, bad, progress.warned, feed=FEED), *ran_on())}{OFF if tty else ''}{timed(f'{took:.0f} s', f'{started_workers} workers', feed=FEED)}")
         else:
-            print(f"    {result_line(tally(progress.done, 'test', 'passed', feed=FEED), *ran_on())}{timed(f'{took:.0f} s', f'{started_workers} workers', feed=FEED)}")
+            print(f"    {result_line(tested(progress.done, 0, progress.warned, feed=FEED), *ran_on())}{timed(f'{took:.0f} s', f'{started_workers} workers', feed=FEED)}")
         sys.stdout.flush()
         return code
 
@@ -359,7 +373,7 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
                         failures.append(f"{'=' * 70}\nERROR: {w.unit[0]}\n{'-' * 70}\nThe worker running it ended (exit code {code}) "
                                         f"with {len(lost)} of its tests not finished:\n  " + "\n  ".join(lost) + "\n")
                         for t in lost:
-                            progress.draw(t.rsplit(".", 2)[-2] + "." + t.rsplit(".", 1)[-1], len(failures))
+                            progress.draw(t.rsplit(".", 2)[-2] + "." + t.rsplit(".", 1)[-1], len(failures), progress.warned)
                         w.unit = None
                         if queue and respawns:
                             respawns -= 1
@@ -370,6 +384,7 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
                 while b"\n" in w.buf:
                     line, w.buf = w.buf.split(b"\n", 1)
                     msg = json.loads(line)
+                    progress.warned += msg.get("w", 0)   # (the warnings it has printed since it last said)
                     if msg["t"] == "want":
                         if w.unit is not None:
                             times[w.unit[0]] = round(time.time() - unit_started[w.unit[0]], 2)
@@ -386,7 +401,7 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
                         if msg.get("id"):
                             w.reported.add(msg["id"])
                             running.pop(w, None)
-                            progress.draw(msg["name"], len(failures))
+                            progress.draw(msg["name"], len(failures), progress.warned)
                             if running:   # (another still under way: named again, its seconds from when it started)
                                 name, since = max(running.values(), key=lambda r: r[1])
                                 progress.show(name, ticking=True, since=since)
@@ -402,7 +417,11 @@ def worker(module: str) -> int:
     jobs = os.fdopen(to_r, "rb", buffering=0)
     out = os.fdopen(from_w, "wb", buffering=0)
 
+    told = [0]   # (the warnings it had printed when it last said)
+
     def say(**msg):
+        if WARNED[0] > told[0]:   # (the warnings printed since: the run's count)
+            msg["w"], told[0] = WARNED[0] - told[0], WARNED[0]
         out.write((json.dumps(msg) + "\n").encode())
 
     def stop(*_):
@@ -473,6 +492,7 @@ def worker(module: str) -> int:
 
     result = Result()
     Asked()(result)
+    say(t="end")   # (the warnings printed after its last test: the module's teardown's)
     jobs.close()
     out.close()
     return 0
@@ -480,6 +500,7 @@ def worker(module: str) -> int:
 
 def main() -> int:
     args = sys.argv[1:]
+    count_warnings()
     if args[:1] == ["--worker"]:
         return worker(args[1])
     jobs = os.environ.get("PLEXCACHE_TEST_JOBS") or ""

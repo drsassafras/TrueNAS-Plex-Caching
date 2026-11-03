@@ -52,7 +52,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:  # (run as a script: dev/ is on the path, not the project)
     sys.path.insert(0, ROOT)
 
-from dev.progress import DIM, OFF, RED, Progress, record  # noqa: E402 — the bar the dev tools share
+from dev.progress import DIM, OFF, RED, Progress, counted, record  # noqa: E402 — the bar the dev tools share
 
 # blue: under way (running, or waiting its turn); then what came of it — green passed, orange a warning (stopped with
 # Enter, the dependencies behind), red failed, grey for the record (not run, skipped, already in sync): tnsync's colours
@@ -68,7 +68,13 @@ BODY = {k: v.replace("[1;", "[") for k, v in COLOUR.items()}   # (the block unde
 SHADE = {BLUE: "\033[48;2;7;63;89m", GOOD: "\033[48;2;0;66;0m", MEH: "\033[48;2;178;122;0m", BAD: "\033[48;2;94;0;0m",
          GREY: "\033[48;2;61;61;61m"}
 TRACK = {k: SHADE[v] for k, v in COLOUR.items()}
-FILL = {k: "\033[30m" if v == MEH else "\033[97m" for k, v in COLOUR.items()}
+# its cells in deep grey #2E2E2E on yellow (black there was as heavy as the counts' capsule beside it)
+FILL = {k: "\033[38;2;46;46;46m" if v == MEH else "\033[97m" for k, v in COLOUR.items()}
+# a run of tests' counts (dev/progress.py's capsule): on a deep shade of its block's colour, the four at one depth —
+# blue #0B3A52, green #0B3F0B, amber #5A3A00, red #520808, grey #2A2A2A
+CAPSULES = {BLUE: "\033[48;2;11;58;82m", GOOD: "\033[48;2;11;63;11m", MEH: "\033[48;2;90;58;0m", BAD: "\033[48;2;82;8;8m",
+            GREY: "\033[48;2;42;42;42m"}
+CAPSULE = {k: CAPSULES[v] for k, v in COLOUR.items()}
 ROWS = 3   # each section's lines, kept from the start
 TITLE = 24   # a block's title column: its status starts after it (and the header's commit, under it)
 SAID = {"waiting": "waiting", "running": "running", "pass": "passed", "warn": "check above", "notrun": "not run",
@@ -156,8 +162,21 @@ class Section:
     @property
     def shown(self) -> str:
         """The state its block is drawn in: red when its key's command failed (the review page didn't open), however it
-        went itself (its result stays what it was)."""
-        return "fail" if self.key_said else self.state
+        went itself (its result stays what it was); while it runs, red from its first failure and orange from its first
+        warning (a run of tests' bar: it needn't end for its colour to say so); once passed, orange when it printed
+        warnings (its result a pass all the same)."""
+        if self.key_said:
+            return "fail"
+        if self.state == "running" and self.failing:
+            return "fail"
+        if self.state in ("running", "pass") and self.warned:
+            return "warn"
+        return self.state
+
+    @property
+    def warned(self) -> int:
+        """The warnings its run of tests printed (its bar's count): 0 for anything else."""
+        return sum(b.warned for b in self.bars.values() if b.tests)
 
     @property
     def keyed(self) -> bool:
@@ -242,7 +261,7 @@ class Section:
         if self.buf:
             self.line(self.buf.decode("utf-8", "replace"))
             self.buf = b""
-        self.proc = None
+        self.release()
         if self.state in ("stopped", "skipped"):
             self.rc = rc
             return
@@ -273,12 +292,14 @@ class Section:
             self.state, self.note = "info" if rc == 0 else "fail", str(self.info)
         elif self.upkeep:
             self.state = {"current": "pass", "behind": "warn"}.get(self.first, "skipped")
-            self.note = {"current": "all up to date", "behind": "new versions upstream"}.get(self.first, "not checked")   # (the box, above)
+            self.note = {"current": "up to date", "behind": "new versions upstream"}.get(self.first, "not checked")   # (the box, above)
             self.last = ""
         elif rc == 0:
             self.state = "pass"
             if self.final_phase == 3 and self.finale.get("pass_note"):   # (after its last step: "all approved")
                 self.note = str(self.finale["pass_note"])
+            elif self.warned:   # (its tests passed, with warnings: said, in orange)
+                self.note = f"passed · {counted(self.warned, 'warning')}"
         elif self.warn_rc is not None and rc == self.warn_rc:   # (its block says it all: the line it said, the note)
             self.state = "warn"
             self.note = self.warn_note   # (its key: in the header's keys, and its last line)
@@ -286,6 +307,12 @@ class Section:
             self.state = "notrun"
         else:
             self.state = "fail"
+
+    def release(self):
+        """Its process is done with: the pipe it wrote to closed (left open, it warns when it's dropped), and forgotten."""
+        if self.proc is not None and self.proc.stdout is not None:
+            self.proc.stdout.close()
+        self.proc = None
 
     def stop(self, note: str, state: str = "stopped"):
         """Ended before its end: stopped (Enter: orange), or skipped (another's failure made it pointless: grey)."""
@@ -334,7 +361,7 @@ class Section:
             n = shown[-1].workers
             workers = f"{n} worker{'s' if n != 1 else ''}" if n else ""
             room = width - 1 - (len(workers) + 3 if workers else 0)
-            bar = shown[-1].render(room, TRACK[self.shown], FILL[self.shown], "" if self.done else RED).replace(DIM, "")
+            bar = shown[-1].render(room, TRACK[self.shown], FILL[self.shown], "" if self.done else RED, CAPSULE[self.shown]).replace(DIM, "")
             shown[-1].label = label
             if workers:
                 bar += " " * (width - 2 - len(workers) - len(ANSI.sub("", bar))) + workers
@@ -517,7 +544,7 @@ class Board:
                 if s.proc is not None:
                     stop_group(s.proc)
                     s.proc.wait(5)
-                    s.proc = None
+                    s.release()
                 s.final_phase, s.state, s.ended = 3, "warn", time.time()
                 s.note, s.said = s.kept or (s.warn_note, s.said)
                 return
