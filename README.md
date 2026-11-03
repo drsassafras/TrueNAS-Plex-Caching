@@ -1,4 +1,4 @@
-<img src="plexcache/web/logo.svg" alt="" width="96" align="right">
+<img src="plexcache/web/theatre.svg" alt="" width="96" align="right">
 
 # Dionysus Media Server Manager
 
@@ -18,7 +18,7 @@ Everything is set up in a web UI: what to cache, how much, and when. Health chec
 |---|---|
 | [<img src="docs/screenshots/health.png" alt="Health page" width="420">](docs/screenshots/health.png)<br>**Health** — every check with a plain-English fix | [<img src="docs/screenshots/features.png" alt="Features page" width="420">](docs/screenshots/features.png)<br>**Features** — three caching features, each with its own limits |
 | [<img src="docs/screenshots/l2arc-sizing.png" alt="L2ARC sizing" width="420">](docs/screenshots/l2arc-sizing.png)<br>**L2ARC sizing** — how big an SSD to buy, from your own library | [<img src="docs/screenshots/media-mappings.png" alt="Media Mappings" width="420">](docs/screenshots/media-mappings.png)<br>**Media Mappings** — finds your library folders for you |
-| [<img src="docs/screenshots/activity-chart.png" alt="Metrics chart" width="420">](docs/screenshots/activity-chart.png)<br>**Over time** — every measure by hour, day or month | [<img src="docs/screenshots/activity-dark.png" alt="Activity page in dark mode" width="420">](docs/screenshots/activity-dark.png)<br>**Dark mode** — a dark theme, or Auto to follow your system |
+| [<img src="docs/screenshots/activity-chart.png" alt="Metrics chart" width="420">](docs/screenshots/activity-chart.png)<br>**Over time** — every measure by hour, day or month | [<img src="docs/screenshots/activity-dark.png" alt="Activity page in dark mode" width="420">](docs/screenshots/activity-dark.png)<br>**Dark mode** — each theme's dark look, or Auto to follow your system |
 
 ## Features
 
@@ -204,7 +204,7 @@ Things to know: snapshots keep the old copy of every rewritten file until they e
 - **L2ARC Sizing Estimator** — how much cache the lead-in of everything in your libraries takes, in RAM without an L2ARC and on the SSD with one, counted in whole records as ZFS caches them. Four columns per library: *Target minimum* (the first record of each file at the recommended record size, indexes at the front), *Your minimum* (the first record at your record size, plus the index for files keeping it at the end), *Target* (the recommended record size, indexes at the front, at the lengths on the sliders) and *Your library* (the block sizes your files are written with now, at your settings). Below them: the system buffer (room for everything else ZFS caches; the larger it is, the longer cached files stay on the SSD) and the RAM the L2ARC uses to keep track of what it holds. Warm-up, Prefetch and Now Playing Cache read in whole records of each library's dataset, as ZFS does. Warm-up never caches less than a library's minimum: when the L2ARC is too small it shortens every lead-in by the same share, as little as fits, down to one record. A lead-in slider all the way down is one record too, on the Caching page and in the estimator; the estimator's sliders start from the default lengths. Leave room on top for how much your libraries will grow.
 - **Disk speed benchmark** per dataset, so cache hits and preload timing are judged against your actual disks.
 - Help behind small ⓘ buttons instead of walls of text, a ↺ to put any setting back to its default, changes saved as you go, and a layout that works on a phone.
-- **Themes** (System → Themes) — Dionysus Light (new installs start on it) and Dionysus Dark: the Full house theatre logo, wine buttons, a vine with a leaf now and then round each card and the whole app, spots round the outside and a reel of film under each page's title, in Cinzel and Source Sans 3 (both ship with the app). Classic Light and Classic Dark are the look before themes. **Auto** shows a light or a dark theme by each device's own setting. Any theme downloads as a JSON file listing every colour, font and decoration it sets with what each does: change it, rename it, and upload it as your own. Themes are kept in `settings.json` (its `themes` section).
+- **Themes** (System → Themes) — two themes, each with a light and a dark look. **Dionysus** (new installs start on it, light): the Full house theatre logo, wine buttons, a vine with a leaf now and then round each card and down the side of the menu, spots on the menu, a reel of film under each page's title, every progress bar a leafy vine whose grapes ripen as it goes, and a bunch of grapes for the arrow between what's kept and what goes, in Cinzel and Source Sans 3 (both ship with the app). **Classic** is the look before themes. **Mode** picks Light, Dark or **Auto**, which follows each device's own light or dark setting. A device can also keep its own theme and mode (for example Classic on a phone, Dionysus on a computer), kept in that browser. Any theme downloads as a JSON file listing every colour of its light and dark looks, its fonts and decorations, with what each does: change it, rename it, and upload it as your own. Themes are kept in `settings.json` (its `themes` section).
 - **MQTT, for Home Assistant and more** (optional) — publishes health, streams, RAM in use, ARC and L2ARC, warm-up progress, the Metrics figures and lifetime totals, and takes commands. In Home Assistant a "Dionysus" device appears on its own with 60–80 entities, including switches, buttons and sliders; Node-RED, openHAB and other MQTT tools can use the same topics. Status lights show each step of the connection. Follows the MQTT 3.1.1 and Home Assistant discovery standards, checked by its tests ([Standards](#standards)). See [MQTT](#mqtt-home-assistant-node-red-and-more).
 - **Sign-in** for the web UI — a username and password set in the app's YAML (on by default; the example password is refused) — and **local network only**: devices outside your network are refused (System → Access).
 - **Update notices** — checks GitHub every 6 hours (can be switched off in System) and says when there's a newer version, in the web UI and in Home Assistant.
@@ -355,15 +355,18 @@ The tests draw every page the way the browser does — `tests/render.js` runs `a
 
 **Shared code, no exemptions.** Every tool page is built on the shared tool page and every check tool on the shared check page, and the tests hold them there. No page, tool or check is exempted from the shared code or a standard test (added to a test's list of exceptions, or a rule loosened to let it pass) without the maintainer's express permission: see [`CLAUDE.md`](CLAUDE.md).
 
-**The CSS.** `plexcache/web/app.css` is written without browser prefixes (`-webkit-` and the rest): the image build adds the ones its target browsers need with Autoprefixer and minifies it with cssnano, and Stylelint checks the source; the suite runs both (`npm ci --prefix dev` once). See [`dev/README.md`](dev/README.md#the-css).
+**The CSS, the scripts and the pages.** They work in every browser version out in the last five years (now Safari 15.2 and iOS 15.2, Chrome and Edge 96, Firefox 95 and later): one age for all of them, a window that moves on by itself. `plexcache/web/app.css` is written without browser prefixes (`-webkit-` and the rest): it may use newer standard CSS that the image build rewrites for older browsers with postcss-preset-env; the build adds the prefixes the target browsers need with Autoprefixer and minifies it with cssnano, the scripts with Terser and the pages with html-minifier-terser. Stylelint checks the CSS, ESLint the scripts and html-validate the pages, each with a check that nothing used is missing from a target browser. The suite runs them all (`npm ci --prefix dev` once). See [`dev/README.md`](dev/README.md#the-css-the-scripts-and-the-pages).
+
+**The style guide: no new looks without the maintainer's OK.** Every look the app wears (each CSS rule, inline style, drawing, decoration, theme colour, font and image) is listed in `dev/style-guide.json`, and the suite fails on one that's new, changed or gone. `python3 dev/style.py sample` shows each one Before (as approved) and After (now), side by side, in Classic and Dionysus, light and dark, and only where it looks different (`dev/style-sample/index.html`); only the maintainer approves them, at a terminal, with `python3 dev/style.py approve`. See [`dev/README.md`](dev/README.md#the-style-guide).
 
 To try changes on your own TrueNAS before pushing, see [`dev/README.md`](dev/README.md): a test copy of the app plus `tnsync`, which runs the tests, copies your code to the NAS and restarts the test app in one command.
 
 ```sh
-python3 tests/run.py      # progress bar; tests use fake Plex, TrueNAS and MQTT servers
+python3 tests/run.py      # progress bar, two workers per core (-j 1: one at a time); tests use fake Plex, TrueNAS and MQTT servers
 python3 dev/coverage.py   # the same, with test coverage per file (Python 3.12+)
 python3 tests/demo.py     # UI demo at http://127.0.0.1:8642 with sample data
 node dev/screenshots.js   # README screenshots (see the file for how to run it)
+python3 dev/style.py check   # every look in the style guide? (sample: pictures of what isn't; approve: the maintainer only)
 node tests/render.js system < state.json   # a page as the browser draws it from one /api/state answer (the tests use it)
 docker build -t plex-cache .
 ```
@@ -372,7 +375,7 @@ docker build -t plex-cache .
 
 Each language has a catalog in `plexcache/web/i18n/<code>.json`, keyed by the English text. Texts are marked in the code with `T()`, `H()`, `P()` and `N()` in JavaScript, `data-i18n` attributes in HTML and `M()` in Python. You translate in place: a text with no translation yet is in the catalog as `null`, and the app shows the English until it's filled in.
 
-**When to translate:** only when a release is being made, and only when the maintainer asks for the release. Day to day, a change that adds or changes texts leaves the catalogs alone: a new text isn't in them yet (the app shows the English) and an old one lingers until the release. Making the release, run `python3 dev/i18n.py sync` to bring every catalog in step (new texts as `null`, unused ones dropped), then translate.
+**When to translate:** only when a release is being made, and only when the maintainer asks for the release. Day to day, a change that adds or changes texts leaves the catalogs alone: a new text isn't in them yet (the app shows the English) and an old one lingers until the release. `tnsync dev --release` checks that it's been done, with the version ([`dev/README.md`](dev/README.md)). Making the release, run `python3 dev/i18n.py sync` to bring every catalog in step (new texts as `null`, unused ones dropped), then translate.
 
 ```sh
 python3 dev/i18n.py status      # how much of each language is translated

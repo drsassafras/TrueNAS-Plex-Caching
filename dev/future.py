@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The suite on what comes next: the project's image built on the next Python's prerelease (3.16 while the image runs
 3.15) and, in place of each tool's pin, upstream's newest pre-release where it has one ahead of its stable release —
-else that stable release — with every warning an error, so what the next releases deprecate or remove shows up here
+else that stable release — with every warning an error and the web's checks a year ahead (four years of browsers, not five), so what the next releases deprecate or remove shows up here
 before it reaches the image. Local only: GitHub runs the tests on the Python the app ships with (3.15); this is the
 "future" track, run by hand or in a cron of your own (tnsync runs it after the current tests pass), and nothing in it
 gates a build.
@@ -17,7 +17,9 @@ gates a build.
 The channels (CHANNELS below): Python's alphas, betas and rcs as Docker Hub tags them; Node's nightlies and rcs from
 nodejs.org (the page tests need node; the image serves no pages through it, so it's fetched for the run, cached, and
 mounted in); ffmpeg's git snapshot, built from source once a week (FFMPEG_SOURCE and FFMPEG_STAMP in the Dockerfile);
-libjpeg-turbo's and oxipng's GitHub pre-releases; MKVToolNix has releases only. A pre-release counts only while it's
+libjpeg-turbo's and oxipng's GitHub pre-releases; dev/package.json's packages (both sections) at npm's newest dist-tag
+ahead of latest (next, beta, rc…), installed in a copy of it (WEB_DIR) and mounted over the checkout's; MKVToolNix has
+releases only. A pre-release counts only while it's
 ahead of the stable release; the choice is kept for a day (like dev/upkeep.py's look, whose report says what this run is
 on), and upstream not reached means the pin.
 
@@ -39,6 +41,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,12 +49,16 @@ from dataclasses import dataclass
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from dev import upkeep  # noqa: E402 — the pins, the stable releases and the version arithmetic are its
+from dev.progress import Progress, feeding, record, result, said, timed  # noqa: E402 — the bar the dev tools share (on tnsync's board: sent to it)
 
 WARN = ["-X", "dev", "-W", "error::DeprecationWarning", "-W", "error::PendingDeprecationWarning", "-W", "error::SyntaxWarning"]
 IMAGE = "plex-cache:future"
 LOG = os.path.join(tempfile.gettempdir(), "plex-cache-future-build.log")  # the build's full output, kept for a failure
 CACHE = os.path.join(os.path.dirname(upkeep.CACHE), "future.json")  # the day's choices
 NODE_DIR = os.path.join(os.path.dirname(upkeep.CACHE), "node")  # the node tarball fetched for the run (one kept)
+WEB_DIR = os.path.join(os.path.dirname(upkeep.CACHE), "web-future")  # dev/package.json at the channels' choices, installed (one kept)
+# The web checks a year ahead: dev/web.js takes dev/package.json's "futureBrowserslist" (one year less of browsers)
+WEB_TARGETS = ["-e", "PLEXCACHE_WEB_TARGETS=future"]
 # the build's lines that say where it is: the legacy builder's "Step 8/31 : RUN …", BuildKit's "#8 [ffmpeg 2/3] RUN …"
 STEP_LEGACY = re.compile(r"^Step (\d+)/(\d+) : (.*)")
 STEP_BUILDKIT = re.compile(r"^#(\d+) \[([^\]]+)\] (.*)")
@@ -96,6 +103,7 @@ class Pick:
     channel: str
     why: str = ""
     value: str = ""
+    kind: str = ""  # "npm": one of dev/package.json's packages (installed for the run, not a build argument)
 
 
 def hub_tags(python: str) -> list[str]:
@@ -181,6 +189,78 @@ def pick_ffmpeg(latest: str, snapshot: bool) -> Pick:
     return Pick("ffmpeg", latest, "stable", "no snapshot upstream", latest)
 
 
+def npm_tags(package: str) -> dict[str, str]:
+    """A package's dist-tags on npm (latest, next, beta, rc, canary…): tag → version."""
+    return upkeep._json(f"https://registry.npmjs.org/-/package/{urllib.parse.quote(package, safe='@')}/dist-tags")
+
+
+def semver(version: str) -> tuple:
+    """A version as semver orders it: 11.0.0-alpha.2 < 11.0.0-beta.1 < 11.0.0 (a pre-release before its release; its
+    parts numeric before named)."""
+    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+\S*)?$", version.strip())
+    if not m:
+        raise ValueError(f"not a semver version: {version!r}")
+    pre = m.group(4)
+    parts = tuple((0, int(x), "") if x.isdigit() else (1, 0, x) for x in pre.split(".")) if pre else ()
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if pre else 1, parts)
+
+
+def pick_npm(package: str, tags: dict[str, str]) -> Pick:
+    """A package's newest version under any dist-tag when it's ahead of latest (next, beta, rc…: the tag is the channel),
+    else latest. A tag that isn't semver is passed over."""
+    latest = tags.get("latest")
+    if not latest:
+        raise ValueError(f"{package}: no latest on npm")
+    ahead = []
+    for tag, v in tags.items():
+        try:
+            if tag != "latest" and semver(v) > semver(latest):
+                ahead.append((semver(v), v, tag))
+        except ValueError:
+            continue
+    if ahead:
+        _, v, tag = max(ahead)
+        return Pick(package, v, tag, f"ahead of {latest}", v, "npm")
+    return Pick(package, latest, "stable", "no pre-release ahead of it", latest, "npm")
+
+
+def install_web(picks: list[Pick]) -> str | None:
+    """dev/package.json and its lock copied to WEB_DIR and moved to the channels' choices with npm there (the checkout's
+    stay as they are); its node_modules, to mount over the checkout's. Installed once for a set of choices. None: no
+    package picked, no npm, or npm couldn't (the checkout's packages then)."""
+    want = {p.name: p.version for p in picks if p.kind == "npm" and p.channel != "pin"}
+    if not want:
+        return None
+    if not shutil.which("npm"):
+        print(f"    {DIM}no npm here: the web's packages at their pins for this run{OFF}")
+        return None
+    modules, marker = os.path.join(WEB_DIR, "node_modules"), os.path.join(WEB_DIR, "picks.json")
+    stamp = json.dumps(want, sort_keys=True)
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            if fh.read() == stamp and os.path.isdir(modules):
+                return modules
+    except OSError:
+        pass
+    shutil.rmtree(WEB_DIR, ignore_errors=True)
+    os.makedirs(WEB_DIR)
+    for name in ("package.json", "package-lock.json"):
+        shutil.copy(os.path.join(ROOT, "dev", name), WEB_DIR)
+    cmd = ["npm", "install", "--prefix", WEB_DIR, "--save-exact", "--no-audit", "--no-fund", *[f"{n}@{v}" for n, v in sorted(want.items())]]
+    print(f"    Installing the web's packages at the choices ({len(want)}) for the run…", flush=True)
+    got = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if got.returncode and "ERESOLVE" in got.stdout + got.stderr:  # (a pre-release outside another's peer range: tried anyway)
+        print(f"    {DIM}a peer range doesn't take a pre-release: installed with --legacy-peer-deps{OFF}")
+        got = subprocess.run(cmd + ["--legacy-peer-deps"], capture_output=True, text=True, timeout=600)
+    if got.returncode:
+        print(f"    {DIM}npm couldn't install them ({(got.stderr or got.stdout).strip()[-300:]}): the pins for this run{OFF}")
+        shutil.rmtree(WEB_DIR, ignore_errors=True)
+        return None
+    with open(marker, "w", encoding="utf-8") as fh:
+        fh.write(stamp)
+    return modules
+
+
 def host_arch() -> str:
     """Node's name for this machine's architecture (the image Docker builds here is the same)."""
     return "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
@@ -209,6 +289,11 @@ def resolve(python: str, debian: str, arch: str) -> list[Pick]:
     take(lambda: pick_github("libjpeg-turbo", github_releases("libjpeg-turbo/libjpeg-turbo"),
                              lambda v: f"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/{v}/libjpeg-turbo-{v}.tar.gz", upkeep._exists),
          "libjpeg-turbo", upkeep._arg("LIBJPEG_TURBO")())
+    for package, pin in upkeep.web_packages().items():  # (dev/package.json's, both sections)
+        try:
+            picks.append(pick_npm(package, npm_tags(package)))
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            picks.append(Pick(package, pin, "pin", f"npm not reached: {getattr(e, 'reason', e)}", pin, "npm"))
     return picks
 
 
@@ -220,7 +305,9 @@ def channels(python: str, debian: str, arch: str, fresh: bool = False) -> list[P
             cached = json.load(fh)
     except (OSError, ValueError):
         cached = {}
-    if not fresh and cached.get("key") == key and time.time() - cached.get("at", 0) < upkeep.A_DAY and not any(p["channel"] == "pin" for p in cached.get("picks") or []):
+    kept = cached.get("picks") or []
+    if (not fresh and cached.get("key") == key and time.time() - cached.get("at", 0) < upkeep.A_DAY and not any(p["channel"] == "pin" for p in kept)
+            and {p["name"] for p in kept if p.get("kind") == "npm"} == set(upkeep.web_packages())):  # (a package added or gone: asked again)
         return [Pick(**p) for p in cached["picks"]]
     picks = resolve(python, debian, arch)
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
@@ -245,8 +332,8 @@ def build_args(picks: list[Pick]) -> list[str]:
 
 def table(picks: list[Pick]) -> str:
     """The choices, one line each."""
-    width = max(len(p.version) for p in picks)
-    return "\n".join(f"    {p.name:<14} {p.version:<{width}}  {p.channel:<12} {DIM}{p.why}{OFF}" for p in picks)
+    width, names = max(len(p.version) for p in picks), max([14] + [len(p.name) for p in picks])
+    return "\n".join(f"    {p.name:<{names}} {p.version:<{width}}  {p.channel:<12} {DIM}{p.why}{OFF}" for p in picks)
 
 
 def fetch_node(pick: Pick) -> str | None:
@@ -273,12 +360,19 @@ def fetch_node(pick: Pick) -> str | None:
 
 
 class Line:
-    """One line of the terminal, redrawn as the build moves (a plain line now and then when the output isn't a terminal)."""
+    """One line of the terminal, redrawn as the build moves (a plain line now and then when the output isn't a terminal).
+    On tnsync's board (PLEXCACHE_PROGRESS=feed), its Future Tests section's first bar instead: dev/progress.py's."""
 
     def __init__(self, what: str):
         self.what, self.tty, self.started, self.last = what, sys.stdout.isatty(), time.time(), 0.0
+        self.bar = Progress(0, bar="build", unit="build steps") if feeding() else None
+        self.done = 0
 
     def show(self, text: str, done: int | None = None, total: int | None = None) -> None:
+        if self.bar is not None:
+            self.done = done if done is not None else self.done
+            self.bar.at(self.done, total or max(self.bar.total, self.done), f"{self.what}: {text}", ticking=True)
+            return
         elapsed = int(time.time() - self.started)
         part = f" {done}/{total}" if done is not None and total else ""
         if self.tty:
@@ -292,14 +386,16 @@ class Line:
             sys.stdout.flush()
         elif time.time() - self.last > 30 or done == total:  # (a log: a line every half minute)
             self.last = time.time()
-            print(f"    {self.what}{part}  {text}  ({elapsed} s)", flush=True)
+            print(f"    {self.what}{part}  {text}{timed(f'{elapsed} s')}", flush=True)
 
     def end(self, text: str, ok: bool = True) -> None:
         elapsed = int(time.time() - self.started)
+        if self.bar is not None:
+            self.bar.at(self.bar.total if ok else self.done, self.bar.total or self.done, text)
         if self.tty:
             sys.stdout.write("\r\033[K")
         colour = (GREEN if ok else RED) if self.tty else ""
-        print(f"    {colour}{'✔' if ok else '✘'}{OFF if self.tty else ''} {text} ({elapsed // 60}:{elapsed % 60:02d})", flush=True)
+        print(f"    {colour}{'✔' if ok else '✘'}{OFF if self.tty else ''} {text}{timed(f'{elapsed // 60}:{elapsed % 60:02d}')}", flush=True)
 
 
 # A build step that couldn't fetch what it needed (a download refused, DNS, a tag not published yet): not a failure of the
@@ -362,7 +458,7 @@ def build_image(tag: str, args: list[str], verbose: bool) -> bool:
     return False
 
 
-def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, stable: bool, fresh: bool) -> int:
+def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, stable: bool, fresh: bool, exclude: list[str] | None = None) -> int:
     """The project's image built on the next Python and the channels' choices (the pins with --stable), its Python checked
     for the stdlib zstd, and the tests run inside it."""
     if not shutil.which("docker"):
@@ -399,16 +495,38 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
     # here and mounted in (Debian's package when it can't be had), added to the container for this run only, as root. The
     # suite runs through tests/run.py (its progress bar on a terminal: -t) unless particular tests are named; CI=1: the
     # dependency check, dev/upkeep.py, is for a run by hand in the checkout, not this one.
-    suite = f"python {' '.join(WARN)} tests/run.py" if tests == ["tests.test_plexcache"] else f"python {' '.join(WARN)} -m unittest -q {' '.join(tests)}"
+    leave = "".join(f" --exclude {c}" for c in exclude or [])   # (classes another section runs: tnsync's style guide)
+    suite = f"python {' '.join(WARN)} tests/run.py{leave}" if tests == ["tests.test_plexcache"] else f"python {' '.join(WARN)} -m unittest -q {' '.join(tests)}"
     tarball = fetch_node(node_pick) if node_pick else None
     mount = ["-v", f"{tarball}:/node.tar.xz:ro"] if tarball else []
+    # the web's packages at the channels' choices, over the checkout's (which stay at the pins); the checks a year ahead
+    modules = install_web(picks)
+    if modules and os.path.isdir(os.path.join(ROOT, "dev", "node_modules")):
+        mount += ["-v", f"{modules}:/src/dev/node_modules:ro"]
     node = ("if [ -f /node.tar.xz ]; then python -c \"import tarfile; tarfile.open('/node.tar.xz').extractall('/opt', filter='tar')\" && "
             "PATH=\"$(echo /opt/node-*/bin):$PATH\" && export PATH; fi; "
             "command -v node >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends nodejs) >/dev/null 2>&1 || echo '    node not added: the page tests skip'")
     tty = ["-t"] if sys.stdout.isatty() else []
+    if feeding():  # (on tnsync's board: tests/run.py's bar sent to it, through docker's output)
+        tty = ["-e", "PLEXCACHE_PROGRESS=feed"]
+    # shown on a terminal later (a log, PLEXCACHE_PROGRESS=bar): tests/run.py's bar all the same, as wide as that terminal
+    elif not tty and os.environ.get("PLEXCACHE_PROGRESS") == "bar":
+        tty = ["-e", "PLEXCACHE_PROGRESS=bar", "-e", f"COLUMNS={os.environ.get('COLUMNS') or 100}"]
     print(f"    Adding node {node_pick.version if tarball and node_pick else '(Debian’s)'} to the container, then running the suite:", flush=True)
-    got = subprocess.run(["docker", "run", "--rm", *tty, "-e", "CI=1", "--user", "0", "-v", f"{ROOT}:/src:ro", *mount, "-w", "/src", "--entrypoint", "sh", IMAGE, "-c",
-                          f"{node}; exec {suite}"]).returncode
+    run = ["docker", "run", "--rm", *tty, "-e", "CI=1", *WEB_TARGETS, "--user", "0", "-v", f"{ROOT}:/src:ro", *mount, "-w", "/src", "--entrypoint", "sh", IMAGE, "-c",
+           f"{node}; exec {suite}"]
+    if feeding():   # (on the board: the suite's output passed on as it comes, its result line kept for the block's)
+        last = ""
+        with subprocess.Popen(run, stdout=subprocess.PIPE, text=True, errors="replace") as proc:
+            for line in proc.stdout or []:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                if record(line) is None and line.strip():
+                    last = line.strip()
+        got = proc.returncode
+        said(result(last))   # (the suite's result line, what it ran on with it: tests/run.py's ran_on)
+    else:
+        got = subprocess.run(run).returncode
     print(f"\nPython {python}, inside the image: " + ("clean." if got == 0 else "the suite fails — what it deprecates or removes needs a look before the image moves to it."))
     return 1 if got else 0
 
@@ -527,20 +645,21 @@ def main() -> int:
     ap.add_argument("--local", action="store_true", help="run on an interpreter of this machine instead of inside the image")
     ap.add_argument("--syncthing", action="store_true", help="instead: download Syncthing's newest pre-release, start it, and run the live tests against it")
     ap.add_argument("-v", "--verbose", action="store_true", help="the build's and the tools' full output (quiet otherwise: one progress line, the log kept)")
+    ap.add_argument("--exclude", action="append", metavar="CLASS", help="the whole suite but this class (tnsync: the style guide, in a section of its own); again for another")
     ap.add_argument("tests", nargs="*", default=["tests.test_plexcache"], help="what to run (default: the whole suite)")
     args = ap.parse_args()
     if args.syncthing:
         return syncthing_route(args.verbose)
     if not args.local:
-        return image_route(args.python, args.tag, args.tests, args.verbose, args.stable, args.fresh)
+        return image_route(args.python, args.tag, args.tests, args.verbose, args.stable, args.fresh, args.exclude)
     cmd = find_python(args.python)
     if not cmd:
         print(f"No Python {args.python} here. Get one (python3.{args.python.split('.')[1]} on PATH), or install uv — it fetches prerelease builds "
               f"and this script uses it. Or drop --local: the image route needs only Docker.")
         return 2
     print(f"The suite on Python {args.python} ({' '.join(cmd)}), every warning an error:")
-    suite = ["tests/run.py"] if args.tests == ["tests.test_plexcache"] else ["-m", "unittest", "-q", *args.tests]
-    got = subprocess.run(cmd + WARN + suite, cwd=ROOT, env=dict(os.environ, CI="1"))  # (CI: no dependency check here)
+    suite = ["tests/run.py", *(x for c in args.exclude or [] for x in ("--exclude", c))] if args.tests == ["tests.test_plexcache"] else ["-m", "unittest", "-q", *args.tests]
+    got = subprocess.run(cmd + WARN + suite, cwd=ROOT, env=dict(os.environ, CI="1", PLEXCACHE_WEB_TARGETS="future"))  # (CI: no dependency check here)
     print(f"\nPython {args.python}: " + ("clean." if got.returncode == 0 else "the suite fails — what it deprecates or removes needs a look before the image moves to it."))
     return 1 if got.returncode else 0
 

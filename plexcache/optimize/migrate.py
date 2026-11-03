@@ -121,6 +121,8 @@ def copy_tree(src: str, dst: str, ctl: Paused, report=lambda **kw: None, mirror:
         raise OSError("both folders must exist")
     total_files = total_bytes = 0
     for dirpath, dirnames, filenames in os.walk(src):
+        if ctl.stop.is_set():  # (a big folder takes a while to count: stopped here too, not only once copying)
+            raise InterruptedError("stopped")
         for n in filenames:
             try:
                 st = os.lstat(os.path.join(dirpath, n))

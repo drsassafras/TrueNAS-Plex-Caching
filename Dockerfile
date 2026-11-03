@@ -17,7 +17,8 @@ ARG LIBJPEG_TURBO=3.2.1
 # FFMPEG_STAMP the week, so the layer is built again when it changes. Empty: the release above.
 ARG FFMPEG_SOURCE=""
 ARG FFMPEG_STAMP=""
-# The Node that builds the app's CSS (the css stage below): its current LTS release. Only the build uses it; the image has none.
+# The Node that builds the web app's CSS, scripts and pages (the web stage below): its current LTS release. Only the build uses
+# it; the image has none.
 ARG NODE_TAG=26-slim
 
 # jpegtran built from libjpeg-turbo's release: the one tool of it the optimizer uses, linked statically against it.
@@ -33,6 +34,8 @@ RUN set -eux; \
     /usr/local/bin/jpegtran -version
 
 # ffmpeg (with ffprobe) built from its release, with no external libraries (zlib for PNG cover art). A few minutes of the build.
+# The release's tarball is fetched from ffmpeg.org, tried again a few times; if ffmpeg.org still can't be reached, the same
+# release's tag from FFmpeg's own mirror on GitHub (the snapshot has only ffmpeg.org).
 FROM python:${PYTHON_TAG} AS ffmpeg
 ARG FFMPEG
 ARG FFMPEG_SOURCE
@@ -40,23 +43,31 @@ ARG FFMPEG_STAMP
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates curl xz-utils bzip2 build-essential nasm pkg-config zlib1g-dev; \
+    fetch() { curl -fsSL --connect-timeout 30 --retry 3 --retry-delay 10 --retry-all-errors "$1" -o "${1##*/}"; }; \
     src="${FFMPEG_SOURCE:-https://ffmpeg.org/releases/ffmpeg-${FFMPEG}.tar.xz}"; echo "ffmpeg from $src ${FFMPEG_STAMP}"; \
-    curl -fsSL "$src" -o "${src##*/}"; mkdir ffmpeg-src; tar xaf "${src##*/}" -C ffmpeg-src --strip-components=1; \
+    if ! fetch "$src"; then \
+        test -z "${FFMPEG_SOURCE}"; \
+        src="https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n${FFMPEG}.tar.gz"; echo "ffmpeg.org not reached: ffmpeg from $src"; \
+        fetch "$src"; \
+    fi; \
+    mkdir ffmpeg-src; tar xaf "${src##*/}" -C ffmpeg-src --strip-components=1; \
     cd ffmpeg-src; \
     ./configure --disable-doc --disable-debug --disable-ffplay --disable-autodetect --enable-zlib --disable-shared --enable-static >/dev/null; \
     make -j "$(nproc)" >/dev/null; \
     install -m 755 ffmpeg ffprobe /usr/local/bin/; \
     ffmpeg -version | head -1
 
-# The app's CSS as browsers get it (dev/css.js): the browser prefixes its targets need added by Autoprefixer (the targets in
-# dev/package.json, "browserslist"), then minified by cssnano. The CSS in plexcache/web is written without prefixes; this
-# copy of it replaces that one in the image.
-FROM node:${NODE_TAG} AS css
-WORKDIR /css
-COPY dev/package.json dev/package-lock.json dev/css.js dev/
+# The web app's CSS, scripts and pages as browsers get them (dev/web.js): the CSS with the newer features its targets lack
+# rewritten by postcss-preset-env and the browser prefixes they need added by Autoprefixer (the targets in dev/package.json,
+# "browserslist"), then minified by cssnano; the scripts minified by
+# Terser, the pages by html-minifier-terser. plexcache/web's are written as they are read (the CSS without prefixes); these
+# copies of them replace those in the image.
+FROM node:${NODE_TAG} AS web
+WORKDIR /web
+COPY dev/package.json dev/package-lock.json dev/web.js dev/
 RUN npm ci --prefix dev --no-audit --no-fund
-COPY plexcache/web/app.css plexcache/web/app.css
-RUN node dev/css.js build plexcache/web/app.css plexcache/web/app.css
+COPY plexcache/web/*.css plexcache/web/*.js plexcache/web/*.html plexcache/web/
+RUN for f in plexcache/web/*.css plexcache/web/*.js plexcache/web/*.html; do node dev/web.js build "$f" "$f" || exit 1; done
 
 FROM python:${PYTHON_TAG}
 ARG MKVTOOLNIX
@@ -104,7 +115,7 @@ COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/
 
 WORKDIR /app
 COPY plexcache /app/plexcache
-COPY --from=css /css/plexcache/web/app.css /app/plexcache/web/app.css
+COPY --from=web /web/plexcache/web/ /app/plexcache/web/
 # Library Health names codecs the way the MKVToolNix in this image does: its release's own list
 # (the committed one stays if it can't be read)
 COPY dev/codecs.py /app/dev/codecs.py

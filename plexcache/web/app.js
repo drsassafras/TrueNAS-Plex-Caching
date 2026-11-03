@@ -12,9 +12,7 @@ PCI18N.ready.then(function () {
   var mapPending = {};   // library folder -> time its mapping was saved (shows "Checking…")
   var otherOpen = {};    // library folders where "Other path…" was chosen
   var main = document.getElementById("main");
-  var MASK = "__unchanged__";
   var GB = 1e9;
-  var KINDS = ["movie", "tv", "audio"];
   var KIND_NAME = { movie: T("Movies"), tv: T("TV"), audio: T("Audio") };
   // ------------------------------------------------------------ caching mode
   // L2ARC or RAM only (see plexcache/cachemode.py). Three marks, explained in the legend:
@@ -22,7 +20,7 @@ PCI18N.ready.then(function () {
   //   ssd-def  (blue SSD)        the default with an L2ARC
   //   ssd-only (grey SSD)        needs an L2ARC; without one the RAM default is used instead
   function modeIs(m) { return ((ST && ST.cache) || {}).mode === m; }
-  var ICONS = {
+  var MODE_ICONS = {
     ssd: '<path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5zM7 8v3h10V8zm0 6v2h4v-2z"/>',
     ram: '<path d="M2 7h20v9H2zm3 2v5h2V9zm4 0v5h2V9zm4 0v5h2V9zm4 0v5h2V9zM4 17h2v2H4zm5 0h2v2H9zm5 0h2v2h-2zm5 0h2v2h-2z"/>'
   };
@@ -36,7 +34,7 @@ PCI18N.ready.then(function () {
     var m = MARKS[kind];
     if (!m) return "";
     return '<span class="mode-ic mk-' + kind + '" role="img" title="' + esc(T(m.text)) + '" aria-label="' + esc(T(m.text)) + '">' +
-      '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor">' + ICONS[m.icon] + "</svg></span>";
+      '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor">' + MODE_ICONS[m.icon] + "</svg></span>";
   }
   // A setting that's wholly one kind gets its mark beside its name (in dropdowns, each choice has
   // its own). Settings that apply with or without an L2ARC get none.
@@ -103,11 +101,6 @@ PCI18N.ready.then(function () {
     var meta = ((ST.cache || {}).settings || {})[sid];
     if (!meta || modeIs("l2arc") || meta.l2arc_only.indexOf(value) < 0) return "";
     return '<div class="fallback">' + mark("ssd-only") + H("Needs an L2ARC. Using “{value}” (the RAM default) until one is added.", { value: names[(own && own.ram) || meta.ram] }) + "</div>";
-  }
-  function dynSelect(sec, key, label, order, names, help) {
-    var sid = sec + "." + key, h = splitHelp(help), cur = String(S[sec][key]), opts = dynOptions(sid, order, names);
-    return '<div class="fld"><span class="lbl">' + esc(label) + info(h.more, label) + pickRevert("set:" + sid, cur, opts) + "</span>" +
-      pickHtml("set:" + sid, cur, opts, label) + fallbackNote(sid, cur, names) + helpDiv(h) + "</div>";
   }
 
   // ------------------------------------------------------------------ utils
@@ -260,7 +253,6 @@ PCI18N.ready.then(function () {
     optimizer: N("optimizer"), "library health": N("library health") };
   var EVENT_ICONS = { optimizer: "optimizer", sync: "sync", tools: "tools", update: "updates", settings: "prefs", "library health": "library", benchmark: "speed" };
   var STATUS_TEXT = { pass: T("Pass"), warn: T("Warning"), fail: T("Fail"), info: T("Info") };
-  var VERDICT_TEXT = { use: T("Use"), maybe: T("Maybe"), avoid: T("Unavailable") };
 
   // --------------------------------------------------------------- saving
   var pending = {}, saveTimer = null;
@@ -285,7 +277,6 @@ PCI18N.ready.then(function () {
   // ------------------------------------------------------------- planning
   // The L2ARC plan (plexcache/warmup.py plan()) comes from the server with every state; a change
   // saves and reloads straight away, so it's always current.
-  var DEFAULT_INDEX = { movie: 512 * 1024, tv: 256 * 1024, audio: 0 };  // per file, until a run measures yours
 
   // ---------------------------------------------------------------- pages
   // a Health group's heading: TrueNAS and ZFS each behind its mark, Media Datasets behind TrueNAS's dataset icon
@@ -517,7 +508,7 @@ PCI18N.ready.then(function () {
   function range(sec, key, label, min, max, step, unit, help) {
     var id = "f-" + sec + "-" + key;
     var h = splitHelp(help);
-    return '<div class="fld"><label for="' + id + '">' + esc(label) + iconFor(sec, key) + info(h.more, label) + '<span class="val" data-val="' + id + '">' + esc(S[sec][key]) + " " + unit + "</span>" + revertBtn(sec, key, unit) + "</label>" +
+    return '<div class="fld"><span class="lbl"><label for="' + id + '">' + esc(label) + iconFor(sec, key) + "</label>" + info(h.more, label) + '<span class="val" data-val="' + id + '">' + esc(S[sec][key]) + " " + unit + "</span>" + revertBtn(sec, key, unit) + "</span>" +
       '<input id="' + id + '" type="range" min="' + min + '" max="' + max + '" step="' + step + '" value="' + esc(S[sec][key]) + '" data-set="' + sec + "." + key + '" data-unit="' + unit + '">' +
       helpDiv(h) + "</div>";
   }
@@ -527,13 +518,13 @@ PCI18N.ready.then(function () {
     var unit = key === "poll_seconds" ? T("s") : "";  // for the ↺ button's "Back to the default (5 s)"
     var names = REVERT_LABELS[sec + "." + key] = {};
     options.forEach(function (o) { names[String(o[0])] = o[1]; });
-    return '<div class="fld"><label for="' + id + '">' + esc(label) + iconFor(sec, key) + info(h.more, label) + revertBtn(sec, key, unit) + '</label><select id="' + id + '" data-set="' + sec + "." + key + '">' +
+    return '<div class="fld"><span class="lbl"><label for="' + id + '">' + esc(label) + iconFor(sec, key) + "</label>" + info(h.more, label) + revertBtn(sec, key, unit) + '</span><select id="' + id + '" data-set="' + sec + "." + key + '">' +
       options.map(function (o) { return '<option value="' + esc(o[0]) + '"' + (String(o[0]) === cur ? " selected" : "") + ">" + esc(o[1]) + "</option>"; }).join("") +
       "</select>" + helpDiv(h) + "</div>";
   }
   function number(sec, key, label, min, max, help) {
     var id = "f-" + sec + "-" + key, h = splitHelp(help);
-    return '<div class="fld"><label for="' + id + '">' + esc(label) + iconFor(sec, key) + info(h.more, label) + revertBtn(sec, key, "") + '</label><input id="' + id + '" type="number" min="' + min + '" max="' + max + '" value="' + esc(S[sec][key]) + '" data-set="' + sec + "." + key + '">' +
+    return '<div class="fld"><span class="lbl"><label for="' + id + '">' + esc(label) + iconFor(sec, key) + "</label>" + info(h.more, label) + revertBtn(sec, key, "") + '</span><input id="' + id + '" type="number" min="' + min + '" max="' + max + '" value="' + esc(S[sec][key]) + '" data-set="' + sec + "." + key + '">' +
       helpDiv(h) + "</div>";
   }
 
@@ -570,7 +561,6 @@ PCI18N.ready.then(function () {
   // × seconds of the start, plus a safety margin, counted in whole records as ZFS caches them.
   // Shown even without an L2ARC: the same lead-ins then take RAM instead.
   var SSD_SIZES = [128, 256, 500, 1000, 2000, 4000, 8000];  // GB, as drives are sold
-  var L2_HEADER = 96;  // RAM the L2ARC uses per record it holds (plexcache/warmup.py L2ARC_HEADER_BYTES)
 
   // What one file takes in the cache at a record size (plexcache/warmup.py cached_bytes()): its start —
   // the lead-in, never less than the metadata in front of the video and 60% of a record of video — in
@@ -795,7 +785,7 @@ PCI18N.ready.then(function () {
         (p.paused ? badge("warn", T("Paused")) : badge("running", wu.phase === "scanning" ? T("Preparing") : T("Running"))) + " " +
         (p.total ? H("{done} of {total} files · {size} read", { done: p.done, total: p.total, size: fmtBytes(p.bytes) }) : H("Reading library list…")) +
         (p.paused ? '<div class="help" style="margin:4px 0 0">' + H("Paused: {why}.", { why: p.paused }) + "</div>" : "") +
-        '</div><button class="btn danger" data-act="warmup-stop">' + H("Stop") + '</button></div><div class="meter"><div style="width:' + pct + '%"></div></div></div>';
+        '</div><button class="btn danger" data-act="warmup-stop">' + H("Stop") + '</button></div><div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div></div>';
     }
     return "";
   }
@@ -917,7 +907,7 @@ PCI18N.ready.then(function () {
   function ageText(sec) { return minutesText(Math.round(sec / 60)); }
   function cooldownFields(kind) {
     var sk = kind + "_cooldown_", inUse = modeIs(kind === "l2arc" ? "l2arc" : "ram");
-    var opts = function (key) {
+    var opts = function () {
       return COOLDOWNS[kind].map(function (m) { return [m, minutesText(m)]; });
     };
     var cl = ST.cachelog || { lead_ins: 0, whole_files: 0 };
@@ -957,7 +947,7 @@ PCI18N.ready.then(function () {
   }
   function ramSlider(sec, key, label, min, max, step, unit, help) {
     var id = "f-" + sec + "-" + key, h = splitHelp(help);
-    return '<div class="fld"><label for="' + id + '">' + esc(label) + info(h.more, label) + revertBtn(sec, key, unit) + "</label>" +
+    return '<div class="fld"><span class="lbl"><label for="' + id + '">' + esc(label) + "</label>" + info(h.more, label) + revertBtn(sec, key, unit) + "</span>" +
       '<input id="' + id + '" type="range" min="' + min + '" max="' + max + '" step="' + step + '" value="' + esc(S[sec][key]) + '" data-set="' + sec + "." + key + '" data-unit="' + unit + '">' +
       '<div class="ramlines" data-lines="' + sec + "." + key + '">' + ramLines(sec, key) + "</div></div>";
   }
@@ -1251,7 +1241,7 @@ PCI18N.ready.then(function () {
   }
   // a library's choices, drawn as every tool's options are (toolOptions): each with its ⓘ and its ↺ back to the default —
   // what to do, then for MKV files the cover art and tags; under them its dataset, as set up for the best result
-  function optOptions(l, key, c, sm, op) {
+  function optOptions(l, key, c, sm) {
     var box = function (k, label, help, title, n) {
       return optionRow({ help: help, title: title, label: '<input type="checkbox" data-optlib="' + esc(key) + '" data-optkey="' + k + '"' + (c[k] ? " checked" : "") + "> " + label, revert: optRevert(key, k), count: sm ? n || 0 : null, on: c[k] });
     };
@@ -1557,6 +1547,11 @@ PCI18N.ready.then(function () {
       "<br><br>" + H("<strong>Ideal already</strong>: its dataset has the record size recommended for it. <strong>Sufficient</strong>: the second best — fine as it is. <strong>Split dataset</strong>: neither; converting the folder lets it read in the size that suits it.") +
       "<br><br>" + H("How: a new dataset is made next to the folder, the files are copied into it (which also gives them its record size and compression), and it takes the folder’s place. Plex keeps every file’s metadata, and is restarted once, at the end. You’ll need room for a second copy until the old one is deleted; snapshots keep the old copy’s space until they expire."));
     out += migMirror(mg.mirror);
+    var cx = mg.cancelled;  // a conversion just cancelled: what that did, and what's left to do (migrating.py cancel)
+    if (!st && cx) out += '<div class="note">' + H("Cancelled: converting {folder} to a dataset. The folder is as it was: nothing in it was changed.", { folder: cx.host_folder || cx.folder }) +
+      (cx.copy_stopped ? " " + H("The copy was stopped.") : "") +
+      (cx.left ? " " + H("The new dataset {name} is still there, with what was copied: delete it in TrueNAS (Datasets → select it → Delete) to free its space — or Pick Up This Conversion, below, carries on from it.", { name: cx.temp || (cx.temp_folder || "").split("/").pop() }) : "") +
+      ' <button class="link" type="button" data-act="mig" data-mig="dismiss">' + H("Close") + "</button></div>";
     if (!st || st.step === "done") {
       if (st && st.step === "done") {
         var mvd = mg.mirror && mg.mirror.watched ? mg.mirror : null, thereD = mvd && st.scope === "both" ? (mvd.folders || {})[st.folder] : null;
@@ -1627,13 +1622,17 @@ PCI18N.ready.then(function () {
         '<div style="margin-top:10px"><button class="btn" type="button" data-act="queue-remove" data-id="' + esc((queuedFor("copy", { folder: st.folder }) || {}).id || "") + '">' +
         H("Remove from the Queue") + "</button></div>";
       else if (st.copying) out += migProgress();
-      else out += '<div class="det">' + H("Stopped: {why}", { why: (st.copy || {}).reason || (st.copy || {}).result || "" }) + "</div>" +
+      else out += '<div class="det">' + ((st.copy || {}).result === "stopped"
+          ? H("Copying stopped. What’s copied so far stays in {name}: Carry On Copying picks up from there; Cancel ends the conversion, the folder as it was.", { name: temp })
+          : H("Stopped: {why}", { why: (st.copy || {}).reason || (st.copy || {}).result || "" })) + "</div>" +
         '<div style="margin-top:10px">' + btn("copy", H("Carry On Copying"), true) + btn("cancel", H("Cancel")) + "</div>";
     } else if (st.step === "switch") {
       // the last pass ran by itself after the copy; it runs again, always, just before the old folder is set aside
       var cmp = st.compare, lp = st.last_pass || {}, cat = st.compare_at || (st.copy || {}).finished;
       var aside = "." + (st.folder || "").split("/").pop() + ".plexcache-old";
       var passLine = st.copying ? migProgress()
+        : !cmp && st.copy && st.copy.result && st.copy.result !== "copied" ? '<div class="det">' + (st.copy.result === "stopped" ? H("The last pass was stopped: Copy Changes &amp; Compare runs it again.")
+          : H("The last pass stopped: {why}. Copy Changes &amp; Compare runs it again.", { why: st.copy.reason || st.copy.result })) + "</div>"
         : !cmp ? '<div class="det">' + H("It runs by itself once the copy is done.") + "</div>"
         : '<div class="det">' + (cmp.same ? badge("pass", T("Both the same")) + " " + H("{files} files, {size}, compared {when}. {copied} copied by the pass (changed since the copy), {removed} removed.",
             { files: fmtNum(cmp.files || 0), size: fmtGB(cmp.bytes || 0), when: ago(cat), copied: fmtNum(lp.copied || 0), removed: fmtNum(lp.removed || 0) })
@@ -1702,11 +1701,10 @@ PCI18N.ready.then(function () {
   // @testable: pageRanges — the spans of a list the page holds whole: as the server works them out (plexcache/paging.py)
   function pageRanges(labels, per) {
     var MAXP = 3, out = [];
-    var plain = function (l) { return String(l == null ? "" : l).replace(/^[^\p{L}\p{N}_]+/u, ""); };  // (plainTitle, held here so the function stands alone)
     var common = function (a, b) { a = a.toLowerCase(); b = b.toLowerCase(); var n = 0; while (n < a.length && n < b.length && a[n] === b[n]) n++; return n; };
     var cut = function (l, n) { var o = l.slice(0, Math.max(1, Math.min(n, MAXP))).replace(/\s+$/, ""); return o || l.slice(0, 1) || "…"; };
     var pages = [];
-    for (var off = 0; off < labels.length; off += per) pages.push({ offset: off, first: plain(labels[off]), last: plain(labels[Math.min(off + per, labels.length) - 1]) });
+    for (var off = 0; off < labels.length; off += per) pages.push({ offset: off, first: plainTitle(labels[off]), last: plainTitle(labels[Math.min(off + per, labels.length) - 1]) });
     pages.forEach(function (p, i) {
       var kf = i ? common(pages[i - 1].last, p.first) + 1 : 1, kt = i + 1 < pages.length ? common(p.last, pages[i + 1].first) + 1 : 1;
       out.push({ offset: p.offset, from: cut(p.first, kf), to: cut(p.last, kt) });
@@ -2258,7 +2256,6 @@ PCI18N.ready.then(function () {
     return out + "</div>";
   }
   var PROJ_HELP = H("Estimated from what inspecting each file measured — nothing is read or changed. The optimizer takes out the metadata the library’s choices strip (cover art, tags), moves the rest to the end of the file where it compresses, and writes the file in the dataset’s record size. Plex’s poster, where it’s put in, counts at its real size once that’s known — fetched when you open a file, and learnt in the background for a library; until then the file’s own cover art stands in.");
-  function sumValues(o) { return Object.keys(o || {}).reduce(function (a, k) { return a + (o[k] || 0); }, 0); }
   function blocksLine(now, after) {
     return '<div class="det lgains">' + esc(T("Blocks always cached: {now} → {after}", { now: fmtNum(now || 0), after: fmtNum(after || 0) })) + "</div>";
   }
@@ -2494,10 +2491,6 @@ PCI18N.ready.then(function () {
     producer: N("Producers"), country: N("Countries"), collection: N("Collections"), label: N("Labels"), thumb: N("Poster"), art: N("Background"), rating: N("Rating"),
     userRating: N("Rating"), editionTitle: N("Edition"), audienceRating: N("Rating") };
   function fieldName(f) { return FIELD_NAMES[f] ? T(FIELD_NAMES[f]) : f; }
-  function fieldText(x) {  // "title: A" → "Title: A"; field lists too
-    return String(x).replace(/\b([A-Za-z]+)(?=:)/, function (m) { return FIELD_NAMES[m] ? T(FIELD_NAMES[m]) : m; })
-      .replace(/: ([A-Za-z, ]+)$/, function (m, list) { return ": " + list.split(", ").map(fieldName).join(", "); });
-  }
   // One side of an item: its poster, title and match state, then — the source — what it copies, or
   // — the other server — what it has that would be overwritten. Only the kinds that differ, each a
   // button: pressed, its value shows, and the same field's on the other side with it, to compare.
@@ -2556,12 +2549,6 @@ PCI18N.ready.then(function () {
     if (id === "labels") return (x.labels || []).join(", ");
     if (id === "editions") return x.edition || "";
     return "";
-  }
-  // its files, one to a line — bulleted when there are several
-  function fileList(files) {
-    if (!(files || []).length) return "";
-    var many = files.length > 1;
-    return '<div class="ssfiles' + (many ? " many" : "") + '">' + files.map(function (f) { return "<div>" + (many ? "• " : "") + esc(f) + "</div>"; }).join("") + "</div>";
   }
   // the row's files numbered: File 1, File 2… over both sides (fidx: name -> n); a chip per file on a card,
   // green when the other side has the file too, yellow when only this side does — or, with ``explain`` (a tool's
@@ -2632,7 +2619,6 @@ PCI18N.ready.then(function () {
   var HEALTH_PAGES = { library: 1, filechecks: 1, plexchecks: 1, mirrorchecks: 1 };  // the pages that draw the Health view
   // each category's own page: where its checks are set (checksPage, every one of them)
   var CHECK_PAGES = { file: ["filechecks", "File Checks"], plex: ["plexchecks", "Plex Checks"], mirror: ["mirrorchecks", "Mirror Checks"] };
-  function checkCategory(name) { return Object.keys(CHECK_PAGES).filter(function (c) { return CHECK_PAGES[c][0] === name; })[0]; }
   // a library's answer fetched (again): the one on the page kept while a newer one comes — the state's count names the
   // answer that's out (health_counts' rev: worked out again in the background as the data changes, or a scan finishes)
   var LH_NEXT = {}, LH_ASKED = {};
@@ -2687,7 +2673,6 @@ PCI18N.ready.then(function () {
     // (a check page's category: its ⓘ on the Library page)
     var cats = { file: T("What’s in each file, as inspected: its tracks."), plex: T("How Plex has each item."), mirror: T("Whether the two sites of a mirror hold the same files, and each Plex lists them.") };
     var dflt = ((ST.library_health_defaults || {}).checks) || {};
-    var stt = d.stats || {};
     var mig = d.migration ? '<div class="note">' + H("A folder of this library is on its way to a dataset of its own ({step}): <a href=\"/dataset\" data-nav>Child Dataset</a> carries on.", { step: d.migration.step }) + "</div>" : "";
     var out = only ? "" : mig;
     // the language the subtitle check wants: chosen beside it, from the languages the library's files hold
@@ -3117,7 +3102,7 @@ PCI18N.ready.then(function () {
     lastsView = localStorage.getItem("pc-lasts-view") || "age";
     lastsTier = localStorage.getItem("pc-lasts-tier") || "ram";
     lastsFirst = localStorage.getItem("pc-lasts-first") !== "hide";
-  } catch (e) { /* storage unavailable */ }
+  } catch { /* storage unavailable */ }
   // The Hit age columns: each is "up to" this many seconds (they line up with cachelog.AGES)
   var LASTS_COLS = [600, 1800, 7200, 21600, 86400, 172800, 604800, 2592000, 15552000];
   var LASTS_FEW = 3;  // fewer reads than this at an age: shown faded (the same minimum as a suggested cooldown)
@@ -3277,7 +3262,7 @@ PCI18N.ready.then(function () {
   // library in bold. A hollow point means no misses that day, so it lasted at least that long.
   var FC_COLORS = ["#3987e5", "#e66b39", "#1baf7a", "#e0a000", "#d96a95", "#7f6bd9", "#2f9e2f", "#e05555"];
   var lastsRange = "30d";
-  try { lastsRange = localStorage.getItem("pc-lasts-range") || "30d"; } catch (e) { /* storage unavailable */ }
+  try { lastsRange = localStorage.getItem("pc-lasts-range") || "30d"; } catch { /* storage unavailable */ }
   function lastsFullyHtml(route) {
     // 24 hours and 7 days hour by hour, 30 days day by day. Points: [age, no misses, re-reads, youngest miss]
     var src = lastsRange === "30d" ? route.days : route.hours;
@@ -3339,7 +3324,7 @@ PCI18N.ready.then(function () {
   // ---- Library cached over time (coverage.py): each hour, the share of a library cached within
   // the last hour, 24 hours, 7 days, 30 days and 6 months. Fetched on its own (it's big), every few minutes.
   var COV = null, covAt = 0, covLib = "*", covMode = "bands", covBy = 0, covRange = 1000, covHover = null;
-  try { covMode = localStorage.getItem("pc-cov-mode") || "bands"; covBy = Number(localStorage.getItem("pc-cov-by") || 0); } catch (e) { /* storage unavailable */ }
+  try { covMode = localStorage.getItem("pc-cov-mode") || "bands"; covBy = Number(localStorage.getItem("pc-cov-by") || 0); } catch { /* storage unavailable */ }
   var COV_NAMES = [N("1 hour"), N("24 hours"), N("7 days"), N("30 days"), N("6 months")];
   function covFetch() {
     if (Date.now() - covAt < 5 * 60 * 1000) return;
@@ -3454,9 +3439,9 @@ PCI18N.ready.then(function () {
       out += '<p class="help" style="margin:0 0 12px">' + sug + " · " + PH(route.first, "{n} cached for the first time", "{n} cached for the first time") + "</p>";
     // The SSD cache is per pool: none at all, or only under some libraries, is worth saying
     if (lastsTier === "ssd") {
-      var noL2 = (route.libs || []).filter(function (l) { return l.cached !== false && l.l2arc === false; });
+      var bare = (route.libs || []).filter(function (l) { return l.cached !== false && l.l2arc === false; });
       if (ST.l2arc === "absent") out += '<div class="note" style="margin:0 0 12px">' + H("There’s no SSD cache (L2ARC) on the pools holding your libraries, so nothing is cached on an SSD to measure. See <a href=\"/ssd\" data-nav>SSD Cache</a>.") + "</div>";
-      else if (noL2.length) out += '<div class="note" style="margin:0 0 12px">' + H("No SSD cache (L2ARC) on the pool of: {list}. Their data only stays in RAM.", { list: noL2.map(function (l) { return l.name; }).join(", ") }) + "</div>";
+      else if (bare.length) out += '<div class="note" style="margin:0 0 12px">' + H("No SSD cache (L2ARC) on the pool of: {list}. Their data only stays in RAM.", { list: bare.map(function (l) { return l.name; }).join(", ") }) + "</div>";
     }
     out += lastsView === "fresh" ? lastsFreshHtml(route, sv.fine) : lastsView === "fully" ? lastsFullyHtml(route) : lastsAgeHtml(route);
     return out + "</section>";
@@ -3565,7 +3550,7 @@ PCI18N.ready.then(function () {
 
   // ---- Activity: period switch and the "Over time" chart
   var actPeriod = "week", chartMetric = "skips";
-  try { actPeriod = localStorage.getItem("pc-period") || "week"; chartMetric = localStorage.getItem("pc-chart") || "skips"; } catch (e) { /* storage unavailable */ }
+  try { actPeriod = localStorage.getItem("pc-period") || "week"; chartMetric = localStorage.getItem("pc-chart") || "skips"; } catch { /* storage unavailable */ }
   var PERIOD_NAMES = [["today", T("Today")], ["week", T("7 days")], ["month", T("30 days")], ["year", T("12 months")]];
   function periodSwitch() {
     return '<div class="seg" role="tablist" aria-label="' + H("Period") + '">' + PERIOD_NAMES.map(function (p) {
@@ -3703,7 +3688,7 @@ PCI18N.ready.then(function () {
   }
 
   // The Activity report card: a verdict, four numbers, a chart, and what needs attention.
-  function reportHtml(r, z, arc, a) {
+  function reportHtml(r, z, arc) {
     if (!r) return "";
     var t = r.tiles, out = banner(r.verdict, false);
     function rtile(title, big, sub, status, why, go) {
@@ -3711,7 +3696,6 @@ PCI18N.ready.then(function () {
       return '<div class="card tile rtile r-' + status + (go ? ' rgo" data-goto="' + go + '" role="button" tabindex="0" title="' + esc(T("Show the details")) : "") + '"><div class="muted" style="font-size:13px">' + esc(title) + info(esc(why), title) + '</div><div class="big">' + big +
         '</div><div class="muted" style="font-size:13px">' + sub + (go ? ' <span class="rmore" aria-hidden="true">›</span>' : "") + "</div></div>";
     }
-    function frac(n, d) { return d ? H("{n} <small>of {total}</small>", { n: n, total: d }) : "—"; }
     out += '<div class="tiles rtiles">';
     // Weighted by how likely each one really came from cache: how long ago that part was cached,
     // and how long cached data lasts in its library (Metrics → How Long Cached Data Lasts)
@@ -3757,14 +3741,14 @@ PCI18N.ready.then(function () {
     function meter(label, used, limit) {
       var pct = limit ? Math.min(100, used / limit * 100) : 0;
       return '<div style="margin:6px 0 12px"><div style="display:flex;justify-content:space-between;font-size:13px"><span>' + esc(label) + '</span><span class="muted">' +
-        H("{used} of {limit}", { used: fmtBytes(used), limit: fmtBytes(limit) }) + '</span></div><div class="meter"><div style="width:' + pct.toFixed(1) + '%"></div></div></div>';
+        H("{used} of {limit}", { used: fmtBytes(used), limit: fmtBytes(limit) }) + '</span></div><div class="meter usage"><div style="width:' + pct.toFixed(1) + '%"></div></div></div>';
     }
     out += '<div class="cols2" style="margin-bottom:20px"><section class="card"><h2>' + H("RAM Limits") + '</h2><p class="hint">' + H("In use right now, by streams that are playing.") + "</p>" +
       meter(T("Now Playing Cache"), r.ram.nowplaying.in_use, r.ram.nowplaying.limit) + meter(T("Prefetch"), r.ram.nextepisode.in_use, r.ram.nextepisode.limit) +
       '<div class="muted" style="font-size:13px">' + ramShort(r) + "</div></section>";
     out += '<section class="card"><h2>' + H("Disks While People Watched") + '</h2><p class="hint">' + H("How busy the media pool’s disks were during streams.") + "</p>";
     if (r.disk.avg == null) out += '<p class="muted" style="margin:0">' + H("Measured during streams; nothing yet.") + "</p>";
-    else out += '<div class="big" style="font-size:28px">' + H("{n}% <small class=\"muted\" style=\"font-size:14px\">average</small>", { n: r.disk.avg }) + '</div><div class="meter"><div style="width:' + r.disk.avg + '%"></div></div>' +
+    else out += '<div class="big" style="font-size:28px">' + H("{n}% <small class=\"muted\" style=\"font-size:14px\">average</small>", { n: r.disk.avg }) + '</div><div class="meter usage"><div style="width:' + r.disk.avg + '%"></div></div>' +
       '<div class="muted" style="font-size:13px;margin-top:6px">' + PH(r.disk.streams, "Peak {peak}% · over {n} stream", "Peak {peak}% · over {n} streams", { peak: r.disk.peak }) + "</div>";
     if (z.l2_total && arc) {
       out += '<div class="muted" style="font-size:13px;margin-top:12px">' + H("L2ARC (SSD cache): {used} of {total} filled", { used: fmtBytes(arc.l2_asize), total: fmtBytes(z.l2_total) }) + "</div>";
@@ -3785,7 +3769,7 @@ PCI18N.ready.then(function () {
   var NO_REVERT = { "plex.url": 1, "truenas.url": 1, "syncthing.url": 1, "mqtt.host": 1, "mqtt.username": 1 };
   function textInput(sec, key, label, id, help, placeholder) {
     var h = splitHelp(help);
-    return '<div class="fld"><label for="' + id + '">' + esc(label) + info(h.more, label) + (NO_REVERT[sec + "." + key] ? "" : revertBtn(sec, key, "")) + '</label><input id="' + id + '" type="text" value="' + esc(S[sec][key]) + '" placeholder="' + esc(placeholder || "") +
+    return '<div class="fld"><span class="lbl"><label for="' + id + '">' + esc(label) + "</label>" + info(h.more, label) + (NO_REVERT[sec + "." + key] ? "" : revertBtn(sec, key, "")) + '</span><input id="' + id + '" type="text" value="' + esc(S[sec][key]) + '" placeholder="' + esc(placeholder || "") +
       '" data-set="' + sec + "." + key + '">' + helpDiv(h) + "</div>";
   }
 
@@ -3908,7 +3892,7 @@ PCI18N.ready.then(function () {
   // picture of it at the card's top right (stMark), and the address and key it's reached with. Its checks are Mirror
   // Checks' (mirror_syncthing_*); Convert Folder to Child Dataset pauses and resumes the folder through it.
   function syncthingCard() {
-    var sy = ST.syncthing || {}, lt = sy.lights || {}, dev = sy.device || {}, testing = !!sy.busy || !!ST.testing;  // (asked again with the other connections; the lights: integrationLights)
+    var sy = ST.syncthing || {}, lt = sy.lights || {}, testing = !!sy.busy || !!ST.testing;  // (asked again with the other connections; the lights: integrationLights)
     var out = '<section class="card' + (integrationMark("syncthing", "Syncthing") ? " hasfp" : "") + '" id="syncthing">' + integrationMark("syncthing", "Syncthing") + "<h2>" + brand("syncthing") + 'Syncthing <span class="muted" style="font-weight:400;font-size:14px">· ' + H("optional") + "</span></h2>" +
       '<p class="hint">' + H("The folder sync between the sites of a mirror, read through its API on this server. Mirror Checks then see that it runs, has a folder over each mirrored library, watches for changes and sends the smallest files first; Convert Folder to Child Dataset pauses the folder and adds its ignore patterns itself.") +
       info(H("Asked every couple of minutes: its folders and their settings, which devices they’re shared with and whether each is connected, and what’s still on its way. The only things it’s ever asked to change are a folder’s pause, Watch for Changes, its pull order and its ignore patterns — each from a button here, never by itself. The key is kept with the settings and never shown again.<br><br>" +
@@ -4089,8 +4073,8 @@ PCI18N.ready.then(function () {
           status = (differ ? badge("warn", T("Files differ")) : badge("pass", T("Mirrored"))) + " " + where + syncthingLine(key);
         } else if (st.state === "none") status = "";
         else {  // not decided: what looking found for it (the list says the state) — nothing said of a library not looked at yet
-          var where = f ? esc(f.name) + ": " + esc(f.their_title) + ' <span class="muted">' + esc(T("{found} of {of} files there", { found: fmtNum(f.found), of: fmtNum(f.of) })) + "</span>" : "";
-          status = rate >= 90 ? badge("pass", T("Looks like a mirror")) + " " + where : rate >= 20 ? badge("warn", T("Partly the same")) + " " + where
+          var seen = f ? esc(f.name) + ": " + esc(f.their_title) + ' <span class="muted">' + esc(T("{found} of {of} files there", { found: fmtNum(f.found), of: fmtNum(f.of) })) + "</span>" : "";
+          status = rate >= 90 ? badge("pass", T("Looks like a mirror")) + " " + seen : rate >= 20 ? badge("warn", T("Partly the same")) + " " + seen
             : '<span class="muted">' + (sy.running ? H("Looking…") : (sy.compared || []).indexOf(key) >= 0 ? H("Nothing found that looks like one") : H("Not looked for yet")) + "</span>";
         }
         return "<tr><td>" + libIcon(key) + esc(l.title) + "</td><td>" + sel + "</td><td>" + status + "</td></tr>";
@@ -4106,7 +4090,7 @@ PCI18N.ready.then(function () {
   // Mirror: the server kept in step with this one (sync.py: the servers that may be one), each library's state, Plex's own
   // sync of watched state, and what uses the mirror — Sync Libraries (the tool that brings its libraries in line) among them
   function pageMirrors() {
-    var sy = ST.sync || {}, p2 = ST.plex2 || {};
+    var p2 = ST.plex2 || {};
     var out = top(T("Mirror"), H("Other Plex servers with the same files — at another site, kept in step by syncing the folders — chosen per library, from the servers of your Plex account."), "");
     out += '<div class="stack" style="max-width:980px">';
     // ---- each library: its mirror, chosen from the account's servers (what looking found for it), under the lights
@@ -4135,42 +4119,55 @@ PCI18N.ready.then(function () {
   }
   // ---- Themes (plexcache/themes.py): how every page looks, the built-in themes and any uploaded; a theme downloads as a
   // file that shows every value it sets, to change and upload as one's own
-  var THEME_NAMES = { "classic-light": N("Classic Light"), "classic-dark": N("Classic Dark"), "dionysus-light": N("Dionysus Light"), "dionysus-dark": N("Dionysus Dark") };
+  var THEME_NAMES = { classic: N("Classic"), dionysus: N("Dionysus") };
   function themeName(t) { return t.builtin && THEME_NAMES[t.id] ? T(THEME_NAMES[t.id]) : t.name; }
+  var THEME_MODES = ["auto", "light", "dark"];
   function themesCard() {
-    var list = ST.themes || [], ts = S.themes || {};
-    var opts = function (mode) { return list.filter(function (t) { return !mode || t.mode === mode; }).map(function (t) { return [t.id, themeName(t)]; }); };
+    var list = ST.themes || [], own = (window.PCTHEME && window.PCTHEME.own()) || {};
+    var opts = list.map(function (t) { return [t.id, themeName(t)]; });
+    var modes = [["auto", T("Auto")], ["light", T("Light")], ["dark", T("Dark")]];
+    // this browser's own choice (theme.js: localStorage "pc-theme"), not a setting: the same everywhere else
+    var mine = function (key, label, options, help) {
+      var id = "f-theme-own-" + key, cur = own[key] || "", h = splitHelp(help);
+      return '<div class="fld"><span class="lbl"><label for="' + id + '">' + esc(label) + "</label>" + info(h.more, label) + '</span><select id="' + id + '" data-own="' + key + '">' +
+        [["", T("As set above")]].concat(options).map(function (o) { return '<option value="' + esc(o[0]) + '"' + (o[0] === cur ? " selected" : "") + ">" + esc(o[1]) + "</option>"; }).join("") +
+        "</select>" + helpDiv(h) + "</div>";
+    };
     var rows = list.map(function (t) {
       return '<div class="row themerow"><div class="grow"><div class="what">' + esc(themeName(t)) + "</div>" +
-        '<div class="det">' + (t.mode === "dark" ? H("Dark") : H("Light")) + " · " + (t.builtin ? H("Comes with Dionysus") : H("Added by you")) + "</div></div>" +
+        '<div class="det">' + H("Light and dark") + " · " + (t.builtin ? H("Comes with Dionysus") : H("Added by you")) + "</div></div>" +
         '<button class="btn sm" type="button" data-act="theme-download" data-id="' + esc(t.id) + '">' + H("Download") + "</button>" +
         (t.builtin ? "" : '<button class="btn sm danger" type="button" data-act="theme-remove" data-id="' + esc(t.id) + '">' + H("Remove") + "</button>") + "</div>";
     }).join("");
     return '<section class="card" id="themes"><h2>' + icon("themes") + H("Themes") + '</h2><p class="hint">' +
-      H("How Dionysus looks, on every page. Kept with its settings, so every browser that opens it shows the same theme.") + "</p>" +
+      H("How Dionysus looks, on every page. Each theme has a light and a dark look. Kept with its settings, so every browser that opens it shows the same, unless a device picks its own below.") + "</p>" +
       '<div class="grid">' +
-      select("themes", "selected", T("Theme"), [["auto", T("Auto: light or dark, as the device is set")]].concat(opts()),
+      select("themes", "theme", T("Theme"), opts) +
+      select("themes", "mode", T("Mode"), modes,
         { s: H("Auto follows each device’s own light or dark setting, and changes with it."),
-          more: H("Phones, tablets and computers can be set to a light or a dark look (often dark at night). With Auto, Dionysus shows the light theme or the dark theme you pick below to match it.") }) +
-      (ts.selected === "auto" ? select("themes", "auto_light", T("Light theme for Auto"), opts("light")) + select("themes", "auto_dark", T("Dark theme for Auto"), opts("dark")) : "") +
+          more: H("Phones, tablets and computers can be set to a light or a dark look (often dark at night). With Auto, the theme shows its light or its dark look to match.") }) +
+      mine("theme", T("Theme on this device"), opts,
+        { s: H("Only this browser on this device, for example Classic on a phone and Dionysus on a computer."),
+          more: H("Kept in this browser, not with the settings: other devices keep showing the theme set above. Clearing the browser’s site data forgets it.") }) +
+      mine("mode", T("Mode on this device"), modes) +
       "</div>" +
       '<div class="themelist">' + rows + "</div>" +
       '<div class="acts"><button class="btn" type="button" data-act="theme-upload">' + H("Upload a Theme") + "</button>" +
       '<input type="file" id="theme-file" accept=".json,application/json" hidden>' +
       '<span class="muted" style="font-size:13px">' + H("To make your own, download a theme, change its colours, give it a new name and upload it.") +
-      info(H("A theme file lists every colour it sets (as #hex), its two fonts and its decorations, each with what it colours or does. Any colour left out comes from the theme it was based on."), T("Themes")) + "</span></div></section>";
+      info(H("A theme file lists every colour of its light look and of its dark look (as #hex), its two fonts and its decorations, each with what it colours or does. Any colour left out comes from the theme it was based on."), T("Themes")) + "</span></div></section>";
   }
   // the theme the settings name, put on the page (theme.js: PCTHEME) as soon as it changes here or on another browser
   var themeKey = "";
   function applyTheme() {
     if (!window.PCTHEME || !S || !S.themes || !ST || !ST.themes) return;
-    var ts = S.themes, info = {}, ids = {};
-    ST.themes.forEach(function (t) { info[t.id] = { mode: t.mode, decor: t.decor }; ids[t.id] = 1; });
-    var pick = function (v, d) { return ids[v] ? v : d; };
-    var sel = { selected: ts.selected === "auto" ? "auto" : pick(ts.selected, "dionysus-light"), light: pick(ts.auto_light, "dionysus-light"), dark: pick(ts.auto_dark, "dionysus-dark") };
-    var key = JSON.stringify(sel) + Object.keys(ids).join(",");
+    var ts = S.themes, info = {};
+    ST.themes.forEach(function (t) { info[t.id] = t.decor; });
+    var ids = Object.keys(info).join(",");
+    var sel = { theme: info[ts.theme] ? ts.theme : "dionysus", mode: THEME_MODES.indexOf(ts.mode) >= 0 ? ts.mode : "light" };
+    var key = sel.theme + "|" + sel.mode + "|" + ids;
     if (key === themeKey) return;
-    var themesChanged = themeKey && themeKey.split("}")[1] !== Object.keys(ids).join(",");
+    var themesChanged = themeKey && themeKey.split("|")[2] !== ids;
     themeKey = key;
     if (themesChanged) {  // (a theme added or removed: its colours fetched again)
       var link = document.querySelector('link[href^="/theme.css"]');
@@ -4573,8 +4570,9 @@ PCI18N.ready.then(function () {
     merge: pageMerge, versions: pageVersions, folders: pageFolders, unlink: pageUnlink, sync: pageSync, filechecks: pageFilechecks, plexchecks: pagePlexchecks, mirrorchecks: pageMirrorchecks,
     processes: pageProcesses, mirrors: pageMirrors, activity: pageActivity, system: pageSystem };
   // The tools, under the Tools entry in the menu — each one's definition: its page, its name, the short name the menu and
-  // the tabs use, its icon (its drawing, strokes on a 24 grid as the menu's; the dataset's is TrueNAS's, from its web UI,
-  // GPL), and what it does: its card's text on the Tools page, and the description its page opens with. The icon is
+  // the tabs use, the shorter name its card on the Tools page uses (card, where there is one), its icon (its drawing,
+  // strokes on a 24 grid as the menu's; the dataset's is TrueNAS's, from its web UI, GPL), and what it does: its card's
+  // text on the Tools page, and the description its page opens with. The icon is
   // shown wherever the tool is named — its card, the Tools menu, its page's heading, its jobs on Processes and Health —
   // from here and nowhere else (test_tool_icons_come_from_their_definitions).
   var TOOLS = [
@@ -4582,7 +4580,7 @@ PCI18N.ready.then(function () {
       blurb: N("Rewrites media files so they suit caching: the dataset’s record size and compression, and MKV files laid out with their metadata at the end.") },
     { page: "convert", name: N("Convert to MKV"), icon: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4M7 12h10"/>',
       blurb: N("Converts other containers (AVI, MPEG-TS, VOB…) to MKV when nothing in them would be lost — backed up first, revertable after — and sees the new file into Plex on every server before the original goes.") },
-    { page: "dataset", name: N("Convert Folder to Child Dataset"), short: N("Child Dataset"), icon: '<path fill="currentColor" stroke="none" d="M6 8C5.72 8 5.48 7.9 5.29 7.71C5.1 7.52 5 7.28 5 7C5 6.72 5.1 6.48 5.29 6.29C5.48 6.1 5.72 6 6 6H18C18.28 6 18.52 6.1 18.71 6.29C18.9 6.48 19 6.72 19 7C19 7.28 18.9 7.52 18.71 7.71C18.52 7.9 18.28 8 18 8H6ZM8 5C7.72 5 7.48 4.9 7.29 4.71C7.1 4.52 7 4.28 7 4C7 3.72 7.1 3.48 7.29 3.29C7.48 3.1 7.72 3 8 3H16C16.28 3 16.52 3.1 16.71 3.29C16.9 3.48 17 3.72 17 4C17 4.28 16.9 4.52 16.71 4.71C16.52 4.9 16.28 5 16 5H8ZM3 9L5 21H19L21 9H3ZM14.71 15.1C14.52 15.29 14.28 15.39 14 15.39H10C9.72 15.39 9.48 15.29 9.29 15.1C9.1 14.91 9 14.67 9 14.39C9 14.11 9.1 13.87 9.29 13.68C9.48 13.49 9.72 13.39 10 13.39H14C14.28 13.39 14.52 13.49 14.71 13.68C14.9 13.87 15 14.11 15 14.39C15 14.67 14.9 14.91 14.71 15.1Z"/>',
+    { page: "dataset", name: N("Convert Folder to Child Dataset"), short: N("Child Dataset"), card: N("Folder to Child Dataset"), icon: '<path fill="currentColor" stroke="none" d="M6 8C5.72 8 5.48 7.9 5.29 7.71C5.1 7.52 5 7.28 5 7C5 6.72 5.1 6.48 5.29 6.29C5.48 6.1 5.72 6 6 6H18C18.28 6 18.52 6.1 18.71 6.29C18.9 6.48 19 6.72 19 7C19 7.28 18.9 7.52 18.71 7.71C18.52 7.9 18.28 8 18 8H6ZM8 5C7.72 5 7.48 4.9 7.29 4.71C7.1 4.52 7 4.28 7 4C7 3.72 7.1 3.48 7.29 3.29C7.48 3.1 7.72 3 8 3H16C16.28 3 16.52 3.1 16.71 3.29C16.9 3.48 17 3.72 17 4C17 4.28 16.9 4.52 16.71 4.71C16.52 4.9 16.28 5 16 5H8ZM3 9L5 21H19L21 9H3ZM14.71 15.1C14.52 15.29 14.28 15.39 14 15.39H10C9.72 15.39 9.48 15.29 9.29 15.1C9.1 14.91 9 14.67 9 14.39C9 14.11 9.1 13.87 9.29 13.68C9.48 13.49 9.72 13.39 10 13.39H14C14.28 13.39 14.52 13.49 14.71 13.68C14.9 13.87 15 14.11 15 14.39C15 14.67 14.9 14.91 14.71 15.1Z"/>',
       blurb: N("Turns a library folder into a dataset of its own, at the same path, with the record size that suits it.") },
     { page: "merge", name: N("Merge Duplicates"), icon: '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>',
       blurb: N("Finds the same film on several Plex records and makes them versions of one, keeping its edits, poster and watched state. No file is touched.") },
@@ -4644,7 +4642,7 @@ PCI18N.ready.then(function () {
     var why = esc(countWhy(c)), tone = partialTone(c, bad);
     if (c.s === "pending") return ' <span class="count busy' + (c.partial != null ? " partial" : "") + (tone ? " " + tone : "") + ' spinning" role="status" title="' + why + '" aria-label="' + why + '">' +
       (c.partial != null ? fmtNum(c.partial) : "…") + "</span>";
-    if (c.s === "na") return ' <span class="count na" title="' + why + '" aria-label="' + why + '">–</span>';
+    if (c.s === "na") return ' <span class="count na" role="img" title="' + why + '" aria-label="' + why + '">–</span>';
     if (c.s === "failed") return ' <span class="count fail" title="' + why + '" aria-label="' + why + '">!</span>';
     if (bad) return ' <span class="count fail" title="' + H("Something red on its page stops part of it, or couldn’t be checked") + '">' + fmtNum(c.n || 0) + "</span>";
     return ' <span class="count ' + (c.n ? "warn" : "ok") + '" title="' + H("Found to do") + '">' + fmtNum(c.n || 0) + "</span>";
@@ -4675,7 +4673,7 @@ PCI18N.ready.then(function () {
   function pageTools() {
     var out = top(T("Tools"), H("What Dionysus can do to your library beyond caching it. Each tool has a page of its own; none changes anything until you ask it to. The number on a card is what the tool has found to do, across your libraries."), "");
     out += '<div class="stack">' + toolsNav("tools") + '<div class="grid">' + TOOLS.map(function (t) {
-      return '<section class="card toolcard"><h2><a href="/' + t.page + '" data-nav>' + icon(t.page) + esc(T(t.name)) + "</a>" +
+      return '<section class="card toolcard"><h2><a href="/' + t.page + '" data-nav>' + icon(t.page) + esc(T(t.card || t.name)) + "</a>" +
         countChip(countOf(t.page), toolBad(t.page)) + "</h2><p>" + esc(T(t.blurb)) + "</p></section>";
     }).join("") + "</div></div>";
     return out;
@@ -5041,17 +5039,26 @@ PCI18N.ready.then(function () {
         : '<div class="mgdrop"><div class="mgdroplbl">' + esc(sd.label) + "</div>" + (sd.dim === false ? inner : '<div class="mgdim">' + inner + "</div>") + own + "</div>";
     };
     var stack = function (list) { var h = list.map(side); return h.length > 1 ? '<div class="ssstack">' + h.join("") + "</div>" : h[0] || ""; };
-    var keepRight = (c.right || []).some(function (sd) { return sd.kind === "keep"; }), arrow = keepRight ? "→" : "←";
+    var keepRight = (c.right || []).some(function (sd) { return sd.kind === "keep"; });
+    // the arrow points at the one kept: as text, or (a theme's "grapes", themes.py) the Play bunch on its stem
+    var arrow = '<span class="txtarrow">' + (keepRight ? "→" : "←") + "</span>" + grapeArrow(!keepRight);
     var left = stack(c.left || []), right = stack(c.right || []);
     var sev = c.sev || rowSeverity(cmpStatuses(c));
     var tick = c.tick === false ? "" : toolCheck(c.tool, { id: c.id, title: c.title }, !sev.live || sev.blocked) + " ";
     var files = pathsShown(c.files || []);
-    return '<div class="ssitem cmprow' + (sev.blocked ? " blocked" : "") + '" data-cmp="' + esc(c.tool) + '"><div class="sstop"><span class="what">' + tick + esc(c.title) + '</span><span class="sswarn">' +
-      (c.checks && c.checks.length ? chips(c.tool, c.id, c.checks, c.id) : "") + "</span></div>" + left +
-      (c.swap ? '<button type="button" class="ssarrow mgarrow" ' + c.swap + ' title="' + esc(c.swapTitle || "") + '"><span>' + arrow + "</span></button>"
-        : '<span class="ssarrow mgarrow fixed" aria-hidden="true"><span>' + arrow + "</span></span>") + right +
+    return '<div class="ssitem cmprow' + (sev.blocked ? " blocked" : "") + '" data-cmp="' + esc(c.tool) + '"><div class="sstop"><span class="what">' + tick + esc(c.title) + '</span><div class="sswarn">' +
+      (c.checks && c.checks.length ? chips(c.tool, c.id, c.checks, c.id) : "") + "</div></div>" + left +
+      (c.swap ? '<button type="button" class="ssarrow mgarrow" ' + c.swap + ' title="' + esc(c.swapTitle || "") + '">' + arrow + "</button>"
+        : '<span class="ssarrow mgarrow fixed" aria-hidden="true">' + arrow + "</span>") + right +
       (c.notes || []).map(function (x) { return '<div class="note ' + (x.status === "fail" ? "badbox" : "greybox") + (x.cls ? " " + x.cls : "") + '">' + x.html + "</div>"; }).join("") +
       (files.length ? '<div class="ssnotes ssfilelist"><div class="ssfiles many">' + files.map(function (f, k) { return '<div><span class="ssfn">' + (k + 1) + "</span> " + esc(f) + "</div>"; }).join("") + "</div></div>" : "") + "</div>";
+  }
+  // the Play bunch on its stem (the Decorating Dionysus marks): six grapes and a leaf pointing right, or left when asked
+  function grapeArrow(left) {
+    return '<svg class="grapearrow" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><g' + (left ? ' transform="matrix(-1 0 0 1 64 0)"' : "") + '>' +
+      '<path d="M4 32H15" fill="none" stroke="var(--leaf)" stroke-width="3" stroke-linecap="round"/><g transform="rotate(-90 32 32) translate(0 -1)">' +
+      '<path d="M33 8c6-8 15-7 19-3-5 4-13 6-19 3z" fill="var(--leaf)"/>' +
+      [[18, 22], [32, 22], [46, 22], [25, 36], [39, 36], [32, 50]].map(function (q) { return '<circle cx="' + q[0] + '" cy="' + q[1] + '" r="8" fill="var(--wine)"/>'; }).join("") + "</g></g></svg>";
   }
   // @testable: pathsShown — a card's files as listed under it: one file, its whole path; several, their paths without the
   // folders they all share (/data/Movies/ on each), so what tells them apart is what's shown
@@ -5101,12 +5108,7 @@ PCI18N.ready.then(function () {
   // Before an Apply that changes Plex's records (Merge Duplicates, Sync Libraries): what's backed up first — the records,
   // or none where you back up yourself (plexbackup.py, ST.plex_backup) — as one line, for the box above the Apply button
   function plexBackupText() { var pb = ST.plex_backup || {}; return pb.text ? links(msg(pb.text)) : ""; }
-  function plexBackupNote() {
-    var pb = ST.plex_backup || {};
-    if (!pb.kind) return "";
-    return '<div class="det plexbackup">' + badge(pb.kind === "records" ? "pass" : "info", pb.kind === "records" ? T("Backup first") : T("No backup")) + " " + plexBackupText() + "</div>";
-  }
-  var FILE_TOOLS = { versions: function (rows) { return 0; }, folders: function (rows) { return 0; }, unlink: function (rows) { return rows.reduce(function (a, r) { return a + (r.size || 0); }, 0); }, convert: function (rows) { return rows.reduce(function (a, r) { return a + (r.size || 0); }, 0); } };
+  var FILE_TOOLS = { versions: function () { return 0; }, folders: function () { return 0; }, unlink: function (rows) { return rows.reduce(function (a, r) { return a + (r.size || 0); }, 0); }, convert: function (rows) { return rows.reduce(function (a, r) { return a + (r.size || 0); }, 0); } };
   var READY = {};  // "key/needed" -> {at, data}
   // The lights before anything changes files, the same everywhere: room for what's written (and what a snapshot keeps),
   // and the backup plan — what the process does first, per the Backup preference (System → Preferences): a snapshot
@@ -5214,17 +5216,6 @@ PCI18N.ready.then(function () {
   function toolCheck(name, r, off) {
     return '<input type="checkbox" data-act="tool-sel" data-tool="' + name + '" data-id="' + esc(r.id) + '"' + (TOOL[name].sel[r.id] && !off ? " checked" : "") + (off ? " disabled" : "") + ' aria-label="' + esc(r.title) + '">';
   }
-  // what was done, last first: each row's result and the steps it took
-  function toolResults(t) {
-    var rs = t.results || [];
-    if (!rs.length) return "";
-    return '<section class="card"><h2>' + H("Done") + '</h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Item") + '</th><th scope="col">' + H("Result") + "</th></tr></thead><tbody>" +
-      rs.slice(0, 30).map(function (r) {
-        return "<tr><td>" + esc(r.title || r.id) + '<div class="det">' + fmtWhen(r.at) + "</div></td><td>" +
-          badge(r.result === "done" ? "pass" : "warn", r.result === "done" ? T("Done") : T("Not done")) + (r.reason ? ' <span class="bad">' + esc(msg(r.reason)) + "</span>" : "") +
-          (r.steps || []).map(function (x) { return '<div class="det">' + esc(msg(x)) + "</div>"; }).join("") + "</td></tr>";
-      }).join("") + "</tbody></table></div></section>";
-  }
   function toolRows(name, t) {
     var sc = t.scan;
     return sc && String(sc.library) === String(TOOL[name].key) ? sc : null;
@@ -5241,7 +5232,7 @@ PCI18N.ready.then(function () {
   function mergeFileKept(f, how) {
     return how === "gains" ? H("This file isn’t attached to this item yet: it will be transferred over, as a version of the record kept.") : H("This is the existing file of the record kept: it will be kept.");
   }
-  function mergeFileLost(f) { return H("This file will be transferred over to the record kept, as a version of it. The file itself isn’t touched; this record’s own metadata goes."); }
+  function mergeFileLost() { return H("This file will be transferred over to the record kept, as a version of it. The file itself isn’t touched; this record’s own metadata goes."); }
   function mergeCard(r) {
     var all = [r.keep].concat(r.others || []), chosen = TOOL.merge.keep[r.id] || r.keep.key;
     // the files by name — or by their whole path where two records' files share a name (a link or a copy in another folder)
@@ -5266,11 +5257,6 @@ PCI18N.ready.then(function () {
     all.forEach(function (x) { (x.files || []).forEach(function (f, i) { pathOf[f] = (x.paths || [])[i] || f; }); });
     return { checks: checks, left: [side(all[0])], right: all.slice(1).map(side), files: files.map(function (f) { return pathOf[f] || f; }),
       swap: 'data-act="tool-swap" data-tool="merge" data-id="' + esc(r.id) + '"', swapTitle: T("Keep the other record’s metadata instead") };
-  }
-  function recLine(r) {  // a Plex record, briefly: its name, how many fields were edited, its files
-    if (!r) return '<span class="muted">' + H("—") + "</span>";
-    return '<div>' + esc(r.label) + (r.locked ? " " + badge("info", P(r.locked, "{n} edited field", "{n} edited fields", { n: r.locked })) : "") + (r.matched === false ? " " + badge("warn", T("Unmatched")) : "") + "</div>" +
-      '<div class="det mono">' + esc((r.files || []).join(", ")) + "</div>";
   }
   var MERGE_HELP = N("Plex can hold the same film on two records — one added before the other was matched, a second copy in another folder — each with its own poster, edits and watched state. Plex’s own Merge turns them into versions of one record, keeping the record’s metadata; this finds them for you. Records are the same film when they hold the very same file (a link or a copy in another folder: the same size and running time), whatever each is matched to; or when they share a match or, unmatched, when their files are named for the same title and year — and their running times agree (4% or 30 seconds, whichever is more: a different frame rate or cut of the credits; two films that merely share a title and year differ by more), and they’re the same edition (a Director’s Cut and the theatrical cut are two records on purpose), unless their files are the very same file. The record kept is the one with the most edited fields, then the most files, then the oldest. No file is touched, so a mirror isn’t affected.");
   function pageMerge() {
@@ -5421,7 +5407,6 @@ PCI18N.ready.then(function () {
       } });
   }
   function pageUnlink() {
-    var u = TOOL.unlink;
     return toolPage({ name: "unlink", title: "Unlink Files",
       help: UNLINK_HELP + "<br><br>" + H("Why: a link looks like a second file to you but not to Plex, which lists one path and ignores the other — and not to the folder sync, which turns it into separate copies at the other site that drift apart. Making each a file of its own puts every site on the same footing; then the duplicate tools can remove the extra copies the same way everywhere."),
       read: function (sc) { return sc.files == null ? null : { n: sc.files, text: P(sc.files, "{n} file read", "{n} files read", { n: fmtNum(sc.files) }) }; },
@@ -5665,14 +5650,14 @@ PCI18N.ready.then(function () {
   document.getElementById("sidetoggle").addEventListener("click", function () {
     var on = !document.querySelector(".shell").classList.contains("collapsed");
     setSideCollapsed(on);
-    try { localStorage.setItem("pc-side", on ? "collapsed" : "open"); } catch (e) { /* storage unavailable */ }
+    try { localStorage.setItem("pc-side", on ? "collapsed" : "open"); } catch { /* storage unavailable */ }
   });
   try {
     if (localStorage.getItem("pc-side") === "collapsed") {
       setSideCollapsed(true);
       PCI18N.ready.then(function () { setSideCollapsed(true); });  // again once the names are translated
     }
-  } catch (e) { /* storage unavailable */ }
+  } catch { /* storage unavailable */ }
 
   // A tall poster's width from its height (2:3): browsers don't take it from a height that's stretched
   function fitPosters() {
@@ -5857,7 +5842,7 @@ PCI18N.ready.then(function () {
     var compared = sy.compared || [], now = Date.now() / 1000;
     if (sy.discovered_at && now - sy.discovered_at < 3600 && !libs.some(function (l) { return compared.indexOf(String(l.key)) < 0; })) return;
     LOOKED = Date.now();
-    try { api("/api/sync/discover", {}).then(function () { load(); }).catch(function () {}); } catch (e) { /* (the page drawn offline: nothing to ask) */ }
+    try { api("/api/sync/discover", {}).then(function () { load(); }).catch(function () {}); } catch { /* (the page drawn offline: nothing to ask) */ }
   }
 
   // --------------------------------------------------------------- events
@@ -5874,15 +5859,20 @@ PCI18N.ready.then(function () {
     tip.style.top = "0px";
   });
 
-  // ---- info popover: one shared bubble, placed under whichever "i" is active
+  // ---- info popover: one shared bubble, placed under whichever "i" is active. Where the browser has popovers, the bubble
+  // is one (a manual one: opened and closed here, as before), so it's shown in the top layer, above everything: no card,
+  // scroll box, menu or dialog covers or clips it. Without them, it's the page's own bubble, as it always was.
   var pop = document.createElement("div"), popFor = null, popPinned = false;
   pop.id = "infopop"; pop.className = "infopop"; pop.setAttribute("role", "tooltip"); pop.hidden = true;
+  var topLayer = typeof pop.showPopover === "function", popUp = false;
+  if (topLayer) pop.setAttribute("popover", "manual");
   document.body.appendChild(pop);
   function showInfo(btn, pinned) {
     if (popFor && popFor !== btn.dataset.info) document.querySelectorAll('.info[aria-expanded="true"]').forEach(function (b) { b.setAttribute("aria-expanded", "false"); });
     popFor = btn.dataset.info; popPinned = !!pinned;
     pop.innerHTML = INFO[popFor] || "";
     pop.hidden = false;
+    if (topLayer && !popUp) { pop.showPopover(); popUp = true; }
     btn.setAttribute("aria-expanded", "true");
     btn.setAttribute("aria-describedby", "infopop");
     placeInfo(btn);
@@ -5898,6 +5888,7 @@ PCI18N.ready.then(function () {
     if (!popFor) return;
     document.querySelectorAll('.info[data-info="' + popFor + '"]').forEach(function (b) { b.setAttribute("aria-expanded", "false"); b.removeAttribute("aria-describedby"); });
     popFor = null; popPinned = false; pop.hidden = true;
+    if (popUp) { pop.hidePopover(); popUp = false; }
   }
   // The page redraws every few seconds; keep an open bubble on its (new) button.
   function reattachInfo() {
@@ -5996,7 +5987,7 @@ PCI18N.ready.then(function () {
       var where = tile.dataset.goto.split(":");
       if (where[0] === "lasts" && where[1]) {
         lastsView = where[1];
-        try { localStorage.setItem("pc-lasts-view", lastsView); } catch (err) { /* storage unavailable */ }
+        try { localStorage.setItem("pc-lasts-view", lastsView); } catch { /* storage unavailable */ }
         render();
       }
       var el = document.getElementById(where[0]);
@@ -6008,7 +5999,7 @@ PCI18N.ready.then(function () {
       if (cv.dataset.covLib) covLib = cv.dataset.covLib;
       else if (cv.dataset.covMode) covMode = cv.dataset.covMode;
       else covBy = Number(cv.dataset.covBy);
-      try { localStorage.setItem("pc-cov-mode", covMode); localStorage.setItem("pc-cov-by", String(covBy)); } catch (err) { /* storage unavailable */ }
+      try { localStorage.setItem("pc-cov-mode", covMode); localStorage.setItem("pc-cov-by", String(covBy)); } catch { /* storage unavailable */ }
       covHover = null;
       render();
       return;
@@ -6018,28 +6009,28 @@ PCI18N.ready.then(function () {
     var lr = e.target.closest("[data-lasts-range]");
     if (lr) {
       lastsRange = lr.dataset.lastsRange;
-      try { localStorage.setItem("pc-lasts-range", lastsRange); } catch (err) { /* storage unavailable */ }
+      try { localStorage.setItem("pc-lasts-range", lastsRange); } catch { /* storage unavailable */ }
       render();
       return;
     }
     var lf = e.target.closest("[data-lasts-first]");
     if (lf) {
       lastsFirst = !lastsFirst;
-      try { localStorage.setItem("pc-lasts-first", lastsFirst ? "show" : "hide"); } catch (err) { /* storage unavailable */ }
+      try { localStorage.setItem("pc-lasts-first", lastsFirst ? "show" : "hide"); } catch { /* storage unavailable */ }
       lastsFreshUpdate(null);
       return;
     }
     var lb = e.target.closest("[data-lasts-view], [data-lasts-tier]");
     if (lb) {
       if (lb.dataset.lastsView) lastsView = lb.dataset.lastsView; else lastsTier = lb.dataset.lastsTier;
-      try { localStorage.setItem("pc-lasts-view", lastsView); localStorage.setItem("pc-lasts-tier", lastsTier); } catch (err) { /* storage unavailable */ }
+      try { localStorage.setItem("pc-lasts-view", lastsView); localStorage.setItem("pc-lasts-tier", lastsTier); } catch { /* storage unavailable */ }
       render();
       return;
     }
     var seg = e.target.closest("[data-period], [data-chart]");
     if (seg) {
       if (seg.dataset.period) actPeriod = seg.dataset.period; else chartMetric = seg.dataset.chart;
-      try { localStorage.setItem("pc-period", actPeriod); localStorage.setItem("pc-chart", chartMetric); } catch (err) { /* storage unavailable */ }
+      try { localStorage.setItem("pc-period", actPeriod); localStorage.setItem("pc-chart", chartMetric); } catch { /* storage unavailable */ }
       render();
       return;
     }
@@ -6115,8 +6106,8 @@ PCI18N.ready.then(function () {
     else if (act === "tool-swap") {  // the comparison card's arrow: the next side of the row kept instead (round and round)
       var wt = el.dataset.tool, wrow = (((toolState(wt).scan || {}).rows) || []).filter(function (r) { return r.id === el.dataset.id; })[0];
       if (wrow) {
-        var keys = SWAP_KEYS[wt](wrow), cur = TOOL[wt].keep[el.dataset.id] || keys[0];
-        TOOL[wt].keep[el.dataset.id] = keys[(keys.indexOf(cur) + 1) % keys.length];
+        var keys = SWAP_KEYS[wt](wrow), kept = TOOL[wt].keep[el.dataset.id] || keys[0];
+        TOOL[wt].keep[el.dataset.id] = keys[(keys.indexOf(kept) + 1) % keys.length];
         TOOL[wt].confirm = false;
         render();
       }
@@ -6239,7 +6230,7 @@ PCI18N.ready.then(function () {
       if (m === "check") { MIG_CHECKING = true; render(); }
       var checked = function () { if (m === "check") { MIG_CHECKING = false; render(); } };
       api("/api/migration", { action: m, library: el.dataset.lib, folder: el.dataset.folder, scope: el.dataset.scope })
-        .then(function () { return load(); }).catch(function (e) { toast(e.message, true); return load(); }).then(checked, checked);
+        .then(function (r) { if (m === "cancel" && r && r.cancelled) toast(T("Conversion cancelled: the folder is as it was")); return load(); }).catch(function (e) { toast(e.message, true); return load(); }).then(checked, checked);
     }
     else if (act === "queue-remove") {
       el.disabled = true;
@@ -6307,9 +6298,9 @@ PCI18N.ready.then(function () {
     }
     else if (act === "lib-survey") {
       el.disabled = true;
-      var how = el.dataset.how;
-      LIB.hold.inspect[LIB.key] = how === "pause";  // (paused by hand: not started again by itself until Resume)
-      api("/api/library/survey", how === "pause" ? { library: LIB.key, pause: true } : { library: LIB.key, force: how === "again" }).then(function () { load(); });
+      var ask = el.dataset.how;
+      LIB.hold.inspect[LIB.key] = ask === "pause";  // (paused by hand: not started again by itself until Resume)
+      api("/api/library/survey", ask === "pause" ? { library: LIB.key, pause: true } : { library: LIB.key, force: ask === "again" }).then(function () { load(); });
     }
     else if (act === "proc-sort") { var sj = el.dataset.job, sk = el.dataset.key; procSort[sj] = procSort[sj] === sk ? null : sk; procFilesFetch(sj, 0); }
     else if (act === "proc-page") { procFilesFetch(el.dataset.job, Number(el.dataset.offset) || 0); }
@@ -6381,8 +6372,8 @@ PCI18N.ready.then(function () {
     ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
     document.body.appendChild(ta);
     ta.select(); ta.setSelectionRange(0, text.length);
-    var ok = false;
-    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    var ok;
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
     document.body.removeChild(ta);
     toast(ok ? T("Copied") : T("Couldn’t copy — select the command and copy it by hand"));
   }
@@ -6413,7 +6404,7 @@ PCI18N.ready.then(function () {
         api(base + "/" + pin.id, {}).then(function (r) {
           if (r.done) {
             clearInterval(timer);
-            if (win) try { win.close(); } catch (e) { /* ignore */ }
+            if (win) try { win.close(); } catch { /* ignore */ }
             toast(T("Signed in with Plex")); load();
           }
         }).catch(function () { /* keep polling */ });
@@ -6438,7 +6429,7 @@ PCI18N.ready.then(function () {
     var body = main.querySelector("#cov-body");
     if (body) body.innerHTML = covBody();
   });
-  main.addEventListener("pointerleave", function (e) {
+  main.addEventListener("pointerleave", function () {
     if (covHover == null) return;
     covHover = null;
     var body = main.querySelector("#cov-body");
@@ -6509,9 +6500,16 @@ PCI18N.ready.then(function () {
       if (!file) return;
       file.text().then(function (txt) {
         var theme;
-        try { theme = JSON.parse(txt); } catch (err) { throw new Error(T("That file isn’t a theme: it isn’t JSON")); }
+        try { theme = JSON.parse(txt); } catch (err) { throw new Error(T("That file isn’t a theme: it isn’t JSON"), { cause: err }); }
         return api("/api/themes/upload", { theme: theme });
       }).then(function (r) { S = r.settings; if (ST) ST.settings = S; toast(T("Theme added")); return load(); }).catch(function (err) { toast(err.message, true); });
+      return;
+    }
+    if (el.dataset.own && window.PCTHEME) {  // this device's own theme or mode (System → Themes → This device)
+      var mine = window.PCTHEME.own() || {};
+      if (el.value) mine[el.dataset.own] = el.value; else delete mine[el.dataset.own];
+      window.PCTHEME.setOwn(Object.keys(mine).length ? mine : null);
+      toast(T("Saved on this device"));
       return;
     }
     if (el.dataset.set) {
@@ -6548,9 +6546,9 @@ PCI18N.ready.then(function () {
       sp[el.dataset.speed] = { mb_s: v, measured_at: null };
       queueSave("general", "disk_speeds", sp, true);
     } else if (el.dataset.mapOther !== undefined) {
-      var v = el.value.trim();
-      if (v && v.charAt(0) !== "/") { toast(T("Enter a full path starting with /")); return; }
-      saveMapping(el.dataset.mapOther, v);
+      var path = el.value.trim();
+      if (path && path.charAt(0) !== "/") { toast(T("Enter a full path starting with /")); return; }
+      saveMapping(el.dataset.mapOther, path);
     }
   });
 

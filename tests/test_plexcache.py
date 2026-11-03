@@ -3125,7 +3125,7 @@ class ServerTests(unittest.TestCase):
 
 
 class ThemeTests(unittest.TestCase):
-    """Themes (themes.py): the built-in four, a theme file checked before it reaches a page, the routes that serve the
+    """Themes (themes.py): the built-in two (Classic and Dionysus, each with a light and a dark look), a theme file checked before it reaches a page, the routes that serve the
     look (/theme.css, /theme.js) and download and upload a theme, and System → Themes."""
 
     @classmethod
@@ -3147,116 +3147,190 @@ class ThemeTests(unittest.TestCase):
         return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), *p)
 
     def test_built_in_themes(self):
-        """Every built-in theme sets every colour; Classic Light is the app's look before themes (app.css's own colours,
-        the fallback), and Dionysus Light is what a new install shows. No rule follows the device's light or dark setting
-        but the theme: a dark rule goes under the theme's mode."""
+        """Two built-in themes, each with a light and a dark look that set every colour; Classic's light look is the app's
+        look before themes (app.css's own colours, the fallback), and Dionysus light is what a new install shows. No rule
+        follows the device's light or dark setting but the theme: a dark rule goes under the theme's mode."""
         from plexcache import config, themes
         css = _read(self._root("plexcache", "web", "app.css"), encoding="utf-8")
         self.assertNotIn("prefers-color-scheme", css)
         fallback = dict(re.findall(r"--([a-z0-9-]+):(#[0-9A-Fa-f]{3,6})", css[:css.index("}")]))
-        classic = themes.built_in("classic-light")["colors"]
+        classic = themes.built_in("classic")["light"]["colors"]
         self.assertGreater(len(fallback), 30)
         self.assertEqual({k: v for k, v in classic.items() if k in fallback}, fallback)
+        self.assertEqual([t["id"] for t in themes.BUILT_IN], ["classic", "dionysus"])
         for t in themes.BUILT_IN:
-            self.assertEqual(set(t["colors"]), set(themes.COLORS), t["id"])
-            self.assertEqual(themes.validate(dict(t, id="x-" + t["id"])), dict(t, id="x-" + t["id"], dionysus_theme=1, colors={k: v.upper() for k, v in t["colors"].items()}))
-        self.assertEqual(config.DEFAULTS["themes"]["selected"], "dionysus-light")
-        self.assertEqual({t["mode"] for t in themes.BUILT_IN if t["id"].endswith("-dark")}, {"dark"})
-        # every colour the decorations use is one a theme sets (but the see-through holes they cut, --hole)
+            for mode in ("light", "dark"):
+                self.assertEqual(set(t[mode]["colors"]), set(themes.COLORS), (t["id"], mode))
+            up = {m: {"colors": {k: v.upper() for k, v in t[m]["colors"].items()}} for m in ("light", "dark")}
+            self.assertEqual(themes.validate(dict(t, id="x-" + t["id"])), dict(t, id="x-" + t["id"], dionysus_theme=1, **up))
+        self.assertNotEqual(themes.built_in("dionysus")["light"]["colors"]["bg"], themes.built_in("dionysus")["dark"]["colors"]["bg"])
+        self.assertEqual((config.DEFAULTS["themes"]["theme"], config.DEFAULTS["themes"]["mode"]), ("dionysus", "light"))
+        # every colour the decorations use is one a theme sets (but the see-through holes they cut, --hole, and a box's own
+        # line colour, --edge, which app.css sets from a theme's colour)
         used = set(re.findall(r"var\(--([a-z0-9-]+)", _read(self._root("plexcache", "web", "decor.js"), encoding="utf-8")))
-        self.assertEqual(used - set(themes.COLORS), {"hole"})
-        self.assertLessEqual({"film", "film-mark", "vine", "vine-leaf", "frame", "frame-leaf", "menu-vine", "panel"}, used)
+        self.assertEqual(used - set(themes.COLORS), {"hole", "edge"})
+        self.assertLessEqual(set(re.findall(r"--edge:var\(--([a-z0-9-]+)\)", css)), set(themes.COLORS))
+        # what's kept and what goes beside it: two colours apart in Dionysus (the lost one grey), the same as before in Classic
+        for mode in ("light", "dark"):
+            self.assertEqual(themes.built_in("classic")[mode]["colors"]["lost"], themes.built_in("classic")[mode]["colors"]["bad"])
+            dio = themes.built_in("dionysus")[mode]["colors"]
+            self.assertNotEqual(dio["lost"], dio["bad"])
+        self.assertEqual({t["id"]: t["decor"]["grapes"] for t in themes.BUILT_IN}, {"classic": False, "dionysus": True})
+        self.assertLessEqual({"film", "film-mark", "vine", "vine-leaf", "menu-vine", "panel"}, used)
+        # the app goes to the window's edges in every theme (the vine round it is gone): a theme file made with that
+        # vine's colours still uploads, without them
+        self.assertFalse(set(themes.RETIRED) & (set(themes.COLORS) | used))
+        old = themes.validate({"name": "Old Wine", "based_on": "dionysus", "light": {"colors": {"frame": "#AAACA7", "frame-leaf": "#AAACA7", "bg": "#E7E8E2"}}})
+        self.assertNotIn("frame", old["light"]["colors"])
+        self.assertEqual(old["light"]["colors"]["bg"], "#E7E8E2")
 
     def test_theme_files_are_checked(self):
-        """A theme from a file: #hex colours only, fonts and decorations from their lists, no built-in's id; what it
-        leaves out comes from the theme it's based on. A downloaded theme uploads again as it is."""
+        """A theme from a file: #hex colours only, for its light and its dark look, fonts and decorations from their lists,
+        no built-in's id; what it leaves out comes from the theme it's based on. A downloaded theme uploads again as it is."""
         from plexcache import themes
-        base = {"name": "Wine Cellar", "mode": "dark", "based_on": "dionysus-dark"}
-        t = themes.validate(dict(base, colors={"accent": "#c04070"}))
-        self.assertEqual((t["id"], t["colors"]["accent"], t["colors"]["bg"], t["fonts"]["headings"], t["decor"]["vines"]),
-                         ("wine-cellar", "#C04070", themes.built_in("dionysus-dark")["colors"]["bg"], "Cinzel", True))
-        for bad in ({"colors": {"bg": "red;}body{background:url(x)"}}, {"colors": {"bg": "url(x)"}}, {"colors": {"nope": "#fff"}},
-                    {"fonts": {"text": "Comic Sans"}}, {"decor": {"logo": "mine"}}, {"decor": {"spots": 50}}, {"decor": {"vines": "yes"}},
-                    {"name": "<script>"}, {"name": ""}, {"id": "classic-light"}, {"id": "Bad Id"}, {"mode": "dim"}, {"dionysus_theme": 2}):
+        base = {"name": "Wine Cellar", "based_on": "dionysus"}
+        t = themes.validate(dict(base, dark={"colors": {"accent": "#c04070"}}))
+        dio = themes.built_in("dionysus")
+        self.assertEqual((t["id"], t["dark"]["colors"]["accent"], t["dark"]["colors"]["bg"], t["light"], t["fonts"]["headings"], t["decor"]["vines"]),
+                         ("wine-cellar", "#C04070", dio["dark"]["colors"]["bg"], {"colors": {k: v.upper() for k, v in dio["light"]["colors"].items()}}, "Cinzel", True))
+        self.assertEqual(themes.validate({"name": "Plain"})["light"]["colors"]["bg"], themes.built_in("classic")["light"]["colors"]["bg"].upper())
+        for bad in ({"light": {"colors": {"bg": "red;}body{background:url(x)"}}}, {"dark": {"colors": {"bg": "url(x)"}}},
+                    {"light": {"colors": {"nope": "#fff"}}}, {"dark": "black"}, {"fonts": {"text": "Comic Sans"}}, {"decor": {"spots": -1}},
+                    {"decor": {"spots": 50}}, {"decor": {"vines": "yes"}}, {"name": "<script>"}, {"name": ""}, {"id": "classic"},
+                    {"id": "Bad Id"}, {"dionysus_theme": 2}):
             with self.assertRaises(themes.ThemeError, msg=bad):
                 themes.validate(dict(base, **bad))
         for t in themes.everything({}):
             back = json.loads(themes.download(t))
             self.assertIn("about", back)
-            self.assertEqual(themes.validate(back)["colors"], t["colors"])
+            again = themes.validate(back)
+            for m in ("light", "dark"):
+                self.assertEqual(again[m]["colors"], {k: v.upper() for k, v in t[m]["colors"].items()}, (t["id"], m))
         self.assertNotIn("about", themes.validate(json.loads(themes.download(themes.everything({})[0]))))
 
+    def test_theme_settings_from_before(self):
+        """Settings kept when each theme was one look: the theme and its mode carry over, Auto stays Auto, and a theme
+        added then holds its colours as the look it was, the other look from the theme it was based on."""
+        from plexcache import config, themes
+        d = tempfile.mkdtemp(dir=TMP)
+        old = {"id": "wine", "name": "Wine", "mode": "dark", "based_on": "dionysus-dark", "colors": {"accent": "#C04070"},
+               "fonts": {"text": "Source Sans 3", "headings": "Cinzel"}, "decor": {"logo": "theatre", "spots": 5, "vines": True, "film": True}}
+        for saved, want in (({"selected": "classic-dark"}, ("classic", "dark")), ({"selected": "auto", "auto_light": "dionysus-light"}, ("dionysus", "auto")),
+                            ({"selected": "wine", "custom": {"wine": old}}, ("wine", "dark"))):
+            with open(os.path.join(d, "settings.json"), "w", encoding="utf-8") as fh:
+                json.dump({"themes": saved}, fh)
+            ts = config.Settings(d).section("themes")
+            self.assertEqual((ts["theme"], ts["mode"]), want)
+            self.assertFalse({"selected", "auto_light", "auto_dark"} & set(ts))
+        wine = ts["custom"]["wine"]
+        self.assertEqual((wine["dark"]["colors"]["accent"], wine["light"]["colors"]["bg"]),
+                         ("#C04070", themes.built_in("dionysus")["light"]["colors"]["bg"].upper()))
+
     def test_theme_routes(self):
-        """/theme.css holds every theme's colours, /theme.js names the one to show (never kept by the browser); a theme
-        downloads as a file, uploads into the settings (one of the same id replaced), shows when chosen, and goes back to
-        the default when removed while in use. Auto names a light and a dark theme."""
+        """/theme.css holds every theme's light and dark colours, /theme.js names the theme and mode to show (never kept by
+        the browser); a theme downloads as a file, uploads into the settings (one of the same id replaced), shows when
+        chosen, and goes back to the default when removed while in use."""
         status, body, headers = self.req("GET", "/theme.css")
         self.assertEqual((status, headers["Cache-Control"]), (200, "no-store"))
         self.assertIn("text/css", headers["Content-Type"])
-        for tid in ("classic-light", "classic-dark", "dionysus-light", "dionysus-dark"):
-            self.assertIn(f':root[data-theme="{tid}"]{{--bg:'.encode(), body)
+        for tid in ("classic", "dionysus"):
+            for mode in ("light", "dark"):
+                self.assertIn(f':root[data-theme="{tid}"][data-mode="{mode}"]{{--bg:'.encode(), body)
         status, body, headers = self.req("GET", "/theme.js")
         self.assertIn("javascript", headers["Content-Type"])
-        self.assertIn(b'"selected":"dionysus-light"', body)
-        status, body, headers = self.req("GET", "/api/themes/download?id=dionysus-dark")
+        self.assertIn(b'SEL={"theme":"dionysus","mode":"light"}', body)
+        self.assertIn(b"pc-theme", body)  # (a device's own choice, System \u2192 Themes)
+        status, body, headers = self.req("GET", "/api/themes/download?id=dionysus")
         self.assertEqual(status, 200)
-        self.assertIn('filename="dionysus-theme-dionysus-dark-copy.json"', headers["Content-Disposition"])
+        self.assertIn('filename="dionysus-theme-dionysus-copy.json"', headers["Content-Disposition"])
         theme = json.loads(body)
-        self.assertEqual((theme["id"], theme["based_on"]), ("dionysus-dark-copy", "dionysus-dark"))
+        self.assertEqual((theme["id"], theme["based_on"]), ("dionysus-copy", "dionysus"))
         self.assertEqual(self.req("GET", "/api/themes/download?id=nope")[0], 404)
-        theme["name"], theme["colors"]["accent"] = "Wine Cellar", "#C04070"
+        theme["name"], theme["dark"]["colors"]["accent"] = "Wine Cellar", "#C04070"
         status, body, _ = self.req("POST", "/api/themes/upload", {"theme": theme})
-        self.assertEqual((status, json.loads(body)["id"]), (200, "dionysus-dark-copy"))
-        self.assertEqual(self.req("POST", "/api/themes/upload", {"theme": dict(theme, colors={"bg": "red"})})[0], 400)
+        self.assertEqual((status, json.loads(body)["id"]), (200, "dionysus-copy"))
+        self.assertEqual(self.req("POST", "/api/themes/upload", {"theme": dict(theme, light={"colors": {"bg": "red"}})})[0], 400)
         self.assertEqual(self.req("POST", "/api/themes/upload", {"theme": "nope"})[0], 400)
-        self.assertIn({"id": "dionysus-dark-copy", "name": "Wine Cellar", "mode": "dark", "builtin": False, "decor": theme["decor"]}, self.app.state()["themes"])
-        self.assertIn(b':root[data-theme="dionysus-dark-copy"]{--bg:#111513', self.req("GET", "/theme.css")[1])
-        self.assertIn(b"--accent:#C04070", self.req("GET", "/theme.css")[1])
-        self.assertEqual(self.req("POST", "/api/settings", {"themes": {"selected": "dionysus-dark-copy"}})[0], 200)
-        self.assertIn(b'"selected":"dionysus-dark-copy"', self.req("GET", "/theme.js")[1])
-        self.assertEqual(self.req("POST", "/api/settings", {"themes": {"selected": "<b>"}})[0], 400)
-        self.assertEqual(self.req("POST", "/api/themes/remove", {"id": "dionysus-dark-copy"})[0], 200)
-        self.assertEqual((self.app.settings.section("themes")["selected"], self.app.settings.section("themes")["custom"]), ("dionysus-light", {}))
-        self.assertEqual(self.req("POST", "/api/settings", {"themes": {"selected": "auto", "auto_dark": "classic-dark"}})[0], 200)
-        self.assertIn(b'{"selected":"auto","light":"dionysus-light","dark":"classic-dark"}', self.req("GET", "/theme.js")[1])
-        self.app.settings.update({"themes": {"selected": "dionysus-light", "auto_dark": "dionysus-dark"}})
+        self.assertIn({"id": "dionysus-copy", "name": "Wine Cellar", "builtin": False, "decor": theme["decor"]}, self.app.state()["themes"])
+        css = self.req("GET", "/theme.css")[1]
+        self.assertIn(b':root[data-theme="dionysus-copy"][data-mode="dark"]{--bg:#111513', css)
+        self.assertIn(b"--accent:#C04070", css)
+        self.assertEqual(self.req("POST", "/api/settings", {"themes": {"theme": "dionysus-copy", "mode": "auto"}})[0], 200)
+        self.assertIn(b'SEL={"theme":"dionysus-copy","mode":"auto"}', self.req("GET", "/theme.js")[1])
+        self.assertEqual(self.req("POST", "/api/settings", {"themes": {"theme": "<b>"}})[0], 400)
+        self.assertEqual(self.req("POST", "/api/settings", {"themes": {"mode": "dim"}})[0], 400)
+        self.assertEqual(self.req("POST", "/api/themes/remove", {"id": "dionysus-copy"})[0], 200)
+        self.assertEqual((self.app.settings.section("themes")["theme"], self.app.settings.section("themes")["custom"]), ("dionysus", {}))
+        self.app.settings.update({"themes": {"mode": "light"}})
         # the fonts that ship with the app are served with their type
         status, _, headers = self.req("GET", "/static/fonts/cinzel-latin.woff2")
         self.assertEqual((status, headers["Content-Type"]), (200, "font/woff2"))
         self.assertEqual(self.req("GET", "/static/fonts/../app.css")[0], 404)
 
     def test_every_page_wears_the_theme(self):
-        """The sign-in page and the app load the theme before they draw, and the decorations after; the app's pages are
-        drawn by one function that hands each page to the decorations, so none goes without."""
+        """The sign-in page and the app load the theme before they draw, and the decorations after, and show the one logo
+        whatever the theme; the app's pages are drawn by one function that hands each page to the decorations, so none goes without."""
         for name in ("index.html", "login.html"):
             html = _read(self._root("plexcache", "web", name), encoding="utf-8")
             head = html[:html.index("</head>")]
             self.assertIn('<link rel="stylesheet" href="/theme.css">', head, name)
             self.assertIn('<script src="/theme.js"></script>', head, name)
             self.assertIn('<script src="/static/decor.js"></script>', html, name)
+            # the logo is the same in every theme: the Full house theatre, and its tab icon
+            self.assertIn('<link rel="icon" type="image/svg+xml" href="/static/theatre-tab.svg">', head, name)
+            self.assertIn('<img src="/static/theatre.svg"', html, name)
         js = _read(self._root("plexcache", "web", "app.js"), encoding="utf-8")
         self.assertEqual(js.count("main.innerHTML = PAGES[page]();"), 1)
         draw = js[js.index("main.innerHTML = PAGES[page]();"):]
         self.assertLess(draw.index("PCDECOR.paint(main)"), draw.index("\n  }"))
 
+    def test_kept_and_lost_sides(self):
+        """A side-by-side card (Merge Duplicates and the like): both titles sit in an oval, and the arrow between the sides
+        is text, or the Play bunch on its stem in a theme with grapes; both point at the one kept."""
+        css = _read(self._root("plexcache", "web", "app.css"), encoding="utf-8")
+        for cls in ("mgkeeplbl", "mgdroplbl"):
+            rule = re.search(r"\." + cls + r"\{([^}]*)\}", css).group(1)
+            self.assertIn("border-radius:999px", rule, cls)
+            self.assertRegex(rule, r"border:2px solid var\(--(accent|lost)\)", cls)
+        self.assertIn(':root[data-grapes="on"] .mgarrow .grapearrow{display:block}', css)
+        js = _read(self._root("plexcache", "web", "app.js"), encoding="utf-8")
+        self.assertIn('grapeArrow(!keepRight)', js)
+        self.assertIn(b'data-grapes', self.req("GET", "/theme.js")[1])
+
+    def test_every_progress_bar_wears_the_theme(self):
+        """Every progress bar is the one shared bar (class "meter", role "progressbar"), which a theme with grapes draws as the
+        leafy vine (decor.js meters): none made another way, so none goes plain. A usage meter (how full something is) is
+        marked "usage" and keeps its bar."""
+        js = _read(self._root("plexcache", "web", "app.js"), encoding="utf-8")
+        bars = re.findall(r'<div class="meter([^"]*)"([^>]*)>', js)
+        self.assertGreater(len(bars), 10)
+        for cls, rest in bars:
+            self.assertTrue("usage" in cls or 'role="progressbar"' in rest, (cls, rest))
+        self.assertEqual(len(re.findall(r'role="progressbar"', js)), sum(1 for cls, rest in bars if 'role="progressbar"' in rest))
+        for name in ("app.js", "decor.js", "login.js", "i18n.js"):
+            self.assertNotIn("<progress", _read(self._root("plexcache", "web", name), encoding="utf-8"), name)
+        decor = _read(self._root("plexcache", "web", "decor.js"), encoding="utf-8")
+        self.assertIn('root.querySelectorAll(".meter:not(.usage)")', decor)
+        self.assertIn('if (on("grapes")) meters(root);', decor)
+        css = _read(self._root("plexcache", "web", "app.css"), encoding="utf-8")
+        self.assertIn(':root[data-grapes="on"] .meter:not(.usage)>div{display:none}', css)
+
     def test_system_page_themes_card(self):
-        """System → Themes: the theme to show, the light and dark pair for Auto, every theme with its Download, an uploaded
-        one's Remove, and Upload a Theme."""
+        """System → Themes: the theme to show and its mode (Auto, Light or Dark), this device's own theme and mode, every
+        theme with its Download, an uploaded one's Remove, and Upload a Theme."""
         st = copy.deepcopy(self.app.state())
-        st["themes"].append({"id": "mine", "name": "Mine", "mode": "light", "builtin": False, "decor": {}})
+        st["themes"].append({"id": "mine", "name": "Mine", "builtin": False, "decor": {}})
         html = PageStructureTests._render(self, st, "system")["html"]
         card = html[html.index('id="themes"'):]
         card = card[:card.index("</section>")]
-        self.assertIn('data-set="themes.selected"', card)
-        self.assertNotIn('data-set="themes.auto_light"', card)
-        for tid in ("classic-light", "classic-dark", "dionysus-light", "dionysus-dark", "mine"):
+        self.assertIn('data-set="themes.theme"', card)
+        self.assertEqual(re.findall(r'data-set="themes.mode">(.*?)</select>', card)[0].count("<option"), 3)
+        self.assertIn('data-own="theme"', card)
+        self.assertIn('data-own="mode"', card)
+        for tid in ("classic", "dionysus", "mine"):
             self.assertIn(f'data-act="theme-download" data-id="{tid}"', card)
         self.assertEqual(re.findall(r'data-act="theme-remove" data-id="([^"]+)"', card), ["mine"])
         self.assertIn('data-act="theme-upload"', card)
-        st["settings"]["themes"]["selected"] = "auto"
-        card = PageStructureTests._render(self, st, "system")["html"]
-        self.assertIn('data-set="themes.auto_light"', card)
-        self.assertIn('data-set="themes.auto_dark"', card)
 
 
 class ReportTests(unittest.TestCase):
@@ -4133,22 +4207,80 @@ class TestRunnerTests(unittest.TestCase):
                         pass
             """))
         runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.py")
-        proc = subprocess.Popen([sys.executable, runner, "stop_probe_tests"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, env=dict(os.environ, PYTHONPATH=folder))
+        # (its output to a file, not a pipe: with the suite shared out, another test's process in the same worker can
+        # hold a pipe's end open, and the end of the output wouldn't be seen)
+        log = os.path.join(folder, "out.txt")
+        with open(log, "w", encoding="utf-8") as fh:
+            proc = subprocess.Popen([sys.executable, runner, "-j", "1", "stop_probe_tests"], stdout=fh, stderr=subprocess.STDOUT,
+                                    env=dict(os.environ, PYTHONPATH=folder))
         try:
-            self.assertEqual(proc.stdout.readline().strip(), "1/3 tests done")
-            self.assertEqual(proc.stdout.readline().strip(), "running")
+            self.assertTrue(wait_for(lambda: "running" in _read(log, encoding="utf-8"), timeout=30), _read(log, encoding="utf-8"))
+            self.assertEqual(_read(log, encoding="utf-8").split(), ["1/3", "tests", "done", "running"])
             proc.send_signal(signal.SIGTERM)
-            out, _ = proc.communicate(timeout=10)
+            proc.wait(timeout=30)
         finally:
             if proc.poll() is None:
                 proc.kill()
-                proc.communicate()
+                proc.wait()
+        out = _read(log, encoding="utf-8")
         self.assertEqual(proc.returncode, 130)
-        self.assertIn("Stopped: 1 of 3 tests ran, 2 not run", out)
+        self.assertIn("Stopped · 1/3 tests ran · 2 not run", out)
         self.assertNotIn("fail", out.lower())
 
-    @unittest.skipUnless(os.path.isdir(os.path.join(ROOT, ".git")), "a copy, not the checkout: no git record to read")
+    def test_classes_are_shared_out_among_workers(self):
+        """tests/run.py -j N shares the tests out among N worker processes: a class with setUpClass stays in one worker, in order;
+        a failure is listed in full at the end as unittest would; a worker that dies mid-class makes its unfinished tests
+        errors and the run goes on; the warnings options (-W) are the workers' too. Every test is counted once."""
+        import subprocess
+        import textwrap
+        folder = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(folder, "share_probe_tests.py"), "w", encoding="utf-8") as fh:
+            fh.write(textwrap.dedent("""
+                import os, sys, unittest
+                class Kept(unittest.TestCase):
+                    @classmethod
+                    def setUpClass(cls):
+                        cls.pid = os.getpid()
+                    def test_1_here(self):
+                        self.assertEqual(os.getpid(), self.pid)
+                    def test_2_same_worker(self):
+                        self.assertEqual(os.getpid(), self.pid)
+                        if os.environ.get("PROBE_PARENT") != "x":  # (shared out: a worker, with the run's -W)
+                            self.assertIn("error::DeprecationWarning", sys.warnoptions)
+                            self.assertNotEqual(os.environ.get("PROBE_PARENT"), str(os.getpid()))
+                class Fails(unittest.TestCase):
+                    def test_wrong(self):
+                        \"\"\"Wrong on purpose.\"\"\"
+                        self.assertEqual(1, 2)
+                    def test_skipped(self):
+                        self.skipTest("on purpose")
+                class Dies(unittest.TestCase):
+                    def test_a_fine(self):
+                        pass
+                    def test_b_ends_the_process(self):
+                        os._exit(3)
+            """))
+        runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.py")
+        got = subprocess.run([sys.executable, "-W", "error::DeprecationWarning", runner, "-j", "3", "share_probe_tests"], capture_output=True,
+                             text=True, timeout=60, env=dict(os.environ, PYTHONPATH=folder, XDG_CACHE_HOME=folder, PROBE_PARENT=str(os.getpid())))
+        self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+        self.assertIn("FAIL: test_wrong (share_probe_tests.Fails.test_wrong)\nWrong on purpose.", got.stdout)
+        self.assertIn("ERROR: share_probe_tests.Dies", got.stdout)
+        self.assertIn("share_probe_tests.Dies.test_b_ends_the_process", got.stdout)
+        self.assertNotIn("Kept", got.stdout)
+        self.assertIn("2/6 tests failed", got.stdout)
+        self.assertIn("6/6 tests done", got.stdout)
+        # the next run takes the slowest class first: how long each took is kept
+        with open(os.path.join(folder, "plex-cache", "test-times.json"), encoding="utf-8") as fh:
+            self.assertLessEqual({"share_probe_tests.Kept", "share_probe_tests.Fails.test_wrong"}, set(json.load(fh)))
+        # -j 1: in this process, as before
+        got = subprocess.run([sys.executable, runner, "-j", "1", "share_probe_tests.Kept"], capture_output=True, text=True, timeout=60,
+                             env=dict(os.environ, PYTHONPATH=folder, XDG_CACHE_HOME=folder, PROBE_PARENT="x"))
+        self.assertIn("2 tests passed", got.stdout, got.stdout + got.stderr)
+        self.assertNotIn("workers", got.stdout)
+
+    @unittest.skipUnless(os.path.isdir(os.path.join(ROOT, ".git")) and shutil.which("git"),
+                         "a copy, not the checkout, or no git here (the image: dev/future.py): no git record to read")
     def test_tnsync_stays_executable(self):
         """dev/tnsync is run as `tnsync`, so git must record it executable (100755). An editor or tool that
         rewrites the file can drop the bit, and a commit then makes every checkout say 'permission denied'."""
@@ -4159,6 +4291,412 @@ class TestRunnerTests(unittest.TestCase):
         self.assertEqual(listed[0], "100755", "git records dev/tnsync as not executable: run `chmod +x dev/tnsync` and commit")
         self.assertTrue(os.access(os.path.join(ROOT, "dev", "tnsync"), os.X_OK),
                         "dev/tnsync lost its executable bit: run `chmod +x dev/tnsync`")
+
+    def test_a_bar_goes_to_the_board_and_is_drawn_there_with_the_same_code(self):
+        """PLEXCACHE_PROGRESS=feed: dev/progress.py's bar sends each change as a line the board reads (FEED, then JSON)
+        instead of drawing it; the board puts that into a bar of its own and draws it with the same code — the line a
+        terminal would have had, the seconds of a step under way counted there."""
+        import io
+        from dev.progress import FEED, Progress, feeding, record
+        out = io.StringIO()
+        bar = Progress(3, stream=out, feed=True, bar="tests")
+        self.assertFalse(bar.tty)
+        bar.draw("A.test_1")
+        bar.draw("A.test_2", bad=1)
+        bar.show("looking up ffmpeg", ticking=True)
+        bar.at(5, 9, "step 5 of 9")
+        recs = [record(line) for line in out.getvalue().split("\n")[:-1]]   # (not splitlines: it splits at FEED too)
+        self.assertNotIn(None, recs)
+        self.assertEqual([(r["bar"], r["done"], r["total"], r["bad"]) for r in recs], [("tests", 1, 3, 0), ("tests", 2, 3, 1), ("tests", 2, 3, 1), ("tests", 5, 9, 1)])
+        self.assertEqual((recs[2]["label"], recs[2]["ticking"], recs[3]["ticking"]), ("looking up ffmpeg", True, False))
+        self.assertIsNone(record("    2 tests passed"))
+        self.assertIsNone(record(FEED + "not a record"))
+        with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": "feed"}):
+            self.assertTrue(feeding())
+            self.assertTrue(Progress(1, stream=io.StringIO()).feed)
+        # the board's side: the same line a terminal would have drawn
+        board = Progress(0, tty=True, feed=False)
+        board.apply(recs[1])
+        term = io.StringIO()
+        drawn = Progress(3, tty=True, stream=term)
+        drawn.draw("A.test_1")
+        drawn.draw("A.test_2", bad=1)
+        with mock.patch.dict(os.environ, {"COLUMNS": "80"}):
+            self.assertEqual(term.getvalue().split("\r\033[K")[-1], board.render(80))
+        board.apply(recs[2])
+        self.assertIsNotNone(board.since)
+        self.assertIn("looking up ffmpeg  (0 s)", re.sub(r"\033\[[0-9;]*m", "", board.render(80)))
+        self.assertLess(len(re.sub(r"\033\[[0-9;]*m", "", Progress(3, tty=True).render(40))), 40)
+
+    def test_the_bar_names_the_test_under_way(self):
+        """The bar's label: the test running now, its seconds counting from when it started — on the board too (the
+        record says how long it's been going), whichever of the workers' tests it is."""
+        import io
+        from dev.progress import Progress, record
+        out = io.StringIO()
+        bar = Progress(4, stream=out, feed=True)
+        bar.show("A.test_slow", ticking=True, since=time.time() - 30)
+        rec = record(out.getvalue().split("\n")[-2])
+        self.assertEqual((rec["label"], rec["ticking"]), ("A.test_slow", True))
+        self.assertGreaterEqual(rec["age"], 30)
+        board = Progress(0, tty=True, feed=False)
+        board.apply(rec)
+        self.assertIn("A.test_slow  (30 s)", re.sub(r"\033\[[0-9;]*m", "", board.render(80)))
+
+    def test_the_dependencies_block_says_what_moved_from_and_to(self):
+        """dev/upkeep.py on the board: the box in a line under its bar (dev/progress.said) — what moved and what's new
+        upstream, each from → to; all current; or upstream not reached."""
+        import io
+        from dev import board, upkeep
+        from dev.progress import FEED, said
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": "feed"}):
+            said("postcss-preset-env 11.6.1 → 11.6.2", out)
+        with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": ""}):
+            said("not on the board", out)
+        self.assertEqual(out.getvalue().count(FEED), 1)
+        s = board.Section({"id": "upkeep", "title": "Dependency Versions", "cmd": "true", "upkeep": True}, tempfile.mkdtemp(dir=TMP))
+        s.state = "running"
+        s.line("behind")
+        s.line(out.getvalue().rstrip("\n"))
+        s.finished(0)
+        self.assertIn("postcss-preset-env 11.6.1 → 11.6.2", s.lines(80)[2])
+        r = upkeep.Report(moved=["Node 24.1.0 → 24.2.0"], bumped=["Node: Dockerfile: 24.1.0 → 24.2.0"],
+                          news=[("pyright", "1.1.400", "2.0.0", "major", "by hand")])
+        self.assertEqual(upkeep.summary(r), "Moved Node 24.1.0 → 24.2.0 · pyright 1.1.400 → 2.0.0 (major)")
+        self.assertEqual(upkeep.summary(upkeep.Report()), f"{len(upkeep.DEPS)} dependencies up to date")
+        self.assertEqual(upkeep.summary(None, "timed out"), "Upstream not reached · timed out")
+
+    def test_run_py_sends_its_bar_to_the_board_and_can_leave_a_class_out(self):
+        """tests/run.py on the board (PLEXCACHE_PROGRESS=feed): its bar as records (bar "tests"), its summary as text;
+        --exclude <Class> leaves that class out (tnsync runs WebBuildTests in a section of its own), in this process or
+        shared out among workers."""
+        import subprocess
+        import textwrap
+        from dev.progress import record
+        folder = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(folder, "feed_probe_tests.py"), "w", encoding="utf-8") as fh:
+            fh.write(textwrap.dedent("""
+                import unittest
+                class Kept(unittest.TestCase):
+                    def test_1(self):
+                        pass
+                    def test_2(self):
+                        pass
+                class Left(unittest.TestCase):
+                    def test_never(self):
+                        self.fail("excluded")
+            """))
+        runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.py")
+        for jobs in ("1", "2"):
+            got = subprocess.run([sys.executable, runner, "-j", jobs, "--exclude", "Left", "feed_probe_tests"], capture_output=True, text=True, timeout=60,
+                                 env=dict(os.environ, PYTHONPATH=folder, XDG_CACHE_HOME=folder, PLEXCACHE_PROGRESS="feed"))
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            recs = [r for r in map(record, got.stdout.split("\n")) if r is not None]
+            self.assertEqual(sorted({(r["bar"], r["done"], r["total"]) for r in recs if r["done"] and not r["ticking"]}), [("tests", 1, 2), ("tests", 2, 2)], jobs)
+            self.assertTrue({"Kept.test_1", "Kept.test_2"} & {r["label"] for r in recs if r["ticking"]}, jobs)   # (the test under way named)
+            self.assertNotIn("2 tests passed", got.stdout)   # (the bar's count, 2/2: not said again under it)
+            self.assertIn(f"\n    Python {__import__('platform').python_version()}", got.stdout)   # (its result line: what it ran on)
+            self.assertTrue(all(r.get("workers") in (1, 2) for r in recs), jobs)   # (its workers, beside the bar: never none)
+            self.assertNotIn("\r", got.stdout)  # (nothing drawn: the board draws it)
+
+    def test_the_board_runs_its_sections_at_once(self):
+        """dev/board.py starts every section at once (two that each take a second take a second together); one that waits
+        on another ("after") starts when that has passed, and isn't run when it didn't; one stopped with another
+        ("stop_with": the future tests with the current ones) is stopped when that fails; an exit code that means "couldn't
+        be set up" is not run, not failed; the dependencies' section ("upkeep") looks, then runs again once the checks are
+        done ("then"), its colour from that run's first line. What a failed section printed comes after the board; the
+        results say how each went, for tnsync."""
+        import subprocess
+        folder = tempfile.mkdtemp(dir=TMP)
+        plan = [{"id": "slow1", "title": "One", "cmd": "sleep 1; echo one done"},
+                {"id": "slow2", "title": "Two", "cmd": "sleep 1; echo two done"},
+                {"id": "bad", "title": "Bad", "cmd": "echo the reason it failed; echo 1 thing failed; exit 1"},
+                {"id": "gone", "title": "Gone", "cmd": "sleep 30", "stop_with": ["bad"]},
+                {"id": "next", "title": "Next", "cmd": "echo after one", "after": ["slow1"]},
+                {"id": "never", "title": "Never", "cmd": "echo ran", "after": ["bad"]},
+                {"id": "unset", "title": "Unset", "cmd": "echo download failed; exit 3", "not_run_rc": 3},
+                {"id": "deps", "title": "Dependency Versions", "cmd": "echo current; echo looked: $TNSYNC_PHASE", "env": {"TNSYNC_PHASE": "look"}, "upkeep": True,
+                 "then": {"cmd": "echo behind; echo moved", "after": ["slow1", "slow2", "bad", "gone"]}}]
+        with open(os.path.join(folder, "plan.json"), "w", encoding="utf-8") as fh:
+            json.dump(plan, fh)
+        results = os.path.join(folder, "results")
+        started = time.time()
+        got = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "board.py"), os.path.join(folder, "plan.json"), results],
+                             capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        took = time.time() - started
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        self.assertLess(took, 8)   # (not the 2 s of the two one after the other plus the 30 s of the one stopped)
+        res = dict(line.split("=", 1) for line in _read(results, encoding="utf-8").splitlines())
+        self.assertEqual({k: res[k] for k in ("slow1", "slow2", "bad", "gone", "next", "never", "unset", "deps", "aborted")},
+                         {"slow1": "pass", "slow2": "pass", "bad": "fail", "gone": "skipped", "next": "pass", "never": "skipped",
+                          "unset": "notrun", "deps": "warn", "aborted": "0"})
+        self.assertEqual((res["bad_rc"], res["deps_first"], res["slow1_last"], res["bad_last"]), ("1", "behind", "one done", "1 thing failed"))
+        self.assertEqual(_read(res["deps_log"], encoding="utf-8"), "behind\nmoved\n")   # (the box: the second run's)
+        self.assertIn("looked: look", _read(os.path.join(folder, "logs", "deps.log"), encoding="utf-8"))
+        self.assertIn("\nthe reason it failed\n", got.stdout)   # (what it printed, just that: whose it is, its block says)
+        self.assertNotIn("\n1 thing failed\n", got.stdout)   # (its last line: in its block, not said again)
+        self.assertIn("Never: NOT RUN: BAD DIDN'T PASS", got.stdout)
+        self.assertIn("Gone: STOPPED: BAD FAILED", got.stdout)
+        self.assertNotIn("\none done\n", got.stdout)   # (only a failed section's output is printed)
+
+    def test_the_board_stops_what_waits_on_a_suite_at_its_first_failing_test(self):
+        """A suite's first failing test (its bar's failure count above 0) is enough: what stops with it ("stop_with": the
+        future tests) is stopped and what waits on it ("after": the copy with --tests-first) isn't run, there and then,
+        each saying why; the suite itself runs to its end, so all its failures are still said."""
+        import subprocess
+        folder = tempfile.mkdtemp(dir=TMP)
+        feed = r"""printf '\036{"bar": "tests", "done": 1, "total": 3, "bad": 1}\n'"""   # (its bar: 1 of 3 done, 1 failed)
+        plan = [{"id": "current", "title": "Current Tests", "cmd": f"{feed}; sleep 2; echo the last failure; echo 1/3 tests failed; exit 1"},
+                {"id": "future", "title": "Future Tests", "cmd": "sleep 30", "stop_with": ["current"]},
+                {"id": "sync", "title": "Sync", "cmd": "echo copied", "after": ["current"]}]
+        with open(os.path.join(folder, "plan.json"), "w", encoding="utf-8") as fh:
+            json.dump(plan, fh)
+        results = os.path.join(folder, "results")
+        got = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "board.py"), os.path.join(folder, "plan.json"), results],
+                             capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+        res = dict(line.split("=", 1) for line in _read(results, encoding="utf-8").splitlines())
+        self.assertEqual({k: res[k] for k in ("current", "future", "sync")}, {"current": "fail", "future": "skipped", "sync": "skipped"})
+        self.assertIn("Future Tests: STOPPED: CURRENT TESTS FAILING", got.stdout)   # (while it ran: not once it had ended)
+        self.assertIn("Sync: NOT RUN: CURRENT TESTS FAILING", got.stdout)
+        self.assertLess(got.stdout.index("Future Tests: STOPPED"), got.stdout.index("Current Tests: FAILED"))
+        self.assertIn("\nthe last failure\n", got.stdout)   # (the suite ran on to its end: everything it said is there)
+
+    def test_a_result_line_is_said_one_way_by_every_dev_tool(self):
+        """dev/progress.py's result line, which every dev tool's last line on the board is made with: facts joined with
+        " · ", sentence case, no full stop; counts n/total; the count the bar shows left out on the board (part of it
+        said without the total); versions short (a nightly's build stamp off, a git snapshot "snapshot")."""
+        from dev.progress import counted, result, short_version, tally
+        self.assertEqual((counted(1, "test"), counted(550, "test"), counted(3, "test", of=550), counted(2, "dependency", "dependencies")),
+                         ("1 test", "550 tests", "3/550 tests", "2 dependencies"))
+        self.assertEqual(result("copied 2 files.", "", "restarted myapp"), "Copied 2 files · restarted myapp")
+        self.assertEqual(result(tally(550, "test", "passed", feed=False), "Python 3.15.2"), "550 tests passed · Python 3.15.2")   # (off the board)
+        self.assertEqual(result(tally(550, "test", "passed", feed=True), "Python 3.15.2"), "Python 3.15.2")                    # (the bar says 550/550)
+        self.assertEqual(result(tally(3, "test", "failed", of=550, feed=True), "Python 3.15.2"), "3 failed · Python 3.15.2")
+        self.assertEqual(result(tally(26, "dependency", "up to date", "dependencies", feed=True)), "Up to date")                 # (nothing else to say)
+        self.assertEqual([short_version(v) for v in ("28.0.0-nightly202611022758c59105", "3.16.0a1", "24.0.0-rc.1", "1.2-dev-20261102-abc123",
+                                                     "1.0+git.abc", "N-121234-g1a2b3c4d", "103.0")],
+                         ["28.0.0-nightly", "3.16.0a1", "24.0.0-rc.1", "1.2-dev", "1.0", "snapshot", "103.0"])
+
+    def test_a_two_step_section_waits_between_its_steps_and_ends_when_the_second_has_nothing_to_do(self):
+        """A section of two steps ("then": the dependencies' look, then their pins moved once the checks pass): between
+        them, WAITING: CHECKS (blue), no bar (none at work) and what its first step said; when the first says its second
+        has nothing to do (dev/progress.then(0)), it ends there, green, its second step never run."""
+        from dev import board
+        from dev.progress import FEED
+        folder = tempfile.mkdtemp(dir=TMP)
+        bar = FEED + json.dumps({"bar": "upkeep", "done": 26, "total": 26, "label": "looked up"})
+        s = board.Section({"id": "upkeep", "title": "Dependency Versions", "cmd": "true", "upkeep": True,
+                           "then": {"cmd": "echo moved", "after": ["current"]}}, folder)
+        self.addCleanup(lambda s=s: s.out.close())
+        s.state = "running"
+        for line in ("behind", bar, FEED + json.dumps({"then": 2}), FEED + json.dumps({"said": "26/26 looked up · 2 to move once the checks pass"})):
+            s.line(line)
+        s.finished(0)
+        drawn = [re.sub(r"\033\[[0-9;]*m", "", x) for x in s.lines(100)]
+        self.assertEqual((s.state, s.phase), ("waiting", 1))
+        self.assertIn("WAITING: CHECKS", drawn[0])
+        self.assertEqual(drawn[1].strip(), "")   # (no full bar while it isn't working)
+        self.assertIn("26/26 looked up · 2 to move once the checks pass", drawn[2])
+        s = board.Section({"id": "upkeep", "title": "Dependency Versions", "cmd": "true", "upkeep": True,
+                           "then": {"cmd": "echo moved", "after": ["current"]}}, folder)
+        self.addCleanup(lambda s=s: s.out.close())
+        s.state = "running"
+        for line in ("current", bar, FEED + json.dumps({"then": 0}), FEED + json.dumps({"said": "26 dependencies up to date"})):
+            s.line(line)
+        s.finished(0)
+        drawn = [re.sub(r"\033\[[0-9;]*m", "", x) for x in s.lines(100)]
+        self.assertEqual((s.state, s.phase, s.first), ("pass", 0, "current"))
+        self.assertIn("ALL UP TO DATE", drawn[0])
+        self.assertIn("26/26", drawn[1])
+        self.assertIn("26 dependencies up to date", drawn[2])
+
+    def test_a_section_is_blue_while_it_runs_then_green_orange_red_or_grey(self):
+        """Each of the board's sections: a block of three lines from the start, so nothing moves as it fills in, all of it
+        blue while it runs (or waits), then green (passed), orange (stopped with Enter, the dependencies behind), red
+        (failed) or grey (for the record: not run, skipped, already in sync): a header, the bar its command moved last (dev/progress.py's) and the last line it printed; no line wider
+        than the board."""
+        from dev import board
+        from dev.progress import FEED
+        folder = tempfile.mkdtemp(dir=TMP)
+
+        def section(**spec):
+            return board.Section({"id": "x", "title": "Current Tests", "cmd": "true", **spec}, folder)
+        s = section()
+        self.assertEqual(len(s.lines(60)), board.ROWS)
+        self.assertTrue(all(line.startswith((board.WAIT, board.BODY["waiting"])) for line in s.lines(60)))   # (blue: under way)
+        s.state = "running"
+        s.line(FEED + json.dumps({"bar": "tests", "done": 3, "total": 10, "bad": 0, "label": "A.test_" + "x" * 200, "ticking": False}))
+        s.line("\033[32mlast line\033[0m " + "y" * 200)
+        s.line(FEED + json.dumps({"bar": "build", "done": 2, "total": 7, "bad": 0, "label": "step 2", "ticking": False}))
+        drawn = s.lines(60)
+        self.assertEqual(len(drawn), board.ROWS)
+        self.assertTrue(drawn[0].startswith(board.BLUE))
+        self.assertIn("2/7", drawn[1])   # (the bar moved last)
+        s.line(FEED + json.dumps({"bar": "tests", "done": 3, "total": 10, "bad": 0, "label": "A.test_1", "ticking": False}))
+        drawn = s.lines(60)
+        self.assertIn("3/10", drawn[1])
+        self.assertNotIn("last line", drawn[2])   # (while its bar runs, no stray line: the bar says how it goes)
+        for line in drawn:
+            self.assertLessEqual(len(re.sub(r"\033\[[0-9;]*m", "", line)), 60)
+            self.assertTrue(line.startswith((board.BLUE, board.BODY["running"])))
+        s.line(FEED + json.dumps({"said": "3 tests passed"}))
+        self.assertIn("3 tests passed", s.lines(60)[2])   # (what the tool says of it: shown, running or not)
+        for rc, spec, colour in ((0, {}, board.GOOD), (1, {}, board.BAD), (3, {"not_run_rc": 3}, board.GREY), (0, {"info": "in sync"}, board.GREY),
+                                 (1, {"info": "can't connect"}, board.BAD)):
+            s = section(**spec)
+            s.state = "running"
+            s.finished(rc)
+            got = s.lines(60)
+            self.assertTrue(got[0].startswith(colour) and all(line.startswith(colour.replace("[1;", "[")) for line in got[1:]), (rc, spec))
+        s = section(warn={"rc": 1, "note": "looks waiting for your approval"})   # (a warning of its own: orange, its note)
+        s.state = "running"
+        s.finished(1)
+        self.assertEqual((s.state, s.lines(60)[0].startswith(board.MEH)), ("warn", True))
+        self.assertIn("LOOKS WAITING FOR YOUR APPROVAL", s.lines(60)[0])
+        for first, colour in (("current", board.GOOD), ("behind", board.MEH), ("unknown", board.GREY)):
+            s = section(upkeep=True)
+            s.state = "running"
+            s.line(first)
+            s.finished(0)
+            self.assertTrue(s.lines(60)[0].startswith(colour), first)
+
+    def test_a_key_on_the_board_opens_the_review(self):
+        """The style guide's block, once it says looks wait and while the board runs: r starts its review page (on the
+        terminal, in a session of its own, so it outlives the board), the block saying "press r" in place of the
+        command; once the board is done, the command again, and r does nothing."""
+        import io
+        from dev import board
+        from dev.progress import FEED
+        folder = tempfile.mkdtemp(dir=TMP)
+        key = {"key": "r", "cmd": "exit 0", "does": "Review Style Changes", "opens": "the review page",
+               "line": "press r to review them"}
+        s = board.Section({"id": "style", "title": "Style Approval", "cmd": "true", "warn": {"rc": 1, "note": "looks waiting"},
+                           "key": key}, folder)
+        self.addCleanup(s.out.close)
+        s.live = True
+        self.assertFalse(s.keyed)                         # (not before it has warned)
+        s.state = "running"
+        s.line(FEED + json.dumps({"said": "3 looks need your approval: python3 dev/style.py review"}))
+        s.finished(1)
+        self.assertTrue(s.keyed)
+        self.assertIn("LOOKS WAITING", s.lines(80)[0])   # (its key: the header's, and its last line)
+        self.assertIn("3 looks need your approval: press r to review them", s.lines(80)[2])
+        b = board.Board({"header": ["Local Copy on Dev"], "keys": [{"key": "Enter", "does": "Cancel"}], "sections": []}, folder, True)
+        b.sections, b.by_id, b.stdin_tty = [s], {"style": s}, True
+        with mock.patch.object(sys, "stdout", io.StringIO()) as out, mock.patch("shutil.get_terminal_size", return_value=os.terminal_size((100, 40))):
+            b.frame()
+        self.assertIn("[Enter] Cancel, [r] Review Style Changes", out.getvalue())
+        null = os.open(os.devnull, os.O_RDWR)
+        self.addCleanup(os.close, null)
+        with mock.patch.object(sys, "stdin", mock.Mock(fileno=lambda: null)):
+            b.keys("x r")
+        self.assertTrue(b.pressed)
+        self.assertIn("the review page is open", s.note)
+        s.helper.wait(5)
+        s.helped()
+        self.assertIn("the review page has closed", s.note)
+        s.key["cmd"] = "echo \"There's no sample to review: run python3 dev/style.py sample first.\" >&2; exit 1"
+        s.press(null)
+        s.helper.wait(5)
+        s.helped()
+        self.assertIn("THE REVIEW PAGE DIDN'T OPEN", s.lines(80)[0])
+        self.assertIn("There's no sample to review", s.lines(80)[2])   # (why, in its last line)
+        self.assertTrue(s.lines(80)[0].startswith(board.BAD) and s.lines(80)[2].startswith(board.BODY["fail"]))   # (red)
+        self.assertEqual(s.state, "warn")                                                                       # (its result as it was)
+        s.press(null)
+        self.assertNotIn("no sample", s.lines(80)[2])
+        self.assertTrue(s.lines(80)[0].startswith(board.MEH))
+        s.helper.wait(5)
+        s.key_said = ""
+        s.live = False                                     # (the board done: the command again, and no key)
+        self.assertFalse(s.keyed)
+        self.assertIn("3 looks need your approval: python3 dev/style.py review", s.lines(80)[2])
+        self.assertIn('review --board', _read(os.path.join(ROOT, "dev", "tnsync"), encoding="utf-8"))
+
+    @unittest.skipUnless(shutil.which("rsync") and shutil.which("bash"), "no rsync here (tnsync copies with it)")
+    def test_tnsync_runs_its_steps_at_once(self):
+        """tnsync local -y: the copy (and restart) and every check .tnsync sets run at the same time, each a section of
+        the board (each passing only while the other two run); nothing is said again after it, the result kept, so
+        the next run with nothing changed says the tests already passed. With --tests-first, a check that fails means
+        nothing is copied. Without -y, the app isn't restarted (there's no question asked)."""
+        import subprocess
+        folder = tempfile.mkdtemp(dir=TMP)
+        project, nas, fake = (os.path.join(folder, d) for d in ("project", "nas", "bin"))
+        for d in (os.path.join(project, "app"), nas, fake):
+            os.makedirs(d)
+        with open(os.path.join(fake, "ssh"), "w", encoding="utf-8") as fh:   # (the NAS: this machine, a folder of it)
+            fh.write('#!/bin/bash\n[ -z "$NAS_DOWN" ] || { echo "ssh: connect to host nas.example: timed out" >&2; exit 255; }\nwhile [ $# -gt 0 ]; do case "$1" in -o|-p|-l) shift 2 ;; -O) exit 0 ;; -*) shift ;; *) break ;; esac; done\n'
+                     'shift; [ $# -eq 0 ] && exit 0; exec bash -c "$*"\n')
+        with open(os.path.join(fake, "midclt"), "w", encoding="utf-8") as fh:
+            fh.write(f'#!/bin/bash\necho "$*" >> {folder}/restarts\n')
+        for name in ("ssh", "midclt"):
+            os.chmod(os.path.join(fake, name), 0o755)
+        with open(os.path.join(project, "app", "code.py"), "w", encoding="utf-8") as fh:
+            fh.write("one\n")
+        with open(os.path.join(folder, "config"), "w", encoding="utf-8") as fh:
+            fh.write("TN_HOST=nas.example\nTN_USER=me\n")
+
+        def together(me: str, said: str) -> str:   # a check that passes only while the other two run too
+            others = " && ".join(f"[ -f {folder}/{o} ]" for o in ("test", "validate", "types") if o != me)
+            return (f"touch {folder}/{me}; for i in $(seq 200); do {others} && break; sleep 0.05; done; "
+                    f"{others} && echo {said}; s=$?; sleep 0.3; rm -f {folder}/{me}; exit $s")
+
+        def settings(failing: bool = False):
+            checks = ("echo the failure; echo 1/1 test failed; exit 1", "echo checked", "echo 0 errors") if failing else \
+                (together("test", "12 tests passed"), together("validate", "checked"), together("types", "0 errors"))
+            with open(os.path.join(project, ".tnsync"), "w", encoding="utf-8") as fh:
+                fh.write(f"TN_APP=myapp\nTN_DEST={nas}\nTN_PATHS=app\nTN_TEST={checks[0]}\nTN_VALIDATE={checks[1]}\nTN_TYPES={checks[2]}\n"
+                         "TN_UPKEEP=echo current; echo DEPENDENCIES  -  ALL UP TO DATE; echo; echo upkeep: $TNSYNC_UPKEEP\n"
+                         "TN_STYLE=echo '  new: css .a'; echo 2 looks need your approval: /the/page.html; exit 1\n")
+        env = dict(os.environ, PATH=fake + os.pathsep + os.environ.get("PATH", ""), TNSYNC_CONFIG=os.path.join(folder, "config"),
+                   XDG_STATE_HOME=os.path.join(folder, "state"), TMPDIR=folder)
+        env.pop("PLEXCACHE_PROGRESS", None)
+
+        def tnsync(*args, **more):
+            got = subprocess.run([os.path.join(ROOT, "dev", "tnsync"), "local", *args], cwd=project, env=dict(env, **more), capture_output=True,
+                                 text=True, timeout=120, stdin=subprocess.DEVNULL)
+            return got.returncode, got.stdout + got.stderr
+        settings()
+        rc, out = tnsync("-y")
+        self.assertEqual(rc, 0, out)   # (the three checks at once, each passing only while the others run: not one after the other)
+        self.assertEqual(_read(os.path.join(nas, "app", "code.py"), encoding="utf-8"), "one\n")
+        self.assertRegex(out, r"Copied \d+ files? · restarted myapp")   # (rsync's count: openrsync, on a Mac, lists a folder too)
+        self.assertEqual(_read(os.path.join(folder, "restarts"), encoding="utf-8"), "call -j app.redeploy myapp\n")
+        self.assertNotIn("ALL CHECKS PASSED", out)   # (each section said its own: nothing said again)
+        self.assertNotIn("\n  DEPENDENCIES  -  ALL UP TO DATE", out)   # (its box: none when all are current)
+        for said in ("Current Tests: PASSED (12 tests passed)", "HTML/JS/CSS Validation: PASSED (checked)", "Python Validation: PASSED (0 errors)",
+                     "Dependency Versions: ALL UP TO DATE", "==> Dependency Versions: export TNSYNC_UPKEEP=move",
+                     "Style Approval: LOOKS WAITING (2 looks need your approval: /the/page.html)"):
+            self.assertIn(said, out)
+        self.assertNotIn("\n  new: css .a\n", out)   # (the looks waiting: its block says how many and where, the rest not printed; nor a failure: rc 0)
+        rc, out = tnsync("-y")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Sync to nas.example: ALREADY IN SYNC (Nothing copied · nas.example already has these files", out)   # (in its block, as each check is)
+        self.assertIn("Current Tests: ALREADY PASSED", out)
+        self.assertNotIn("ALREADY IN SYNC  -", out)   # (no box of its own: its block says it)
+        # the NAS out of reach: the Sync block says so, red, with what ssh said; the checks run all the same
+        rc, out = tnsync("-y", NAS_DOWN="1")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("Sync to nas.example: CAN'T CONNECT: NOTHING COPIED (ssh: connect to host nas.example: timed out)", out)
+        self.assertIn("Current Tests: PASSED", out)
+        # a failing check with --tests-first: nothing copied; without -y: no restart, and no question
+        with open(os.path.join(project, "app", "code.py"), "w", encoding="utf-8") as fh:
+            fh.write("two\n")
+        settings(failing=True)
+        rc, out = tnsync("--tests-first")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(_read(os.path.join(nas, "app", "code.py"), encoding="utf-8"), "one\n")
+        self.assertIn("Sync to nas.example: NOT RUN: CURRENT TESTS DIDN'T PASS", out)
+        self.assertIn("\nthe failure\n", out)
+        self.assertIn("\nLocal Copy", out)   # (the board's header)
+        settings()
+        rc, out = tnsync()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(_read(os.path.join(nas, "app", "code.py"), encoding="utf-8"), "two\n")
+        self.assertIn("not restarted ('tnsync local -y' restarts it)", out)
+        self.assertEqual(_read(os.path.join(folder, "restarts"), encoding="utf-8").count("\n"), 1)
 
 
 
@@ -5100,13 +5638,15 @@ class PageStructureTests(unittest.TestCase):
                 self.assertNotRegex(body, r"(margin|padding)-left\s*:\s*[1-9]", f"{sel} indents a whole row (its ⓘ would leave the column)")
 
     # Every page as the browser draws it from one /api/state answer (tests/render.js, node with a stand-in DOM).
-    def _render(self, state, page):
+    # web: the folder app.js and i18n.js are read from (the built copies: WebBuildTests); plexcache/web when not given.
+    def _render(self, state, page, web=None):
         import subprocess
         node = shutil.which("node")
         if not node:
             self.skipTest("node isn't installed")
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        got = subprocess.run([node, os.path.join(root, "tests", "render.js"), page], input=json.dumps(jsonable(state)), capture_output=True, text=True, timeout=60)
+        env = dict(os.environ, PC_WEB=web) if web else None
+        got = subprocess.run([node, os.path.join(root, "tests", "render.js"), page], input=json.dumps(jsonable(state)), capture_output=True, text=True, timeout=60, env=env)
         self.assertEqual(got.returncode, 0, got.stderr)
         return json.loads(got.stdout)
 
@@ -5368,7 +5908,7 @@ class PageStructureTests(unittest.TestCase):
         starts = [m.start() for m in re.finditer(r'<div class="ssitem cmprow', html)]
         for k, a in enumerate(starts):
             seg = html[a:starts[k + 1] if k + 1 < len(starts) else html.find('<div class="note applybox', a) if html.find('<div class="note applybox', a) > 0 else len(html)]
-            top_end = seg.index('</span></div>', seg.index('class="sswarn"')) if 'class="sswarn"' in seg else 0
+            top_end = seg.index('</div></div>', seg.index('class="sswarn"')) if 'class="sswarn"' in seg else 0
             tick = re.search(r'<input type="checkbox" data-act="tool-sel"[^>]*>', seg[:top_end])
             out.append((tick.group(0) if tick else "", seg[:top_end], seg[top_end:]))
         return out
@@ -5417,7 +5957,7 @@ class PageStructureTests(unittest.TestCase):
                     if turns:
                         self.assertRegex(rest, r'<button type="button" class="ssarrow mgarrow" data-act="tool-swap" data-tool="' + name + '"')
                     else:
-                        self.assertRegex(rest, r'<span class="ssarrow mgarrow fixed" aria-hidden="true"><span>(→|←)</span></span>')
+                        self.assertRegex(rest, r'<span class="ssarrow mgarrow fixed" aria-hidden="true"><span class="txtarrow">(→|←)</span><svg class="grapearrow" [^>]*>.*?</svg></span>')
                         self.assertNotIn("tool-swap", rest)
                     self.assertRegex(rest, r'<div class="ssnotes ssfilelist"><div class="ssfiles many"><div><span class="ssfn">1</span> ')
                     # the File n chips: grey, never yellow (a colour on a card is a check's) — but on Merge Duplicates the kept
@@ -5495,7 +6035,7 @@ class PageStructureTests(unittest.TestCase):
         self.assertNotIn("disabled", one[0])
         self.assertIn('<div class="mgdrop"><div class="mgdroplbl">File as it is now</div><div class="sscard">', one[2])  # (not greyed: its warnings to read)
         self.assertIn('<div class="mgkeep"><div class="mgkeeplbl">File after optimizing</div>', one[2])
-        self.assertIn('<span class="ssarrow mgarrow fixed" aria-hidden="true"><span>→</span></span>', one[2])
+        self.assertRegex(one[2], r'<span class="ssarrow mgarrow fixed" aria-hidden="true"><span class="txtarrow">→</span><svg class="grapearrow" [^>]*><g>')  # (right: not mirrored)
         self.assertRegex(one[2], r'class="badge b-warn sschip"[^>]*>Not optimized yet<')
         self.assertRegex(one[2], r'class="badge b-warn sschip"[^>]*>Not in the dataset’s compression<')
         self.assertRegex(one[2], r'class="badge b-pass sschip"[^>]*>Record size 1M<')                     # (right already)
@@ -6103,7 +6643,7 @@ class PageStructureTests(unittest.TestCase):
             self.fail(f"a list draws its own page links: {js[m.start() - 80:m.start() + 40]!r}")
         self.assertGreaterEqual(js.count("pager("), 5)  # (the Library files, Health items, Sync differences, a job's files)
         # the page's own span helper (for lists it holds whole) agrees with the server's
-        fn = self._js_fn("pageRanges")
+        fn = self._js_fn("plainTitle") + "\n" + self._js_fn("pageRanges")
         got = self._node(fn + "\nconsole.log(JSON.stringify(pageRanges(" + json.dumps(["Alpha", "Alps", "Amber", "Beta", "Altered Carbon · S01E01", "Altered Carbon · S01E02"]) + ", 2)));")
         self.assertEqual(got, page_ranges(["Alpha", "Alps", "Amber", "Beta", "Altered Carbon · S01E01", "Altered Carbon · S01E02"], 2))
         # three letters at most: episodes of one show across pages don't make a span of the whole title
@@ -6198,12 +6738,12 @@ class PageStructureTests(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         defs = js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES = ")]
-        tools = re.findall(r'\n    \{ page: "(\w+)", name: N\("((?:[^"\\]|\\.)*)"\),(?: short: N\("([^"]*)"\),)? icon: \'((?:[^\'\\]|\\.)+)\',', defs)
+        tools = re.findall(r'\n    \{ page: "(\w+)", name: N\("((?:[^"\\]|\\.)*)"\),(?: short: N\("([^"]*)"\),)?(?: card: N\("([^"]*)"\),)? icon: \'((?:[^\'\\]|\\.)+)\',', defs)
         nav = set(re.findall(r"(\w+): 1", re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)))
         self.assertEqual({t[0] for t in tools}, nav, "a page under the Tools nav whose definition has no icon")
-        self.assertEqual(len({t[3] for t in tools}), len(tools), "two tools share a drawing")
+        self.assertEqual(len({t[4] for t in tools}), len(tools), "two tools share a drawing")
         icons = re.search(r"\n  var ICONS = \{\n(.*?)\n  \};", js[js.index("The icons of the app's own places"):], re.S).group(1)
-        for page, _n, _s, drawing in tools:
+        for page, _n, _s, _c, drawing in tools:
             self.assertNotRegex(icons, r"^    " + page + ": ", f"{page}'s icon is in ICONS as well as in its definition")
             self.assertNotIn(drawing, icons, f"{page}'s drawing is in ICONS too")
             self.assertEqual(js.count(drawing), 1, f"{page}'s drawing appears outside its definition")
@@ -6223,10 +6763,10 @@ class PageStructureTests(unittest.TestCase):
         st = jsonable(app.state())
         st["_proc"] = {"job": app.jobs.snapshot(), "queue": app.jobs.queued(), "jobs": app.jobs.log.jobs()}
         drawn = self._render(st, "tools")
-        for page, name, short, drawing in tools:
+        for page, name, short, card, drawing in tools:
             with self.subTest(tool=page):
                 svg = '<svg class="ico pic" viewBox="0 0 24 24" aria-hidden="true">' + drawing.replace("\\'", "'") + "</svg>"
-                self.assertIn('<h2><a href="/' + page + '" data-nav>' + svg + html.escape(name, quote=False) + "</a>", drawn["html"], "the Tools page's card")
+                self.assertIn('<h2><a href="/' + page + '" data-nav>' + svg + html.escape(card or name, quote=False) + "</a>", drawn["html"], "the Tools page's card")
                 self.assertIn('href="/' + page + '" data-nav>' + svg + html.escape(short or name, quote=False) + "</a>", drawn["menu"]["sub"], "the Tools menu")
                 own = self._render(st, page)
                 self.assertRegex(own["html"], r'<h2>' + re.escape(svg) + r'[^<]+(</h2>|<button type="button" class="info")', "the page's heading")
@@ -9803,6 +10343,32 @@ class MigrateTests(unittest.TestCase):
             # kept across restarts
             self.assertEqual(migrating.Migration(app).snapshot()["state"]["step"], "done")
 
+    def test_a_pass_that_ends_at_once_still_moves(self):
+        """The last pass before the move ended before pass_then_move went on (a quick copy): the old folder is moved all the same."""
+        from plexcache import migrating
+        mig = migrating.Migration(_new_app())
+        mig.state = {"step": "switch", "folder": "/m/Books", "temp_folder": "/m/Books-new", "library": "9"}
+        moved = []
+
+        def start_copy(mirror=False):  # (the job ends before start_copy returns)
+            mig.state.update(copying=True, mirror=mirror)
+            mig.copy_finished({"result": "copied", "copied": 0})
+            return {}
+        with mock.patch.object(mig, "refresh"), mock.patch.object(mig, "blocking", return_value=[]), \
+                mock.patch.object(mig, "_folder", return_value={"same": True}), mock.patch.object(mig, "start_copy", start_copy), \
+                mock.patch.object(mig, "rename_old", lambda from_pass=False: moved.append(from_pass)):
+            mig.pass_then_move()
+        self.assertEqual(moved, [True])
+        self.assertNotIn("move_after", mig.state)                                  # used, not left for a later pass
+
+        def refused(mirror=False):
+            raise ValueError("it's queued or copying already")
+        with mock.patch.object(mig, "refresh"), mock.patch.object(mig, "blocking", return_value=[]), \
+                mock.patch.object(mig, "start_copy", refused):
+            with self.assertRaises(ValueError):
+                mig.pass_then_move()
+        self.assertNotIn("move_after", mig.state)                                  # not queued: not asked for
+
 
 class MirrorMigrationTests(unittest.TestCase):
     """Converting a mirrored folder to a child dataset (migrating.py): the folder sync over it, a conversion left partway on
@@ -10188,6 +10754,53 @@ class MirrorMigrationTests(unittest.TestCase):
         st = mig.refresh()["state"]
         self.assertNotIn("old_path", st)
         self.assertIn("isn’t there any more", en(st["corrected"]))
+
+    def test_cancelling_says_what_it_did(self):
+        """Cancel, partway: the copy stopped (the job itself, logged as cancelled), the conversion forgotten, and the page
+        says so — the folder as it was, the new dataset still there to delete or carry on from — until closed or another
+        conversion starts. A stopped copy says what Carry On Copying and Cancel do; a stopped last pass isn't "runs by itself"."""
+        app, mig, d, folder, mounted, props = self._setup(mirror=False)
+        self._ready_dataset(folder, mounted, props)
+        app.zfs = {"datasets": [{"dataset": "tank/media", "pool": "tank", "keys": ["9"]}], "pools": {}}   # (looked at)
+        mig.plan("9", folder)
+        # the copy stopped by its own Cancel: what that means, and the two ways on
+        mig.state.update(step="copy", copying=False, copy={"result": "stopped"})
+        html = PageStructureTests()._render(app.state(), "dataset")["html"]
+        self.assertIn("Copying stopped. What’s copied so far stays in tank/media/Books-new", html)
+        self.assertNotIn("Stopped: stopped", html)
+        # the last pass stopped: said, with the way to run it again
+        mig.state.update(step="switch", copying=False, copy={"result": "stopped"}, mirror=True)
+        mig.state.pop("compare", None)
+        html = PageStructureTests()._render(app.state(), "dataset")["html"]
+        self.assertIn("The last pass was stopped", html)
+        self.assertNotIn("It runs by itself once the copy is done", html)
+        # Cancel while the copy runs: the job is cancelled too, not only the optimizer told
+        mig.state.update(step="copy", copying=True, copy=None)
+        job = mock.Mock(kind="copy", state={"running": True, "folder": folder})
+        with mock.patch.object(app.jobs, "job", job), mock.patch.object(app.jobs, "cancel") as cancel:
+            told = mig.cancel()
+        cancel.assert_called_once()
+        self.assertIsNone(mig.state)
+        self.assertEqual((told["folder"], told["left"], told["copy_stopped"], told["step"]), (folder, True, True, "copy"))
+        self.assertEqual(mig.snapshot()["cancelled"]["temp_folder"], folder + "-new")
+        html = PageStructureTests()._render(app.state(), "dataset")["html"]
+        self.assertIn("Cancelled: converting", html)
+        self.assertIn("The folder is as it was", html)
+        self.assertIn("The copy was stopped.", html)
+        self.assertIn("The new dataset tank/media/Books-new is still there", html)
+        self.assertIn('data-mig="dismiss"', html)
+        self.assertIn("Pick Up This Conversion", html)                                  # (and the way to carry on from it)
+        # closed: said no more
+        self.assertIsNone(mig.dismiss()["cancelled"])
+        self.assertNotIn("Cancelled: converting", PageStructureTests()._render(app.state(), "dataset")["html"])
+        # another start clears it too; a finished conversion closed isn't a cancel
+        mig.plan("9", folder)
+        self.assertIsNotNone(mig.cancel())
+        mig.plan("9", folder)
+        self.assertIsNone(mig.snapshot()["cancelled"])
+        mig.state["step"] = "done"
+        self.assertIsNone(mig.cancel())
+        self.assertIsNone(mig.snapshot()["cancelled"])
 
     def test_what_each_side_tells_the_other(self):
         """Each side's status and marker say what it runs on, whether its TrueNAS API is connected, the conversion under
@@ -12158,6 +12771,28 @@ class MQTTTests(unittest.TestCase):
         s["nextepisode"]["libraries"] = {"2": {"start": "off", "end": "next"}}
         self.assertTrue(ha.control_availability(fake(libs=["2"]), s, {})["nextepisode_ram_percent"])
 
+    def test_discovery_keys_are_listed(self):
+        """Every key a discovery message uses is in DISCOVERY_KEYS, which dev/upkeep.py checks against each Home Assistant
+        release, and each listed one is used: so a new key is checked too, and one dropped isn't checked for nothing."""
+        from plexcache import homeassistant as ha
+        self.enable()
+        self.assertTrue(wait_for(lambda: self.app.ha.status.get("entities") and self.state() is not None, 15))
+        used = {"entity": set(), "availability": set(), "device": set(), "origin": set()}
+        for topic, raw in self.broker.retained.items():
+            if topic.endswith("/config") and raw:
+                conf = json.loads(raw)
+                used["entity"] |= set(conf)
+                used["device"] |= set(conf["device"])
+                used["origin"] |= set(conf["origin"])
+                for a in conf.get("availability") or []:
+                    used["availability"] |= set(a)
+        for where, keys in used.items():
+            self.assertEqual(keys - ha.DISCOVERY_KEYS[where], set(), f"add to DISCOVERY_KEYS[{where!r}]")
+        source = _read(ha.__file__, encoding="utf-8")
+        code = source.split("DISCOVERY_KEYS = {", 1)[0] + source.split("DISCOVERY_KEYS = {", 1)[1].split("\n}\n", 1)[1]
+        for where, keys in ha.DISCOVERY_KEYS.items():   # (each listed one in the code beside the list: configuration_url isn't published here)
+            self.assertEqual([k for k in keys if f'"{k}"' not in code and f"{k}=" not in code], [], where)
+
     def test_without_discovery(self):
         """For Node-RED and the like: just the state, availability and command topics."""
         self.enable()
@@ -13800,6 +14435,25 @@ class FutureTests(unittest.TestCase):
         p = future.pick_ffmpeg("9.0.2", True)
         self.assertEqual((p.channel, p.value, p.version.startswith("git snapshot (")), ("snapshot", future.FFMPEG_SNAPSHOT, True))
         self.assertEqual((future.pick_ffmpeg("9.0.2", False).version, future.pick_ffmpeg("9.0.2", False).channel), ("9.0.2", "stable"))
+        # the web's packages: the newest dist-tag ahead of latest (its tag the channel), else latest — in semver's order
+        self.assertLess(future.semver("11.0.0-alpha.2"), future.semver("11.0.0-beta.1"))
+        self.assertLess(future.semver("11.0.0-beta.1"), future.semver("11.0.0"))
+        self.assertLess(future.semver("11.0.0-rc.2"), future.semver("11.0.0-rc.10"))
+        p = future.pick_npm("eslint", {"latest": "10.14.0", "next": "11.0.0-alpha.1", "beta": "11.0.0-beta.2", "v9": "9.39.1", "odd": "nope"})
+        self.assertEqual((p.version, p.channel, p.why, p.value, p.kind), ("11.0.0-beta.2", "beta", "ahead of 10.14.0", "11.0.0-beta.2", "npm"))
+        p = future.pick_npm("terser", {"latest": "5.51.2", "next": "5.50.0-beta.1"})
+        self.assertEqual((p.version, p.channel, p.kind), ("5.51.2", "stable", "npm"))
+        # every package dev/package.json pins, both sections: tried here, kept current by upkeep, and checked a year ahead
+        # (dev/web.js on "futureBrowserslist", four years of browsers, when the run sets PLEXCACHE_WEB_TARGETS=future)
+        from dev import upkeep
+        pkg = json.loads(_read(os.path.join(ROOT, "dev", "package.json"), encoding="utf-8"))
+        self.assertEqual(set(upkeep.web_packages()), set(pkg["devDependencies"]) | set(pkg["dependencies"]))
+        self.assertLessEqual(set(upkeep.web_packages()), {d.name for d in upkeep.DEPS})
+        self.assertEqual(pkg["futureBrowserslist"], ["last 4 years", "not and_qq >= 1"])
+        self.assertEqual(future.WEB_TARGETS, ["-e", "PLEXCACHE_WEB_TARGETS=future"])
+        tool = _read(os.path.join(ROOT, "dev", "web.js"), encoding="utf-8")
+        self.assertIn('process.env.PLEXCACHE_WEB_TARGETS === "future" ? settings.futureBrowserslist : settings.browserslist', tool)
+        self.assertEqual(tool.count("settings.browserslist"), 1)                                   # (every use through TARGETS)
         # what the choices become: the build's arguments (the Python's tag goes apart), and the table
         picks = [future.Pick("Python", "3.16.0a2", "alpha", "", "python:3.16.0a2-slim-trixie"), future.pick_ffmpeg("9.0.2", True),
                  future.Pick("MKVToolNix", "103.0", "stable", "", "103.0"), future.Pick("oxipng", "10.2.1", "stable", "", "10.2.1"),
@@ -13812,12 +14466,18 @@ class FutureTests(unittest.TestCase):
         self.assertNotIn("FFMPEG=9.0.2", args)                                                     # (the snapshot in its place)
         self.assertFalse(any("node" in a for a in args))                                            # (node isn't the image's: mounted into the run)
         self.assertIn("libjpeg-turbo  3.2.90", future.table(picks))
+        wide = future.table(picks + [future.Pick("stylelint-no-unsupported-browser-features", "8.1.2", "stable", "", "8.1.2", "npm")])
+        self.assertIn("libjpeg-turbo" + " " * 29 + "3.2.90", wide)                                  # (the names' column as wide as the longest)
         # the Dockerfile takes the snapshot: FFMPEG_SOURCE in place of the release's URL, FFMPEG_STAMP in the layer
         df = _read(os.path.join(ROOT, "Dockerfile"), encoding="utf-8")
         for word in ('ARG FFMPEG_SOURCE=""', 'ARG FFMPEG_STAMP=""', "${FFMPEG_SOURCE:-https://ffmpeg.org/releases/ffmpeg-${FFMPEG}.tar.xz}", "${FFMPEG_STAMP}", "bzip2"):
             self.assertIn(word, df, word)
         stage = df[df.index("AS ffmpeg"):df.index("FROM python:${PYTHON_TAG}\n")]
         self.assertTrue("ARG FFMPEG_SOURCE" in stage and "ARG FFMPEG_STAMP" in stage)              # (declared in the stage that uses them)
+        # the release fetched again when ffmpeg.org doesn't answer, then from FFmpeg's mirror on GitHub (the release's tag)
+        self.assertIn("--retry 3 --retry-delay 10 --retry-all-errors", stage)
+        self.assertIn("https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n${FFMPEG}.tar.gz", stage)
+        self.assertLess(stage.index("https://ffmpeg.org/releases/"), stage.index("https://github.com/FFmpeg/FFmpeg/"))
         # the day's choices, as upkeep reports them
         from dev import upkeep
         with tempfile.TemporaryDirectory() as d, mock.patch.object(upkeep, "FUTURE", os.path.join(d, "future.json")):
@@ -13825,25 +14485,39 @@ class FutureTests(unittest.TestCase):
             with open(os.path.join(d, "future.json"), "w", encoding="utf-8") as fh:
                 json.dump({"at": time.time(), "key": "3.16 trixie arm64", "picks": [vars(p) for p in picks[:2]]}, fh)
             self.assertEqual(upkeep.future_track(), "Python 3.16.0a2 (alpha), ffmpeg " + picks[1].version + " (snapshot)")
+            npm = [future.pick_npm("eslint", {"latest": "10.14.0", "next": "11.0.0-alpha.1"}), future.pick_npm("terser", {"latest": "5.51.2"})]
+            with open(os.path.join(d, "future.json"), "w", encoding="utf-8") as fh:
+                json.dump({"at": time.time(), "key": "3.16 trixie arm64", "picks": [vars(p) for p in picks[:2] + npm]}, fh)
+            self.assertEqual(upkeep.future_track(), "Python 3.16.0a2 (alpha), ffmpeg " + picks[1].version + " (snapshot), "
+                                                    "2 Node packages at their newest, of them eslint 11.0.0-alpha.1 (next)")
 
 
-class CssBuildTests(unittest.TestCase):
-    """The app's CSS (dev/css.js, its settings in dev/package.json): written without browser prefixes (-webkit-, -moz-, -ms-,
-    -o-) and passing Stylelint; built for the image by Autoprefixer, which adds the prefixes its targets need, and cssnano."""
+class WebBuildTests(unittest.TestCase):
+    """The web app's CSS, scripts and pages (dev/web.js, its settings in dev/package.json): the CSS written without browser
+    prefixes (-webkit-, -moz-, -ms-, -o-) and passing Stylelint, the scripts ESLint, the pages and the HTML the app draws
+    html-validate — each with its recommended (html-validate: standard) checks and no feature a target lacks, but the few
+    the pages can do without ("graceful"), the CSS's in what postcss-preset-env makes of it for the targets; built for the
+    image: the CSS by postcss-preset-env (the newer features the targets lack, rewritten), Autoprefixer (the prefixes they
+    need) and cssnano, the scripts by Terser, the pages by html-minifier-terser. One floor of target browsers for all three: every
+    browser out in the last five years ("browserslist"), which moves on by itself."""
 
     VENDOR = re.compile(r"(?<![\w-])-(?:webkit|moz|ms|o)-[a-z]")
+    SCRIPTS = ("app.js", "decor.js", "i18n.js", "login.js")
 
-    def _css_js(self, *args):
+    def _web_js(self, *args):
         node = shutil.which("node")
         if not node:
             self.skipTest("node isn't installed")
         dev = os.path.join(ROOT, "dev")
-        for package in json.loads(_read(os.path.join(dev, "package.json"), encoding="utf-8"))["devDependencies"]:
+        for package in [*self._settings()["devDependencies"], *self._settings()["dependencies"]]:
             self.assertTrue(os.path.isdir(os.path.join(dev, "node_modules", package)), f"{package} isn't installed: npm ci --prefix dev")
         import subprocess
-        return subprocess.run([node, os.path.join(dev, "css.js"), *args], capture_output=True, text=True, timeout=120)
+        return subprocess.run([node, os.path.join(dev, "web.js"), *args], capture_output=True, text=True, timeout=180)
 
-    def test_css_has_no_browser_prefixes(self):
+    def _settings(self):
+        return json.loads(_read(os.path.join(ROOT, "dev", "package.json"), encoding="utf-8"))
+
+    def test_web_has_no_browser_prefixes(self):
         """Not in the stylesheets, not in the pages' or scripts' own styles, not in the themes' CSS (served at /theme.css)."""
         from plexcache import themes
         web = os.path.join(ROOT, "plexcache", "web")
@@ -13856,57 +14530,876 @@ class CssBuildTests(unittest.TestCase):
         for n, line in enumerate(themes.css({}).splitlines(), 1):
             if self.VENDOR.search(line):
                 found.append(f"/theme.css:{n}: {line.strip()[:120]}")
-        self.assertEqual(found, [], "a browser prefix written by hand: leave it to Autoprefixer (dev/css.js)")
+        self.assertEqual(found, [], "a browser prefix written by hand: leave it to Autoprefixer (dev/web.js)")
 
-    def test_css_passes_stylelint(self):
-        """Stylelint on plexcache/web/*.css, with dev/package.json's rules: its recommended ones, and no browser prefixes."""
-        got = self._css_js("lint")
+    def test_web_passes_its_checks(self):
+        """dev/web.js lint: Stylelint on plexcache/web/*.css, ESLint on plexcache/web/*.js and the script the server makes
+        (/theme.js), html-validate on plexcache/web/*.html and every page as the app draws it, with dev/package.json's
+        settings: every recommended check of each (none turned off), no browser prefixes, and no feature a target lacks
+        (stylelint-no-unsupported-browser-features, eslint-plugin-compat, MDN's data) but the graceful ones."""
+        from plexcache import themes
+        web = os.path.join(ROOT, "plexcache", "web")
+        self.assertEqual(sorted(n for n in os.listdir(web) if n.endswith(".js")), sorted(self.SCRIPTS))  # (a new one: ship it built too)
+        with tempfile.TemporaryDirectory() as d:
+            theme = os.path.join(d, "theme.js")
+            with open(theme, "w", encoding="utf-8") as fh:
+                fh.write(themes.script({}))
+            pages, drawn, app = PageStructureTests(), [], _new_app()
+            for when in ("checking", "checked"):
+                app.checking = app.testing = when == "checking"
+                state = app.state()
+                for page in PageStructureTests.PAGES_DRAWN:
+                    drawn.append(os.path.join(d, f"{page}-{when}.html"))
+                    with open(drawn[-1], "w", encoding="utf-8") as fh:
+                        fh.write(pages._render(state, page)["html"])
+            got = self._web_js("lint", theme, *drawn, *[os.path.join(web, n) for n in sorted(os.listdir(web)) if n.endswith((".css", ".js", ".html"))])
         self.assertEqual(got.returncode, 0, got.stderr)
-        rules = json.loads(_read(os.path.join(ROOT, "dev", "package.json"), encoding="utf-8"))["stylelint"]["rules"]
+        self.assertIn("pass Stylelint", got.stderr)
+        self.assertIn("5 file(s) pass ESLint", got.stderr)
+        self.assertIn(f"{len(drawn) + 2} file(s) pass html-validate", got.stderr)
+        settings = self._settings()
+        config = settings["stylelint"]
+        rules = config["rules"]
+        self.assertEqual(config["extends"], ["stylelint-config-recommended"])
+        self.assertEqual({r: v for r, v in rules.items() if v in (None, False)}, {}, "a Stylelint rule turned off")
         for rule in ("property-no-vendor-prefix", "value-no-vendor-prefix", "selector-no-vendor-prefix",
                      "media-feature-name-no-vendor-prefix", "at-rule-no-vendor-prefix"):
             self.assertIs(rules.get(rule), True, rule)
+        config = settings["eslint"]
+        self.assertEqual(config["extends"], ["@eslint/js:recommended", "eslint-plugin-compat:flat/recommended"])
+        off = lambda v: (v[0] if isinstance(v, list) else v) in ("off", 0)
+        self.assertEqual({r: v for r, v in config["rules"].items() if off(v)}, {}, "an ESLint rule turned off")
+        tool = _read(os.path.join(ROOT, "dev", "web.js"), encoding="utf-8")
+        self.assertIn("lintAllEsApis: true", tool)                       # (the language's own features checked too, not only the DOM's)
+        self.assertIn("browserslistOpts: { path: __dirname }", tool)    # (the same targets as the CSS)
+        config = settings["htmlvalidate"]
+        self.assertEqual(config["extends"], ["html-validate:standard"])
+        self.assertEqual({r: v for r, v in config["rules"].items() if off(v)}, {}, "an html-validate rule turned off")
+        self.assertIn('"web-compat/compat": "error"', tool)
+        self.assertIn('"plugin/no-unsupported-browser-features": [true, { ignorePartialSupport: true, ignore: graceful }]', tool)
+
+    def test_web_targets(self):
+        """The floor: every browser version out in the last five years, a window that moves on by itself (November 2026:
+        Safari 15.2 and iOS 15.2, Chrome and Edge 96, Firefox 95) — one age for every browser, so the CSS, scripts and pages
+        hold to the same ones. QQ Browser is left out (caniuse's data for it: an old engine, no min())."""
+        self.assertEqual(self._settings()["browserslist"], ["last 5 years", "not and_qq >= 1"])
+        # what the targets lack, the pages can do without: these only, each with why (a new one is a choice, made here; one
+        # the window has passed — the check no longer finds it — comes out)
+        graceful = self._settings()["graceful"]
+        self.assertEqual(set(graceful), {"css-focus-visible", "css-has", "css3-cursors", "css-touch-action",
+                                         "html.global_attributes.autofocus", "html.global_attributes.autocapitalize",
+                                         "html.elements.img.loading"})
+        for feature, why in graceful.items():
+            self.assertGreater(len(why), 20, feature)
+        # what an old Safari can't read throws out a whole rule: a selector it lacks (:focus-visible before 15.4, :has()
+        # before 15.4) never shares a rule with others, so the rest still apply there (cssnano, told the targets, keeps them apart)
+        css = re.sub(r"/\*.*?\*/", "", _read(os.path.join(ROOT, "plexcache", "web", "app.css"), encoding="utf-8"), flags=re.S)
+        for m in re.finditer(r"([^{}]+)\{", css):
+            sels = [s.strip() for s in m.group(1).split(",")]
+            if len(sels) > 1 and not m.group(1).lstrip().startswith("@"):
+                for s in sels:
+                    self.assertNotRegex(s, r":focus-visible|:has\(", f"{m.group(1).strip()}: a newer selector with others in one rule")
 
     def test_css_builds_cleanly_for_its_targets(self):
-        """Autoprefixer runs on app.css with no warnings (a property it can't prefix as written, an old syntax) and only adds
-        to it; minified, it's smaller. The image build runs it and ships what it makes; GitHub installs it for these tests."""
+        """postcss-preset-env and Autoprefixer run on app.css with no warnings (a property Autoprefixer can't prefix as
+        written, an old syntax) and only add to it: every declaration written is in what's built, in its order, with the
+        prefixes and the fallbacks for the older targets beside them; minified, it's smaller. The image build runs it and
+        ships what it makes; GitHub installs it for these tests."""
         src = os.path.join(ROOT, "plexcache", "web", "app.css")
         css = _read(src, encoding="utf-8")
         with tempfile.TemporaryDirectory() as d:
             prefixed, built = os.path.join(d, "prefixed.css"), os.path.join(d, "built.css")
-            got = self._css_js("build", "--no-minify", src, prefixed)
+            got = self._web_js("build", "--no-minify", src, prefixed)
             self.assertEqual(got.returncode, 0, got.stderr)
-            got = self._css_js("build", src, built)
+            got = self._web_js("build", src, built)
             self.assertEqual(got.returncode, 0, got.stderr)
             prefixed, built = _read(prefixed, encoding="utf-8"), _read(built, encoding="utf-8")
-        # what Autoprefixer adds is prefixed declarations (or a prefixed copy of a value): taken out again, it's the source
-        strip = lambda text: re.sub(r"(?<=[{;])\s*[\w-]+:\s*-(?:webkit|moz|ms|o)-[^;{}]*;|(?<=[{;])\s*-(?:webkit|moz|ms|o)-[\w-]+:[^;{}]*;", "", text)
-        self.assertEqual(strip(prefixed), strip(css))
+        # every declaration written, in order, in what's built: what the build adds (a prefixed copy, a fallback an older
+        # target reads) goes beside them, and none is dropped or changed
+        decls = lambda text: [re.sub(r"\s+", " ", d).strip() for d in re.findall(r"(?<=[{;])\s*([\w-]+\s*:[^;{}]*?)\s*(?=[;}])", re.sub(r"/\*.*?\*/", "", text, flags=re.S))]
+        written, out, at = decls(css), decls(prefixed), 0
+        self.assertGreater(len(written), 1000)
+        for decl in written:
+            self.assertIn(decl, out[at:], "dropped or changed by the build")
+            at = out.index(decl, at) + 1
         self.assertLess(len(built), len(css))
         self.assertEqual(self.VENDOR.findall(built) != [], self.VENDOR.findall(prefixed) != [])  # (minifying keeps the prefixes)
-        self.assertTrue(json.loads(_read(os.path.join(ROOT, "dev", "package.json"), encoding="utf-8"))["browserslist"])
-        # the image ships the built copy, made from the same files; GitHub's test job installs the packages for these tests
+        for m in re.finditer(r"([^{}]+)\{", built):  # (and the rules a target would throw out whole stay apart)
+            if "," in m.group(1) and not m.group(1).startswith("@"):
+                self.assertNotRegex(m.group(1), r":focus-visible|:has\(", m.group(1))
+
+    def test_css_is_checked_as_written_and_as_the_targets_get_it(self):
+        """The CSS's two checks (dev/web.js lint): as written, Stylelint's own (a prefix written by hand is found), and as the
+        oldest targets get it, after postcss-preset-env: a newer feature it rewrites for them passes (nesting, the media
+        range syntax, lab and oklch colours), one it can't is found, at the line it's written on (container queries)."""
+        with tempfile.TemporaryDirectory() as d:
+            ok, bad = os.path.join(d, "ok.css"), os.path.join(d, "bad.css")
+            with open(ok, "w", encoding="utf-8") as fh:
+                fh.write(".a {\n  color: oklch(60% 0.15 30);\n  & .b { margin: 0; }\n}\n@media (width >= 600px) {\n  .c { color: lab(50% 20 30); }\n}\n")
+            with open(bad, "w", encoding="utf-8") as fh:
+                fh.write(".a { color: red; }\n.b { -webkit-appearance: none; }\n\n@container (min-width: 400px) {\n  .c { color: red; }\n}\n")
+            got = self._web_js("lint", ok)
+            self.assertEqual(got.returncode, 0, got.stderr)
+            got = self._web_js("lint", bad)
+        self.assertEqual(got.returncode, 1, got.stderr)
+        found = [line for line in got.stderr.splitlines() if "bad.css:" in line]
+        self.assertEqual(len(found), 2, got.stderr)
+        self.assertRegex(found[0], r"bad\.css:2:\d+: .*property-no-vendor-prefix")
+        self.assertRegex(found[1], r"bad\.css:4:1: .*css-container-queries")
+
+    def test_scripts_and_pages_build_and_draw_the_same(self):
+        """Terser minifies every script with no error, smaller; the built app.js and i18n.js draw every page as the source
+        does (tests/render.js on both). The pages minify smaller, their text and tags as they were. The image ships the built
+        copies; GitHub installs the packages for these tests."""
+        web = os.path.join(ROOT, "plexcache", "web")
+        with tempfile.TemporaryDirectory() as d:
+            for name in self.SCRIPTS:
+                got = self._web_js("build", os.path.join(web, name), os.path.join(d, name))
+                self.assertEqual(got.returncode, 0, got.stderr)
+                self.assertLess(os.path.getsize(os.path.join(d, name)), os.path.getsize(os.path.join(web, name)), name)
+            got = self._web_js("build", "--no-minify", os.path.join(web, "login.js"))  # (not minified: as written)
+            self.assertEqual(got.returncode, 0, got.stderr)
+            self.assertEqual(got.stdout, _read(os.path.join(web, "login.js"), encoding="utf-8"))
+            pages = PageStructureTests()
+            state = _new_app().state()
+            for page in PageStructureTests.PAGES_DRAWN:
+                with self.subTest(page=page):
+                    self.assertEqual(pages._render(state, page, web=d), pages._render(state, page))
+            words = lambda html: re.sub(r"\s+", " ", re.sub(r">\s+<", "><", html)).strip()
+            for name in ("index.html", "login.html"):
+                got = self._web_js("build", os.path.join(web, name), os.path.join(d, name))
+                self.assertEqual(got.returncode, 0, got.stderr)
+                src, built = _read(os.path.join(web, name), encoding="utf-8"), _read(os.path.join(d, name), encoding="utf-8")
+                self.assertLess(len(built), len(src), name)
+                self.assertEqual(re.findall(r"<(\w+)", built), re.findall(r"<(\w+)", src), name)           # (every tag kept)
+                self.assertEqual(re.sub(r"<[^>]*>", "", words(built)).split(), re.sub(r"<[^>]*>", "", words(src)).split(), name)
+        # the image ships the built copies, made from the same files
         docker = _read(os.path.join(ROOT, "Dockerfile"), encoding="utf-8")
-        self.assertIn("RUN node dev/css.js build plexcache/web/app.css plexcache/web/app.css", docker)
-        self.assertIn("COPY --from=css /css/plexcache/web/app.css /app/plexcache/web/app.css", docker)
-        self.assertLess(docker.index("COPY plexcache /app/plexcache"), docker.index("COPY --from=css /css/plexcache/web/app.css"))
+        self.assertIn("RUN for f in plexcache/web/*.css plexcache/web/*.js plexcache/web/*.html; do node dev/web.js build \"$f\" \"$f\" || exit 1; done", docker)
+        self.assertIn("COPY plexcache/web/*.css plexcache/web/*.js plexcache/web/*.html plexcache/web/", docker)
+        self.assertIn("COPY --from=web /web/plexcache/web/ /app/plexcache/web/", docker)
+        self.assertLess(docker.index("COPY plexcache /app/plexcache"), docker.index("COPY --from=web /web/plexcache/web/"))
         self.assertIn("npm ci --prefix dev", _read(os.path.join(ROOT, ".github", "workflows", "build.yml"), encoding="utf-8"))
+
+
+class StyleGuideTests(unittest.TestCase):
+    """The style guide (dev/style.py, dev/style-guide.json): every look the app wears — each CSS rule, inline style,
+    drawing, decoration, theme colour, font, image — is one the maintainer approved from a sample. A look that's new,
+    changed or gone fails here until they see its sample (dev/style.py sample) and approve it at a terminal
+    (dev/style.py approve). Nobody else writes the guide: never approve, edit the guide or loosen this test without the
+    maintainer's express OK (CLAUDE.md)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("style_tool", os.path.join(ROOT, "dev", "style.py"))
+        assert spec and spec.loader
+        cls.style = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.style)
+        cls.now = cls.style.looks()
+
+    def test_every_look_is_in_the_style_guide(self):
+        found = self.style.problems(now=self.now)
+        self.assertEqual(found, [], "Looks the style guide (dev/style-guide.json) doesn't have, or has otherwise. Each needs "
+                         "the maintainer's OK: run python3 dev/style.py sample and show them dev/style-sample/index.html; "
+                         "only they run python3 dev/style.py approve. Don't edit the guide or this test.")
+
+    def test_the_guide_holds_every_kind_of_look(self):
+        kinds = {k.split(" ")[0] for k in self.style.load_guide()["looks"]}
+        self.assertEqual(kinds, {"css", "inline", "scripted", "svg", "mark", "theme", "file"})
+        g = self.style.load_guide()["looks"]
+        for look in ("css .btn.pri", "css @media (prefers-reduced-motion:reduce) | .mvine .ripen", "theme dionysus/light lost",
+                     "theme dionysus decor grapes", "mark themes.py css",
+                     "file plexcache/web/theatre.svg", "file plexcache/web/fonts/cinzel-latin.woff2", "inline font-size:13px"):
+            self.assertIn(look, g)
+        self.assertTrue(any(k.startswith('svg <svg class="grapearrow"') for k in g))
+        # what decor.js draws, not its code: a card's vine, the progress bars' grapes, the film, the seam's vine, the spots
+        drawn = [k for k in g if k.startswith("mark decor.js draws | ")]
+        for part in ("| vine at", "| mvine at", "| edgevine at", "| filmline at", "| seamvine", "| style"):
+            self.assertTrue(any(part in k for k in drawn), part)
+        self.assertFalse(any(k.startswith("mark decor.js ") and not k.startswith("mark decor.js draws | ") for k in g))
+
+    def test_decor_js_is_judged_by_what_it_draws(self):
+        """A change to decor.js's code that draws the same is no new look; one that draws otherwise is."""
+        s = self.style
+        src = _read(os.path.join(ROOT, "plexcache", "web", "decor.js"), encoding="utf-8")
+        now = {k: v for k, v in self.now.items() if k.startswith("mark decor.js ")}
+        self.assertTrue(now)
+        with tempfile.TemporaryDirectory() as tmp:
+            def drawn(text):
+                path = os.path.join(tmp, "decor.js")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                return s.drawn_looks(path, "decor.js")
+            self.assertEqual(drawn(src.replace("function ease(", "/* the same, said again */ function ease(", 1) + "\n// a note\n"), now)
+            wider = drawn(src.replace('stroke="var(--vine)" stroke-width="1.2"', 'stroke="var(--vine)" stroke-width="2"', 1))
+            self.assertNotEqual(wider, now)
+            self.assertEqual(set(wider), set(now))   # the same places: only the cards' vines are drawn otherwise
+
+    def test_a_new_or_changed_look_is_found(self):
+        s = self.style
+        css = s.css_looks(".a{color:red}\n/* a note */.b , .c > d{ margin : 0 ; }\n@media (max-width: 600px){.a{color:blue}}"
+                          "@keyframes spin{from{opacity:0}to{opacity:1}}")
+        self.assertEqual(css, {"css .a": "color:red", "css .b,.c>d": "margin:0", "css @media (max-width:600px) | .a": "color:blue",
+                               "css @keyframes spin": "from{opacity:0}to{opacity:1}"})
+        self.assertEqual(s.css_looks(".a{color:red}.a{gap:1px}"), {"css .a": "color:red ‖ gap:1px"})   # a selector twice: both
+        js = s.script_looks("var x = '<div style=\"width:' + pct(a) + '%; color: red\"></div>';\n"
+                            "el.style.opacity = '0'; if (el.style.top === '') el.style.setProperty('--w', '1px');\n"
+                            "svg += '<path d=\"M0 0H' + w + '\" fill=\"var(--leaf)\"/>';")
+        self.assertEqual(set(js), {"inline width:…%;color:red", "scripted opacity", "scripted --w", 'svg <path d="M0 0H…" fill="var(--leaf)"/>'})
+        page = s.page_looks('<p style="margin:0">x</p><svg viewBox="0 0 4 4">\n<path d="M0 0"/></svg><style>.z{gap:0}</style>', "x.html")
+        self.assertEqual(set(page), {"inline margin:0", 'svg <svg viewBox="0 0 4 4"> <path d="M0 0"/></svg>', "css x.html | .z"})
+        marks = s.mark_looks("(function () {\n  var a = 1; // a note\n  function f(x) {\n    return x * 2;\n  }\n})();", "d.js")
+        self.assertEqual(set(marks), {"mark d.js (start)", "mark d.js a", "mark d.js f"})
+        py = s.py_marks('def f(x):\n    """What it does."""\n    # a note\n    return f"{x}#"  # another\n\ndef g():\n    pass\n', "m.py", ("f",))
+        self.assertEqual(py, {"mark m.py f": 'def f(x): return f"{x}#"'})   # (the source, not ast.unparse: the same on every Python)
+        diff = s.compare({"css .a": "color:red", "css .gone": "gap:0", "inline margin:0": ""},
+                         {"css .a": "color:blue", "inline margin:0": "", "inline margin:1px": ""})
+        self.assertEqual(diff, {"new": {"inline margin:1px": ""}, "changed": {"css .a": ["color:red", "color:blue"]}, "gone": {"css .gone": "gap:0"}})
+        guide = {"format": s.FORMAT, "looks": {"css .a": "color:red"}, "seal": s.seal({"css .a": "color:red"})}
+        self.assertEqual(s.problems(guide, {"css .a": "color:red"}), [])
+        self.assertEqual(s.problems(guide, {"css .a": "color:red", "css .b": "gap:0"}), ["new: css .b"])
+        self.assertEqual(s.problems(guide, {"css .a": "color:pink"}), ["changed: css .a"])
+        self.assertEqual(s.problems(guide, {}), ["gone: css .a"])
+
+    def test_a_guide_edited_by_hand_fails(self):
+        s = self.style
+        guide = s.load_guide()
+        guide["looks"]["css .sneaked-in"] = "color:red"
+        self.assertIn("wasn't written by dev/style.py approve", s.problems(guide, dict(guide["looks"]))[0])
+
+    def test_approve_takes_a_terminal_a_sample_of_these_looks_and_a_yes(self):
+        s = self.style
+        with tempfile.TemporaryDirectory() as tmp:
+            path, out = os.path.join(tmp, "guide.json"), os.path.join(tmp, "sample")
+            os.makedirs(out)
+            before = {"css .a": "color:red", "css .gone": "gap:0"}
+            now = {"css .a": "color:blue", "css .new": "gap:1px"}
+            s.write_guide(before, {"date": "2026-01-01", "sample": "x", "looks": 2}, path, {})
+            asked = []
+
+            def run(answer="approve", terminal=True):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    return s.approve(out, ask=lambda q: asked.append(q) or answer, terminal=terminal, guide_path=path, now=now)
+
+            self.assertEqual(run(terminal=False), 2)                     # not at a terminal: never
+            self.assertEqual(run(), 1)                                   # no sample
+            fp = s.fingerprint(s.compare(before, now))
+            for f in ("index.html", "look0.png"):
+                with open(os.path.join(out, f), "w") as fh:
+                    fh.write("x")
+            with open(os.path.join(out, "sample.json"), "w") as fh:
+                json.dump({"fingerprint": "0" * 64, "shots": ["look0.png"]}, fh)
+            self.assertEqual(run(), 1)                                   # a sample of other looks
+            with open(os.path.join(out, "sample.json"), "w") as fh:
+                json.dump({"fingerprint": fp, "shots": ["look0.png", "look1.png"]}, fh)
+            self.assertEqual(run(), 1)                                   # a sample missing a picture
+            with open(os.path.join(out, "sample.json"), "w") as fh:
+                json.dump({"fingerprint": fp, "shots": ["look0.png"]}, fh)
+            self.assertEqual(asked, [])
+            self.assertEqual(run("no"), 1)                               # the maintainer says no
+            self.assertEqual(s.load_guide(path)["looks"], before)
+            self.assertEqual(run(), 0)                                   # ...and yes
+            g = s.load_guide(path)
+            self.assertEqual(g["looks"], now)
+            self.assertEqual(s.problems(g, now), [])
+            self.assertEqual([a["sample"] for a in g["approvals"]], ["x", fp])
+            self.assertEqual(len(asked), 2)
+
+    def test_the_sample_finds_each_look_on_the_demo(self):
+        s = self.style
+        self.assertEqual(s.finder("css .btn.pri:hover,.btn:focus-visible::after", ""),
+                         {"how": "selector", "selectors": [".btn.pri", ".btn"], "width": 1280})
+        self.assertEqual(s.finder("css @media (max-width:760px) | .shell", "")["width"], 750)
+        self.assertEqual(s.finder("css @keyframes ripen", "")["how"], "code")
+        pat = s.finder("inline width:…%;background:var(--c-tv)", "")["pattern"]
+        self.assertRegex("width:12.5%;background:var(--c-tv)", pat)
+        self.assertNotRegex("width:12.5%", pat)
+        self.assertEqual(s.finder('svg <svg class="grapearrow" viewBox="0 0 64 64">', "")["selectors"], ["svg.grapearrow"])
+        self.assertEqual(s.finder("theme dionysus/dark wine", "#B5558A")["how"], "pages")
+        self.assertEqual(s.finder("file plexcache/web/theatre.svg", "")["how"], "image")
+        self.assertEqual(s.app_pages()[:2], ["health", "caching"])
+        # the pictures: Playwright, in all four looks, on every page; the dev tools' shared progress bar
+        js = _read(os.path.join(ROOT, "dev", "style-sample.js"), encoding="utf-8")
+        self.assertIn('require("playwright")', js)
+        self.assertEqual(s.LOOKS, [("classic", "light"), ("classic", "dark"), ("dionysus", "light"), ("dionysus", "dark")])
+        src = _read(os.path.join(ROOT, "dev", "style.py"), encoding="utf-8")
+        self.assertIn("from progress import Progress", src)
+        self.assertIn('_dev("i18n_tool", "i18n.py")', src)               # the translations' JavaScript tokenizer, shared
+        self.assertIn("dev/style-sample/", _read(os.path.join(ROOT, ".gitignore"), encoding="utf-8"))
+
+    def test_the_sample_shows_each_change_before_and_after(self):
+        """The sample puts Before (as approved) and After (now) side by side, only where they differ: a look that drew
+        the same everywhere is set aside, one drawn on no demo page is judged by its code."""
+        s = self.style
+        items = [{"id": i, "state": "changed", "look": f"css .l{i}", "was": "gap:0", "now": "gap:1px", "find": {"how": "selector"}}
+                 for i in range(4)]
+        pair = lambda label, same: {"label": label, "before": label + "-b.png", "after": label + "-a.png", "same": same,  # noqa: E731
+                                    "diff": None if same else label + "-d.png"}
+        shots = {"0": [pair("Classic light", True), pair("Dionysus light", True)],     # the same everywhere
+                 "1": [pair("Classic light", True), pair("Dionysus light", False)],    # different in Dionysus
+                 "2": [pair("Dionysus light", False)]}                                 # the same picture as 1's
+        got = s.sort_looks(items, shots, True)
+        self.assertEqual([it["id"] for it in got["same"]], [0])
+        self.assertEqual([it["id"] for it in got["code"]], [3])
+        self.assertEqual([[it["id"] for it in g["items"]] for g in got["seen"]], [[1, 2]])
+        self.assertEqual([p["label"] for p in got["seen"][0]["pairs"]], ["Dionysus light"])
+        self.assertEqual(got["seen"][0]["alike"], ["Classic light"])
+        self.assertEqual([[it["id"] for it in g["items"]] for g in s.sort_looks(items, shots, False)["seen"]],
+                         [[0, 1], [2]])                                            # no Before: all of it, as it is now
+        with tempfile.TemporaryDirectory() as tmp:
+            counts = s._page(tmp, items, shots, "f" * 64, None, True, "dev/style-approved.zip")
+            self.assertEqual(counts, {"seen": 2, "code": 1, "same": 1})
+            page = _read(os.path.join(tmp, "index.html"), encoding="utf-8")
+            self.assertIn('<figcaption class="side">Before</figcaption>', page)
+            self.assertIn('<figcaption class="side after">After</figcaption>', page)
+            # the slider: both pictures by name, loaded with the page (a lazy one, hidden, would never load)
+            slider = page[page.index('<div class="slider"'):]
+            self.assertIn('<img src="Dionysus light-a.png" alt="After">', slider)
+            self.assertIn('src="Dionysus light-b.png" alt="Before" style=', slider)
+            self.assertNotIn("{", slider.split("</div></div>")[0])
+            self.assertNotIn("Classic light-a.png", page.split('<details class="same">')[0])   # (no picture of what's alike)
+            self.assertIn("css .l0", page.split('<details class="same">')[1])
+        # a look seen on whole pages is judged against its own file where it can be
+        self.assertEqual(s.judged_by("theme dionysus/dark wine", []), {"only": ["/theme.css", "/theme.js"]})
+        self.assertEqual(s.judged_by("file plexcache/web/theatre.svg", []), {"only": ["/static/theatre.svg"]})
+        self.assertEqual(s.judged_by("mark decor.js draws | x", ["plexcache/web/logo.svg"]), {"except": ["/static/logo.svg", *s.WORDS]})
+        # the Before's words are today's (a reworded title isn't a difference): a stylesheet's rule is judged on today's
+        # pages; a look written in a page or script comes with its own words, the whole Before
+        self.assertEqual(s.cropped_by("css .card h2"), {"except": s.WORDS})
+        self.assertIsNone(s.cropped_by("svg <svg class=\"x\">…</svg>"))
+        self.assertTrue({"document", "/static/app.js", "/static/i18n/"} <= set(s.WORDS))
+        # a new image's Before is the one it's a variant of
+        self.assertEqual(s.stands_in("plexcache/web/theatre-light.svg", ROOT), "plexcache/web/theatre.svg")
+        self.assertIsNone(s.stands_in("plexcache/web/brand-new.svg", ROOT))
+
+    def test_words_are_not_a_look(self):
+        """What the app says is content, not style: rewording a title, a label or a tooltip needs no approval. Text with a
+        letter in it is "…" in every look (between tags, the attributes people read, a stylesheet's content); text
+        without one (…%, an arrow) is drawing, and stays."""
+        s = self.style
+        a = s.page_looks('<svg class="ic" aria-label="Sign out"><title>Sign out</title><text>42%</text></svg>', "x.html")
+        b = s.page_looks('<svg class="ic" aria-label="Log off"><title>Log off now</title><text>42%</text></svg>', "x.html")
+        self.assertEqual(a, b)
+        self.assertEqual(list(a), ['svg <svg class="ic" aria-label="…"><title>…</title><text>42%</text></svg>'])
+        self.assertNotEqual(a, s.page_looks('<svg class="ic2" aria-label="Sign out"><title>Sign out</title><text>42%</text></svg>', "x.html"))
+        self.assertEqual(s.css_looks('.a::before{content:"Loading";color:red}'), s.css_looks('.a::before{content:"Wait";color:red}'))
+        self.assertNotEqual(s.css_looks('.a::before{content:"\\2192"}'), s.css_looks('.a::before{content:"\\2190"}'))   # (a glyph: drawing)
+        self.assertEqual(s.compare(s.load_guide()["looks"], {k: v for k, v in s.load_guide()["looks"].items()}),
+                         {"new": {}, "changed": {}, "gone": {}})
+
+    def test_looks_at_one_spot_are_one_change(self):
+        """Several rules that make one change (a vine's place, size and colour) photographed at the same spot: one card,
+        showing the biggest crop on each page and listing every look; a look elsewhere on the page keeps its own."""
+        s = self.style
+
+        def pair(label, x, y, w, h, name):
+            return {"label": label, "before": name + "-b.png", "after": name + "-a.png", "diff": None,
+                    "clip": {"x": x, "y": y, "width": w, "height": h}}
+        groups = [{"pairs": [pair("light", 0, 0, 640, 200, "a"), pair("dark", 0, 0, 640, 200, "a2")], "items": [{"id": 1}], "alike": []},
+                  {"pairs": [pair("light", 0, 50, 640, 400, "b"), pair("dark", 0, 50, 640, 400, "b2")], "items": [{"id": 2}], "alike": ["x"]},
+                  {"pairs": [pair("light", 0, 900, 640, 200, "c")], "items": [{"id": 3}], "alike": []}]
+        got = s.one_spot(groups)
+        self.assertEqual([[it["id"] for it in g["items"]] for g in got], [[1, 2], [3]])
+        self.assertEqual([p["after"] for p in got[0]["pairs"]], ["b-a.png", "b2-a.png"])   # (the biggest crop of each)
+        self.assertEqual(got[0]["alike"], ["x"])
+        self.assertEqual(s._overlap(None, groups[0]["pairs"][0]["clip"]), 0.0)
+        self.assertEqual(len(s.one_spot([{**g, "pairs": [{**p, "clip": None} for p in g["pairs"]]} for g in groups])), 3)   # (no spot: as they were)
+
+    def test_the_before_is_the_app_as_approved(self):
+        """approve keeps a copy of the approved app's look files (dev/style-approved.zip); the sample's Before is today's
+        app with those put back, and checked against the guide."""
+        import zipfile
+        s = self.style
+        self.assertIn("plexcache/web/app.css", s.look_files())
+        self.assertIn("plexcache/themes.py", s.look_files())
+        self.assertIn("plexcache/web/theatre.svg", s.look_files())
+        with tempfile.TemporaryDirectory() as tmp:
+            zipped = os.path.join(tmp, "kept.zip")
+            s.keep_approved(ROOT, zipped)
+            with zipfile.ZipFile(zipped) as z:
+                self.assertEqual(sorted(z.namelist()), s.look_files())
+                kept = os.path.join(tmp, "kept")
+                z.extractall(kept)
+            s.keep_approved(ROOT, zipped + "2")
+            self.assertEqual(_read_bytes(zipped), _read_bytes(zipped + "2"))   # the same files, the same bytes
+            self.assertEqual(_read_bytes(os.path.join(s.before_tree(zipped, os.path.join(tmp, "z")), "plexcache", "web", "app.css")),
+                             _read_bytes(os.path.join(ROOT, "plexcache", "web", "app.css")))
+            with open(os.path.join(kept, "plexcache", "web", "app.css"), "a", encoding="utf-8") as f:
+                f.write("\n.sample-before-only{gap:3px}\n")
+            os.remove(os.path.join(kept, "plexcache", "web", "theatre.svg"))
+            tree = s.before_tree(kept, tmp)
+            self.assertIn(".sample-before-only", _read(os.path.join(tree, "plexcache", "web", "app.css"), encoding="utf-8"))
+            self.assertFalse(os.path.exists(os.path.join(tree, "plexcache", "web", "theatre.svg")))   # not there then
+            self.assertTrue(os.path.exists(os.path.join(tree, "tests", "demo.py")))                   # the demo runs it
+            before = s.looks(tree)
+            self.assertEqual(before["css .sample-before-only"], "gap:3px")
+            self.assertNotIn("file plexcache/web/theatre.svg", before)
+            self.assertEqual({k: v for k, v in before.items() if k.startswith("theme ")},
+                             {k: v for k, v in self.now.items() if k.startswith("theme ")})   # that tree's own themes.py
+            # an image the guide has as it is now stays as it is
+            tree2 = s.before_tree(kept, os.path.join(tmp, "2"), {"file plexcache/web/theatre.svg": self.now["file plexcache/web/theatre.svg"]})
+            self.assertTrue(os.path.exists(os.path.join(tree2, "plexcache", "web", "theatre.svg")))
+        # approve keeps the copy only when it writes the real guide, and only on a yes
+        src = _read(os.path.join(ROOT, "dev", "style.py"), encoding="utf-8")
+        self.assertIn("if keep is None and guide_path == GUIDE:", src)
+        js = _read(os.path.join(ROOT, "dev", "style-sample.js"), encoding="utf-8")
+        self.assertIn("setFixedTime", js)                     # both sides see the same moment
+        self.assertIn('ctx.route("**/*"', js)                 # the Before's files over the same demo data
+
+    def test_the_review_page_approves_a_change_at_a_time(self):
+        """dev/style.py review: the sample's page with Approve buttons, served to this computer while it runs. A look
+        goes into the guide only as the sample showed it, and only from a terminal."""
+        s = self.style
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "guide.json")
+            s.write_guide({"css .a": "color:red", "css .gone": "gap:0"}, {"date": "2026-01-01", "sample": "x", "looks": 2}, path, {})
+            now = {"css .a": "color:blue", "css .new": "gap:1px"}
+            items = [{"id": 0, "state": "changed", "look": "css .a", "was": "color:red", "now": "color:blue"},
+                     {"id": 1, "state": "new", "look": "css .new", "was": None, "now": "gap:2px"},     # not what's there now
+                     {"id": 2, "state": "gone", "look": "css .gone", "was": "gap:0", "now": None}]
+            kept = []
+            done, refused = s.approve_looks(items, [0, 1, 7], now, path, keep=lambda: kept.append(1))
+            self.assertEqual(done, [0])
+            self.assertEqual(sorted(refused), [1, 7])
+            g = s.load_guide(path)
+            self.assertEqual(g["looks"], {"css .a": "color:blue", "css .gone": "gap:0"})
+            self.assertEqual(s.problems(g, now), ["new: css .new", "gone: css .gone"])   # (sealed: written by the tool)
+            self.assertEqual(g["approvals"][-1]["on"], "review page")
+            self.assertEqual(kept, [])
+            items[1]["now"] = "gap:1px"
+            self.assertEqual(s.approve_looks(items, [1, 2], now, path, keep=lambda: kept.append(1)), ([1, 2], {}))
+            # one approved already (on another change that shows it too): done, not refused, and nothing written again
+            when = os.path.getmtime(path)
+            self.assertEqual(s.approve_looks(items, [0], now, path), ([0], {}))
+            self.assertEqual(os.path.getmtime(path), when)
+            self.assertEqual(s.load_guide(path)["looks"], now)
+            self.assertEqual(kept, [1])                       # all approved: the app as it is now is the next Before
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(s.review(tmp, terminal=False), 2)        # not at a terminal: never
+                self.assertEqual(s.review(tmp, terminal=True), 1)         # no sample
+            # opened from tnsync's board (r): what it says goes to a file, and unused it closes by itself
+            with open(os.path.join(tmp, "index.html"), "w", encoding="utf-8") as f:
+                f.write("<script>var R=window.REVIEW;</script>")
+            with open(os.path.join(tmp, "sample.json"), "w", encoding="utf-8") as f:
+                json.dump({"items": items}, f)
+            log, out = os.path.join(tmp, "review.log"), sys.stdout
+            self.assertEqual(s.review(tmp, terminal=True, open_browser=False, guide_path=path, log=log, idle=0.2), 0)
+            self.assertIs(sys.stdout, out)
+            said = _read(log, encoding="utf-8")
+            self.assertIn("The review page: http://127.0.0.1:", said)
+            self.assertIn("No one has used the page", said)
+        page = _read(os.path.join(ROOT, "dev", "style.py"), encoding="utf-8")
+        for part in ('"127.0.0.1"', "X-Review-Token", "compare_digest", "_host_ok", "ended.set()"):
+            self.assertIn(part, page)
+
+    def test_check_tells_tnsync_where_the_review_is(self):
+        s = self.style
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(s.review_line(3, tmp, self.now), "3 looks need your approval: python3 dev/style.py sample, then review")
+            with open(os.path.join(tmp, "index.html"), "w") as f:
+                f.write("x")
+            with open(os.path.join(tmp, "sample.json"), "w") as f:
+                json.dump({"fingerprint": s.fingerprint(s.compare(s.load_guide()["looks"], self.now))}, f)
+            self.assertEqual(s.review_line(1, tmp, self.now), "1 look needs your approval: python3 dev/style.py review")
+            # some of it approved since: what's left is all in the sample as it showed it, so it's not out of date
+            diff = s.compare(s.load_guide()["looks"], {**s.load_guide()["looks"], "css .zz": "gap:1px", "css .zy": "gap:2px"})
+            with open(os.path.join(tmp, "sample.json"), "w") as f:
+                json.dump({"fingerprint": "x", "items": [{"id": 0, "state": "new", "look": "css .zz", "was": None, "now": "gap:1px"},
+                                                         {"id": 1, "state": "new", "look": "css .zy", "was": None, "now": "gap:2px"},
+                                                         {"id": 2, "state": "new", "look": "css .zx", "was": None, "now": "gap:0"}]}, f)
+            now = {**s.load_guide()["looks"], "css .zz": "gap:1px"}
+            self.assertEqual(s.review_line(1, tmp, now), "1 look needs your approval: python3 dev/style.py review")
+            now["css .zz"] = "gap:3px"                      # (but not as the sample showed it: out of date)
+            self.assertEqual(s.review_line(1, tmp, now), "1 look needs your approval: python3 dev/style.py sample, then review")
 
 
 class UpkeepTests(unittest.TestCase):
     """The dependencies kept current (dev/upkeep.py): looked up when the suite runs by hand, never on GitHub."""
 
+    def test_moves_only_on_dev_and_tells_tnsync(self):
+        """Pins are moved only in a checkout of dev, or of main (its minor and patch releases; a copy isn't a checkout), and
+        --tnsync is the box tnsync shows at the end of a run (TN_UPKEEP): its first line current (green), behind
+        (yellow: what moved, what's left and what to do) or unknown (grey), every line fitting the box."""
+        from dev import upkeep
+        for where, moves in (("dev", True), ("main", True), ("feature", False), (None, False)):
+            with mock.patch.object(upkeep, "branch", return_value=where):
+                self.assertEqual(upkeep.may_move(), moves, where)
+                with mock.patch.object(upkeep, "check", side_effect=upkeep.Offline("x")) as check, \
+                        mock.patch.object(sys, "argv", ["upkeep.py"]), mock.patch("builtins.print"):
+                    upkeep.main()
+                self.assertEqual(check.call_args.kwargs["apply"], moves, where)
+                # on tnsync's board it looks while the tests run (TNSYNC_UPKEEP=look: nothing moved), and moves once they're done
+                for phase, phase_moves in (("look", False), ("move", moves)):
+                    with mock.patch.object(upkeep, "check", side_effect=upkeep.Offline("x")) as check, mock.patch.dict(os.environ, {"TNSYNC_UPKEEP": phase}), \
+                            mock.patch.object(sys, "argv", ["upkeep.py", "--tnsync"]), mock.patch("builtins.print"):
+                        upkeep.main()
+                    self.assertEqual(check.call_args.kwargs["apply"], phase_moves, (where, phase))
+        found = {d.name: [d.have(), d.have()] for d in upkeep.DEPS}
+        fits = lambda lines: [l for l in lines if len(l) > upkeep.WIDTH]  # noqa: E731
+        with mock.patch.object(upkeep, "lookup", return_value=(found, False)):
+            got = upkeep.box(upkeep.check(apply=False), "dev")
+        self.assertEqual((got[0], got[1]), ("current", "DEPENDENCIES  -  ALL UP TO DATE"))
+        self.assertEqual(fits(got), [])
+        have = found["eslint"][0]
+        major = f"{int(have.split('.')[0]) + 1}.0.0"
+        found["eslint"] = [have, major]
+        t = found["terser"][0].split(".")
+        minor = f"{t[0]}.{int(t[1]) + 1}.0"
+        found["terser"] = [found["terser"][0], minor]
+        with mock.patch.object(upkeep, "lookup", return_value=(found, True)):
+            r = upkeep.check(apply=False)
+        got = upkeep.box(r, "main")
+        self.assertEqual(got[0], "behind")
+        self.assertEqual(got[1], "NEW VERSIONS UPSTREAM  -  1 FOR YOU, 1 TO MOVE ON DEV")
+        self.assertIn(f"eslint {have} → {major}  (a major release)", got)
+        self.assertIn(f"terser {found['terser'][0]} → {minor}", got)
+        self.assertIn("npm install --prefix dev --save-exact eslint@<version>", " ".join(" ".join(got).split()))     # (what to do about it)
+        self.assertIn("(Upstream not reached now: these are the last look's answers.)", got)
+        self.assertEqual(fits(got), [])
+        got = upkeep.box(None, "dev", "Python: no route to host")
+        self.assertEqual((got[0], got[1]), ("unknown", "DEPENDENCIES NOT CHECKED  -  UPSTREAM NOT REACHED"))
+        # on main, only the minor and patch releases count (moved there): a major is dev's, a line and never a prompt
+        with mock.patch.object(upkeep, "lookup", return_value=(found, False)):
+            r = upkeep.check(apply=False, where="main")
+        self.assertEqual([n[0] for n in r.news], ["terser"])
+        self.assertIn(f"eslint {have}: {major} is out — a major release, for dev (never moved on main)", r.lines)
+        got = upkeep.box(r, "main")
+        self.assertEqual(got[1], "NEW VERSIONS UPSTREAM  -  1 TO MOVE ON MAIN")
+        self.assertNotIn("eslint", " ".join(got))
+        found["terser"] = [found["terser"][0], found["terser"][0]]
+        with mock.patch.object(upkeep, "lookup", return_value=(found, False)):
+            self.assertEqual(upkeep.box(upkeep.check(apply=False, where="main"), "main")[0], "current")   # (only a major behind: nothing to do on main)
+        # tnsync shows it last, from your folder, coloured by that first line; this project's .tnsync names it
+        tool = _read(os.path.join(ROOT, "dev", "tnsync"), encoding="utf-8")
+        for word in ("TN_UPKEEP", 'current) green_banner "${lines[@]}" ;;', 'behind)  yellow_banner "${lines[@]}" ;;',
+                     'out="$( cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 bash -c "$TN_UPKEEP"'):
+            self.assertIn(word, tool)
+
+    def test_saved_answers_never_ask_upstream(self):
+        """The suite's look (saved=True) reads the last look's answers and nothing else: no network, no npm."""
+        from dev import upkeep
+        found = {d.name: [d.have(), d.have()] for d in upkeep.DEPS}
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(upkeep, "CACHE", os.path.join(d, "upkeep.json")), \
+                mock.patch.object(upkeep, "_get", side_effect=AssertionError("upstream asked")), \
+                mock.patch.object(upkeep.subprocess, "run", side_effect=AssertionError("npm run")):
+            with self.assertRaises(upkeep.Offline):
+                upkeep.check(apply=False, saved=True)                                     # (nothing saved yet)
+            upkeep._save_cache({k: v for k, v in found.items() if k != "eslint"})
+            with self.assertRaises(upkeep.Offline):
+                upkeep.lookup(saved=True)                                                 # (a dependency with no answer yet)
+            upkeep._save_cache(found)
+            self.assertEqual(upkeep.lookup(saved=True), (found, False))
+            with open(upkeep.CACHE, "w", encoding="utf-8") as fh:
+                json.dump({"at": time.time() - 2 * upkeep.A_DAY, "found": found}, fh)
+            self.assertEqual(upkeep.lookup(saved=True), (found, True))                    # (however old: said to be stale)
+            found["eslint"] = [found["eslint"][0], "999.0.0"]
+            upkeep._save_cache(found)
+            r = upkeep.check(apply=True, saved=True)
+            self.assertEqual(r.bumped, [])
+            self.assertTrue(any(p.startswith("eslint ") for p in r.prompts))
+
+    def test_the_look_shows_each_step_on_the_shared_bar(self):
+        """While it looks (tnsync's last box waits on it), the bar tests/run.py draws (dev/progress.py) says what's being
+        looked up — every dependency asked at once — then which pin is being moved, the packages of dev/package.json in one
+        npm install, with its seconds so far; and it's gone at the end. A pin that can't be moved (npm failing, or too
+        slow) is said, not a crash; when the one install of them all fails, each is tried alone, to say which."""
+        import io
+        import subprocess
+        from dev import upkeep
+        from dev.progress import Progress
+        moved, installs = [], []
+
+        def bump(new):
+            moved.append(new)
+            if new == "2.0.9":
+                raise subprocess.TimeoutExpired(["x"], 300)
+            return f"its pin: 1.0.0 → {new}"
+
+        def npm(pins):
+            installs.append(dict(pins))
+            if "bad" in pins:
+                raise ValueError("npm couldn't install: no such version")
+        deps = [upkeep.Dep("alpha", lambda: "1.0.0", lambda: "1.1.0", "ARG ALPHA", bump=bump),
+                upkeep.Dep("beta", lambda: "2.0.0", lambda: "2.0.9", "ARG BETA", bump=bump, cant="by hand"),
+                upkeep.Dep("gamma", lambda: "3.0.0", lambda: "3.0.0", "ARG GAMMA"),
+                upkeep.Dep("delta", lambda: "4.0.0", lambda: "4.1.0", "its pin in dev/package.json", bump=bump, package="delta"),
+                upkeep.Dep("eps", lambda: "5.0.0", lambda: "5.0.1", "its pin in dev/package.json", bump=bump, package="eps")]
+
+        def run(deps):
+            out = io.StringIO()
+            with tempfile.TemporaryDirectory() as d, mock.patch.object(upkeep, "CACHE", os.path.join(d, "upkeep.json")), \
+                    mock.patch.object(upkeep, "DEPS", deps), mock.patch.object(upkeep, "npm_install", side_effect=npm), \
+                    mock.patch.dict(os.environ, {"COLUMNS": "200"}):  # (wide enough for every label, whatever terminal runs this)
+                got = upkeep.check(apply=True, fresh=True, progress=Progress(0, tty=True, stream=out))
+            return got, re.sub(r"\033\[[0-9;]*m", "", out.getvalue())                         # (its colours left out)
+        r, drawn = run(deps)
+        for said in ("0/5  waiting on 5: alpha, beta, gamma, delta, eps", "beta: 2.0.9 upstream", "5/5  ",
+                     "npm install delta@4.1.0 eps@5.0.1", "2/2 packages moved with npm", "moving alpha 1.0.0 → 1.1.0", "moving beta 2.0.0 → 2.0.9", "3/3  "):
+            self.assertIn(said, drawn)
+        self.assertTrue(drawn.endswith("\r\033[K"))                                           # (gone before the box)
+        self.assertEqual((moved, installs), (["1.1.0", "2.0.9"], [{"delta": "4.1.0", "eps": "5.0.1"}]))
+        self.assertEqual(r.bumped, ["delta: dev/package.json (and its lock): delta 4.0.0 → 4.1.0", "eps: dev/package.json (and its lock): eps 5.0.0 → 5.0.1",
+                                    "alpha: its pin: 1.0.0 → 1.1.0"])
+        self.assertIn("beta 2.0.0 → 2.0.9: couldn't be moved — took longer than 300 s", r.lines)
+        self.assertTrue(any("Not moved by itself this time" in n[4] for n in r.news))
+        # the install of them all fails: each alone, so the one that can't be had is named and the other still moves
+        installs.clear()
+        r, drawn = run([deps[3], upkeep.Dep("bad", lambda: "1.0.0", lambda: "1.0.1", "its pin in dev/package.json", bump=bump, package="bad")])
+        self.assertEqual(installs, [{"delta": "4.1.0", "bad": "1.0.1"}, {"delta": "4.1.0"}, {"bad": "1.0.1"}])
+        self.assertIn("1/2 packages moved with npm", drawn)
+        self.assertEqual(r.bumped, ["delta: dev/package.json (and its lock): delta 4.0.0 → 4.1.0"])
+        self.assertIn("bad 1.0.0 → 1.0.1: couldn't be moved — npm couldn't install: no such version", r.lines)
+        # no terminal (CI, a log): a line every 10% of the steps, nothing redrawn
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(upkeep, "CACHE", os.path.join(d, "upkeep.json")), \
+                mock.patch.object(upkeep, "DEPS", deps[2:3]), mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": ""}):
+            upkeep.check(apply=True, fresh=True, progress=Progress(0, stream=out))
+        self.assertEqual(out.getvalue(), "    1/1 looked up\n")
+        # shown on a terminal later (tnsync's log of the future run): the bar all the same, as wide as COLUMNS says
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": "bar", "COLUMNS": "60"}):
+            bar = Progress(2, stream=out)
+            bar.draw("x" * 200)
+        self.assertTrue(bar.tty)
+        self.assertLess(len(out.getvalue().split("\r\033[K")[-1]), 90)
+
+    def test_a_slow_answer_doesnt_hold_the_look_up(self):
+        """Every dependency is asked at once; one that hasn't answered by DEADLINE is left (its last answer used, said to be
+        stale; with none, upstream not reached) and the bar says which host it's waiting on. A host's addresses are tried
+        IPv4 first, CONNECT seconds each, so an IPv6 that goes nowhere doesn't cost TIMEOUT for each address in turn."""
+        import io
+        from dev import upkeep
+        from dev.progress import Progress
+        hang = threading.Event()
+        self.addCleanup(hang.set)
+
+        def slow():
+            upkeep.WHERE["slow"] = "registry.example"
+            hang.wait(10)
+            return "9.9.9"
+        deps = [upkeep.Dep("quick", lambda: "1.0.0", lambda: "1.0.0", "ARG QUICK"), upkeep.Dep("slow", lambda: "2.0.0", slow, "ARG SLOW")]
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(upkeep, "CACHE", os.path.join(d, "upkeep.json")), \
+                mock.patch.object(upkeep, "DEPS", deps), mock.patch.object(upkeep, "DEADLINE", 0.5), mock.patch.dict(os.environ, {"COLUMNS": "200"}):
+            out = io.StringIO()
+            started = time.time()
+            with self.assertRaises(upkeep.Offline) as no:
+                upkeep.lookup(fresh=True, progress=Progress(0, tty=True, stream=out))
+            self.assertLess(time.time() - started, 5)
+            self.assertIn("slow: no answer in 0.5 s from registry.example", str(no.exception))
+            self.assertIn("waiting on 1: slow (registry.example)", out.getvalue())
+            upkeep._save_cache({"quick": ["1.0.0", "0.9.0"], "slow": ["2.0.0", "2.1.0"]})
+            with open(upkeep.CACHE, "r+", encoding="utf-8") as fh:  # (a look from before today)
+                old = json.load(fh)
+                old["at"] -= 2 * upkeep.A_DAY
+                fh.seek(0), fh.truncate(), json.dump(old, fh)
+            self.assertEqual(upkeep.lookup(), ({"quick": ["1.0.0", "1.0.0"], "slow": ["2.0.0", "2.1.0"]}, True))
+        # IPv4 first, a short wait for each address; the answer then waited on for TIMEOUT
+        tried = []
+
+        class Sock:
+            def __init__(self, family, *a):
+                self.family = family
+            def settimeout(self, t):
+                tried.append((self.family, t))
+            def connect(self, addr):
+                if self.family == socket.AF_INET6:
+                    raise TimeoutError("nowhere")
+            def close(self):
+                pass
+        infos = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 443, 0, 0)), (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+        with mock.patch.object(upkeep.socket, "getaddrinfo", return_value=infos), mock.patch.object(upkeep.socket, "socket", Sock):
+            self.assertEqual(upkeep._connect(("h", 443), timeout=upkeep.TIMEOUT).family, socket.AF_INET)
+        self.assertEqual(tried, [(socket.AF_INET, upkeep.CONNECT), (socket.AF_INET, upkeep.TIMEOUT)])
+
     @unittest.skipIf(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"), "by hand only: GitHub isn't asked to look upstream")
     def test_dependencies_are_current(self):
+        """From the last look's answers only (tnsync's box and dev/upkeep.py do the looking, and the moving on dev): the
+        suite never waits on upstream or npm. A minor release behind moves by itself on dev, so only what's left to you fails it there."""
         from dev import upkeep
         try:
-            r = upkeep.check(apply=os.path.isdir(os.path.join(ROOT, ".git")))  # (a pin moved in the checkout only, not a copy)
+            r = upkeep.check(apply=False, saved=True, where=upkeep.branch())
         except upkeep.Offline as e:
-            self.skipTest(f"upstream not reached: {e}")
-        for line in r.bumped:
-            print(f"\nupkeep: {line} — a pin moved: see the diff", file=sys.stderr)
-        if r.prompts:
-            self.fail("behind upstream — move it, or hold it by choice (dev/upkeep.py):\n  " + "\n  ".join(r.prompts))
+            self.skipTest(str(e))
+        moves = upkeep.may_move()
+        left = [p for p, n in zip(r.prompts, r.news) if not (moves and n[3] == "minor")]
+        if left:
+            self.fail("behind upstream — move it, or hold it by choice (dev/upkeep.py):\n  " + "\n  ".join(left))
+
+
+class HomeAssistantRulesTests(unittest.TestCase):
+    """dev/upkeep.py's look at Home Assistant's MQTT rules: each key the discovery messages use, in each new release."""
+
+    SOURCES = {"components/mqtt/abbreviations.py": 'ABBREVIATIONS = {"name": "name", "stat_t": "state_topic", "obj_id": "object_id"}\n'
+                                                   'DEVICE_ABBREVIATIONS = {"ids": "identifiers"}\n',
+               "components/mqtt/const.py": 'CONF_VIA_DEVICE = "via_device"\nCONF_OLD = "via_hub"\n',
+               "components/mqtt/schemas.py": 'S = vol.All(cv.deprecated(CONF_OLD, CONF_VIA_DEVICE), cv.removed("object_id"))\n'}
+
+    def test_rules_from_the_sources(self):
+        from dev import upkeep
+        taken, gone = upkeep.ha_rules(self.SOURCES)
+        self.assertEqual(taken, {"name", "state_topic", "identifiers", "via_device"})
+        self.assertEqual(gone, {"via_hub", "object_id"})
+
+    def test_a_key_it_no_longer_takes_is_a_prompt(self):
+        import urllib.error
+        from dev import upkeep
+        def get(url):
+            for path, text in self.SOURCES.items():
+                if url.endswith("/homeassistant/" + path):
+                    return text
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        keys = {"entity": {"name", "state_topic"}, "device": {"identifiers", "via_device"}}
+        with mock.patch.object(upkeep, "_get", side_effect=get), mock.patch.object(upkeep, "discovery_keys", return_value=keys):
+            self.assertEqual(upkeep.ha_check("2099.1.0"), [])
+            keys["entity"] |= {"object_id", "new_thing"}
+            self.assertEqual(upkeep.ha_check("2099.1.0"), ["new_thing (entity): not a discovery key Home Assistant 2099.1.0 knows",
+                                                            "object_id (entity): deprecated or removed in Home Assistant 2099.1.0"])
+            with mock.patch.object(upkeep, "_repin", side_effect=AssertionError("moved")):
+                with self.assertRaises(ValueError):
+                    upkeep._bump_ha("2099.1.0")   # (not moved: the prompt names what to change)
+        # what's checked is what the app lists; HA_CHECKED is a version
+        self.assertEqual(upkeep.discovery_keys(), {k: set(v) for k, v in __import__("plexcache.homeassistant").homeassistant.DISCOVERY_KEYS.items()})
+        self.assertTrue(upkeep.parse(next(d for d in upkeep.DEPS if d.name.startswith("Home Assistant")).have()))
+
+
+class ReleaseTests(unittest.TestCase):
+    """The release checks (dev/release.py): what tnsync --release checks before dev is released, and only then."""
+
+    def test_version_is_a_new_minor_or_major(self):
+        from dev import release
+        text = lambda v: f'__version__ = "{v}"\n'  # noqa: E731
+        with mock.patch.object(release, "released", return_value=((0, 15, 0), "main has 0.15.0")), \
+                mock.patch.object(release, "_git", return_value=""):
+            for v, ok in (("0.16.0", True), ("0.17.0", True), ("1.0.0", True), ("0.16.22", False), ("0.15.0", False),
+                          ("0.14.0", False), ("0.16.0-beta.1", False), ("0.16", False)):
+                with self.subTest(v):
+                    self.assertEqual(release.check_version(text(v)).ok, ok)
+            got = release.check_version(text("0.16.22"))
+            self.assertIn("0.16.0", " ".join(got.todo))   # (what to set it to)
+            self.assertFalse(release.check_version("nothing here").ok)
+        with mock.patch.object(release, "released", return_value=((0, 15, 0), "main has 0.15.0")), \
+                mock.patch.object(release, "_git", return_value="v0.16.0\n"):
+            self.assertEqual(release.check_version(text("0.16.0")).line, "0.16.0 is tagged already")
+        with mock.patch.object(release, "released", return_value=(None, "")):
+            self.assertFalse(release.check_version(text("0.16.0")).ok)   # (nothing to compare with: not passed)
+
+    def test_released_is_main_or_the_newest_tag(self):
+        from dev import release
+        answers = {("show", "origin/main:plexcache/__init__.py"): '__version__ = "0.15.0"\n',
+                   ("tag", "-l"): "v0.14.0\nv0.16.0-beta.2\nv0.15.1\n"}
+        with mock.patch.object(release, "_git", side_effect=lambda *a: answers.get(a)):
+            self.assertEqual(release.released(), ((0, 15, 1), "tag v0.15.1"))   # (a pre-release tag isn't a release)
+        with mock.patch.object(release, "_git", return_value=None):
+            self.assertEqual(release.released(), (None, ""))
+
+    def test_translations_must_be_complete(self):
+        from dev import i18n, release
+        with mock.patch.object(i18n, "all_keys", return_value={"Idle": None}), \
+                mock.patch.object(i18n, "load", side_effect=lambda code: {"Idle": None if code == "fr" else "x"}):
+            got = release.check_translations()
+        self.assertFalse(got.ok)
+        self.assertTrue(got.line.startswith("1 of "), got.line)
+        self.assertIn("fr: 1 untranslated", got.todo)
+        with mock.patch.object(i18n, "all_keys", return_value={"Idle": None}), \
+                mock.patch.object(i18n, "load", return_value={"Idle": "x"}):
+            self.assertTrue(release.check_translations().ok)
+
+    def test_every_setting_is_placed_for_mqtt(self):
+        from dev import release
+        from plexcache import config
+        from plexcache import homeassistant as ha
+        self.assertTrue(release.check_mqtt_settings().ok, release.check_mqtt_settings().todo)
+        defaults = copy.deepcopy(config.DEFAULTS)
+        defaults["general"]["new_switch"] = True
+        with mock.patch.object(config, "DEFAULTS", defaults), mock.patch.dict(ha.NOT_OVER_MQTT, {"gone.*": "x"}):
+            got = release.check_mqtt_settings()
+        self.assertFalse(got.ok)
+        self.assertEqual(got.line, "1 settings not placed, 1 listed that are gone")
+        self.assertIn("general.new_switch: not a control over MQTT, nor in NOT_OVER_MQTT", got.todo)
+
+    def test_mqtt_docs_match_the_code(self):
+        from dev import release
+        self.assertTrue(release.check_mqtt_docs().ok, release.check_mqtt_docs().todo)
+        source = (
+            "class B:\n    def _topics(self, cfg):\n        return f'{base}/state', f'{base}/set'\n"
+            "    def _command(self, name, value):\n        if name == 'recheck':\n            pass\n"
+            "        elif name in ('ram_reserve_gb', 'poll_seconds'):\n            pass\n"
+            "        elif name.startswith('library_') and (name.endswith('_prefetch_start') or name.endswith('_start')):\n            pass\n")
+        self.assertEqual(release.mqtt_commands(source), {"recheck", "ram_reserve_gb", "poll_seconds", "library_<key>_prefetch_start"})
+        readme = ("| `plexcache/state` | everything |\n| `plexcache/info` | gone |\n"
+                  "| `plexcache/set/<name>` | `recheck`, `ram_reserve_gb` (`3`, `ON`), `library_<key>_prefetch_start`, `old_one` |\n")
+        got = release.check_mqtt_docs(readme, source)
+        self.assertFalse(got.ok)
+        self.assertEqual(got.todo[:3], ["topic plexcache/info: in the README's table, not published",
+                                        "command poll_seconds: taken, not in the README's plexcache/set/<name> row",
+                                        "command old_one: in the README's plexcache/set/<name> row, not taken"])
+
+    def test_runs_each_check_and_says_them(self):
+        from dev import release
+        checks = [lambda: release.Result("Version", True, "0.16.0, a new release"),
+                  lambda: release.Result("Translations", False, "1 of 17 catalogs not complete", ["fr: 1 problems"])]
+        out = io.StringIO()
+        with mock.patch.object(release, "CHECKS", checks), contextlib.redirect_stdout(out), \
+                mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": "feed"}):
+            self.assertEqual(release.main(), 1)
+        self.assertIn("✔ Version: 0.16.0, a new release\n✘ Translations: 1 of 17 catalogs not complete\n    fr: 1 problems\n", out.getvalue())
+        self.assertIn('{"said": "Translations: 1 of 17 catalogs not complete"}', out.getvalue())   # (its block's line on the board)
+        with mock.patch.object(release, "CHECKS", checks[:1]), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(release.main(), 0)
+
+    @unittest.skipUnless(shutil.which("rsync") and shutil.which("bash"), "no rsync here (tnsync copies with it)")
+    def test_tnsync_runs_them_only_for_a_release(self):
+        """tnsync --release: a Release checks block (TN_RELEASE), a check like the others, red when it fails; the checks
+        told it's a release (TNSYNC_RELEASE, PLEXCACHE_I18N_RELEASE). Without --release, no block and neither is set, so a
+        normal run can't fail on what only a release needs. A pass without --release doesn't count for one with it."""
+        import subprocess
+        folder = tempfile.mkdtemp(dir=TMP)
+        project, nas, fake = (os.path.join(folder, d) for d in ("project", "nas", "bin"))
+        for d in (os.path.join(project, "app"), nas, fake):
+            os.makedirs(d)
+        with open(os.path.join(fake, "ssh"), "w", encoding="utf-8") as fh:   # (the NAS: this machine, a folder of it)
+            fh.write('#!/bin/bash\nwhile [ $# -gt 0 ]; do case "$1" in -o|-p|-l) shift 2 ;; -O) exit 0 ;; -*) shift ;; *) break ;; esac; done\n'
+                     'shift; [ $# -eq 0 ] && exit 0; exec bash -c "$*"\n')
+        os.chmod(os.path.join(fake, "ssh"), 0o755)
+        with open(os.path.join(project, "app", "code.py"), "w", encoding="utf-8") as fh:
+            fh.write("one\n")
+        with open(os.path.join(folder, "config"), "w", encoding="utf-8") as fh:
+            fh.write("TN_HOST=nas.example\nTN_USER=me\n")
+
+        def settings(release_rc: int):
+            with open(os.path.join(project, ".tnsync"), "w", encoding="utf-8") as fh:
+                fh.write(f"TN_APP=myapp\nTN_DEST={nas}\nTN_PATHS=app\n"
+                         "TN_TEST=echo tests: release=${TNSYNC_RELEASE:-no} i18n=${PLEXCACHE_I18N_RELEASE:-no}\n"
+                         f"TN_RELEASE=echo the version is wrong; echo 1 release check failed; exit {release_rc}\n")
+        env = dict(os.environ, PATH=fake + os.pathsep + os.environ.get("PATH", ""), TNSYNC_CONFIG=os.path.join(folder, "config"),
+                   XDG_STATE_HOME=os.path.join(folder, "state"), TMPDIR=folder)
+        env.pop("PLEXCACHE_PROGRESS", None)
+
+        def tnsync(*args):
+            got = subprocess.run([os.path.join(ROOT, "dev", "tnsync"), "local", *args], cwd=project, env=env, capture_output=True,
+                                 text=True, timeout=120, stdin=subprocess.DEVNULL)
+            return got.returncode, got.stdout + got.stderr
+        settings(1)
+        rc, out = tnsync()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("Release checks", out)
+        self.assertIn("tests: release=no i18n=no", out)
+        rc, out = tnsync("--release")   # (in sync, and passed: but not as a release, so tested again)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("The last tests weren't a release run (--release) · nothing copied", out)
+        self.assertIn("Release checks: FAILED", out)
+        self.assertIn("\nthe version is wrong\n", out)   # (what it said, above the board)
+        self.assertIn("tests: release=1 i18n=1", out)
+        self.assertIn("Local Copy", out)   # (the board's header)
+        self.assertRegex(out, r"\nLocal Copy[^\n]* · Release")
+        settings(0)
+        rc, out = tnsync("--release")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Release checks: PASSED", out)
+        rc, out = tnsync("--release")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Release checks: ALREADY PASSED", out)
 
 
 if __name__ == "__main__":
@@ -18905,6 +20398,7 @@ class MiscEdgeTests4(unittest.TestCase):
         from plexcache import healthcheck, prefetch, projection
         from plexcache.tools import merge as mergemod
         tn = TrueNASClient(TRUENAS.url, "good-key", verify_tls=False)
+        self.addCleanup(tn.close)  # (its connection closed: left to the garbage collector, -X dev warns of it)
         with mock.patch.object(tn, "call", side_effect=TrueNASError("no")):
             self.assertIsNone(tn.known_methods())
         with mock.patch.object(tn, "call", return_value=[{"name": "a.b"}, "c.d"]):

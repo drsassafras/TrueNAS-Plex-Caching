@@ -1,10 +1,24 @@
 {
   "name": "plex-cache-dev",
   "private": true,
-  "description": "What builds and checks the app's CSS (dev/css.js): Autoprefixer adds the browser prefixes the targets below need, cssnano minifies, Stylelint checks the source (no prefixes written by hand). The image build runs the build; the suite runs the checks.",
+  "description": "What builds and checks the web app's CSS, scripts and pages (dev/web.js): postcss-preset-env rewrites the newer CSS the targets below lack as CSS they read, Autoprefixer adds the browser prefixes they need, cssnano, Terser and html-minifier-terser minify, Stylelint, ESLint and html-validate check the source (no prefixes written by hand, no feature a target lacks but the graceful ones: for the CSS, in what postcss-preset-env makes of it). The image build runs the build; the suite runs the checks.",
   "browserslist": [
-    "defaults"
+    "last 5 years",
+    "not and_qq >= 1"
   ],
+  "futureBrowserslist": [
+    "last 4 years",
+    "not and_qq >= 1"
+  ],
+  "graceful": {
+    "css-focus-visible": "Safari before 15.4 draws its own focus ring instead: each :focus-visible rule stands alone, so nothing goes with it (WebBuildTests)",
+    "css-has": "the one :has() rule only nudges a name 4px off its ⓘ, and stands alone",
+    "css3-cursors": "a phone has no pointer to show a cursor on",
+    "css-touch-action": "desktop Safari has no touch to act on",
+    "html.global_attributes.autofocus": "iOS before 15 leaves the sign-in field for a tap",
+    "html.global_attributes.autocapitalize": "desktop Safari and Firefox have no on-screen keyboard to capitalize on",
+    "html.elements.img.loading": "Safari before 15.4 loads the posters straight away instead of as they scroll in"
+  },
   "stylelint": {
     "extends": [
       "stylelint-config-recommended"
@@ -14,18 +28,46 @@
       "value-no-vendor-prefix": true,
       "selector-no-vendor-prefix": true,
       "media-feature-name-no-vendor-prefix": true,
-      "at-rule-no-vendor-prefix": true,
-      "no-descending-specificity": null,
-      "no-duplicate-selectors": null,
-      "property-no-deprecated": null
+      "at-rule-no-vendor-prefix": true
     }
   },
+  "eslint": {
+    "extends": [
+      "@eslint/js:recommended",
+      "eslint-plugin-compat:flat/recommended"
+    ],
+    "ecmaVersion": 2020,
+    "globals": {
+      "PCI18N": "readonly",
+      "PCDECOR": "readonly"
+    },
+    "rules": {}
+  },
+  "htmlvalidate": {
+    "extends": [
+      "html-validate:standard"
+    ],
+    "rules": {}
+  },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "autoprefixer": "10.6.2",
     "caniuse-lite": "1.0.30001820",
     "cssnano": "9.9.0",
+    "eslint": "10.14.0",
+    "eslint-plugin-compat": "7.0.2",
+    "globals": "17.14.0",
     "postcss": "8.5.32",
+    "postcss-preset-env": "11.6.2",
     "stylelint": "17.16.0",
-    "stylelint-config-recommended": "18.0.0"
+    "stylelint-config-recommended": "18.0.0",
+    "terser": "5.51.2"
+  },
+  "dependencies": {
+    "@mdn/browser-compat-data": "8.1.8",
+    "browserslist": "4.29.5",
+    "html-minifier-terser": "7.2.0",
+    "html-validate": "11.18.0",
+    "stylelint-no-unsupported-browser-features": "8.1.2"
   }
 }

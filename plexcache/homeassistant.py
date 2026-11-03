@@ -472,6 +472,66 @@ CONTROL_SETTINGS = {
     "warmup_pacing_percent": ("warmup", "pacing_percent"),  # only while automatic pacing is off, as on the page
 }
 
+# Each setting that isn't a control above, and why it isn't one: what the release checks hold (dev/release.py), so a new
+# setting is placed — made a control (CONTROL_SETTINGS) or listed here — before it's released. Patterns as fnmatch's:
+# "plex.*" is the whole section. (Plain text: for whoever adds a setting, never shown.)
+PER_LIBRARY_CONTROLS = {"nextepisode.libraries": "each library's Prefetch choices: library_<key>_prefetch_start / _end"}
+NOT_OVER_MQTT = {
+    "plex.*": "the connection to Plex: an address and a secret",
+    "plex2.*": "the mirrors, set up on the Mirror page",
+    "library_health.*": "Library Health's choices, on its page",
+    "sync.*": "what Plex's own sync carries, on the Mirror page",
+    "truenas.*": "the connection to TrueNAS: an address and a secret",
+    "syncthing.*": "the connection to Syncthing and its throttling, in System",
+    "peer.*": "the pairing with the other Dionysus",
+    "general.update_check": "System's update check",
+    "general.page_size": "how the web UI pages its lists",
+    "general.tool_page_size": "how the web UI pages its lists",
+    "general.backup": "what stands in for a backup before files change: a choice made where files are changed",
+    "general.backup_days": "how long backups are kept",
+    "general.hdd_mb_per_sec": "measured, not set",
+    "general.hdd_measured_at": "measured, not set",
+    "general.disk_speeds": "measured, not set",
+    "general.ram_cooldown_*": "the cache log's timings, on the Caching page",
+    "general.l2arc_cooldown_*": "the cache log's timings, on the SSD Cache page",
+    "general.no_l2arc": "a choice about the hardware, on the SSD Cache page",
+    "general.lan_only": "who may reach the web UI: never changed from outside it",
+    "general.debug": "unused",
+    "general.excluded_libraries": "which libraries are cached: set up in the web UI",
+    "general.path_map": "media mappings: set up in the web UI",
+    "general.client_id": "this installation's id, not a setting",
+    "warmup.time": "warm-up's schedule, on the SSD Cache page",
+    "warmup.weekday": "warm-up's schedule, on the SSD Cache page",
+    "warmup.libraries": "each library's warm-up schedule, on the SSD Cache page",
+    "warmup.reserve_gb": "the L2ARC Cache Settings, on the SSD Cache page",
+    "warmup.padding_*": "the L2ARC Cache Settings, on the SSD Cache page",
+    "warmup.pause_*": "the L2ARC Cache Settings, on the SSD Cache page",
+    "nowplaying.delay_sec": "Now Playing Cache's timings, on the Caching page",
+    "nowplaying.buffer_*": "Now Playing Cache's timings, on the Caching page",
+    "nowplaying.min_delay_sec": "Now Playing Cache's timings, on the Caching page",
+    "nowplaying.max_streams": "Now Playing Cache's limits, on the Caching page",
+    "nowplaying.pacing_percent": "Now Playing Cache's pacing, on the Caching page",
+    "nextepisode.pacing_percent": "Prefetch's pacing, on the Caching page",
+    "optimizer.*": "the optimizer's per-library choices, on its page",
+    "tools.*": "the tools' options, on their pages",
+    "themes.*": "how the web UI looks",
+    "mqtt.*": "MQTT's own connection: changing it over MQTT could cut it off",
+}
+
+# The keys the discovery messages use, by where they go: what dev/upkeep.py checks against Home Assistant's newest release
+# (still taken, none deprecated or removed), and the suite holds to what's published (test_discovery_keys_are_listed).
+HA_CHECKED = "2026.10.4"   # the Home Assistant release these keys were last checked against (moved by dev/upkeep.py)
+DISCOVERY_KEYS = {
+    "entity": {"availability", "availability_mode", "availability_topic", "command_topic", "default_entity_id", "device",
+               "device_class", "entity_category", "icon", "json_attributes_template", "json_attributes_topic", "max", "min",
+               "mode", "name", "options", "origin", "payload_install", "payload_off", "payload_on", "payload_press",
+               "release_url", "state_class", "state_off", "state_on", "state_topic", "step", "title", "unique_id",
+               "unit_of_measurement", "value_template"},
+    "availability": {"topic", "value_template"},
+    "device": {"configuration_url", "identifiers", "manufacturer", "model", "name", "sw_version", "via_device"},
+    "origin": {"name", "support_url", "sw_version"},
+}
+
 # Entities dropped in an update, removed from Home Assistant if they're still there.
 RETIRED = [("sensor", "arc_max"), ("sensor", "l2arc_needed"), ("select", "start_at"), ("switch", "warmup_enabled"),
            ("switch", "nextepisode_enabled"),

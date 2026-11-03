@@ -1,7 +1,7 @@
 :root{
   --bg:#F3F4F1; --panel:#FFFFFF; --ink:#1B1F1D; --muted:#5A625D; --soft:#4C544F; --line:#DDE1DD; --line2:#EDEFEC;
   --accent:#0F5E57; --accent-ink:#FFFFFF; --side:#1B1F1D; --side-ink:#C9CFCB;
-  --ok-bg:#DDEFE3; --ok:#155C37; --warn-bg:#FBE8CF; --warn:#7F4205; --bad-bg:#F8D9D6; --bad:#8A1C14;
+  --ok-bg:#DDEFE3; --ok:#155C37; --warn-bg:#FBE8CF; --warn:#7F4205; --bad-bg:#F8D9D6; --bad:#8A1C14; --lost:#8A1C14;
   --info-bg:#E7EAE6; --info:#4C544F; --run-bg:#D8E9F4; --run:#14476B;
   --guide-bg:#F1F5F3; --guide-line:#D6E2DD; --note-bg:#FDF4E7; --note-line:#F1D9B4; --note-ink:#5E3404;
   --code-bg:#F6F7F5; --c-movie:#0F5E57; --c-tv:#5FA79B; --c-audio:#B9772A; --c-res:#9AA39E; --c-idx:#6E5BA8; --track:#E7EAE6;
@@ -28,38 +28,41 @@
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.45}
 a{color:var(--accent)}
-.shell{display:flex;flex-wrap:wrap;min-height:100vh}
-.side{flex:1 1 220px;max-width:260px;background:var(--side);color:#E7EAE6;padding:28px 18px;display:flex;flex-direction:column;gap:6px}
+.shell{display:flex;flex-wrap:wrap;min-height:100vh;position:relative}
+.side{flex:1 1 220px;max-width:260px;background:var(--side);color:#E7EAE6;padding:28px 18px;display:flex;flex-direction:column;gap:6px;position:sticky;top:0;align-self:flex-start;height:100vh;box-sizing:border-box;overflow-y:auto;transition:max-width .15s,flex-basis .15s,padding .15s}
 .brand{font-weight:700;font-size:15px;line-height:1.2;padding:0 10px 22px;display:flex;align-items:center;gap:12px}
 .brand img{flex:none;border-radius:8px}
 .brand small{display:block;font-weight:400;font-size:12px;color:#A3ABA6;margin-top:4px}
 .nav{display:flex;align-items:center;gap:12px;padding:11px 12px;border-radius:8px;color:var(--side-ink);text-decoration:none;min-height:44px}
 /* The menu stays in view while the page scrolls, and can fold down to its icons */
-.side{position:sticky;top:0;align-self:flex-start;height:100vh;box-sizing:border-box;overflow-y:auto;transition:max-width .15s,flex-basis .15s,padding .15s}
 .icon{position:relative;display:inline-flex;flex:none}
 .ico{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.icon .dot{position:absolute;right:-3px;top:-3px;box-shadow:0 0 0 2px var(--side)}
 .sidetoggle{margin-top:auto;display:flex;align-items:center;gap:12px;padding:11px 12px;min-height:44px;border:0;border-radius:8px;background:none;color:#A3ABA6;font:inherit;font-size:14px;cursor:pointer;text-align:left}
-.sidetoggle:hover,.sidetoggle:focus-visible{background:#2A302D;color:#fff}
+.sidetoggle:hover{background:#2A302D;color:#fff}.sidetoggle:focus-visible{background:#2A302D;color:#fff}
 .shell.collapsed .side{flex:0 0 76px;max-width:76px;padding:28px 12px}
 .shell.collapsed .brand{padding:0 0 22px;justify-content:center}
-.shell.collapsed .brand>div,.shell.collapsed .lbl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-.shell.collapsed .nav,.shell.collapsed .sidetoggle{justify-content:center;padding:11px 0}
 .shell.collapsed .sidetoggle .ico{transform:rotate(180deg)}
 @media (prefers-reduced-motion: reduce){.side{transition:none}}
+/* Dionysus: the menu's scrollbar on its left, by the window's edge (direction puts it there; the menu's contents keep
+   reading left to right). Not on a phone, where the menu is a row across the top and doesn't scroll. */
+@media (min-width:721px){
+  :root[data-theme="dionysus"] .side{direction:rtl}
+  :root[data-theme="dionysus"] .side>*{direction:ltr}
+}
 .nav:hover{background:#2A302D;color:#fff}
+.shell.collapsed .nav,.shell.collapsed .sidetoggle{justify-content:center;padding:11px 0}
 .nav.on{background:#2F3833;color:#fff;font-weight:600}
 .dot{width:8px;height:8px;border-radius:50%;flex:none;background:#6FB88F}
+.icon .dot{position:absolute;right:-3px;top:-3px;box-shadow:0 0 0 2px var(--side)}
 .dot.warn{background:#E0A04A}.dot.fail{background:#E06A5F}.dot.ok{background:#6FB88F}
 .main{flex:999 1 560px;min-width:0;padding:32px 40px 56px;outline:none}
 @media (max-width:720px){
   .side{max-width:none;flex-direction:row;flex-wrap:wrap;padding:12px;gap:4px;position:static;height:auto;overflow:visible}
   .sidetoggle{display:none}
   .shell.collapsed .side{flex:1 1 220px;max-width:none;padding:12px}
-  .shell.collapsed .brand{padding:4px 10px 8px;justify-content:flex-start}
-  .shell.collapsed .brand>div,.shell.collapsed .lbl{position:static;width:auto;height:auto;overflow:visible;clip:auto}
   .shell.collapsed .nav{padding:11px 12px}
   .brand{width:100%;padding:4px 10px 8px}
+  .shell.collapsed .brand{padding:4px 10px 8px;justify-content:flex-start}
   .brand img{width:28px;height:28px}
   .main{padding:20px 16px 48px}
 }
@@ -96,11 +99,6 @@ h2{font-size:17px;margin:0 0 4px;font-weight:600;font-family:var(--head)}
 a.badge{text-decoration:none}a.badge:hover{text-decoration:underline}
 .b-info,.b-skip,.b-cancelled,.b-waiting,.b-manual{background:var(--info-bg);color:var(--info)}
 .b-off{background:var(--info-bg);color:var(--info)}  /* an issue whose switch is off for the library */
-.tbl.tool tr.off td{opacity:.6}
-.seg button .count{display:inline-block;min-width:20px;padding:0 6px;border-radius:10px;background:var(--line2);color:var(--ink);font-size:12px;font-weight:600;text-align:center;margin-left:4px}
-.seg button .count.warn{background:var(--warn-bg);color:var(--warn)}
-.seg button .count.fail{background:var(--bad-bg);color:var(--bad)}
-.seg button .count.ok{background:var(--ok-bg);color:var(--ok)}
 .tooloptions{flex-basis:100%;border-bottom:1px solid var(--line2);padding-bottom:8px}
 .tooloptions .toolway{grid-column:1 / -1}
 .b-reading,.b-running,.b-scanning{background:var(--run-bg);color:var(--run)}
@@ -117,28 +115,26 @@ fieldset.sub>legend{padding:0 8px;font-weight:600;color:var(--ink);font-size:15p
 .identicon.sm{width:14px;height:14px;vertical-align:-1px;margin-right:7px}
 .identicon.menu{width:14px;height:14px;vertical-align:-1px;margin-left:8px;color:#E7EAE6}
 .lights.marked,.card.hasfp{position:relative}
-.lights.marked>.lightrow:first-of-type{padding-right:160px}
 /* boxed, the picture centred over its code; the info button sits in the spare room beside the picture, out of the flow,
    so it never pulls the picture off centre */
 .fpmark{position:absolute;top:12px;right:14px;display:flex;color:var(--ink);padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
 .fpmark.own{position:relative;top:auto;right:auto;float:right;margin:-4px -4px 10px 16px}  /* this one's own: the card's words flow round it */
 .fpstack{display:flex;flex-direction:column;align-items:center;gap:3px;min-width:96px}
-.fpmark>.info{position:absolute;top:19px;right:10px;margin:0;transform:none}
 .fpcode{font-weight:600;font-size:13px;letter-spacing:.02em}
 .fpname{font-size:12px;color:var(--soft)}
-@media (max-width:640px){.fpmark,.fpmark.own{position:relative;top:auto;right:auto;float:none;width:fit-content;justify-self:start;margin:0 0 2px}.lights.marked>.lightrow:first-of-type{padding-right:0}}
+@media (max-width:640px){.fpmark,.fpmark.own{position:relative;top:auto;right:auto;float:none;width:fit-content;justify-self:start;margin:0 0 2px}}
 /* The icon of a place of the app, before its name (ICONS in app.js) */
 .pic{width:18px;height:18px;vertical-align:-3px;margin-right:8px;flex:none}
+.log .pic{width:14px;height:14px;vertical-align:-2px;margin-right:6px;display:inline-block}
 .head h2 .pic{width:20px;height:20px;vertical-align:-4px}
 .toolsub a.subnav .pic{width:15px;height:15px;margin-right:0;opacity:.9}
-.log .pic{width:14px;height:14px;vertical-align:-2px;margin-right:6px;display:inline-block}
 /* Nothing in a page may make it wider than the window: grid cells and flex items can shrink below
    their content, and a long path or name without spaces wraps anywhere */
 .tiles>*,.grid>*,.cols2>*,.guide>*,.libmodes>*,.pflib-grid>*,.estgrid>*,.stack>*{min-width:0}
 .det,.what,.note,.help{overflow-wrap:anywhere}
 .fix{margin-top:10px;background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:13px}
 .cmd{display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap}
-.cmd code{font-family:var(--mono);font-size:13px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;overflow-wrap:anywhere}
+.cmd code{font-family:var(--mono);font-size:13px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;overflow-wrap:anywhere;user-select:all}
 .tbl-wrap{overflow-x:auto}
 .tbl{width:100%;border-collapse:collapse;font-size:14px}
 .tbl th{text-align:left;color:var(--muted);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.5px;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -154,12 +150,12 @@ fieldset.sub>legend{padding:0 8px;font-weight:600;color:var(--ink);font-size:15p
 .sw{position:relative;width:56px;height:32px;border-radius:999px;border:0;cursor:pointer;flex:none;padding:0;background:#B7BEB9}
 .sw[aria-pressed="true"]{background:var(--accent)}
 .sw span{position:absolute;top:4px;left:4px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:left .15s}
-.sw[aria-pressed="true"] span{left:28px}
 .guide{margin-top:16px;background:var(--guide-bg);border:1px solid var(--guide-line);border-radius:10px;padding:16px 18px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px;font-size:14px}
 .guide h3{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--accent);margin:0 0 6px}
 .guide p{margin:0}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px 28px;margin-top:20px}
 .fld label,.fld .lbl{display:block;font-size:14px;font-weight:600;margin-bottom:6px}
+.lbl>label{display:inline;margin-bottom:0}  /* (a field's name in its row: the ⓘ and the revert beside it, outside the label) */
 .fld .help{font-size:13px;color:var(--muted);margin-top:5px}
 .fld select,.fld input[type=number],.fld input[type=text],.fld input[type=password],.fld input[type=time],.fld input[type=url]{font:inherit;font-size:14px;width:100%;min-height:44px;border:1px solid var(--line);border-radius:8px;padding:0 12px;background:var(--panel);color:var(--ink)}
 .fld input[type=range],.pflib input[type=range]{width:100%;accent-color:var(--accent);min-height:32px}
@@ -190,16 +186,17 @@ summary{cursor:pointer;font-weight:600;color:var(--accent);min-height:32px;displ
 .toast.show{opacity:1;transform:none}
 .toast.err{background:var(--bad-bg);color:var(--bad);border:1px solid var(--bad);pointer-events:auto}
 .pathmap{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center}
-.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
 :focus-visible{outline:3px solid #6FB8AE;outline-offset:2px}
-.main:focus,.main:focus-visible{outline:none}
+.main:focus{outline:none}.main:focus-visible{outline:none}
 
 /* Status lights (Settings) and summary banners */
 .lights{display:grid;gap:10px;margin:4px 0 6px;padding:14px 16px;background:var(--code-bg);border:1px solid var(--line);border-radius:10px}
 .lightrow{display:flex;gap:12px;align-items:flex-start}
+.lights.marked>.lightrow:first-of-type{padding-right:160px}
 .lightrow>.grow{flex:1;min-width:0}
 .lightrow>.btn{flex:none;align-self:center}  /* a light's button (light's act): beside the check */
-@media (max-width:640px){.lightrow{flex-wrap:wrap}.lightrow>.grow{flex-basis:calc(100% - 24px)}.lightrow>.btn{margin-left:24px}}
+@media (max-width:640px){.lightrow{flex-wrap:wrap}.lights.marked>.lightrow:first-of-type{padding-right:0}.lightrow>.grow{flex-basis:calc(100% - 24px)}.lightrow>.btn{margin-left:24px}}
 .light{flex:none;width:12px;height:12px;border-radius:50%;margin-top:5px;background:var(--c-res);box-shadow:0 0 0 3px var(--track)}
 .l-ok{background:#2E9E5B;box-shadow:0 0 0 3px var(--ok-bg)}
 .l-warn{background:#E0942F;box-shadow:0 0 0 3px var(--warn-bg)}
@@ -216,19 +213,10 @@ summary{cursor:pointer;font-weight:600;color:var(--accent);min-height:32px;displ
 .bn-testing{background:var(--run-bg);color:var(--run);border-color:transparent}
 .explain{margin-top:16px;font-size:14px;color:var(--soft);background:var(--guide-bg);border:1px solid var(--guide-line);border-radius:10px;padding:12px 14px}
 .sw:disabled{opacity:.45;cursor:not-allowed}
-#mappings select,#mappings input[type=text]{font:inherit;font-size:14px;width:100%;min-height:40px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:var(--panel);color:var(--ink);margin-top:8px}
-#disk-speed input[data-speed]{font:inherit;font-size:14px;width:110px;min-height:40px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:var(--panel);color:var(--ink);margin-right:6px}
-#mappings td{min-width:120px}
-#mappings td:last-child{min-width:280px}
 /* Secret fields are text inputs (so browsers don't treat them as passwords) masked here. */
 input.secret{font-family:var(--mono)}
-.cmd code{user-select:all}
 #mappings .tick{display:inline-flex;align-items:center;min-height:32px}
-#mappings .tick input{width:20px;height:20px;accent-color:var(--accent)}
-#mappings td:first-child{min-width:56px}
-#mappings tr.excl td{color:var(--muted)}
 .chkblk{margin:0 0 10px}.chkblk .chk{margin:0}.chkblk .help{margin:2px 0 0 28px;font-size:13px;color:var(--muted)}
-#mappings td[rowspan]{vertical-align:top}#mappings tr.cont td{border-top:1px dashed var(--line)}
 /* Activity report */
 .rtiles{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
 .rtile{border-top:4px solid var(--line)}
@@ -241,7 +229,7 @@ input.secret{font-family:var(--mono)}
 .seg{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;background:var(--track);border-radius:10px;margin-bottom:18px}
 .seg button{font:inherit;font-size:14px;font-weight:600;border:0;background:transparent;color:var(--soft);border-radius:8px;padding:0 14px;min-height:36px;cursor:pointer}
 .seg button[aria-selected=true]{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
-.seg.small{margin:0}.seg.small button{font-size:13px;min-height:32px;padding:0 10px}
+.seg.small{margin:0}
 .chartcard .head{flex-wrap:wrap;gap:10px}
 .chartwrap{position:relative;margin-top:14px}
 .chart{width:100%;height:auto;display:block;overflow:visible}
@@ -254,17 +242,18 @@ input.secret{font-family:var(--mono)}
 /* Info buttons: a small "i" that opens a bubble with the longer explanation */
 .info{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin:0 0 0 6px;padding:0;border-radius:50%;border:1px solid var(--muted);background:transparent;color:var(--muted);font:700 11px/1 var(--sans);cursor:pointer;vertical-align:middle;position:relative;flex:none;transform:translateY(-1px)}  /* centred on the text beside it, wherever it sits */
 .info::before{content:"";position:absolute;inset:-13px}  /* a 44px touch target around the 18px mark */
+h2 .info{vertical-align:2px}
+.fpmark>.info{position:absolute;top:19px;right:10px;margin:0;transform:none}
 .info:hover,.info[aria-expanded=true]{border-color:var(--accent);color:var(--accent);background:var(--guide-bg)}
 .info:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-h2 .info{vertical-align:2px}
 .infopop{position:absolute;z-index:50;max-width:min(340px,calc(100vw - 32px));background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px;font-weight:400;line-height:1.5;box-shadow:0 6px 20px rgba(0,0,0,.16);text-transform:none;letter-spacing:0;overflow-wrap:anywhere}  /* a long id breaks onto the next line, inside it */
 .infopop[hidden]{display:none}
+.infopop[popover]{inset:auto;margin:0}  /* as a popover (the top layer): placed where the page puts it, as before */
 .infopop .mono{font-family:var(--mono);font-size:12px}
 .chk > .info,.convtype > .info{align-self:center;margin-left:0;margin-right:-8px}  /* the ⓘ first in every row, in one column; the box right after it */
 .chk > .info::before,.convtype > .info::before{inset:-13px -3px}  /* (its touch target kept off the box beside it) */
 .convtype > .info{margin-right:4px}  /* the row's gap is 4px, not 18px: a clear 8px between the ⓘ and its box */
 .info.gap{visibility:hidden;cursor:default}  /* a row without an ⓘ keeps its place, so the boxes line up too */
-.sizing .tbl tr.sum th,.sizing .tbl tr.sum td{font-weight:600;border-top:1px solid var(--line)}
 .sizing .tbl th[scope=row]{text-align:left;text-transform:none;letter-spacing:0;font-size:14px;color:var(--ink)}
 /* "Back to default" button beside a changed setting */
 .revert{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;margin-left:6px;padding:0;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--muted);font:600 13px/1 var(--sans);cursor:pointer;vertical-align:1px;position:relative}
@@ -275,45 +264,41 @@ h2 .info{vertical-align:2px}
 .libmodes{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px 18px;margin-top:6px}
 .libmode{display:flex;flex-direction:column;gap:6px;font-size:14px;font-weight:500}
 .libmode select{font:inherit;font-size:14px;font-weight:400;min-height:44px;border:1px solid var(--line);border-radius:8px;padding:0 12px;background:var(--panel);color:var(--ink)}
+#mappings select,#mappings input[type=text]{font:inherit;font-size:14px;width:100%;min-height:40px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:var(--panel);color:var(--ink);margin-top:8px}
+#disk-speed input[data-speed]{font:inherit;font-size:14px;width:110px;min-height:40px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:var(--panel);color:var(--ink);margin-right:6px}
 .scanctl{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;margin-top:6px}.scanctl .info{margin-left:0}
 /* Sign-in page */
 .login{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;background:var(--bg)}
 .login .card{width:100%;max-width:380px}
 .login .brand-row{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+.login .logo-light, :root[data-mode="light"] .login .logo-dark{display:none}
+:root[data-mode="light"] .login .logo-light{display:block}
 .login h1{font-size:24px;margin:0}
 .login .tagline{font-size:13px;color:var(--muted);margin-top:2px}
 .brand small.tagline{margin-top:2px;color:#C9CFCB}
 .login .fld{margin-bottom:14px}
-.login .fld input{font:inherit;font-size:15px;width:100%;min-height:44px;border:1px solid var(--line);border-radius:8px;padding:0 12px;background:var(--panel);color:var(--ink)}
 .login .btn{width:100%;margin-top:4px}
 .login-err{color:var(--bad);font-size:14px;margin:0 0 12px}
 .login-help{font-size:13px;color:var(--soft);background:var(--line2);border-radius:8px;padding:2px 14px;margin:0 0 16px}
 .login-help p{margin:10px 0}
 .login-help code{font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}
-.shell{position:relative}
 .userbar{position:absolute;top:14px;right:20px;display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
 .userbar .signout{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:8px;border:0;background:none;color:inherit;cursor:pointer}
-.userbar .signout:hover,.userbar .signout:focus-visible{background:var(--line);color:var(--ink)}
+.userbar .signout:hover{background:var(--line);color:var(--ink)}.userbar .signout:focus-visible{background:var(--line);color:var(--ink)}
 .brandlink{color:inherit;text-decoration:none}
-.brandlink:hover,.brandlink:focus-visible{text-decoration:underline}
+.brandlink:hover{text-decoration:underline}.brandlink:focus-visible{text-decoration:underline}
 .brand small .verlink{color:inherit;text-decoration:none}
 .brand small .verlink:hover{text-decoration:underline}
-.brand small .update{display:block;margin-top:4px;color:#F2C14E;text-decoration:none;background:none;border:0;padding:0;font:inherit;cursor:pointer;text-align:left}
-.brand small .update:hover{text-decoration:underline}
 @media (max-width:720px){.userbar{top:10px;right:12px;color:var(--side-ink)}.userbar .signout:hover{background:rgba(255,255,255,.1);color:#fff}}
-
-.tbl th .info{vertical-align:-3px}
 /* Language menu (top right, next to Sign out; top right of the sign-in page) */
 .whobox{display:inline-flex;align-items:center;gap:6px}
 .langpick{position:relative}
 .langbtn{display:inline-flex;align-items:center;gap:5px;height:36px;padding:0 8px;border-radius:8px;border:0;background:none;color:inherit;font:inherit;font-size:13px;cursor:pointer}
-.langbtn:hover,.langbtn:focus-visible{background:var(--line);color:var(--ink)}
+.langbtn:hover{background:var(--line);color:var(--ink)}.langbtn:focus-visible{background:var(--line);color:var(--ink)}
 .langbtn .code{font-weight:600;letter-spacing:.02em}
 .langmenu{position:absolute;right:0;top:40px;z-index:30;width:250px;max-height:min(70vh,560px);overflow:auto;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:6px}
 .langmenu ul{list-style:none;margin:0;padding:0}
-.langmenu button{display:block;width:100%;text-align:left;border:0;background:none;color:inherit;font:inherit;font-size:14px;padding:7px 10px;border-radius:6px;cursor:pointer}
-.langmenu button:hover,.langmenu button:focus-visible{background:var(--line2);outline:none}
-.langmenu button[aria-checked="true"]{font-weight:600}
+.langmenu button{display:block;width:100%;text-align:left;border:0;background:none;color:inherit;font:inherit;font-size:14px;padding:7px 10px;border-radius:6px;cursor:pointer}.seg.small button{font-size:13px;min-height:32px;padding:0 10px}
 .langmenu button[aria-checked="true"]::after{content:"✓";float:right;color:var(--accent)}
 .langmenu .orig{margin:6px 0;padding:4px;border-radius:8px;background:var(--guide-bg);border:1px solid var(--guide-line)}
 .langmenu .orig-head{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);padding:4px 10px 2px}
@@ -331,7 +316,6 @@ h2 .mode-ic{vertical-align:-3px}
   background:var(--guide-bg);border:1px solid var(--guide-line);border-radius:10px}
 .legend-ics{display:inline-flex;flex-wrap:wrap;align-items:center;gap:4px;color:var(--soft);font-size:13px}
 .legend-ics .mode-ic{margin-left:12px}
-.legend-ics .mode-ic:first-child{margin-left:0}
 /* The dropdown that can show marks beside its choices */
 .pick{position:relative}
 .pick-btn{display:flex;align-items:center;gap:2px;width:100%;min-height:42px;padding:8px 10px 8px 14px;border:1px solid var(--line);border-radius:8px;
@@ -343,13 +327,11 @@ h2 .mode-ic{vertical-align:-3px}
 .pick-list{position:absolute;z-index:30;left:0;min-width:100%;width:max-content;max-width:min(460px,calc(100vw - 32px));top:calc(100% + 4px);margin:0;padding:4px;list-style:none;background:var(--panel);
   border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.14);max-height:340px;overflow:auto}
 .pick-list li{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:8px 10px;border-radius:6px;font-size:15px;cursor:pointer}
-.pick-list li:hover,.pick-list li:focus{background:var(--guide-bg);outline:none}
-.pick-list li.sel{font-weight:600}
 .pick-list .pick-txt{white-space:normal;flex:0 1 auto}
-.pick-list li:first-child{border-bottom:1px solid var(--line2);border-radius:6px 6px 0 0;margin-bottom:2px}
 .pick-note{flex-basis:100%;font-size:12px;font-weight:400;color:var(--muted)}
 .fallback{display:flex;align-items:center;gap:6px;margin-top:6px;font-size:13px;color:var(--note-ink);background:var(--note-bg);border:1px solid var(--note-line);border-radius:8px;padding:6px 10px}
 .fallback .mode-ic{margin-left:0}
+.legend-ics .mode-ic:first-child{margin-left:0}
 :root[data-mode="dark"] .mode-ic.mk-ram-def{color:#8FD1AE;background:#1B2E24}
 :root[data-mode="dark"] .mode-ic.mk-ssd-def{color:#9DBDF0;background:#1E2A3D}
 :root[data-mode="dark"] .mode-ic.mk-ssd-only, :root[data-mode="dark"] .mode-ic.mk-ram-only{color:#A7AEA9;background:#2A302C}
@@ -369,8 +351,6 @@ h2 .mode-ic{vertical-align:-3px}
 .cachegrp:first-of-type{border-top:0;padding-top:0;margin-top:0}
 .cachegrp-h{font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--soft);margin-bottom:8px}
 .estgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:4px 18px;margin:10px 0 4px}
-.estgrid input[type=range]{width:100%;accent-color:var(--accent)}
-.tbl td.estc{background:var(--guide-bg)}
 .subh{font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--soft);margin:18px 0 8px;display:flex;align-items:center;gap:4px}
 #leadin>.cachegrp{margin:14px 0 4px}
 #leadin>.cachegrp .cachegrp-h{display:flex;align-items:center;gap:6px}
@@ -403,6 +383,9 @@ h2 .mode-ic{vertical-align:-3px}
 .fslider{display:flex;align-items:center;gap:12px}
 .fslider label{font-size:14px;color:var(--soft);white-space:nowrap}
 .fslider input{flex:1}
+.login .fld input{font:inherit;font-size:15px;width:100%;min-height:44px;border:1px solid var(--line);border-radius:8px;padding:0 12px;background:var(--panel);color:var(--ink)}
+#mappings .tick input{width:20px;height:20px;accent-color:var(--accent)}
+.estgrid input[type=range]{width:100%;accent-color:var(--accent)}
 .fslider strong{min-width:80px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
 .frows{display:grid;grid-template-columns:120px minmax(0,1fr);align-items:center}
 .fband{display:flex;min-width:0}
@@ -412,28 +395,25 @@ h2 .mode-ic{vertical-align:-3px}
 .fhead.L{text-align:right;padding-right:10px}.fhead.R{padding-left:10px}.fhead.M{text-align:center;padding:0 4px 6px}
 /* First seen: in the middle, as wide as its share of all reads, with no hit rate */
 .fmid{padding:8px 0;border-bottom:1px solid var(--line2);border-right:1px solid var(--soft);min-width:0}
-.fmid .fbar{padding:0 3px}.fmid .fbar>div{border-radius:0}
 .ffirst{background:#8C948F}
 .fhalf{padding:8px 0;border-bottom:1px solid var(--line2)}
-.fhalf.L{padding-right:3px;border-right:1px solid var(--soft)}.fhalf.R{padding-left:3px}
 .fbar,.fcnt{display:flex;gap:2px}
-.fhalf.L .fbar,.fhalf.L .fcnt{flex-direction:row-reverse}
 .fbar{height:42px}
+.fmid .fbar{padding:0 3px}
+.fhalf.L{padding-right:3px;border-right:1px solid var(--soft)}.fhalf.R{padding-left:3px}
 /* Each segment: its share on top, its count under it, inside the bar */
 .fbar>div{display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;overflow:hidden;white-space:nowrap;min-width:2px;line-height:1.2}
-.fbar>div span{max-width:100%;overflow:hidden;text-overflow:ellipsis;padding:0 4px;box-sizing:border-box}
-.fbar>div span:first-child{font-size:13px;font-weight:700}
-.fbar>div span:last-child{font-size:11px;font-weight:500;opacity:.92}
 .fbar>.fempty{flex:1;background:var(--track);color:var(--muted);font-size:12px;border-radius:4px}
-.fhalf.L .fbar div:last-child{border-radius:4px 0 0 4px}.fhalf.R .fbar div:last-child{border-radius:0 4px 4px 0}
 .fcnt{font-size:12px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums}
+.fhalf.L .fbar,.fhalf.L .fcnt{flex-direction:row-reverse}
 .fcnt div{text-align:center;white-space:nowrap;min-width:0}
 .fhit{background:#1F8A5B}.fmiss{background:#C8562B}
 .fkey{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:-1px}
 .frows .lname{padding-top:0}
 /* On a phone each library's name goes above its bar, so the two halves get the full width */
-@media (max-width:600px){.frows{grid-template-columns:minmax(0,1fr)}
-  .frows .lname,.frows .fnone,.frows .fband{grid-column:1/-1}.frows .lname{padding-top:10px}.frows .fhalf,.frows .fmid{border-bottom:0}.fcnt{font-size:11px}.lname{font-size:13px}}
+@media (max-width:600px){.frows{grid-template-columns:minmax(0,1fr)}.frows .fhalf,.frows .fmid{border-bottom:0}.fcnt{font-size:11px}.lname{font-size:13px}
+  .frows .lname,.frows .fnone,.frows .fband{grid-column:1/-1}.frows .lname{padding-top:10px}
+}
 .lnone{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--muted)}
 .fnone{grid-column:2/-1;padding:12px 0;border-bottom:1px solid var(--line2);font-size:13px;color:var(--muted);text-align:center}
 /* With virgin cache in the middle, the side headings sit at the ends of the bar */
@@ -450,16 +430,14 @@ h2 .mode-ic{vertical-align:-3px}
 .fclegend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--soft);margin:2px 0 8px}
 .fclegend span{display:flex;align-items:center;gap:5px}
 .fclegend i{display:inline-block;width:14px;height:2px;border-radius:2px}
-.fclegend i.ring{width:8px;height:8px;border-radius:50%;border:2px solid var(--soft);background:var(--panel)}
 /* Tiles that open their detailed view */
-.rgo{cursor:pointer}.rgo:hover,.rgo:focus-visible{border-color:var(--accent)}
+.rgo{cursor:pointer}.rgo:hover{border-color:var(--accent)}.rgo:focus-visible{border-color:var(--accent)}
 .rmore{color:var(--accent);font-weight:700}
 /* Skips served from cache, in detail */
 .srows{display:grid;grid-template-columns:120px minmax(0,1fr) 80px;align-items:center;gap:8px 12px;margin-top:8px}
 .srows .lname{padding:0}
 .sbar{display:flex;height:22px;gap:2px}
 .sbar>div{display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;overflow:hidden;white-space:nowrap}
-.sbar>div:first-child{border-radius:4px 0 0 4px}.sbar>div:last-child{border-radius:0 4px 4px 0}
 .sbar>.fempty{border-radius:4px;background:var(--track);color:var(--muted);font-weight:400}
 .scount{font-size:12px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
 .shitbar{fill:#1F8A5B}.smissbar{fill:#C8562B;opacity:.85}
@@ -470,9 +448,8 @@ h2 .mode-ic{vertical-align:-3px}
 .covsw{display:inline-block;width:10px;height:10px;border-radius:2px}
 .covsw.cov0{background:#042C53}.covsw.cov1{background:#0C447C}.covsw.cov2{background:#185FA5}.covsw.cov3{background:#378ADD}.covsw.cov4{background:#85B7EB}
 .covlegend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--soft);margin:10px 0 6px;font-variant-numeric:tabular-nums}
-.covlegend span{display:flex;align-items:center;gap:5px}.covlegend b{color:var(--ink);font-weight:600}
+.covlegend span{display:flex;align-items:center;gap:5px}.covlegend b{color:var(--ink);font-weight:600;display:inline-block;min-width:3.2em}
 .covwhen{font-weight:600;color:var(--ink);margin-left:auto}
-.covlegend b{display:inline-block;min-width:3.2em}
 .covcross{stroke:var(--ink);stroke-width:1;stroke-dasharray:3 3}
 .covhit{fill:transparent}
 :root[data-mode="dark"] .cov0{fill:#E6F1FB;stroke:#E6F1FB}
@@ -491,7 +468,7 @@ h2 .mode-ic{vertical-align:-3px}
 .withposter{display:flex;gap:12px;align-items:center;min-width:0}
 .withposter>div{min-width:0}
 .procfiles{margin:4px 0 12px}
-.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .btn.sm{min-height:32px;padding:0 12px;font-size:13px}
 /* Processes: a job's files, the header kept in sight while the list scrolls by (wide screens: on narrow
    ones the table scrolls sideways, and a sideways-scrolling box can't keep a header in sight of the page) */
@@ -499,11 +476,6 @@ h2 .mode-ic{vertical-align:-3px}
 .procfiles thead th{position:sticky;top:0;z-index:2;background:var(--panel)}
 .procfiles .hidelist{font-size:12px;text-transform:none;letter-spacing:0;white-space:nowrap}
 .good{color:var(--ok)}
-/* the files table: the file as it was on the first line, as written on the second */
-.procfiles td .ln{min-height:24px;line-height:24px}
-.procfiles td .ln .badge{vertical-align:middle}
-.procfiles th .sorter{font:inherit;color:inherit;text-transform:inherit;letter-spacing:inherit;font-weight:500;white-space:nowrap;padding:0}
-.procfiles th[aria-sort] .sorter{color:var(--ink)}
 /* the job card: the poster as tall as the lines beside it; a thin bar for the file in hand */
 .withposter.tall{align-items:stretch;margin-top:6px}
 .withposter.tall>.grow{flex:1;min-width:0}
@@ -513,12 +485,8 @@ h2 .mode-ic{vertical-align:-3px}
 .filebar .meter{flex:1;max-width:360px;margin:4px 0}
 .meter.thin{height:6px;border-radius:3px}
 .bad{color:var(--bad)}
-/* a title's files: one line under the last of them, not between them */
-.procfiles tr.ingrp td{border-bottom:0;padding-bottom:4px}
-.procfiles tr.ingrp td[rowspan]{border-bottom:1px solid var(--line2)}
 /* a library's icon beside its name, like Plex's */
 .libicon{width:1.05em;height:1.05em;vertical-align:-0.15em;margin-right:6px;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round;opacity:.75;flex:none}
-.procfiles td .link{text-align:left}
 /* Library Health: what's where in each file */
 .lsearch{flex:1 1 200px;min-width:200px;font:inherit;font-size:14px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}
 .llegend{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;font-size:12px;color:var(--soft);margin:0}
@@ -538,38 +506,22 @@ h2 .mode-ic{vertical-align:-3px}
 .lp-image{fill:#D45D8A;background:#D45D8A}
 .lp-font,.lp-attachment,.lp-attachments{fill:#2E9C8F;background:#2E9C8F}
 .lp-other{fill:#4C544F;background:#4C544F}
-.lfiles tr.lrow{cursor:pointer}
-.lfiles tr.lrow:hover td{background:var(--line2)}
-.lfiles tr.ingrp td{border-bottom:0;padding-bottom:4px}
-.lfiles tr.ingrp td[rowspan]{border-bottom:1px solid var(--line2)}
-.lfiles tr.open td{background:var(--line2)}
 .ldrow>td{background:var(--code-bg)}
 .lfacts{display:flex;flex-wrap:wrap;gap:4px 22px;font-size:13px;margin:0 0 10px}
-.tbl.compact td,.tbl.compact th{padding:5px 8px;font-size:13px}
 :root[data-mode="dark"] .lp-padding{fill:#3A403C;background:#3A403C}
 /* a file's blocks: every block the same size, filled in proportion with what's in it */
-.lblocks{display:flex;align-items:center;flex-wrap:wrap;gap:3px}
-.lblk{display:inline-flex;flex-direction:column;align-items:stretch;width:30px;padding:0;border:1px solid var(--soft);border-radius:2px;background:var(--panel);font:inherit;color:inherit;cursor:inherit}
-.lblk .lbin{display:flex;height:14px;overflow:hidden}
-.lblk .lbin>span{min-width:1px}
-.lblk.big{width:auto;flex:0 1 150px;min-width:64px;cursor:pointer;border-radius:4px}
-.lblocks.big .lgap{min-width:120px}
+.lblocks{display:flex;align-items:center;gap:3px;flex-wrap:nowrap;width:100%}
+.lblk{display:inline-flex;flex-direction:column;align-items:stretch;padding:0;border:1px solid var(--soft);border-radius:2px;background:var(--panel);font:inherit;color:inherit;cursor:inherit}
+.lblk .lbin{display:flex;height:14px;overflow:hidden;position:relative}
 .lblk.big .lbin{height:40px}
-.lblk.big:hover{border-color:var(--ink)}
 .lblk.sel{outline:2px solid var(--accent);outline-offset:1px}
 .lbn{font-size:11px;color:var(--soft);padding:2px 4px;text-align:center;white-space:nowrap}
 .lgap{flex:1 1 auto;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;padding:0 10px;font:inherit;background:none;border-left:0;border-right:0;font-size:11px;line-height:1.3;color:var(--soft);border-top:2px dotted var(--line);border-bottom:2px dotted var(--line);margin:0 4px}
-.lblocks.big .lgap{font-size:12px;min-height:40px}
 .lvid{color:var(--ink);white-space:nowrap}
 .lp-empty{background:repeating-linear-gradient(45deg,var(--line2) 0 3px,var(--panel) 3px 6px)}
 .lblkinfo{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 12px;background:var(--panel)}
 .lblkinfo .tbl{margin-top:6px}
-.lblk .lbin{position:relative}
 .lx{position:absolute;right:2px;top:50%;transform:translateY(-50%);font-size:10px;font-weight:700;color:#fff;text-shadow:0 0 2px rgba(0,0,0,.6)}
-.lblk.big .lx{font-size:13px;right:6px}
-.lblocks{flex-wrap:nowrap}
-.lblocks.big .lgap{cursor:pointer;min-height:58px}
-.lblocks.big .lgap:hover{border-color:var(--soft)}
 .lgap.sel{outline:2px solid var(--accent);outline-offset:1px}
 .lp-segment{background:#A9B2AD}
 .linspect{margin:12px 0 0}
@@ -577,11 +529,13 @@ h2 .mode-ic{vertical-align:-3px}
 /* Library Health bars use the whole width: every block (a run of like blocks counts once) and the
    video share it equally, so blocks are as wide as there's room for and the video is never narrower
    than one of them */
-.lblocks{width:100%}
 .lblk,.lblk.big{flex:1 1 0;width:auto;min-width:14px}
-.lblk.big{min-width:44px}
+.lblk.big{cursor:pointer;border-radius:4px;min-width:44px}
+.lblk.big:hover{border-color:var(--ink)}
 .lblocks .lgap{flex:1 1 0;min-width:96px}
-.lblocks.big .lgap{min-width:130px}
+.lblocks.big .lgap{font-size:12px;cursor:pointer;min-height:58px;min-width:130px}
+.lblk.big .lx{font-size:13px;right:6px}
+.lblocks.big .lgap:hover{border-color:var(--soft)}
 /* the parts every file starts with (header, segment, table of contents, file info, track list): one colour */
 .lp-head{fill:#7C8781;background:#7C8781}
 /* a padding row in a block's list sits under its part, like a sub-item */
@@ -631,19 +585,16 @@ h2 .mode-ic{vertical-align:-3px}
 .lcout{background:#D45D8A}
 .lcround{background:repeating-linear-gradient(45deg,#B9BFBB 0 3px,#DDE1DD 3px 6px);color:var(--ink)}
 .lclegend{margin:2px 0 4px}
-/* Library Health: each part's ⓘ at the front of its line (a slot where it has none), its checks after it */
-.lblkinfo td>.info:first-child{margin:0 6px 0 0}
 .infoslot{display:inline-block;width:18px;margin-right:6px}
 .lcheck{display:inline-flex;align-items:center;gap:4px;margin-left:10px;font-size:13px;font-weight:400}
 .lcheck .badge{margin:0}
 .lcheck .info{margin-left:2px}
 .lcountn{cursor:default}
 /* Library → Sync: each item, both servers side by side, what applying would copy between them */
-.ssitem{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:10px 16px;padding:12px 0;border-top:1px solid var(--line2);align-items:start}
-.ssnotes{grid-column:1/-1;font-size:14px}
+.ssitem{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:10px 16px;border-top:1px solid var(--line2);align-items:start;position:relative;background:var(--guide-bg);border:0;border-radius:8px;padding:12px 10px;margin:0 -2px}
+.ssnotes{grid-column:1/-1;font-size:14px;border:1px dashed var(--line);border-radius:8px;padding:8px 10px;background:var(--line2);display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
 .ssnotes>div{margin-top:4px}
 .sslbl{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-top:6px}
-.ssitem.warn{background:var(--guide-bg);margin:0 -8px;padding:12px 8px;border-radius:8px}
 .ssside .sshead{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:4px}
 .ssside.src .sshead{color:var(--ink)}
 .ssbody{display:flex;gap:10px;align-items:flex-start}
@@ -657,23 +608,19 @@ h2 .mode-ic{vertical-align:-3px}
 .ssrow{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;width:100%;padding:8px 6px;border:0;border-top:1px solid var(--line2);background:none;font:inherit;color:inherit;text-align:left;cursor:pointer}
 .ssrow:hover{background:var(--line2)}
 .ssrow.warn{background:var(--guide-bg)}
-.ssitem{position:relative}
 .ssclose{position:absolute;right:0;top:12px;font-size:12px}
 .ssval{font-size:13px;margin:2px 0;overflow-wrap:anywhere;cursor:default}
 
 /* the Sync comparison: each side its own card, what's about neither underneath, the servers named once over the list */
 .sshdr{position:sticky;top:0;z-index:5;display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:0 16px;padding:8px 0;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:600}
-.sshdr>div:nth-child(2){width:34px}
-.sstop{grid-column:1/-1;display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+.sstop{grid-column:1/-1;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center}
 .sstop .what{font-weight:600}
 .ssitem .ssclose{position:static}
 .sscard{border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--panel);min-width:0}
-.ssnotes{border:1px dashed var(--line);border-radius:8px;padding:8px 10px;background:var(--line2);display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
 .sschips{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0}
 .sschip{cursor:pointer;border:1px solid transparent;font:inherit;font-size:12px}
 .sschip.on{border-color:currentColor}
 @media (max-width:760px){.sshdr{display:none}}
-.ssitem+.ssitem{margin-top:14px}
 .b-grey{background:var(--line2);color:var(--muted)}
 .ssposter.p-hand{box-shadow:0 0 0 4px var(--ok-bg)}
 .ssposter.p-match{box-shadow:0 0 0 4px var(--line2)}
@@ -688,33 +635,29 @@ h2 .mode-ic{vertical-align:-3px}
 .ssfiles{font-family:var(--mono,monospace);font-size:11px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere}
 .ssstack{display:flex;flex-direction:column;gap:8px;min-width:0}
 /* every item its own box; its warnings beside its title (on the next line when there's no room) */
-.ssitem{background:var(--guide-bg);border:0;border-radius:8px;padding:12px 10px;margin:0 -2px}
 .ssitem+.ssitem{margin-top:14px}
-.ssitem.warn{margin:0 -2px;padding:12px 10px}
+.ssitem.warn{background:var(--guide-bg);border-radius:8px;margin:0 -2px;padding:12px 10px}
 .ssitem.warn+.ssitem,.ssitem+.ssitem.warn{margin-top:14px}
-.sstop{flex-wrap:wrap;align-items:center}
 .sswarn{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}
 .ssfiles>div{padding-left:0}
+.sshdr>div:nth-child(2){width:34px}
 .ssnotes .ssfiles{margin-top:0}
 /* Library → Health: the checks by category, each with its switch and count */
 .lhtools{columns:300px;column-gap:28px;margin:8px 0 12px}  /* the Library page's tools: a line each, in columns where there's room */
 .lhtools>*{break-inside:avoid}
 .lhtool{gap:6px 10px;min-height:36px}
 .libstats{display:flex;margin:10px 0 8px}
-.libstats .toolstats{margin-left:0;justify-content:flex-start}
 .lhtool>a{flex:1 1 0;min-width:0}
 .lhtool>.badge{margin-left:auto}
 .lhtool>.btn{flex:none;min-width:64px}
-.lhtool.lhhidden>a,.lhtool.lhhidden>.badge{opacity:.55}  /* (hidden from the list below: still a click away) */
 /* every tool's options, the File Checks' way: a row each, two columns where there's room, the count on the right */
 .optgrid{columns:340px;column-gap:28px;margin:6px 0 8px;padding-bottom:8px;border-bottom:1px solid var(--line2)}  /* (columns, not a grid: a tall option — one with options of its own — doesn't stretch its row and leave holes beside it) */
 .optgrid>*{min-width:0;break-inside:avoid}
 .tooltop{align-items:center}  /* every tool's top: the library tabs, and on their right what the last scan found */
 .toolstats{margin-left:auto;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:6px}
+.libstats .toolstats{margin-left:0;justify-content:flex-start}
 .toolstats .badge{min-width:0;cursor:default}
 .optrow>label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lhchk.optrow select.sel.sm{font-size:12px;padding:2px 6px;min-height:0;max-width:240px;margin-left:4px}
-.optrow>.info+label:not(:has(input)){margin-left:4px}  /* (a choice without a box: its name kept off the ⓘ) */
 .lhchk{align-items:center;gap:6px}
 .lhchk>label{flex:1 1 0;min-width:0}  /* (a long name wraps inside the label: the count stays on the line) */
 .lhchk .badge{margin-left:auto;flex:none}
@@ -724,12 +667,17 @@ h2 .mode-ic{vertical-align:-3px}
 .ssfn{display:inline-block;min-width:1.4em;text-align:right;color:var(--ink);font-weight:600}
 /* Tools: the introduction's cards, and the tools' row on each tool's page */
 .toolcard h2 a{color:inherit;text-decoration:none}
+.lhtool.lhhidden>a,.lhtool.lhhidden>.badge{opacity:.55}  /* (hidden from the list below: still a click away) */
+.procfiles td .ln .badge{vertical-align:middle}
 /* what a tool has found to do: on its card, on the library tabs, and summed beside Tools in the menu — one palette
    everywhere: a pale ground, the dark tone for the number (and for the ring while it's still being counted) */
 .count{display:inline-block;min-width:22px;padding:1px 7px;border-radius:11px;background:var(--line2);color:var(--ink);font-size:13px;font-weight:600;text-align:center;vertical-align:middle;margin-left:6px}
 .count.warn{background:var(--warn-bg);color:var(--warn)}
+.seg button .count.warn{background:var(--warn-bg);color:var(--warn)}
 .count.fail{background:var(--bad-bg);color:var(--bad)}
+.seg button .count.fail{background:var(--bad-bg);color:var(--bad)}
 .count.ok{background:var(--ok-bg);color:var(--ok)}
+.seg button .count.ok{background:var(--ok-bg);color:var(--ok)}
 .count.busy{display:inline-flex;align-items:center;justify-content:center;vertical-align:middle}
 /* a count that doesn't apply there (evaluate.py "na"): a grey dash */
 .count.na{background:var(--line2);color:var(--muted);font-weight:400}
@@ -747,6 +695,24 @@ h2 .mode-ic{vertical-align:-3px}
 .btn.spinning:disabled{opacity:.85;color:var(--muted)}
 @media (prefers-reduced-motion:reduce){.comet{display:none}}
 .icon .count{position:absolute;right:-9px;top:-8px;min-width:16px;padding:0 4px;margin-left:0;border-radius:9px;font-size:10px;line-height:16px;font-weight:700}
+.seg button .count{display:inline-block;min-width:20px;padding:0 6px;border-radius:10px;background:var(--line2);color:var(--ink);font-size:12px;font-weight:600;text-align:center;margin-left:4px}
+.brand small .update{display:block;margin-top:4px;color:#F2C14E;text-decoration:none;background:none;border:0;padding:0;font:inherit;cursor:pointer;text-align:left}
+.brand small .update:hover{text-decoration:underline}
+.langmenu button:hover{background:var(--line2);outline:none}.langmenu button:focus-visible{background:var(--line2);outline:none}
+.langmenu button[aria-checked="true"]{font-weight:600}
+.pick-list li:hover,.pick-list li:focus{background:var(--guide-bg);outline:none}
+.pick-list li.sel{font-weight:600}
+.pick-list li:first-child{border-bottom:1px solid var(--line2);border-radius:6px 6px 0 0;margin-bottom:2px}
+.tbl td.estc{background:var(--guide-bg)}.fmid .fbar>div{border-radius:0}
+.fclegend i.ring{width:8px;height:8px;border-radius:50%;border:2px solid var(--soft);background:var(--panel)}
+.sbar>div:first-child{border-radius:4px 0 0 4px}.sbar>div:last-child{border-radius:0 4px 4px 0}
+/* the files table: the file as it was on the first line, as written on the second */
+.procfiles td .ln{min-height:24px;line-height:24px}
+.procfiles th .sorter{font:inherit;color:inherit;text-transform:inherit;letter-spacing:inherit;font-weight:500;white-space:nowrap;padding:0}
+.procfiles th[aria-sort] .sorter{color:var(--ink)}
+.procfiles td .link{text-align:left}
+.lfiles tr.lrow{cursor:pointer}
+.tbl.compact td,.tbl.compact th{padding:5px 8px;font-size:13px}
 .toolcard p{color:var(--soft);font-size:14px;margin:6px 0 12px}
 .seg a[role=tab]{display:inline-flex;align-items:center;font:inherit;font-size:13px;font-weight:600;text-decoration:none;color:var(--soft);border-radius:8px;padding:0 10px;min-height:32px}
 .seg a[role=tab][aria-selected=true]{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
@@ -760,26 +726,34 @@ h2 .mode-ic{vertical-align:-3px}
 .toolsub[hidden]{display:none}  /* (its display would show it: off a tool page, gone) */
 /* Library Health's checks: the ⓘ before the checkbox, where the eye lands first */
 .lhchk > .info{margin-left:0;margin-right:2px}  /* (a little room between the ⓘ and its box) */
+
+.tbl th .info{vertical-align:-3px}
 /* Library → Health: each flagged item as a record card, its issues as chips on the right */
 .lhitem{grid-template-columns:minmax(0,1fr) 34px minmax(0,1.2fr)}
 .lhhdr{grid-template-columns:minmax(0,1fr) 34px minmax(0,1.2fr)}
 .lhflags{min-width:0}
 .lhchk select.sel.sm{font-size:12px;padding:2px 6px;min-height:0;max-width:140px}
+.lhchk.optrow select.sel.sm{font-size:12px;padding:2px 6px;min-height:0;max-width:240px;margin-left:4px}
 .lhchk .lhlang{flex-basis:100%;display:flex;align-items:center;gap:8px;margin:-4px 0 2px 42px;font-size:13px;color:var(--soft)}
-.lhchk.lhsub{font-size:13px}
-.lhchk.lhsub label{margin-left:18px}  /* the row keeps its ⓘ in the column; the box and its name step in a little */
+.lhchk.lhsub{font-size:13px;align-items:flex-start}  /* (wraps: the language select takes the line under the name) */
+.lhchk.lhsub label{margin-left:18px;flex:1 1 auto;min-width:0;align-items:flex-start}  /* the row keeps its ⓘ in the column; the box and its name step in a little */
+.optrow>.info+label:not(:has(input)){margin-left:4px}  /* (a choice without a box: its name kept off the ⓘ) */
 .lhacts{margin-top:6px}
 .lhquiet .what{color:var(--muted)}
 .ssval.muted{color:var(--muted)}
 .mgarrow{display:flex;flex-direction:column;align-items:center;line-height:1;color:var(--muted)}
 .mgarrow span{font-size:18px}
+.fbar>div span{max-width:100%;overflow:hidden;text-overflow:ellipsis;padding:0 4px;box-sizing:border-box}
+.sw[aria-pressed="true"] span{left:28px}
+.lblk .lbin>span{min-width:1px}
+.fbar>div span:first-child{font-size:13px;font-weight:700}
+.fbar>div span:last-child{font-size:11px;font-weight:500;opacity:.92}
 /* Merge Duplicates: the record kept framed and labelled, the ones folded in greyed; the arrow a button that swaps them */
-.mgkeep{position:relative;border:2px solid var(--accent);border-radius:10px;padding:4px}
-.mgkeeplbl{position:absolute;top:-11px;left:10px;background:var(--panel);border:2px solid var(--accent);border-radius:999px;padding:1px 9px;font-size:11px;line-height:14px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:.4px}
-.mgdrop{position:relative;border:2px solid var(--bad);border-radius:10px;padding:4px}
-.mgdroplbl{position:absolute;top:-9px;left:10px;z-index:1;background:var(--panel);padding:0 6px;font-size:11px;font-weight:600;color:var(--bad);text-transform:uppercase;letter-spacing:.4px}
-/* the side that goes, greyed — but not its yellow and red tags: they count */
-.mgdim .ssposter,.mgdim .ssinfo>.what,.mgdim .ssinfo>.det,.mgdim .ssval,.mgdim .sschip:not(.b-warn):not(.b-fail){opacity:.6}
+.mgkeep{position:relative;border:2px solid var(--accent);border-radius:10px;padding:4px;--edge:var(--accent)}
+.mgkeeplbl{position:absolute;top:-11px;left:10px;background:var(--panel);border:2px solid var(--accent);border-radius:999px;padding:1px 9px;font-size:11px;line-height:14px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:.4px;--edge:var(--accent)}
+/* the one that goes: its own colour (themes.py "lost"), its title in an oval as the kept one's */
+.mgdrop{position:relative;border:2px solid var(--lost);border-radius:10px;padding:4px;--edge:var(--lost)}
+.mgdroplbl{position:absolute;top:-11px;left:10px;z-index:1;background:var(--panel);border:2px solid var(--lost);border-radius:999px;padding:1px 9px;font-size:11px;line-height:14px;font-weight:600;color:var(--lost);text-transform:uppercase;letter-spacing:.4px;--edge:var(--lost)}
 .mgchecks{margin-top:6px}
 .lhitem.revealed{outline:2px solid var(--accent);outline-offset:2px;border-radius:8px}
 button.mgarrow{background:none;border:1px solid var(--line);border-radius:8px;padding:6px 8px;cursor:pointer;font:inherit;color:var(--muted)}
@@ -795,14 +769,28 @@ button.mgarrow:hover{border-color:var(--accent);color:var(--accent)}
 @media (max-width:760px){.cmprow{grid-template-columns:minmax(0,1fr)}.cmprow>.mgarrow{justify-self:center}}
 .brand small .update.quiet{color:#A3ABA6;cursor:default}
 .tbl.mid td{vertical-align:middle}  /* rows with a field in them: the text on the field's line */
+/* a title's files: one line under the last of them, not between them */
+.procfiles tr.ingrp td{border-bottom:0;padding-bottom:4px}
+.lfiles tr.ingrp td{border-bottom:0;padding-bottom:4px}
+.lfiles tr.open td{background:var(--line2)}
+.tbl.tool tr.off td{opacity:.6}
+.sizing .tbl tr.sum th,.sizing .tbl tr.sum td{font-weight:600;border-top:1px solid var(--line)}
+.procfiles tr.ingrp td[rowspan]{border-bottom:1px solid var(--line2)}
+.lfiles tr.lrow:hover td{background:var(--line2)}
+#mappings td{min-width:120px}
+#mappings td:last-child{min-width:280px}
+#mappings td:first-child{min-width:56px}
+#mappings tr.excl td{color:var(--muted)}#mappings tr.cont td{border-top:1px dashed var(--line)}
+.lfiles tr.ingrp td[rowspan]{border-bottom:1px solid var(--line2)}
+#mappings td[rowspan]{vertical-align:top}
 /* a view loading: an indeterminate bar */
 .loading{margin:14px 0}
 .meter.busy>div{width:30%;animation:busy 1.1s ease-in-out infinite alternate}
 @keyframes busy{from{margin-left:0}to{margin-left:70%}}
 @media (prefers-reduced-motion:reduce){.meter.busy>div{animation:none;width:100%;opacity:.4}}
-.lhchk.lhsub{align-items:flex-start}  /* (wraps: the language select takes the line under the name) */
 .lhchk.lhsub > .info{flex:none}
-.lhchk.lhsub label{flex:1 1 auto;min-width:0;align-items:flex-start}
+/* Library Health: each part's ⓘ at the front of its line (a slot where it has none), its checks after it */
+.lblkinfo td>.info:first-child{margin:0 6px 0 0}
 /* a card's controls greyed out where they can't apply (not TrueNAS): there to see, not to use */
 fieldset.plain{border:0;padding:0;margin:0;min-width:0}
 fieldset.greyed{opacity:.5;filter:grayscale(1)}
@@ -822,6 +810,8 @@ fieldset.greyed *{cursor:not-allowed}
 .lights.ready .fallback label{display:flex;align-items:center;gap:6px}
 .optgate{margin-top:12px}
 .optgate>.what{display:flex;align-items:center;gap:6px;font-weight:600;margin-bottom:-6px}
+/* the side that goes, greyed — but not its yellow and red tags: they count */
+.mgdim .ssposter,.mgdim .ssinfo>.what,.mgdim .ssinfo>.det,.mgdim .ssval,.mgdim .sschip:not(.b-warn):not(.b-fail){opacity:.6}
 .note.warnbox{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn)}
 .note.warnbox a{color:inherit}
 .note.badbox{background:var(--bad-bg);color:var(--bad);border:1px solid var(--bad)}
@@ -829,30 +819,49 @@ fieldset.greyed *{cursor:not-allowed}
 .toolguide{margin:4px 0 14px;grid-template-columns:1fr}
 /* what Apply will do, right before it (every tool): what it does, what it changes, the backup */
 .note.applybox>div+div{margin-top:6px}
+.shell.collapsed .brand>div,.shell.collapsed .lbl{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+@media (max-width:720px){
+  .shell.collapsed .brand>div,.shell.collapsed .lbl{position:static;width:auto;height:auto;overflow:visible;clip-path:none}
+}
+.fhalf.L .fbar div:last-child{border-radius:4px 0 0 4px}.fhalf.R .fbar div:last-child{border-radius:0 4px 4px 0}
 .undo{margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
 /* ---- A theme's decorations (themes.py "decor", drawn by decor.js; theme.js marks <html> with them) */
 /* spots: round the app, and on the menu */
 :root[data-spots="on"] body{background-image:var(--spots-img,none)}
 :root[data-spots="on"] .side{background-image:var(--menu-spots-img,none)}
-/* vines: the app sits in a frame, cut to the vine round it; the spots show outside */
-:root[data-vines="on"] body{padding:10px}
-:root[data-vines="on"] .shell{position:relative;min-height:calc(100vh - 20px);background:var(--bg);border-radius:14px}
-:root[data-vines="on"] .side{top:10px;height:calc(100vh - 20px)}
-.shell>svg.framevine,.shell>svg.seamvine{position:absolute;left:0;top:0;overflow:visible;pointer-events:none;z-index:3}
+/* vines: the app to the window's edges, as Classic; a vine down the seam between the menu and the page */
+:root[data-vines="on"] .shell{background:var(--bg)}
+.shell>svg.seamvine{overflow:visible;pointer-events:none;z-index:3}
+/* beside the menu, held there as the page scrolls (as the menu is); across the top of the page on a phone */
+.shell>svg.seamvine.down{position:sticky;top:0;align-self:flex-start;flex:none;margin:0 -6px}
+.shell>svg.seamvine.across{position:absolute;left:0;top:0}
 /* a card's border is its vine: the card's own colour stops at the vine, which is drawn behind what's in the card */
 :root[data-vines="on"] .card{position:relative;isolation:isolate;background:transparent;border-color:transparent}
 .card>svg.vine{position:absolute;left:-1px;top:-1px;overflow:visible;pointer-events:none;z-index:-1}
 :root:not([data-vines="on"]) .card>svg.vine{display:none}
+/* the Kept and Lost boxes and their titles: the cards' vine line, without leaves, for their border (decor.js boxes) */
+:root[data-vines="on"] .mgkeep,:root[data-vines="on"] .mgdrop{border-color:transparent;isolation:isolate}
+/* with vines, one box: the vine filled (decor.js boxes), the file's card inside it without a line of its own */
+:root[data-vines="on"] .mgkeep .sscard,:root[data-vines="on"] .mgdrop .sscard{border-color:transparent;background:transparent}
+svg.edgevine{position:absolute;overflow:visible;pointer-events:none;z-index:-1}
+:root:not([data-vines="on"]) svg.edgevine{display:none}
+/* grapes: the arrow between the two sides is the Play bunch on its stem */
+.mgarrow .grapearrow{display:none;width:30px;height:30px}
+:root[data-grapes="on"] .mgarrow .grapearrow{display:block}
+:root[data-grapes="on"] .mgarrow .txtarrow{display:none}
+/* and every progress bar is the leafy vine, its grapes ripening (decor.js meters); a usage meter keeps its bar */
+:root[data-grapes="on"] .meter:not(.usage){height:auto;border-radius:0;background:none;overflow:visible}
+:root[data-grapes="on"] .meter:not(.usage)>div{display:none}
+.meter>svg.mvine{display:block;max-width:100%}
+:root:not([data-grapes="on"]) .meter>svg.mvine{display:none}
+.mvine .ripen{fill:var(--unripe);animation:ripen 1.6s ease-in-out infinite}
+@keyframes ripen{0%,100%{fill:var(--unripe)}40%{fill:var(--wine)}}
+@media (prefers-reduced-motion:reduce){.mvine .ripen{animation:none;fill:var(--wine);opacity:.5}}
 /* film: a reel and its band of film under each page's title */
 .filmline{margin:-14px 0 20px;line-height:0}
 .filmline svg{display:block;max-width:100%;height:auto}
-@media (max-width:720px){
-  :root[data-vines="on"] body{padding:6px}
-  :root[data-vines="on"] .shell{min-height:calc(100vh - 12px)}
-  :root[data-vines="on"] .side{top:auto;height:auto}
-}
-@media print{:root[data-vines="on"] body{padding:0;background-image:none}.framevine,.seamvine,.filmline{display:none}}
+@media print{:root[data-spots="on"] body{background-image:none}.seamvine,.filmline{display:none}}
 /* System → Themes: each theme on a row, its buttons at the end */
 .themelist{margin:12px 0 6px}
 .themerow{align-items:center;flex-wrap:wrap}

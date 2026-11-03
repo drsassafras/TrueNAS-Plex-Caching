@@ -2087,7 +2087,7 @@ class App:
             "version": self.version,
             "settings": self.settings.public(),
             # the themes to choose from (System → Themes; themes.py), and which one shows
-            "themes": [{k: t[k] for k in ("id", "name", "mode", "builtin", "decor")}
+            "themes": [{k: t[k] for k in ("id", "name", "builtin", "decor")}
                        for t in themes.everything(self.settings.section("themes").get("custom"))],
             "auth": {"enabled": self.auth.enabled, "user": self.auth.username if self.auth.enabled else ""},
             # Defaults of every setting (but secrets), for the page's ↺ "back to default" buttons

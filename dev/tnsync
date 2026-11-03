@@ -11,25 +11,38 @@
 #
 # Options:
 #   -n, --dry-run    show what would be copied and run the tests; change nothing
-#   -y, --yes        restart the app afterwards without asking
-#   -N, --no-restart don't restart (and don't ask)
-#   --tests-first    run the tests BEFORE copying, and copy nothing unless they pass
-#   --skip-tests     don't run the project's tests at all
+#   -y, --yes        restart the app once the files are copied (without it, it isn't)
+#   -N, --no-restart don't restart (the default)
+#   --tests-first    copy nothing until the checks have passed
+#   --skip-tests     don't run the project's tests and checks at all
 #   --skip-future    run the current tests only, not the future ones (TN_FUTURE)
+#   --release        the release checks too (TN_RELEASE), and the tests as for a release: for dev before it's released
 #   -h, --help       this help
 #
-# If the project's .tnsync has TN_TEST, that command runs in the code being
-# copied: by default after the copy and restart (so the app is ready sooner),
-# or first with --tests-first. With TN_FUTURE too (the suite on the next
-# Python, say), that runs at the same time; the current tests' result comes
-# as soon as they finish, then the future tests' output (stopped if the
-# current tests failed).
-# The run ends in one big box: green when every test run passed, red when
-# the current tests failed, green above and red below when only the future
-# ones did — each run (current, future) on its own line. Pressing Enter while
-# the tests run stops them (a yellow box says so; nothing is recorded), so a
-# newer version can be uploaded without waiting: run tnsync again.
+# Everything runs at once, on a board of sections redrawn as they go (dev/board.py):
+# the copy to TrueNAS and the restart, and each of these that .tnsync sets, in the
+# code being copied — TN_TEST (the current tests), TN_FUTURE (the suite on the
+# next Python, say: stopped if the current tests fail), TN_VALIDATE (the HTML,
+# scripts and CSS checked), TN_TYPES (the Python validation: the type check),
+# TN_STYLE (the looks waiting for your approval: orange, a line that says how many and where to see them;
+# it neither blocks the copy nor counts as a failure) — and TN_UPKEEP (the
+# dependencies), in your folder. Each section is blue while it runs, then green,
+# orange, red or grey (for the record: skipped, already in sync), its result in its own block (each block keeps its three lines
+# from the start, so nothing moves); what a failed one printed goes above the
+# board as it ends (scroll up to read it), so the board stays at the bottom.
+# With --tests-first the copy waits for the checks, and happens only if they pass.
+# Pressing Enter while they run stops the checks (their blocks say so; nothing is
+# recorded; a copy under way finishes), so a newer version can be uploaded
+# without waiting: run tnsync again.
 # TNSYNC_MODE (local, master, dev, release, beta) tells the tests which was asked for.
+# With --release, a check of its own too: TN_RELEASE (what has to be true before dev is released: the version, the
+# translations…), red when it fails, as any check; and the checks get TNSYNC_RELEASE=1 and PLEXCACHE_I18N_RELEASE=1 (the
+# suite as GitHub runs it for main). Without it, none of that: a normal run can't fail on what only a release needs.
+# The dependencies: TN_UPKEEP looks while the rest runs (TNSYNC_UPKEEP=look:
+# nothing moved), then again once the checks are done (TNSYNC_UPKEEP=move: a pin
+# it moves can't change the code under the tests) — its first line "current"
+# (green), "behind" (yellow) or anything else (not checked); when it isn't
+# current, the rest of what it said goes above the board.
 #
 # If the NAS already has exactly these files, nothing is copied or restarted.
 # When the last tests tnsync ran there passed, it just says so (green banner);
@@ -37,24 +50,25 @@
 #
 # Settings come from two files (KEY=value lines):
 #   ~/.config/tnsync/config   shared:      TN_HOST, TN_USER, TN_PORT
-#   <project>/.tnsync         per project: TN_APP, TN_DEST, TN_PATHS, TN_EXCLUDE, TN_TEST, TN_FUTURE
-#                              (and may override any shared setting)
+#   <project>/.tnsync         per project: TN_APP, TN_DEST, TN_PATHS, TN_EXCLUDE, TN_TEST, TN_VALIDATE, TN_TYPES,
+#                              TN_FUTURE, TN_STYLE, TN_RELEASE, TN_UPKEEP (and may override any shared setting)
 #
 # Written for the bash 3.2 that ships with macOS.
 
 set -eo pipefail
 
-TNSYNC_VERSION="1.5.0"
+TNSYNC_VERSION="2.0.0"
 GLOBAL_CONF="${TNSYNC_CONFIG:-$HOME/.config/tnsync/config}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/tnsync"   # last test result per app
 
 # ----------------------------------------------------------------- output
 if [ -t 1 ]; then
     C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'; C_BLU=$'\033[34m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
-    C_BAD=$'\033[1;97;41m'   # bold white on red
-    C_GOOD=$'\033[1;97;42m'  # bold white on green
-    C_MEH=$'\033[1;30;43m'   # bold black on yellow
-    C_GREY=$'\033[1;97;100m' # bold white on grey: a run that couldn't be set up, not one that failed
+    # (the board's colours too, dev/board.py: blue under way, then green, orange, red, or grey for the record)
+    C_BAD=$'\033[1;97;48;5;88m'    # bold white on deep red
+    C_GOOD=$'\033[1;97;48;5;22m'   # bold white on forest green
+    C_MEH=$'\033[1;30;48;5;214m'   # bold black on orange
+    C_GREY=$'\033[1;97;48;5;240m'  # bold white on grey: a run that couldn't be set up, not one that failed
 else
     C_RED=""; C_GRN=""; C_YEL=""; C_BLU=""; C_DIM=""; C_OFF=""; C_BAD=""; C_GOOD=""; C_MEH=""; C_GREY=""
 fi
@@ -64,8 +78,8 @@ ok()   { printf '%s✔%s %s\n' "$C_GRN" "$C_OFF" "$*"; }
 warn() { printf '%sWarning:%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
 die()  { printf '%stnsync:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 
-usage() {
-    sed -n '3,41p' "$0" | sed 's/^# \{0,1\}//'
+usage() {   # the comment at the top of this file
+    awk 'NR >= 3 && /^#/ { print; next } NR >= 3 { exit }' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -80,30 +94,19 @@ banner() {   # banner <colour> <line>...
     printf '\n'
 }
 red_banner()    { banner "$C_BAD" "$@" >&2; }
-split_banner() {   # split_banner <green line>... -- <red line>... [--grey]: one box, green above the separator, red (or grey) below it
-    local line colour="$C_GOOD" lower="$C_BAD" args=()
-    for line in "$@"; do [ "$line" = "--grey" ] && lower="$C_GREY" || args+=("$line"); done
-    set -- "${args[@]}"
-    printf '\n'
-    printf '%s  %-66s  %s\n' "$colour" "" "$C_OFF"
-    for line in "$@"; do
-        if [ "$line" = "--" ]; then colour="$lower"; continue; fi
-        printf '%s  %-66s  %s\n' "$colour" "$line" "$C_OFF"
-    done
-    printf '%s  %-66s  %s\n' "$colour" "" "$C_OFF"
-    printf '\n'
-}
 green_banner()  { banner "$C_GOOD" "$@"; }
 yellow_banner() { banner "$C_MEH" "$@"; }
 fail() { red_banner "$@"; exit 1; }   # a red block, then stop
 
 # ----------------------------------------------------------------- args
+ORIG_ARGS=("$@")   # (the copy's own section runs tnsync again with them: TNSYNC_STEP=sync)
 MODE=""
 DRY_RUN=0
-RESTART="ask"   # ask | yes | no
+RESTART="no"   # yes (-y) | no
 SKIP_TESTS=0
 SKIP_FUTURE=0
 TESTS_FIRST=0
+RELEASE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -n|--dry-run)    DRY_RUN=1 ;;
@@ -112,6 +115,7 @@ while [ $# -gt 0 ]; do
         --skip-tests)    SKIP_TESTS=1 ;;
         --skip-future)   SKIP_FUTURE=1 ;;
         --tests-first)   TESTS_FIRST=1 ;;
+        --release)       RELEASE=1 ;;
         -h|--help)       usage 0 ;;
         --version)       say "tnsync $TNSYNC_VERSION"; exit 0 ;;
         -*)              die "unknown option: $1 (see tnsync --help)" ;;
@@ -129,7 +133,7 @@ esac
 
 # ----------------------------------------------------------------- config
 TN_HOST=""; TN_USER="truenas_admin"; TN_PORT="22"
-TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""; TN_FUTURE=""
+TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""; TN_VALIDATE=""; TN_TYPES=""; TN_FUTURE=""; TN_STYLE=""; TN_RELEASE=""; TN_UPKEEP=""
 
 # Read KEY=value lines. The file is parsed, never executed.
 load_conf() {
@@ -150,7 +154,7 @@ load_conf() {
             \'*\') val="${val#\'}"; val="${val%\'}" ;;
         esac
         case "$key" in
-            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST|TN_FUTURE) printf -v "$key" '%s' "$val" ;;
+            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST|TN_VALIDATE|TN_TYPES|TN_FUTURE|TN_STYLE|TN_RELEASE|TN_UPKEEP) printf -v "$key" '%s' "$val" ;;
             *) warn "$file line $n: unknown setting $key" ;;
         esac
     done < "$file"
@@ -199,12 +203,26 @@ TN_DEST=$dest
 TN_PATHS=$paths
 # Patterns never copied.
 TN_EXCLUDE=.git .DS_Store __pycache__ *.pyc
-# Command that must pass before anything is copied (run in the project folder).
+# The tests, run in the code being copied while it's copied (or first, with --tests-first).
 # e.g. TN_TEST=python3 -m unittest   or   TN_TEST=npm test
 TN_TEST=
-# A second test run, only once TN_TEST passes: the suite on the next Python, say.
+# Checks of their own, each in a section beside the tests: the HTML, scripts and CSS; the types.
+# e.g. TN_VALIDATE=npx eslint .   TN_TYPES=npx pyright
+TN_VALIDATE=
+TN_TYPES=
+# The suite on the next Python, say: alongside, stopped if TN_TEST fails.
 # e.g. TN_FUTURE=python3 dev/future.py
 TN_FUTURE=
+# Looks waiting for approval (a style guide), in a section of their own: exit 0 all approved, 1 some wait (orange,
+# its output not printed: its last line, or what it sends with dev/progress.said, says how many and where to see them).
+# e.g. TN_STYLE=python3 dev/style.py check
+TN_STYLE=
+# The release checks, run only with --release (a check like the tests: red when it fails).
+# e.g. TN_RELEASE=python3 dev/release.py
+TN_RELEASE=
+# The dependencies, shown in a last box: a command whose first line is current, behind (or else: not checked),
+# the rest the box's lines. e.g. TN_UPKEEP=python3 dev/upkeep.py --tnsync
+TN_UPKEEP=
 EOF
     ok "wrote $root/.tnsync"
 }
@@ -226,24 +244,80 @@ load_conf "$ROOT/.tnsync"
 [ "$TN_DEST" != "/" ] || die "TN_DEST can't be /"
 [[ "$TN_PORT" =~ ^[0-9]+$ ]] || die "TN_PORT must be a number"
 
+# ----------------------------------------------------------------- packages
+# The packages the tests use, installed where each package-lock.json is (dev/, say): npm ci when there's none yet or the
+# lock has changed since (node_modules/.package-lock.json is npm's note of what it installed). Without npm, a warning; the
+# tests then say what's missing.
+ensure_packages() {
+    local lock dir
+    while IFS= read -r lock; do
+        dir="$(dirname "$lock")"
+        if [ -f "$dir/node_modules/.package-lock.json" ] && [ ! "$lock" -nt "$dir/node_modules/.package-lock.json" ]; then continue; fi
+        if ! command -v npm >/dev/null 2>&1; then
+            warn "npm isn't installed, so the packages in ${dir#"$ROOT"/} can't be: install Node (nodejs.org) for the tests that use them"
+            continue
+        fi
+        info "Installing the packages in ${dir#"$ROOT"/} (npm ci: its package-lock.json has changed)…"
+        npm ci --prefix "$dir" --no-audit --no-fund >/dev/null || die "npm ci --prefix ${dir#"$ROOT"/} failed (see the error above)"
+    done < <(find "$ROOT" -maxdepth 3 -name node_modules -prune -o -name package-lock.json -type f -print 2>/dev/null)
+}
+[ -n "${TNSYNC_STEP:-}" ] || ensure_packages   # (the copy's section: the run that started it has seen to them)
+
 # ----------------------------------------------------------------- source
 TMP=""
 SSH_CTL="/tmp/tnsync-$(id -u)-%C"
+BOARD_DIR=""   # the board's plan, results and logs (dev/board.py), while it's there
+# The last box: the dependencies (TN_UPKEEP), from your folder — where a version it moves belongs — not the copy. Once a
+# run, at its end, whatever the tests did; not when tnsync was interrupted (Ctrl-C) or stopped before it got going.
+# UPKEEP_OUT: what the board's Dependency Versions section said (else the command is run here, now).
+UPKEEP_READY=0
+UPKEEP_OUT=""
+upkeep_banner() {
+    local out status line lines=()
+    [ -n "$TN_UPKEEP" ] && [ "$UPKEEP_READY" = 1 ] || return 0
+    UPKEEP_READY=0
+    if [ -n "$UPKEEP_OUT" ]; then
+        return 0   # (the board said it: in its block, and what more there was above the board)
+    else
+        info "Checking the dependencies: $TN_UPKEEP"
+        out="$( cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 bash -c "$TN_UPKEEP" < /dev/null 2>&1 )" || true
+    fi
+    status="$(printf '%s\n' "$out" | head -n 1)"
+    while IFS= read -r line; do lines+=("$line"); done < <(printf '%s\n' "$out" | tail -n +2)
+    case "$status" in
+        current) green_banner "${lines[@]}" ;;
+        behind)  yellow_banner "${lines[@]}" ;;
+        *)       banner "$C_GREY" "DEPENDENCIES NOT CHECKED" "" "$TN_UPKEEP said:" "${status:0:66}" "${lines[@]}" ;;
+    esac
+}
 cleanup() {
+    local rc=$?
+    [ -z "${TNSYNC_STEP:-}" ] || return 0   # (the copy's section: the connection is the run's that started it)
+    if [ "$rc" -lt 128 ]; then upkeep_banner || true; fi
     if [ -n "$TMP" ]; then rm -rf "$TMP"; fi
-    if [ -n "${FUTURE_PID:-}" ]; then stop_future; fi   # (tnsync ended while they ran: they go too)
-    if [ -n "${FUTURE_LOG:-}" ]; then rm -f "$FUTURE_LOG"; fi
+    if [ -n "$BOARD_DIR" ]; then rm -rf "$BOARD_DIR"; fi
     ssh -o ControlPath="$SSH_CTL" -O exit -p "$TN_PORT" "$TN_USER@$TN_HOST" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-export_ref() {   # export_ref <ref> <label>
+capital() { printf '%s%s' "$(printf '%s' "${1:0:1}" | tr '[:lower:]' '[:upper:]')" "${1:1}"; }   # (bash 3.2 has no ${x^})
+
+SRC_COMMIT=""   # (the commit checked, on the board's header after the label: "a1b2c3d", "+ uncommitted" too for local)
+export_ref() {   # export_ref <ref> <label> — the label the board's header shows
     local ref="$1"
     git -C "$ROOT" rev-parse --verify --quiet "$ref^{commit}" >/dev/null || die "can't find $ref in this repository"
     TMP="$(mktemp -d "${TMPDIR:-/tmp}/tnsync.XXXXXX")"
     git -C "$ROOT" archive "$ref" | tar -x -C "$TMP"
+    # The packages installed in your folder (npm ci: node_modules, never in git) linked in, so the tests that use them
+    # run on this copy as on your folder. They're never copied to the NAS (RSYNC_BASE).
+    local nm rel
+    while IFS= read -r nm; do
+        rel="${nm#"$ROOT"/}"
+        if [ -d "$TMP/$(dirname "$rel")" ] && [ ! -e "$TMP/$rel" ]; then ln -s "$nm" "$TMP/$rel"; fi
+    done < <(find "$ROOT" -maxdepth 3 -name node_modules -type d -prune 2>/dev/null)
     SRC="$TMP"
-    SRC_LABEL="$2 ($(git -C "$ROOT" rev-parse --short "$ref^{commit}"))"
+    SRC_LABEL="$2"
+    SRC_COMMIT="$(git -C "$ROOT" rev-parse --short "$ref^{commit}")"
 }
 
 newest_tag() {   # newest_tag <regex>
@@ -251,15 +325,20 @@ newest_tag() {   # newest_tag <regex>
     git -C "$ROOT" -c versionsort.suffix=- tag -l --sort=-v:refname | grep -E "$1" | head -n 1 || true
 }
 
+if [ -n "${TNSYNC_STEP:-}" ]; then
+    SRC="$TNSYNC_SRC"   # (the copy's section: the code the run that started it chose)
+else
 case "$MODE" in
     local)
         SRC="$ROOT"
-        SRC_LABEL="your folder as it is now"
+        SRC_LABEL="Local Copy"
         if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+            b="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+            [ -z "$b" ] || [ "$b" = HEAD ] || SRC_LABEL="$SRC_LABEL on $(capital "$b")"   # (a detached HEAD: the commit alone)
+            SRC_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
             if [ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]; then
-                SRC_LABEL="$SRC_LABEL, including uncommitted changes"
+                SRC_COMMIT="${SRC_COMMIT:+$SRC_COMMIT }+ uncommitted"
             fi
-            SRC_LABEL="$SRC_LABEL (on $(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null))"
         fi
         ;;
     master|main|dev|release|beta)
@@ -281,34 +360,32 @@ case "$MODE" in
                 done
             fi
             [ -n "$ref" ] || die "can't work out the default branch on origin"
-            export_ref "$ref" "$ref"
+            export_ref "$ref" "Committed Copy on $(capital "${ref#origin/}")"
         elif [ "$MODE" = "dev" ]; then
             git -C "$ROOT" rev-parse --verify --quiet "origin/dev" >/dev/null || die "there's no dev branch on origin"
-            export_ref "origin/dev" "origin/dev"
+            export_ref "origin/dev" "Committed Copy on Dev"
         elif [ "$MODE" = "release" ]; then
             tag="$(newest_tag '^v?[0-9]+(\.[0-9]+)*$')"
             [ -n "$tag" ] || die "no release tags (like v1.2.0) yet"
-            export_ref "$tag" "release $tag"
+            export_ref "$tag" "Release Copy of $tag"
         else
             tag="$(newest_tag '^v?[0-9]+(\.[0-9]+)*(-.+)?$')"
             [ -n "$tag" ] || die "no version tags (like v1.3.0-beta.1) yet"
-            export_ref "$tag" "beta channel $tag"
+            export_ref "$tag" "Beta Copy of $tag"
         fi
         ;;
 esac
+fi
 
 # ----------------------------------------------------------------- copy
 REMOTE="$TN_USER@$TN_HOST"
 SSH_OPTS="-o ControlMaster=auto -o ControlPath=$SSH_CTL -o ControlPersist=120 -p $TN_PORT"
 ssh_run() { ssh $SSH_OPTS "$REMOTE" "$@"; }
 
-say ""
-say "  ${C_DIM}Project${C_OFF}  $ROOT"
-say "  ${C_DIM}Source${C_OFF}   $SRC_LABEL"
-say "  ${C_DIM}To${C_OFF}       $REMOTE:$TN_DEST"
-say "  ${C_DIM}App${C_OFF}      $TN_APP"
-[ "$DRY_RUN" = 1 ] && say "  ${C_YEL}Dry run: nothing will be changed${C_OFF}"
-say ""
+if [ -z "${TNSYNC_STEP:-}" ]; then
+    UPKEEP_READY=1   # (from here on a run ends with the dependencies' box)
+    say ""   # (what this run is, and how to stop it: the board's header)
+fi
 
 # ----------------------------------------------------------------- last test result
 # One small file per NAS folder, written only when the tests ran on exactly the
@@ -319,9 +396,15 @@ state_clear() { rm -f "$STATE_FILE"; }
 record_tests() {   # record_tests pass|fail|aborted — only if the tests actually ran (aborted: stopped with Enter; tested again next time)
     if [ "$TESTS_RAN" != 1 ]; then state_clear; return 0; fi
     mkdir -p "$STATE_DIR" 2>/dev/null || return 0
-    printf 'result=%s\nmode=%s\nwhen=%s\ntest=%s\nfuture=%s\nfuture_test=%s\n' "$1" "$MODE" "$(date '+%Y-%m-%d %H:%M')" "$TN_TEST" "$FUTURE_RESULT" "$FUTURE_CMD" \
+    printf 'result=%s\nmode=%s\nwhen=%s\ntest=%s\nfuture=%s\nfuture_test=%s\nrelease=%s\n' "$1" "$MODE" "$(date '+%Y-%m-%d %H:%M')" "$TEST_SIG" "$FUTURE_RESULT" "$FUTURE_CMD" "$RELEASE" \
         > "$STATE_FILE" 2>/dev/null || true
 }
+TESTS_RAN=0            # (set when the board ran the checks)
+FUTURE_RESULT="none"   # pass | fail | none — what the state file keeps of the future tests
+# The checks this run, as one line (the current ones: a change to any of them means testing again).
+TEST_SIG="$TN_TEST"
+[ -z "$TN_VALIDATE$TN_TYPES" ] || TEST_SIG="$TN_TEST | $TN_VALIDATE | $TN_TYPES"
+[ "$RELEASE" != 1 ] || TEST_SIG="$TEST_SIG | release: $TN_RELEASE"   # (a release run's checks: those, the release checks too)
 # The future tests asked for this run: TN_FUTURE, or nothing with --skip-future (or no tests at all).
 FUTURE_CMD=""
 [ "$SKIP_TESTS" = 1 ] || [ "$SKIP_FUTURE" = 1 ] || FUTURE_CMD="$TN_FUTURE"
@@ -335,8 +418,10 @@ last_tests_not_passed() {
         say "The last test run was stopped with Enter ($when)."
     elif [ "$result" != "pass" ]; then
         say "The last test run failed ($when)."
-    elif [ "$(state_get test)" != "$TN_TEST" ]; then
-        say "TN_TEST has changed since the last test run."
+    elif [ "$RELEASE" = 1 ] && [ "$(state_get release)" != 1 ]; then
+        say "The last tests weren't a release run (--release)."
+    elif [ "$(state_get test)" != "$TEST_SIG" ]; then
+        say "TN_TEST, TN_VALIDATE or TN_TYPES has changed since the last test run."
     elif [ "$(state_get mode)" != "$MODE" ]; then
         say "The last tests ran for 'tnsync $(state_get mode)', not 'tnsync $MODE'."
     elif [ "$(state_get future_test)" != "$FUTURE_CMD" ]; then
@@ -344,211 +429,16 @@ last_tests_not_passed() {
     fi
 }
 
-# ----------------------------------------------------------------- tests
-# run_tests before|after|insync — runs TN_TEST in the code being copied, and TN_FUTURE alongside it (started
-# together, so the two take as long as the slower one, not both added up). The current tests' result is said as
-# soon as they finish; the future tests' output is kept aside until then, and shown from there. If the current
-# tests fail, the future ones are stopped (nothing is learned from them then). Ends in one big box: green when
-# every run passed, red when the current tests failed, green over red when only the future ones did (each run on
-# its own line, and what that means for the NAS). Returns non-zero when a run failed. Sets TESTS_RAN=1 if it ran them.
-TESTS_RAN=0
-FUTURE_RESULT="none"   # pass | fail | none — what the state file keeps of the future tests
-ABORTED=0        # set when Enter stopped the run in progress (watch_job returns 130)
-JOB_PID=""       # the job start_in_src started last
-FUTURE_PID=""    # the future tests, while they run
-FUTURE_LOG=""    # their output, kept aside while the current tests have the terminal
-FUTURE_SHOWN=0   # how much of FUTURE_LOG has been shown (bytes)
-start_in_src() {   # start_in_src <command> [log] — in the code being copied (for master/dev/release/beta that's
-    # the exported copy, not your folder), as a job of its own (its own process group, so it can be stopped
-    # whole), with Python's bytecode cache kept out of the project. Without a log it goes straight to the
-    # terminal (not through a pipe), so a test runner can draw a progress bar. Sets JOB_PID.
-    set -m
-    if [ -n "${2:-}" ]; then
-        ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$1" ) < /dev/null > "$2" 2>&1 &
-    else
-        ( cd "$SRC" && TNSYNC_MODE="$MODE" PYTHONDONTWRITEBYTECODE=1 bash -c "$1" ) < /dev/null &
-    fi
-    JOB_PID=$!
-    set +m
-}
-stop_job() {   # stop_job <pid> — SIGTERM to its process group (tests/run.py then says how far it got),
-    # SIGKILL 2 s later if anything in it is still there
-    local pid="$1" waited=0
-    [ -n "$pid" ] || return 0
-    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 20 ]; do sleep 0.1; waited=$((waited + 1)); done
-    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-}
-stop_future() { stop_job "$FUTURE_PID"; FUTURE_PID=""; }
-show_future_log() {   # prints what the future tests have written since the last call
-    local size
-    [ -n "$FUTURE_LOG" ] && [ -f "$FUTURE_LOG" ] || return 0
-    size=$(wc -c < "$FUTURE_LOG" | tr -d ' ')
-    if [ "$size" -gt "$FUTURE_SHOWN" ]; then
-        tail -c "+$((FUTURE_SHOWN + 1))" "$FUTURE_LOG" | head -c "$((size - FUTURE_SHOWN))" || true
-        FUTURE_SHOWN=$size
-    fi
-}
-watch_job() {   # watch_job <pid> [follow] — waits for the job and returns its exit code. At a terminal, Enter
-    # stops it and the future tests (ABORTED=1, returns 130). follow: shows the future tests' output as it comes.
-    local pid="$1" follow="${2:-}" line rc=0
-    ABORTED=0
-    while kill -0 "$pid" 2>/dev/null; do
-        if [ -n "$follow" ]; then show_future_log; fi
-        if [ -t 0 ]; then
-            if read -r -t 1 line; then
-                ABORTED=1
-                stop_job "$pid"
-                stop_future
-                return 130
-            fi
-        else
-            sleep 1
-        fi
-    done
-    wait "$pid" 2>/dev/null || rc=$?
-    if [ -n "$follow" ]; then show_future_log; fi
-    return $rc
-}
-# What Enter leaves: a yellow box saying the tests were stopped and where that leaves the NAS; nothing is recorded
-# (the next run tests again). abort_banner <which> <when>
-abort_banner() {
-    local where
-    case "$2" in
-        insync) where="$TN_APP is running this code (nothing was copied)." ;;
-        before) where="Nothing was copied to $TN_HOST: $TN_APP still runs the code it had." ;;
-        *) where="$TN_APP has this code$( [ "$RESTART" = "yes" ] && printf ' and was restarted' ); its tests haven't run to the end." ;;
-    esac
-    yellow_banner "$1 STOPPED  -  YOU PRESSED ENTER" \
-                  "" \
-                  "$where" \
-                  "Run 'tnsync $MODE' again to test it (or upload a newer version first)." >&2
-}
-run_tests() {
-    local when="$1" current future future_cmd title frc
-    if [ "$SKIP_TESTS" = 1 ]; then
-        warn "--skip-tests: the tests weren't run"
-        return 0
-    fi
-    if [ -z "$TN_TEST" ]; then
-        say "  ${C_DIM}No TN_TEST in .tnsync, so no tests were run.${C_OFF}"
-        return 0
-    fi
-    TESTS_RAN=1
-    FUTURE_RESULT="none"
-    future_cmd=""   # (shown beside the result only when they ran)
-    future=""
-    if [ -z "$TN_FUTURE" ]; then
-        future="not set up (TN_FUTURE in .tnsync)"
-    elif [ "$SKIP_FUTURE" = 1 ]; then
-        future="not run (--skip-future)"
-    else
-        FUTURE_LOG="$(mktemp "${TMPDIR:-/tmp}/tnsync-future.XXXXXX")"; FUTURE_SHOWN=0
-        start_in_src "$TN_FUTURE" "$FUTURE_LOG"; FUTURE_PID=$JOB_PID
-    fi
-    info "Running the current tests: $TN_TEST"
-    if [ -n "$FUTURE_PID" ]; then
-        say "  ${C_DIM}(the future tests run alongside them: $TN_FUTURE — shown once these are done)${C_OFF}"
-    fi
-    if [ -t 0 ]; then say "  ${C_DIM}(press Enter to stop the tests and come back to the prompt)${C_OFF}"; fi
-    start_in_src "$TN_TEST"
-    crc=0; watch_job "$JOB_PID" || crc=$?
-    if [ "$ABORTED" = 1 ]; then
-        abort_banner "TESTS" "$when"
-        return 2
-    fi
-    if [ "$crc" -eq 0 ]; then
-        ok "Current tests passed"
-        current="passed"
-    else
-        printf '%s✘%s %s\n' "$C_RED" "$C_OFF" "Current tests FAILED (the failures are listed above)"
-        current="FAILED"
-    fi
-    if [ -n "$FUTURE_PID" ]; then
-        if [ "$current" != "passed" ]; then
-            stop_future
-            future="stopped: the current tests failed"
-        else
-            future_cmd="$TN_FUTURE"
-            info "The future tests (running since the current ones started): $TN_FUTURE"
-            frc=0; watch_job "$FUTURE_PID" follow || frc=$?
-            FUTURE_PID=""
-            if [ "$ABORTED" = 1 ]; then
-                abort_banner "FUTURE TESTS" "$when"
-                return 2
-            elif [ "$frc" -eq 0 ]; then
-                ok "Future tests passed"
-                future="passed"; FUTURE_RESULT="pass"
-            elif [ "$frc" -eq 3 ]; then   # (exit 3: the run couldn't be set up — a download failed — so nothing is known: grey, not red)
-                future="NOT RUN"; FUTURE_RESULT="none"
-            else
-                future="FAILED"; FUTURE_RESULT="fail"
-            fi
-        fi
-    fi
-    if [ "$future" = "NOT RUN" ]; then
-        split_banner "CURRENT TESTS PASSED" \
-                     "$(printf 'Current  %-10s %s' "$current" "$TN_TEST")" \
-                     -- \
-                     "FUTURE TESTS NOT RUN  -  A DOWNLOAD THE BUILD NEEDS FAILED" \
-                     "$(printf 'Future   %-10s %s' "not run" "$future_cmd")" \
-                     "" "Nothing is known from this run. Run 'tnsync $MODE' again." --grey >&2
-        return 0
-    fi
-    # The one box that says it all: both runs, then where that leaves the NAS.
-    if [ "$current" = "passed" ] && [ "$future" != "FAILED" ]; then
-        green_banner "ALL TESTS PASSED" \
-                     "" \
-                     "$(printf 'Current  %-10s %s' "$current" "$TN_TEST")" \
-                     "$(printf 'Future   %-10s %s' "$future" "$future_cmd")"
-        return 0
-    fi
-    # what that leaves: the title's tail, and the lines under the two runs
-    local tail="" after=()
-    if [ "$when" = "insync" ]; then
-        tail="  -  THE FILES WERE ALREADY IN SYNC"
-        after=("$TN_APP is running this code (nothing was copied)." "Fix the failures above, then run 'tnsync $MODE' again.")
-    elif [ "$when" = "before" ]; then
-        tail="  -  NOTHING WAS COPIED TO $TN_HOST"
-        after=("$TN_APP is still running the code it had before." "Fix the failures above, then run 'tnsync $MODE' again.")
-    elif [ "$DRY_RUN" = 1 ]; then
-        tail="  (dry run: nothing was copied)"
-    else
-        tail="  -  BUT THE CODE IS ALREADY ON $TN_HOST"
-        after=("$TN_APP has this code$( [ "$RESTART" = "yes" ] && printf ' and was restarted' )." \
-               "Fix the failures above, then run 'tnsync $MODE' again." "(--tests-first copies only code whose tests pass.)")
-    fi
-    [ "${#after[@]}" -gt 0 ] && after=("" "${after[@]}")
-    if [ "$current" = "passed" ]; then
-        # the current tests passed and the future ones didn't: green over red, so a glance says which half is which
-        split_banner "CURRENT TESTS PASSED" \
-                     "$(printf 'Current  %-10s %s' "$current" "$TN_TEST")" \
-                     -- \
-                     "FUTURE TESTS FAILED$tail" \
-                     "$(printf 'Future   %-10s %s' "$future" "$future_cmd")" \
-                     "${after[@]}" >&2
-    else
-        red_banner "CURRENT TESTS FAILED$tail" \
-                   "" \
-                   "$(printf 'Current  %-10s %s' "$current" "$TN_TEST")" \
-                   "$(printf 'Future   %-10s %s' "$future" "$future_cmd")" \
-                   "${after[@]}"
-    fi
-    return 1
-}
-
+# ----------------------------------------------------------------- the copy's connection
+REMOTE_RESTART="a='$TN_APP'
+out=\$(midclt call -j app.redeploy \"\$a\" 2>&1) && exit 0
+out2=\$(sudo -n /usr/bin/midclt call -j app.redeploy \"\$a\" 2>&1) && exit 0
+printf '%s\n%s\n' \"\$out\" \"\$out2\" | tail -n 6 >&2
+exit 1"
 command -v rsync >/dev/null 2>&1 || die "rsync isn't installed (on a Mac: it normally is; try 'brew install rsync')"
-info "Connecting to ${TN_HOST}…"
-ssh_run "true" || fail "CAN'T CONNECT TO $TN_HOST  -  NOTHING WAS COPIED" \
-    "" \
-    "SSH to $REMOTE failed (see the error above). Check:" \
-    "  - you're online and on the same network as the NAS" \
-    "  - TrueNAS: System > Services > SSH is running" \
-    "  - your key is added to $TN_USER"
 
 set -f   # keep exclude patterns like *.pyc from expanding here
-RSYNC_BASE=(-a --delete -e "ssh $SSH_OPTS")
+RSYNC_BASE=(-a --delete -e "ssh $SSH_OPTS" --exclude node_modules)   # (installed packages: npm ci makes them where they're needed)
 for pat in $TN_EXCLUDE; do RSYNC_BASE+=(--exclude "$pat"); done
 RSYNC_ARGS=("${RSYNC_BASE[@]}")
 [ "$DRY_RUN" = 1 ] && RSYNC_ARGS+=(-n -v) || RSYNC_ARGS+=(-v)
@@ -568,6 +458,85 @@ resolve_path() {   # resolve_path <TN_PATHS entry> — sets from, to, parent
         die "'$p' (from TN_PATHS) isn't in the source"
     fi
 }
+
+
+# ----------------------------------------------------------------- the copy (its section on the board)
+files_n() { if [ "$1" = 1 ]; then printf '1 file'; else printf '%s files' "$1"; fi; }   # files_n <n> — "1 file", "2 files"
+# feed <done> <total> <label> [ticking] — the copy's bar, as dev/progress.py sends one to the board (PLEXCACHE_PROGRESS=feed)
+feed() {
+    local label ticking=false
+    label="$(printf '%s' "$3" | tr -d '\000-\037')"
+    label="${label//\\/\\\\}"; label="${label//\"/\\\"}"
+    [ -z "${4:-}" ] || ticking=true
+    printf '\036{"bar":"sync","done":%d,"total":%d,"bad":0,"label":"%s","ticking":%s,"unit":"files","workers":1}\n' "$1" "$2" "$label" "$ticking"
+}
+# sync_step — what the board's first section runs (tnsync again, TNSYNC_STEP=sync): each TN_PATHS entry copied, its
+# files said as they go, then the restart with -y. Exit 0 when done, 1 when the copy failed (the NAS may have part of the
+# code), 4 when it was copied but the app couldn't be restarted.
+sync_step() {
+    local p line n=0 total="${TNSYNC_TOTAL:-0}" changed=0 copied=0 counts rc
+    if [ "$RESTART" = "yes" ] && [ "$DRY_RUN" != 1 ]; then total=$((total + 1)); fi
+    [ "$DRY_RUN" = 1 ] || state_clear   # (the NAS is about to get different code: the last test result no longer applies)
+    feed 0 "$total" "starting"
+    counts="$(mktemp "${TMPDIR:-/tmp}/tnsync-count.XXXXXX")"
+    for p in $PATHS_LIST; do
+        p="${p%/}"
+        resolve_path "$p"
+        if [ "$DRY_RUN" != 1 ] && ! ssh_run "mkdir -p '$parent'" 2>&1; then
+            say "Can't create $parent on TrueNAS (does $TN_USER own it?)"
+            rm -f "$counts"; return 1
+        fi
+        say "Copying $p"
+        # rsync's file list, a line each (its summary lines dropped), each file moving the bar on; folders don't count
+        rc=0
+        rsync "${RSYNC_ARGS[@]}" "$from" "$REMOTE:$to" 2>&1 | {
+            while IFS= read -r line; do
+                case "$line" in "sending "*|"building "*|"sent "*|"total size"*|"created directory"*|"") continue ;; esac
+                say "    $line"
+                case "$line" in */) continue ;; esac
+                n=$((n + 1)); changed=$((changed + 1))
+                feed "$n" "$total" "$line"
+            done
+            printf '%s %s\n' "$n" "$changed" > "$counts"
+        } || rc=$?
+        read -r n changed < "$counts" || true
+        if [ "$rc" != 0 ]; then
+            say "rsync stopped partway (see above): $TN_HOST may have part of the code."
+            rm -f "$counts"; return 1
+        fi
+        copied=$((copied + 1))
+    done
+    rm -f "$counts"
+    # (its last line in the form every block's is: facts joined with " · ", no full stop — dev/progress.py's result)
+    if [ "$DRY_RUN" = 1 ]; then feed "$n" "$n" "files · rsync to $TN_APP (dry run)"; say "Dry run · $(files_n "$changed") would be copied"; return 0; fi
+    if [ "$changed" = 0 ]; then
+        feed "$n" "$n" "files · rsync to $TN_APP"; say "No files changed · $TN_APP not restarted"; return 0
+    fi
+    if [ "$RESTART" != "yes" ]; then
+        feed "$n" "$n" "files · rsync to $TN_APP"; say "Copied $(files_n "$changed") · $TN_APP not restarted ('tnsync $MODE -y' restarts it)"; return 0
+    fi
+    feed "$n" "$((n + 1))" "restarting $TN_APP (TrueNAS redeploys it)" ticking
+    say "Restarting $TN_APP…"
+    if ssh_run "$REMOTE_RESTART" 2>&1; then
+        feed "$((n + 1))" "$((n + 1))" "steps · rsync to $TN_APP, restart"
+        say "Copied $(files_n "$changed") · restarted $TN_APP"
+        return 0
+    fi
+    say "Copied $(files_n "$changed") · $TN_APP couldn't be restarted: check the app name, and that $TN_USER may run midclt (see the tnsync README)"
+    return 4
+}
+if [ "${TNSYNC_STEP:-}" = "sync" ]; then
+    rc=0; sync_step || rc=$?
+    exit "$rc"
+fi
+
+# (a NAS out of reach is the Sync block's to say, red, with what ssh said; the checks run all the same)
+UNREACHABLE=""
+if ! UNREACHABLE="$(ssh_run "true" 2>&1)"; then
+    UNREACHABLE="${UNREACHABLE:-ssh said nothing}"
+else
+    UNREACHABLE=""
+fi
 
 # ----------------------------------------------------------------- already in sync?
 # Compares file contents (not just dates), so the same code from another branch
@@ -591,115 +560,191 @@ pending_changes() {
     done
 }
 
+# ----------------------------------------------------------------- the board
+# Everything at once, on dev/board.py's board (next to this script): a section for the copy (unless the files are already
+# in sync) and one for each check .tnsync sets, the dependencies last. Then the boxes that say where that leaves the NAS.
+self_dir() {   # the folder this script is really in (through any symlink: tnsync on your PATH)
+    local f="$0" l
+    while [ -L "$f" ]; do
+        l="$(readlink "$f")"
+        case "$l" in /*) f="$l" ;; *) f="$(dirname "$f")/$l" ;; esac
+    done
+    cd "$(dirname "$f")" && pwd
+}
+SELF="$(self_dir)/$(basename "$0")"
+BOARD="$(self_dir)/board.py"
+json_str() {   # json_str <text> — as a JSON string
+    local s
+    s="$(printf '%s' "$1" | tr -d '\000-\037')"
+    s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+    printf '"%s"' "$s"
+}
+PLAN=""
+plan_add() { PLAN="${PLAN:+$PLAN,
+}$1"; }
+CHECK_IDS=()   # the checks on the board, in order
+# What every check is told: which command this is, the repository (the code may be a copy from git), and a release run
+CHECK_ENV="\"TNSYNC_MODE\": $(json_str "$MODE"), \"TNSYNC_REPO\": $(json_str "$ROOT")"
+[ "$RELEASE" != 1 ] || CHECK_ENV="$CHECK_ENV, \"TNSYNC_RELEASE\": \"1\", \"PLEXCACHE_I18N_RELEASE\": \"1\""
+check_section() {   # check_section <id> <title> <command> [extra JSON fields]
+    [ -n "$3" ] || return 0
+    CHECK_IDS+=("$1")
+    plan_add "{\"id\": \"$1\", \"title\": $(json_str "$2"), \"cmd\": $(json_str "$3"), \"cwd\": $(json_str "$SRC"), \"stoppable\": true, \"env\": {$CHECK_ENV}${4:+, $4}}"
+}
+json_ids() {   # json_ids <id>... — as a JSON list
+    local out="" id
+    for id in "$@"; do out="${out:+$out, }\"$id\""; done
+    printf '[%s]' "$out"
+}
+RES=""
+res_get() { sed -n "s/^$1=//p" "$RES" | head -n 1; }
+# The Sync block when there's nothing to copy, or no NAS to copy to: a section that only tells (info: grey when it's done,
+# its header that; or red, when its command fails). told_sync <header> <exit code> <line>...
+TOLD_SYNC=""
+told_sync() {
+    local head="$1" rc="$2" cmd=""
+    shift 2
+    cmd="$(printf 'printf "%%s\\n" %s; exit %s' "$(printf '%q ' "$@")" "$rc")"
+    TOLD_SYNC="{\"id\": \"sync\", \"title\": $(json_str "Sync to $TN_HOST"), \"cmd\": $(json_str "$cmd"), \"cwd\": $(json_str "$ROOT"), \"info\": $(json_str "$head")}"
+}
+# A block that only tells, grey: told_section <id> <title> <header> <line>
+told_section() {
+    plan_add "{\"id\": \"$1\", \"title\": $(json_str "$2"), \"cmd\": $(json_str "printf '%s\\n' $(printf '%q' "$4")"), \"info\": $(json_str "$3")}"
+}
+# A check that already passed on this code: its block says so, grey, and nothing runs. passed_section <id> <title> <cmd> <line>
+passed_section() {
+    [ -n "$3" ] || return 0
+    plan_add "{\"id\": \"$1\", \"title\": $(json_str "$2"), \"cmd\": $(json_str "printf '%s\\n' $(printf '%q' "$4")"), \"info\": \"already passed\"}"
+}
+run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES (the results file)
+    local want_copy="$1" after="[]" cmd
+    command -v python3 >/dev/null 2>&1 || die "python3 isn't installed: tnsync's board (dev/board.py) needs it"
+    [ -f "$BOARD" ] || die "$BOARD isn't there: tnsync's board lives next to tnsync"
+    BOARD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tnsync-board.XXXXXX")"
+    RES="$BOARD_DIR/results"
+    PLAN=""; CHECK_IDS=()
+    if [ "$want_copy" = "passed" ]; then
+        local when; when="$(state_get when)"
+        passed_section current "Current Tests" "$TN_TEST" "passed on this code ($when)"
+        [ -z "$FUTURE_CMD" ] || [ "$(state_get future)" != pass ] || passed_section future "Future Tests" "$FUTURE_CMD" "passed on this code too ($when)"
+        passed_section validate "HTML/JS/CSS Validation" "$TN_VALIDATE" "passed on this code ($when)"
+        passed_section types "Python Validation" "$TN_TYPES" "passed on this code ($when)"
+        [ "$RELEASE" != 1 ] || passed_section release "Release checks" "$TN_RELEASE" "passed on this code ($when)"
+    elif [ "$SKIP_TESTS" != 1 ] && [ "$want_copy" != "nothing" ]; then
+        check_section current "Current Tests" "$TN_TEST"
+        [ -n "$TN_TEST" ] || told_section current "Current Tests" "not set up" "No TN_TEST in .tnsync, so no tests were run."
+        [ -z "$FUTURE_CMD" ] || check_section future "Future Tests" "$FUTURE_CMD" "\"stop_with\": [\"current\"], \"not_run_rc\": 3"
+        [ -n "$FUTURE_CMD" ] || [ -z "$TN_FUTURE" ] || told_section future "Future Tests" "skipped" "TN_FUTURE wasn't run: tnsync $MODE --skip-future."
+        check_section validate "HTML/JS/CSS Validation" "$TN_VALIDATE"
+        check_section types "Python Validation" "$TN_TYPES"
+        [ "$RELEASE" != 1 ] || check_section release "Release checks" "$TN_RELEASE"
+        [ "$RELEASE" != 1 ] || [ -n "$TN_RELEASE" ] || told_section release "Release checks" "not set up" "No TN_RELEASE in .tnsync, so no release checks were run."
+    elif [ "$SKIP_TESTS" = 1 ]; then
+        told_section checks "Tests and checks" "skipped" "None of TN_TEST, TN_VALIDATE, TN_TYPES or TN_FUTURE was run (--skip-tests)."
+    fi
+    local checks="[]"
+    [ "${#CHECK_IDS[@]}" = 0 ] || checks="$(json_ids "${CHECK_IDS[@]}")"
+    if [ "$want_copy" = "copy" ]; then   # (first on the board: the copy, then the checks)
+        local checks_plan="$PLAN"
+        [ "$TESTS_FIRST" != 1 ] || after="$checks"
+        cmd="$(printf '%q ' "$SELF" "${ORIG_ARGS[@]}")"
+        PLAN=""
+        plan_add "{\"id\": \"sync\", \"title\": $(json_str "Sync to $TN_HOST"), \"cmd\": $(json_str "$cmd"), \"cwd\": $(json_str "$ROOT"), \"after\": $after, \"doing\": \"copying\", \"env\": {\"TNSYNC_STEP\": \"sync\", \"TNSYNC_SRC\": $(json_str "$SRC"), \"TNSYNC_TOTAL\": \"$(printf '%s\n' "$CHANGES" | grep -c . || true)\"}}"
+        [ -z "$checks_plan" ] || plan_add "$checks_plan"
+    elif [ -n "$TOLD_SYNC" ]; then
+        local checks_plan="$PLAN"
+        PLAN=""
+        plan_add "$TOLD_SYNC"
+        [ -z "$checks_plan" ] || plan_add "$checks_plan"
+    fi
+    if [ -n "$TN_UPKEEP" ]; then
+        plan_add "{\"id\": \"upkeep\", \"title\": \"Dependency Versions\", \"cmd\": $(json_str "export TNSYNC_UPKEEP=look; $TN_UPKEEP"), \"cwd\": $(json_str "$ROOT"), \"upkeep\": true, \"then\": {\"cmd\": $(json_str "export TNSYNC_UPKEEP=move; $TN_UPKEEP"), \"after\": $checks}}"
+    fi
+    # the looks to approve, the last block: every time (it's quick, and approving them changes no code tested), on their own — not a
+    # check the copy waits for, nor one whose warning fails the run
+    if [ -n "$TN_STYLE" ] && [ "$SKIP_TESTS" != 1 ] && [ "$want_copy" != "nothing" ]; then
+        # r, once it says looks are waiting and while the board runs: their review page (TN_STYLE's "check" made
+        # "review --board"), in your folder, where approving them writes the guide; it stays open after the board.
+        # Once the board is done, its line says the command instead
+        local key=""
+        if [ -t 0 ] && [[ "$TN_STYLE" == *" check" ]]; then
+            key=", \"key\": {\"key\": \"r\", \"cmd\": $(json_str "${TN_STYLE% check} review --board"), \"cwd\": $(json_str "$ROOT"), \"does\": \"Review Style Changes\", \"opens\": \"the review page\", \"line\": \"press r to review them\"}"
+        fi
+        plan_add "{\"id\": \"style\", \"title\": \"Style Approval\", \"cmd\": $(json_str "$TN_STYLE"), \"cwd\": $(json_str "$SRC"), \"stoppable\": true, \"warn\": {\"rc\": 1, \"note\": \"looks waiting\"}$key}"
+    fi
+    # the board's header: what's sent and tested (where it goes is the Sync block's to say), the run's modes, the
+    # commit, and how to stop it
+    local head="$SRC_LABEL" keys=""
+    [ "$RELEASE" != 1 ] || head="$head · Release"
+    [ "$TESTS_FIRST" != 1 ] || head="$head · Tests first"
+    [ "$DRY_RUN" != 1 ] || head="$head · Dry run"
+    if [ -t 0 ] && [ "${#CHECK_IDS[@]}" != 0 ]; then keys="{\"key\": \"Enter\", \"does\": \"Cancel\"}"; fi
+    printf '{"header": [%s], "commit": %s, "keys": [%s], "sections": [%s]}\n' "$(json_str "$head")" "$(json_str "$SRC_COMMIT")" "$keys" "$PLAN" > "$BOARD_DIR/plan.json"
+    python3 "$BOARD" "$BOARD_DIR/plan.json" "$RES"
+    if [ -n "$TN_UPKEEP" ]; then UPKEEP_OUT="$(res_get upkeep_log)"; fi
+}
+# What the board leaves: each section said its own result in its own block (and what a failed one printed came under
+# the board), so nothing is said again here: the result is kept for next time, and the exit code says how it went.
+# finish_board insync|copy — exits: 0 all passed, 1 something failed, 2 Enter stopped the checks.
+finish_board() {
+    local when="$1" sync="" id current_ok=1
+    [ "$when" = "copy" ] && sync="$(res_get sync)"
+    # the copy didn't happen (--tests-first, and the checks didn't pass): what the NAS has is what it had, its result too
+    if [ "$when" = "copy" ] && [ "$sync" != "pass" ] && [ "$sync" != "fail" ]; then when="before"; fi
+    [ "$when" != "unreachable" ] || when="before"   # (nothing reached the NAS: its last result stands)
+    if [ "${#CHECK_IDS[@]}" = 0 ]; then   # (--skip-tests, or none set up: their blocks said so)
+        [ "$sync" != "fail" ] || return 1
+        return 0
+    fi
+    TESTS_RAN=1
+    if [ "$(res_get aborted)" = 1 ]; then
+        [ "$when" = "before" ] || [ "$DRY_RUN" = 1 ] || record_tests aborted
+        return 2
+    fi
+    FUTURE_RESULT="none"
+    for id in "${CHECK_IDS[@]}"; do
+        case "$id" in
+            future) case "$(res_get future)" in pass) FUTURE_RESULT="pass" ;; fail) FUTURE_RESULT="fail" ;; esac ;;
+            *) [ "$(res_get "$id")" = "pass" ] || current_ok=0 ;;
+        esac
+    done
+    if [ "$current_ok" = 1 ] && [ "$FUTURE_RESULT" != "fail" ]; then
+        [ "$when" = "before" ] || [ "$DRY_RUN" = 1 ] || record_tests pass
+        [ "$sync" != "fail" ] || return 1
+        return 0
+    fi
+    [ "$when" = "before" ] || [ "$DRY_RUN" = 1 ] || record_tests fail
+    return 1
+}
+
+# ----------------------------------------------------------------- run
+if [ -n "$UNREACHABLE" ]; then
+    told_sync "can't connect: nothing copied" 1 \
+        "Check: you're online, on the NAS's network; TrueNAS: System > Services > SSH is running; your key is added to $TN_USER" \
+        "$(printf '%s' "$UNREACHABLE" | tail -n 1)"
+    run_board unreachable
+    rc=0; finish_board unreachable || rc=$?
+    exit 1
+fi
 CHANGES="$(pending_changes)" || exit 1
 if [ -z "$CHANGES" ]; then
-    if [ -z "$TN_TEST" ] || [ "$SKIP_TESTS" = 1 ]; then
-        green_banner "ALREADY IN SYNC  -  NOTHING TO COPY" \
-                     "" \
-                     "$TN_HOST already has exactly these files." \
-                     "Nothing was copied and $TN_APP wasn't restarted."
+    if [ -z "$TN_TEST$TN_VALIDATE$TN_TYPES" ] || [ "$SKIP_TESTS" = 1 ]; then
+        told_sync "already in sync" 0 "Nothing copied · $TN_HOST already has these files · $TN_APP not restarted"
+        run_board nothing
         exit 0
     fi
     why="$(last_tests_not_passed)"
     if [ -z "$why" ]; then
-        lines=("ALREADY IN SYNC  -  TESTS ALREADY PASSED" "" \
-               "$TN_HOST already has exactly these files, and the" \
-               "last tests tnsync ran on them passed ($(state_get when)).")
-        [ "$(state_get future)" = pass ] && lines+=("The future tests passed on them too.")
-        lines+=("Nothing was copied and $TN_APP wasn't restarted.")
-        green_banner "${lines[@]}"
+        told_sync "already in sync" 0 "Nothing copied · $TN_HOST already has these files · $TN_APP not restarted"
+        run_board passed
         exit 0
     fi
-    yellow_banner "ALL FILES ARE IN SYNC  -  RE-RUNNING TESTS" \
-                  "" \
-                  "$why" \
-                  "Nothing will be copied and $TN_APP won't be restarted."
-    rc=0; run_tests insync || rc=$?
-    if [ "$rc" = 0 ]; then record_tests pass; exit 0; fi
-    if [ "$rc" = 2 ]; then record_tests aborted; exit 2; fi
-    record_tests fail
-    exit 1
+    told_sync "in sync: testing again" 0 "${why%.} · nothing copied · $TN_APP not restarted"
+    run_board insync
+    rc=0; finish_board insync || rc=$?
+    exit "$rc"
 fi
 
-if [ "$TESTS_FIRST" = 1 ]; then
-    rc=0; run_tests before || rc=$?
-    if [ "$rc" = 2 ]; then exit 2; fi
-    [ "$rc" = 0 ] || exit 1
-fi
-
-# The NAS is about to get different code, so the last test result no longer applies.
-[ "$DRY_RUN" = 1 ] || state_clear
-
-COPIED=0
-CHANGED=0   # files actually copied or deleted
-for p in $PATHS_LIST; do
-    p="${p%/}"
-    resolve_path "$p"
-    [ "$DRY_RUN" = 1 ] || ssh_run "mkdir -p '$parent'" || die "can't create $parent on TrueNAS (does $TN_USER own it?)"
-    info "Copying $p"
-    # Indent rsync's file list and drop its summary lines.
-    if ! out="$(rsync "${RSYNC_ARGS[@]}" "$from" "$REMOTE:$to" 2>&1)"; then
-        printf '%s\n' "$out" | sed 's/^/    /'
-        fail "COPY FAILED  -  $TN_HOST MAY HAVE PART OF THE CODE" \
-             "" \
-             "rsync stopped partway (see the error above)." \
-             "Fix it, then run 'tnsync $MODE' again."
-    fi
-    out="$(printf '%s\n' "$out" | grep -v -E '^(sending|building|sent |total size|created directory|$)' || true)"
-    [ -z "$out" ] || printf '%s\n' "$out" | sed 's/^/    /'
-    CHANGED=$((CHANGED + $(printf '%s\n' "$out" | grep -c -v -E '/$|^$' || true)))   # folders don't count
-    COPIED=$((COPIED + 1))
-done
-if [ "$DRY_RUN" = 1 ]; then ok "Dry run: the files listed above would be copied"; else ok "Copied $COPIED path(s) to $TN_HOST"; fi
-
-# ----------------------------------------------------------------- restart
-finish() {   # the tests, unless they already ran first
-    if [ "$TESTS_FIRST" = 1 ]; then
-        [ "$DRY_RUN" = 1 ] || record_tests pass
-        exit 0
-    fi
-    rc=0; run_tests after || rc=$?
-    if [ "$rc" = 0 ]; then
-        [ "$DRY_RUN" = 1 ] || record_tests pass
-        exit 0
-    fi
-    if [ "$rc" = 2 ]; then
-        [ "$DRY_RUN" = 1 ] || record_tests aborted
-        exit 2
-    fi
-    [ "$DRY_RUN" = 1 ] || record_tests fail
-    exit 1
-}
-[ "$DRY_RUN" = 1 ] && finish
-if [ "$CHANGED" = 0 ]; then
-    say "No files changed on $TN_HOST, so $TN_APP wasn't restarted."
-    finish
-fi
-if [ "$RESTART" = "ask" ]; then
-    if [ -t 0 ]; then
-        read -r -p "Restart '$TN_APP' on $TN_HOST now? [y/N] " ans
-        case "$ans" in y|Y|yes|YES) RESTART="yes" ;; *) RESTART="no" ;; esac
-    else
-        RESTART="no"
-    fi
-fi
-if [ "$RESTART" != "yes" ]; then
-    say "Not restarted. Run 'tnsync $MODE -y' or restart it in TrueNAS when ready."
-    finish
-fi
-
-info "Restarting $TN_APP (this waits until TrueNAS has finished)…"
-REMOTE_RESTART="a='$TN_APP'
-out=\$(midclt call -j app.redeploy \"\$a\" 2>&1) && exit 0
-out2=\$(sudo -n /usr/bin/midclt call -j app.redeploy \"\$a\" 2>&1) && exit 0
-printf '%s\n%s\n' \"\$out\" \"\$out2\" | tail -n 6 >&2
-exit 1"
-if ssh_run "$REMOTE_RESTART"; then
-    ok "Restarted $TN_APP — ready to try while the tests run"
-else
-    fail "COPIED, BUT $TN_APP COULDN'T BE RESTARTED" \
-         "" \
-         "Check the app name, and that $TN_USER may run midclt" \
-         "(see the tnsync README). The tests weren't run."
-fi
-finish
+run_board copy
+rc=0; finish_board copy || rc=$?
+exit "$rc"

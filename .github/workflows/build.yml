@@ -23,9 +23,17 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.15"
-      # what checks and builds the app's CSS (dev/css.js: Stylelint, Autoprefixer, cssnano), for the suite's CssBuildTests
+      # what checks and builds the web app's CSS, scripts and pages (dev/web.js: Stylelint, ESLint, html-validate, postcss-preset-env, Autoprefixer,
+      # cssnano, Terser, html-minifier-terser), for the suite's WebBuildTests
       - run: npm ci --prefix dev --no-audit --no-fund
-      - run: python -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest tests.test_plexcache -v
+      # the suite (tests/run.py: its classes shared out among workers), but for the style guide, a step of its own
+      - name: Tests
+        run: python -W error::DeprecationWarning -W error::PendingDeprecationWarning tests/run.py --exclude StyleGuideTests
+      # every look the app wears approved by the maintainer (dev/style.py, dev/style-guide.json): a failure here is a look
+      # waiting for their OK (python3 dev/style.py sample, then they approve), not a broken test
+      - name: Style guide
+        if: ${{ !cancelled() }}   # (its answer either way, whatever the tests did)
+        run: python -W error::DeprecationWarning -W error::PendingDeprecationWarning -m unittest tests.test_plexcache.StyleGuideTests -v
       # the type check (pyrightconfig.json): an error is a fault — an undefined name, a variable read before it's set — and
       # a warning an annotation that says less than the code does; both at zero, and kept there (--warnings)
       - run: npx --yes pyright@1.1.414 --warnings

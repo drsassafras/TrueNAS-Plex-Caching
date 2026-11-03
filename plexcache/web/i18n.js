@@ -49,7 +49,7 @@
   }
 
   var choice = "auto";
-  try { choice = localStorage.getItem(KEY) || "auto"; } catch (e) { /* storage unavailable */ }
+  try { choice = localStorage.getItem(KEY) || "auto"; } catch { /* storage unavailable */ }
   if (choice !== "auto" && CODES.indexOf(choice) < 0) choice = "auto";
   var lang = choice === "auto" ? browserLang() : choice;
   var locale = lang === "en" ? "en-CA" : lang;
@@ -62,7 +62,7 @@
     });
   }
   function num(v) {
-    try { return v.toLocaleString(locale, { maximumFractionDigits: 2 }); } catch (e) { return String(v); }
+    try { return v.toLocaleString(locale, { maximumFractionDigits: 2 }); } catch { return String(v); }
   }
   function value(v) {
     if (v == null) return "";
@@ -120,7 +120,7 @@
   function nameOf(code) { for (var i = 0; i < LANGUAGES.length; i++) if (LANGUAGES[i][0] === code) return LANGUAGES[i][1]; return code; }
 
   function setChoice(c) {
-    try { if (c === "auto") localStorage.removeItem(KEY); else localStorage.setItem(KEY, c); } catch (e) { /* storage unavailable */ }
+    try { if (c === "auto") localStorage.removeItem(KEY); else localStorage.setItem(KEY, c); } catch { /* storage unavailable */ }
     location.reload();
   }
 

@@ -68,7 +68,7 @@ const sandbox = {
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
-const web = path.join(__dirname, "..", "plexcache", "web");
+const web = process.env.PC_WEB || path.join(__dirname, "..", "plexcache", "web");  // (PC_WEB: the scripts as built, WebBuildTests)
 vm.runInContext(fs.readFileSync(path.join(web, "i18n.js"), "utf-8"), sandbox, { filename: "i18n.js" });
 vm.runInContext(fs.readFileSync(path.join(web, "app.js"), "utf-8"), sandbox, { filename: "app.js" });
 // the first draw comes after PCI18N.ready and the state's promise: a few turns of the event loop

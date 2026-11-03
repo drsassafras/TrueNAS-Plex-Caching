@@ -156,9 +156,10 @@ DEFAULTS: dict = {
     "tools": {name: {} for name in TOOL_NAMES},
     # MQTT (off until switched on): status on <base_topic>/state, commands on <base_topic>/set/<name>.
     # With "discovery", Home Assistant (and openHAB, Domoticz...) create the entities themselves.
-    # How the web UI looks (themes.py): "selected", the theme's id, or "auto" — the light or dark theme by the device's
-    # own setting ("auto_light", "auto_dark"); "custom": the themes people uploaded, by id (each checked by themes.validate).
-    "themes": {"selected": "dionysus-light", "auto_light": "dionysus-light", "auto_dark": "dionysus-dark", "custom": {}},
+    # How the web UI looks (themes.py): "theme", the theme's id (Classic, Dionysus or one uploaded); "mode", "auto" (light
+    # or dark by the device's own setting), "light" or "dark"; "custom": the themes people uploaded, by id (each checked by
+    # themes.validate). A browser can keep its own theme and mode instead (System → Themes → This device).
+    "themes": {"theme": "dionysus", "mode": "light", "custom": {}},
     "mqtt": {
         "enabled": False,
         "host": "",
@@ -699,6 +700,20 @@ class Settings:
             if sy is not None:
                 for k in ("source", "mode", "what", "compare_hours", "ask_over", "approved", "libraries"):
                     sy.pop(k, None)
+            th = saved.get("themes") if isinstance(saved, dict) and isinstance(saved.get("themes"), dict) else None
+            if th is not None and "selected" in th:  # (a theme was one look before: now each holds its light and dark one)
+                from .themes import ThemeError, validate
+                custom, modes = {}, {}
+                for tid, t in (th.get("custom") or {}).items() if isinstance(th.get("custom"), dict) else ():
+                    if isinstance(t, dict) and "colors" in t and t.get("mode") in ("light", "dark"):
+                        old = dict(t, based_on=str(t.get("based_on") or "").rsplit("-", 1)[0], **{t["mode"]: {"colors": t["colors"]}})
+                        try:
+                            custom[tid], modes[tid] = validate(old), t["mode"]
+                        except ThemeError:
+                            pass
+                pick = str(th.get("auto_light") if th.get("selected") == "auto" else th.get("selected") or "")
+                saved["themes"] = {"theme": pick if pick in custom else pick.rsplit("-", 1)[0], "custom": custom,
+                                   "mode": "auto" if th.get("selected") == "auto" else modes.get(pick, pick.rsplit("-", 1)[-1])}
             return _merge(DEFAULTS, saved)
         except FileNotFoundError:
             return copy.deepcopy(DEFAULTS)

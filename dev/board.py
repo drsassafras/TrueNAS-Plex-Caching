@@ -1,0 +1,646 @@
+#!/usr/bin/env python3
+"""tnsync's board: its steps run at once, each in a section of its own that's redrawn as it goes.
+
+    python3 dev/board.py <plan.json> <results>
+
+tnsync writes the plan ({"header": [its lines: what this run is], "commit": "a1b2c3d + uncommitted" (after the first
+line, the first thing cut when there's no room), "keys": [{"key": "Enter", "does": "Cancel"}: the keys it offers, said
+"[Enter] Cancel" on the header's next line with each section's key while it works, the tally of sections done on its
+right], "sections": [...]}, or just the list) and reads the results (KEY=value lines) when the board is done; each
+section's output is kept beside the results (their folder's logs/, which tnsync removes):
+
+    {"id": "current", "title": "Current Tests", "cmd": "python3 tests/run.py", "cwd": "/the/code",
+     "after": ["…"],        # (optional) starts only once these have passed; one that didn't (or a test of it failed): not run
+     "stop_with": ["…"],    # (optional) stopped when one of these fails, at its first failing test (the future tests, with the current ones)
+     "stoppable": true,     # (optional) Enter stops it (the tests; a copy under way is left to finish)
+     "warn": {"rc": 1, "note": "…"},   # (optional) that exit code is a warning (orange: the style guide's looks to approve), said in its block alone
+     "not_run_rc": 3,       # (optional) the exit code that means "couldn't be set up" (yellow: nothing is known)
+     "upkeep": true,        # (optional) the dependencies: its output's first line says current / behind / else
+     "key": {"key": "r", "cmd": "…", "cwd": "…", "does": "Review Style Changes", "opens": "the review page",
+             "line": "press r to review them"},   # (optional) once it has warned and while the board runs, that
+                            # key starts cmd (the style guide's review page), on the terminal but in a session of its
+                            # own, so it outlives the board; it says what it has to say to a file of its own. Its
+                            # last line says "line" in place of what follows its last ": " while the key works (the
+                            # command to run instead, once the board is done)
+     "then": {"cmd": "…", "after": ["…"]}}   # (optional) a second command, once those are done, however they went
+
+Each section is a block — blue while it runs (or waits), then green, orange, red or grey (COLOUR) — with the bars its command sends
+(dev/progress.py's, PLEXCACHE_PROGRESS=feed: drawn here with the same code) and the last line it printed. Its full
+output is kept; a section that fails has it printed under the board at the end, as it came. Enter stops the sections
+that can be stopped (the results say ``aborted=1``); a section's key, pressed once it has warned and while the board
+runs, starts its command. Without a terminal, a line as each section starts and ends.
+
+The results, per section: ``<id>=pass|fail|warn|notrun|stopped|skipped`` (warn: the dependencies behind, or not
+checked), ``<id>_rc=<exit code>``, ``<id>_log=<its output, a file>``, ``<id>_last=<its last line>``.
+"""
+
+import json
+import os
+import re
+import selectors
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:  # (run as a script: dev/ is on the path, not the project)
+    sys.path.insert(0, ROOT)
+
+from dev.progress import DIM, OFF, RED, Progress, record  # noqa: E402 — the bar the dev tools share
+
+# blue: under way (running, or waiting its turn); then what came of it — green passed, orange a warning (stopped with
+# Enter, the dependencies behind), red failed, grey for the record (not run, skipped, already in sync): tnsync's colours
+BLUE = WAIT = "\033[1;97;48;2;10;90;128m"   # (Prussian blue #0A5A80, truecolour: running or waiting alike)
+GREY, GOOD, MEH, BAD = "\033[1;97;48;5;240m", "\033[1;97;48;5;22m", "\033[1;30;48;5;214m", "\033[1;97;48;5;88m"
+COLOUR = {"running": BLUE, "waiting": WAIT, "pass": GOOD, "warn": MEH, "stopped": MEH, "fail": BAD,
+          "notrun": GREY, "skipped": GREY, "info": GREY}
+HEAD = "\033[1;97;48;2;11;74;74m"   # (the board's header, deep teal #0B4A4A: what this run is, how to stop it)
+OK = ("pass", "notrun", "info")   # (what a section waiting on another counts as done well enough to go on)
+BODY = {k: v.replace("[1;", "[") for k, v in COLOUR.items()}   # (the block under the header: the same colours, not bold)
+# a bar's track: its block's colour darkened 30% toward black (blue #073F59, forest #004200, yellow #B27A00, red #5E0000,
+# grey #3D3D3D), its cells in the block's text colour (white; black on yellow)
+SHADE = {BLUE: "\033[48;2;7;63;89m", GOOD: "\033[48;2;0;66;0m", MEH: "\033[48;2;178;122;0m", BAD: "\033[48;2;94;0;0m",
+         GREY: "\033[48;2;61;61;61m"}
+TRACK = {k: SHADE[v] for k, v in COLOUR.items()}
+FILL = {k: "\033[30m" if v == MEH else "\033[97m" for k, v in COLOUR.items()}
+ROWS = 3   # each section's lines, kept from the start
+TITLE = 24   # a block's title column: its status starts after it (and the header's commit, under it)
+SAID = {"waiting": "waiting", "running": "running", "pass": "passed", "warn": "check above", "notrun": "not run",
+        "skipped": "skipped", "info": "done",
+        "stopped": "stopped", "fail": "FAILED"}
+def status(text: str) -> str:
+    """A block's status as every block says it: in capitals, all of it ("STOPPED: CURRENT TESTS FAILED"). So it's kept
+    short — a few words, no host, path or option that capitals would change; what explains it goes in its last line."""
+    return text.upper()
+
+
+ANSI = re.compile(r"\033\[[0-9;?]*[A-Za-z]|\033\][^\a]*\a")
+WIDTH = 100     # (the board's widest; a narrower terminal gets a narrower board)
+FRAME = 0.25    # seconds between redraws
+
+
+def plain(text: str) -> str:
+    """A line as it reads: colours gone, and of a line redrawn with \\r, what it ended as."""
+    return ANSI.sub("", text.rsplit("\r", 1)[-1]).replace("\t", "  ").strip()
+
+
+class Section:
+    def __init__(self, spec: dict, logs: str):
+        self.id = spec["id"]
+        self.title = spec["title"]
+        self.cmd = spec["cmd"]
+        self.cwd = spec.get("cwd") or os.getcwd()
+        self.env = {str(k): str(v) for k, v in (spec.get("env") or {}).items()}
+        self.after = list(spec.get("after") or [])
+        self.stop_with = list(spec.get("stop_with") or [])
+        self.stoppable = bool(spec.get("stoppable"))
+        self.not_run_rc = spec.get("not_run_rc")
+        warn = spec.get("warn") or {}   # (optional) {"rc": 1, "note": "…"}: that exit code is a warning (orange), its output not printed
+        self.warn_rc, self.warn_note = warn.get("rc"), warn.get("note")
+        self.upkeep = bool(spec.get("upkeep"))
+        self.doing = spec.get("doing")   # (what its header says while it's under way, for "running")
+        self.info = spec.get("info")   # (a section that only tells: grey when it's done, this its header)
+        self.then = spec.get("then")
+        self.key = dict(spec.get("key") or {})   # (its key, once it has warned: {"key", "cmd", "cwd", "does", "opens"})
+        self.helper: subprocess.Popen | None = None   # (what its key started)
+        self.live = False   # (the board is running and reads keys: its key works)
+        self.why = ""       # (its key's command's errors, a file)
+        self.key_said = ""  # (why its key's command didn't start: its last line)
+        self.state = "waiting"
+        self.note = ""                # (why it's waiting, stopped or not run)
+        self.rc: int | None = None
+        self.proc: subprocess.Popen | None = None
+        self.started: float | None = None
+        self.ended: float | None = None
+        self.bars: dict[str, Progress] = {}
+        self.last = ""
+        self.buf = b""
+        self.log = os.path.join(logs, f"{self.id}.log")
+        self.out = open(self.log, "w", encoding="utf-8", errors="replace")  # noqa: SIM115 — (kept open while it runs)
+        self.phase = 0                # 1: its "then" command
+        self.reported = False         # (what it had to say beyond its block: said)
+        self.first = ""               # (the dependencies: the first line of the command that counts)
+        self.looked = ""              # (the first line of its first step's)
+        self.then_work: int | None = None   # (what its second step has to do, as its first said: 0, it isn't run)
+        self.said: str | None = None   # (what the tool said came of it, for the line under its bar: dev/progress.said)
+
+    @property
+    def done(self) -> bool:
+        return self.state not in ("waiting", "running")
+
+    @property
+    def failing(self) -> bool:
+        """Whether it has failed, or will: ended red, or still running with a failure on one of its bars (a test of the
+        suite's failed). What waits on it, or stops with it, needn't wait for the rest."""
+        return self.state == "fail" or (self.state == "running" and any(b.bad for b in self.bars.values()))
+
+    def failed_note(self) -> str:
+        """What a section it held up or stopped says of it: "Current Tests failed", or "Current Tests failing" (a test of
+        it has failed, and it runs on)."""
+        return f"{self.title} failed" if self.state == "fail" or not self.bars else f"{self.title} failing"
+
+    @property
+    def shown(self) -> str:
+        """The state its block is drawn in: red when its key's command failed (the review page didn't open), however it
+        went itself (its result stays what it was)."""
+        return "fail" if self.key_said else self.state
+
+    @property
+    def keyed(self) -> bool:
+        """Whether its key does something now: it has warned (the looks waiting for approval)."""
+        return bool(self.key) and self.state == "warn" and self.live
+
+    def press(self, tty: int):
+        """Its key: its command, on the terminal (the board's stdin and stdout: the review page won't open without
+        one) in a session of its own, so it stays open after the board, and Enter or Ctrl-C on the board don't reach it."""
+        if self.helper is not None and self.helper.poll() is None:
+            return
+        env = {k: v for k, v in os.environ.items() if k != "PLEXCACHE_PROGRESS"}
+        self.why = self.log[: -len(".log")] + ".key.log"   # (what it says if it can't start: its header says it)
+        with open(self.why, "w", encoding="utf-8") as why:
+            self.helper = subprocess.Popen(["bash", "-c", self.key["cmd"]], cwd=self.key.get("cwd") or self.cwd, env=env,
+                                           stdin=tty, stdout=tty, stderr=why, start_new_session=True)
+        self.note = f"{self.warn_note}: {self.key.get('opens', 'it')} is open"
+        self.key_said = ""
+
+    def helped(self):
+        """Its key's command, once it has ended: said in its header."""
+        if self.helper is None or self.helper.poll() is None:
+            return
+        rc, self.helper = self.helper.returncode, None
+        said = ""
+        try:
+            with open(self.why, encoding="utf-8", errors="replace") as fh:
+                said = next((plain(x) for x in reversed(fh.read().splitlines()) if plain(x)), "")
+        except OSError:
+            pass
+        self.note = f"{self.warn_note}: {self.key.get('opens', 'it')} " + ("has closed" if rc == 0 else "didn't open")
+        self.key_said = "" if rc == 0 else said or f"(exit {rc})"   # (why, in its last line)
+
+    def start(self, cmd: str):
+        env = dict(os.environ, PLEXCACHE_PROGRESS="feed", PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1", **self.env)
+        self.proc = subprocess.Popen(["bash", "-c", cmd], cwd=self.cwd, env=env, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        os.set_blocking(self.proc.stdout.fileno(), False)  # type: ignore[union-attr]
+        self.state = "running"
+        self.note = ""
+        if self.started is None:
+            self.started = time.time()
+
+    def take(self, chunk: bytes):
+        self.buf += chunk
+        while b"\n" in self.buf:
+            line, self.buf = self.buf.split(b"\n", 1)
+            self.line(line.decode("utf-8", "replace"))
+        # (a bar redrawn with \r and no newline yet: its latest state still shows)
+        if self.buf and b"\x1e" not in self.buf:
+            text = plain(self.buf.decode("utf-8", "replace"))
+            if text:
+                self.last = text
+
+    def line(self, text: str):
+        rec = record(text)
+        if rec is not None and "said" in rec:   # (the line under its bar: what came of it, as the tool puts it)
+            self.said = str(rec["said"])
+            return
+        if rec is not None and isinstance(rec.get("then"), int):   # (what its second step has to do: 0, nothing)
+            self.then_work = rec["then"]
+            return
+        if rec is not None:
+            name = str(rec.get("bar") or "main")
+            bar = self.bars.pop(name, None) or Progress(0, tty=True, feed=False, bar=name)
+            self.bars[name] = bar   # (the last one moved is the one shown)
+            bar.apply(rec)
+            return
+        self.out.write(text + "\n")
+        shown = plain(text)
+        if shown:
+            self.last = shown
+            if self.upkeep and self.phase == (1 if self.then else 0) and not self.first:
+                self.first = shown
+            if self.upkeep and self.phase == 0 and not self.looked:
+                self.looked = shown   # (the first step's first line: what counts when it's the only step)
+
+    def finished(self, rc: int):
+        if self.buf:
+            self.line(self.buf.decode("utf-8", "replace"))
+            self.buf = b""
+        self.proc = None
+        if self.state in ("stopped", "skipped"):
+            self.rc = rc
+            return
+        if self.then and self.phase == 0 and self.then_work == 0:   # (nothing for the second step: it ends with the first)
+            self.then, self.first = {}, self.first or self.looked
+        if self.then and self.phase == 0:   # (the first command's end: the second waits its turn, its output the log)
+            self.phase = 1
+            self.state = "waiting"
+            self.bars = {}   # (the second step's bars its own)
+            self.rc = rc
+            self.out.close()
+            self.log = self.log[: -len(".log")] + ".then.log"
+            self.out = open(self.log, "w", encoding="utf-8", errors="replace")  # noqa: SIM115
+            return
+        self.rc = rc
+        self.ended = time.time()
+        if self.info is not None:   # (a section that only tells: its header the same, red when its command failed)
+            self.state, self.note = "info" if rc == 0 else "fail", str(self.info)
+        elif self.upkeep:
+            self.state = {"current": "pass", "behind": "warn"}.get(self.first, "skipped")
+            self.note = {"current": "all up to date", "behind": "new versions upstream"}.get(self.first, "not checked")   # (the box, above)
+            self.last = ""
+        elif rc == 0:
+            self.state = "pass"
+        elif self.warn_rc is not None and rc == self.warn_rc:   # (its block says it all: the line it said, the note)
+            self.state = "warn"
+            self.note = self.warn_note   # (its key: in the header's keys, and its last line)
+        elif self.not_run_rc is not None and rc == self.not_run_rc:
+            self.state = "notrun"
+        else:
+            self.state = "fail"
+
+    def stop(self, note: str, state: str = "stopped"):
+        """Ended before its end: stopped (Enter: orange), or skipped (another's failure made it pointless: grey)."""
+        if self.proc is not None:
+            self.state = state
+            self.note = note
+            stop_group(self.proc)
+        elif self.state == "waiting":
+            self.state = state
+            self.note = note
+        self.ended = self.ended or time.time()
+
+    # ------------------------------------------------------------- drawing
+    def lines(self, width: int) -> list[str]:
+        """Its block: always ROWS lines, all in its colour (so nothing moves as it fills in) — the header (what it is, how
+        it stands, its time), its bar (the one it moved last: the future tests' build, then their tests) and the last line
+        it printed (once it's done, its result)."""
+        took = ""
+        if self.started is not None:
+            secs = int((self.ended or time.time()) - self.started)
+            took = f"{secs // 60}:{secs % 60:02d}"
+        said = status(self.note or SAID[self.state])
+        if self.doing and not self.done and not self.note:   # (what it's doing: its status while it runs)
+            said = status(self.doing)
+        between = self.state == "waiting" and self.phase == 1   # (between its two steps: the second waits for the checks)
+        if between:
+            said = status("waiting: checks")
+        left = f"  {self.title:<{TITLE}}{said}"
+        room = width - len(took) - 3
+        left = left[:room] if len(left) > room else left
+        head = f"{COLOUR[self.shown]}{left}{' ' * (room - len(left))} {took}  {OFF}"
+        bar = ""
+        shown = [b for b in self.bars.values() if (b.done or b.label) and not between]   # (one reset to nothing to do, or none at work: not shown)
+        if shown:
+            # (on its block's track, in its text colour; a failure count red while it runs, the block's own once done)
+            # its workers on the right, under the time (the bar's label cut short first)
+            n = shown[-1].workers
+            workers = f"{n} worker{'s' if n != 1 else ''}" if n else ""
+            room = width - 1 - (len(workers) + 3 if workers else 0)
+            bar = shown[-1].render(room, TRACK[self.shown], FILL[self.shown], "" if self.done else RED).replace(DIM, "")
+            if workers:
+                bar += " " * (width - 2 - len(workers) - len(ANSI.sub("", bar))) + workers
+        # its last line: what the tool says of it; while it runs with a bar, nothing else (the bar says how it goes:
+        # no stray line, a warning on stderr say — that's kept for the failure printout); once done, what it printed last
+        last = self.said if self.said is not None else "" if self.upkeep or (self.bars and not self.done) else self.last
+        if self.keyed and self.key.get("line") and ": " in last:   # (while its key works: the key, not the command)
+            last = last.rsplit(": ", 1)[0] + ": " + self.key["line"]
+        last = self.key_said or last
+        while len(last) > width - 6 and " · " in last:   # (a result line's facts: the last, the least, left off first)
+            last = last.rsplit(" · ", 1)[0]
+        text = f"    {last}" if len(last) <= width - 6 else f"    {last[: width - 7]}…"
+        return [head, *(self.row(x, width) for x in (bar, text))]
+
+    def row(self, text: str, width: int) -> str:
+        """A line of the block: on its colour all the way across (a colour the text sets put back after it ends)."""
+        body = BODY[self.shown]
+        pad = width - len(ANSI.sub("", text))
+        return body + text.replace(OFF, OFF + body) + " " * max(0, pad) + OFF
+
+
+def stop_group(proc: subprocess.Popen):
+    """SIGTERM to its process group (tests/run.py then says how far it got), SIGKILL 2 s later if it's still there."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        return
+    end = time.time() + 2
+    while proc.poll() is None and time.time() < end:
+        time.sleep(0.05)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+class Board:
+    def __init__(self, plan: list[dict] | dict, logs: str, tty: bool):
+        if isinstance(plan, list):
+            plan = {"sections": plan}
+        self.header = [str(x) for x in plan.get("header") or []]   # (the board's own block on top: what this run is)
+        self.commit = str(plan.get("commit") or "")   # (the commit checked: after the header's first line)
+        self.offered = [dict(k) for k in plan.get("keys") or []]   # (the keys the board says under it: Enter)
+        self.started: float | None = None   # (its timer, on the header's right: from the start until the last section ends)
+        self.ended: float | None = None
+        self.sections = [Section(s, logs) for s in plan["sections"]]
+        self.by_id = {s.id: s for s in self.sections}
+        self.tty = tty
+        self.drawn = 0           # lines on the terminal from the last frame
+        self.aborted = False
+        self.sel = selectors.DefaultSelector()
+        self.stdin_tty = tty and sys.stdin.isatty()
+        self.pressed = False     # (a section's key has been pressed)
+        for s in self.sections:
+            s.live = self.stdin_tty
+
+    def ready(self, s: Section) -> bool | None:
+        """Whether a waiting section may start: True, None (not yet), False (never: a section it waits on didn't pass)."""
+        wait = s.then.get("after", []) if s.phase == 1 and s.then else s.after
+        others = [self.by_id[i] for i in wait if i in self.by_id]
+        if s.phase == 0 and any(o.failing for o in others):   # (one failed, or a test of it has: never, now)
+            return False
+        for other in others:
+            if not other.done:
+                return None
+            if s.phase == 0 and other.state not in OK:
+                return False
+        return True
+
+    def step(self):
+        for s in self.sections:
+            if s.state == "waiting":
+                go = self.ready(s)
+                if go is False:
+                    short = [self.by_id[i] for i in s.after if self.by_id[i].state not in OK]
+                    short = [o for o in short if o.failing] or short  # (the one that failed, not the one stopped for it)
+                    early = [o for o in short if not o.done]   # (still running, a test of it failed: it said so first)
+                    note = ", ".join(o.failed_note() for o in early) if early else ", ".join(o.title for o in short) + " didn't pass"
+                    s.state, s.note, s.ended = "skipped", "not run: " + note, time.time()
+                    if not self.tty:
+                        self.said(s)
+                elif go:
+                    s.start(s.then["cmd"] if s.phase == 1 and s.then else s.cmd)
+                    self.sel.register(s.proc.stdout, selectors.EVENT_READ, s)  # type: ignore[union-attr]
+                    if not self.tty:
+                        print(f"==> {s.title}: {s.then['cmd'] if s.phase == 1 and s.then else s.cmd}", flush=True)
+                elif self.ready_note(s):
+                    s.note = self.ready_note(s)
+        for s in self.sections:
+            if s.state in ("running", "waiting") and s.phase == 0:
+                for i in s.stop_with:
+                    other = self.by_id.get(i)
+                    if other is not None and other.failing:   # (at its first failing test: not once it has ended)
+                        self.close(s)
+                        s.stop(f"stopped: {other.failed_note()}", "skipped")
+                        break
+
+    def ready_note(self, s: Section) -> str:
+        wait = s.then.get("after", []) if s.phase == 1 and s.then else s.after
+        pending = [self.by_id[i].title for i in wait if i in self.by_id and not self.by_id[i].done]
+        return "waiting: " + ", ".join(pending) if pending else ""
+
+    def close(self, s: Section):
+        if s.proc is not None and s.proc.stdout is not None:
+            try:
+                self.sel.unregister(s.proc.stdout)
+            except (KeyError, ValueError):
+                pass
+
+    def read(self, timeout: float):
+        if self.stdin_tty:
+            try:
+                self.sel.register(sys.stdin, selectors.EVENT_READ, None)
+            except KeyError:
+                pass
+        if not self.sel.get_map():
+            time.sleep(timeout)
+            return
+        for key, _ in self.sel.select(timeout):
+            s = key.data
+            if s is None:      # a key: Enter, or a section's
+                self.keys(os.read(sys.stdin.fileno(), 1024).decode("utf-8", "replace"))
+                continue
+            try:
+                chunk = os.read(key.fd, 65536)
+            except BlockingIOError:
+                continue
+            if chunk:
+                s.take(chunk)
+                continue
+            self.sel.unregister(key.fileobj)
+            proc = s.proc
+            rc = proc.wait() if proc is not None else 0
+            if proc is not None:
+                s.finished(rc)
+                if not self.tty and s.done:
+                    self.said(s)
+
+    def said(self, s: Section):
+        """Without a terminal: a line as each section ends."""
+        print(f"    {s.title}: {status(s.note or SAID[s.state])}" + (f" ({s.last})" if s.last else ""), flush=True)
+
+    def keys(self, typed: str):
+        for ch in typed:
+            if ch in "\r\n":
+                self.enter()
+                continue
+            for s in self.sections:
+                if s.keyed and s.key.get("key") == ch:
+                    s.press(sys.stdin.fileno())
+                    self.pressed = True
+
+    def enter(self):
+        if self.aborted:
+            return
+        self.aborted = True
+        for s in self.sections:
+            if s.stoppable and not s.done:
+                self.close(s)
+                s.stop("stopped: you pressed Enter")
+            elif not s.done and s.phase == 0 and any(self.by_id[i].stoppable for i in s.after if i in self.by_id):
+                if s.proc is None:
+                    s.state, s.note, s.ended = "stopped", "not run: you pressed Enter", time.time()
+
+    def collect_stopped(self):
+        """A stopped section's process, once it has gone."""
+        for s in self.sections:
+            if s.state in ("stopped", "skipped") and s.proc is not None and s.proc.poll() is not None:
+                rc = s.proc.returncode
+                try:
+                    rest = os.read(s.proc.stdout.fileno(), 1 << 20) if s.proc.stdout is not None else b""
+                except OSError:  # (BlockingIOError: nothing left to read)
+                    rest = b""
+                if rest:
+                    s.take(rest)
+                s.finished(rc)
+                if not self.tty:
+                    self.said(s)
+
+    def frame(self):
+        if not self.tty:
+            return
+        width = min(WIDTH, shutil.get_terminal_size((WIDTH, 40)).columns - 1)
+        # what a section that ended has to say goes above the board, into the terminal's scrollback; the board stays the
+        # last thing on the screen, where it was
+        said = "".join(self.told(s) for s in self.sections)
+        lines: list[str] = []
+        header = list(self.header) or [""]
+        keys = list(self.offered) + ([s.key for s in self.sections if s.keyed] if not self.pressed else [])
+        header.insert(1, ", ".join(f"[{k['key']}] {k.get('does', 'go on')}" for k in keys))
+        took = ""
+        if self.started is not None:
+            secs = int((self.ended or time.time()) - self.started)
+            took = f"{secs // 60}:{secs % 60:02d}"
+        for i, text in enumerate(header):
+            right = took if i == 0 else self.tally() if i == 1 else ""
+            while i == 1 and right and len(text) + len(right) + 1 > width - 4:   # (the keys first: the tally shortened, then gone)
+                right = right.rsplit(" · ", 1)[0] if " · " in right else ""
+            room = width - 4 - (len(right) + 1 if right else 0)
+            if i == 0 and self.commit:   # (the commit after it, cut first when there's no room)
+                text = f"{text:<{TITLE}}" if len(text) < TITLE else text + "   "   # (in line with the blocks' statuses)
+                rest = room - len(text)
+                text = (text + (self.commit if len(self.commit) <= rest else self.commit[: rest - 1] + "…" if rest > 1 else "")).rstrip()
+            text = text if len(text) <= room else text[: room - 1] + "…"
+            body = HEAD if i == 0 else HEAD.replace("[1;", "[")
+            lines.append(f"{body}  {text}{' ' * (width - 4 - len(text) - len(right))}{right}  {OFF}")
+        for s in self.sections:   # (a blank line between blocks, so each stands apart)
+            lines += ([""] if lines else []) + s.lines(width)
+        out = f"\033[{self.drawn}F" if self.drawn else ""
+        if said:
+            out += "\033[J" + said.replace("\n", "\033[K\n") + "\n"
+        out += "".join(f"\r\033[K{line}\n" for line in lines)
+        out += "\033[J"
+        sys.stdout.write(out)
+        sys.stdout.flush()
+        self.drawn = len(lines)
+
+    def tally(self) -> str:
+        """How far the board is, on the header's right: "6 of 8 done · 1 failed" (the failed and warnings when there are)."""
+        n = len(self.sections)
+        out = [f"{sum(s.done for s in self.sections)}/{n} done"]
+        failed = sum(s.state == "fail" for s in self.sections)
+        warned = sum(s.state == "warn" for s in self.sections)
+        if failed:
+            out.append(f"{failed} failed")
+        if warned:
+            out.append(f"{warned} warning" + ("s" if warned != 1 else ""))
+        return " · ".join(out)
+
+    def run(self) -> None:
+        if not self.tty and self.header:
+            print("\n".join([self.header[0] + (f"   {self.commit}" if self.commit else ""), *self.header[1:]]), flush=True)
+        if self.tty:   # (three blank lines first: what the board says above itself later comes under them)
+            sys.stdout.write("\n\n\n\033[?25l")  # (the cursor hidden while the board moves)
+        self.started = time.time()
+        last = 0.0
+        while not all(s.done for s in self.sections):
+            self.step()
+            if all(s.done for s in self.sections):
+                break
+            self.read(FRAME)
+            self.collect_stopped()
+            for s in self.sections:
+                s.helped()
+            if time.time() - last >= FRAME:
+                self.frame()
+                last = time.time()
+        self.ended = max((s.ended for s in self.sections if s.ended), default=None) or time.time()   # (the timer stops)
+        for s in self.sections:   # (the board done: no key works now, and its block says the command to run instead)
+            s.live = False
+            if s.helper is None and s.key and s.state == "warn":
+                s.note = s.warn_note
+        self.frame()
+        if self.tty:
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
+
+    def kill(self):
+        for s in self.sections:
+            if s.proc is not None:
+                stop_group(s.proc)
+
+    def told(self, s: Section) -> str:
+        """What there is to say of a section beyond its block, once it's done: what a failed one printed, as it came (the
+        tests' failures in full); the dependencies' box when they aren't all current. Said once."""
+        if s.reported or not s.done:
+            return ""
+        s.reported = True
+        if s.state != "fail" and not (s.upkeep and s.state in ("warn", "skipped")):   # (a warning of its own: its block says it)
+            return ""
+        s.out.flush()
+        with open(s.log, encoding="utf-8", errors="replace") as fh:
+            text = fh.read().rstrip()
+        if s.upkeep:   # (its first line is the word tnsync reads; the rest, the box)
+            text = "\n".join(line for line in text.split("\n")[1:] if record(line) is None).strip("\n")
+        lines = text.split("\n")
+        if lines and plain(lines[-1]) == s.last:   # (its last line is in its block already: not said twice)
+            text = "\n".join(lines[:-1]).rstrip()
+        if not text:
+            return ""
+        return f"\n{text}\n"   # (just what it printed: whose it is, its block says)
+
+    def report(self):
+        """Without a terminal, what there is to say of each section, after the board (on one, it went above it as each
+        ended: frame)."""
+        for s in self.sections:
+            text = self.told(s)
+            if text:
+                sys.stdout.write(text)
+            s.out.close()
+        sys.stdout.flush()
+
+    def results(self) -> str:
+        out = [f"aborted={1 if self.aborted else 0}"]
+        for s in self.sections:
+            out += [f"{s.id}={s.state}", f"{s.id}_rc={'' if s.rc is None else s.rc}", f"{s.id}_log={s.log}",
+                    f"{s.id}_last={s.last.replace(chr(10), ' ')}", f"{s.id}_first={s.first}"]
+        return "\n".join(out) + "\n"
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        print((__doc__ or "").split("\n\n")[1])
+        return 2
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        plan = json.load(fh)
+    logs = os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])), "logs")
+    os.makedirs(logs, exist_ok=True)
+    tty = sys.stdout.isatty()
+    board = Board(plan, logs, tty)
+    old = None
+    if board.stdin_tty:
+        import termios
+        old = termios.tcgetattr(sys.stdin.fileno())
+        quiet = termios.tcgetattr(sys.stdin.fileno())
+        quiet[3] &= ~(termios.ECHO | termios.ICANON)   # (a key isn't echoed, and comes as it's pressed: no Enter after it)
+        quiet[6][termios.VMIN], quiet[6][termios.VTIME] = 1, 0
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, quiet)
+
+    def ended(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, ended)
+    try:
+        board.run()
+    except KeyboardInterrupt:
+        board.kill()
+        if tty:
+            sys.stdout.write("\033[?25h\n")
+        if old is not None:
+            import termios
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, old)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGINT)  # (ended as Ctrl-C ends a command, so tnsync stops too)
+        return 130
+    finally:
+        if old is not None:
+            import termios
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, old)
+    board.report()
+    with open(sys.argv[2], "w", encoding="utf-8") as fh:
+        fh.write(board.results())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

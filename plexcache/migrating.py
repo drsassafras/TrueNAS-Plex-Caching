@@ -83,6 +83,7 @@ class Migration:
         self.checked_at: float | None = None  # when the current step's conditions were last looked at
         self.waits: dict[str, float] = {}  # a check that completes by itself: when it was first seen waiting (its id)
         self._cand: tuple[float, list] | None = None
+        self.cancelled: dict | None = None  # the conversion last cancelled, said on the page until dismissed (cancel)
         app.jobs.holds.append(self.hold)
         # a folder copy cut short by a restart is started again by the shared jobs, where it was
         app.jobs.register("copy", lambda args, saved: CopyJob(self, resumed=saved)
@@ -227,6 +228,7 @@ class Migration:
             st["picked_up"] = part["step"]
         with self.lock:
             self.state = st
+            self.cancelled = None
         self._save()
         return self.refresh()
 
@@ -281,16 +283,42 @@ class Migration:
         self._save()
         return self.refresh()
 
-    def cancel(self) -> None:
-        """Stop and forget (before the switch: nothing has changed but the new dataset, which you delete)."""
-        if self.state and self.state.get("step") in ("switch", "verify") and self.state.get("old_path"):
+    def cancel(self) -> dict | None:
+        """Stop and forget (before the switch: nothing has changed but the new dataset, which you delete). The copy is
+        stopped too, if it's running or queued. What was cancelled is kept to say so (snapshot's "cancelled": the folder as
+        it was, and whether the new dataset is still there to delete) until it's dismissed or another conversion starts;
+        a finished conversion closed (step done) is just forgotten. Returns what was cancelled (None: nothing was)."""
+        st = self.state
+        if st and st.get("step") in ("switch", "verify") and st.get("old_path"):
             raise ValueError("the folder has been renamed already: undo that first")
-        if self.state and self.state.get("queued"):
-            self.app.jobs.remove(kind="copy", args={"folder": self.state["folder"], "mirror": bool(self.state.get("mirror"))})
+        if st and st.get("queued"):
+            self.app.jobs.remove(kind="copy", args={"folder": st["folder"], "mirror": bool(st.get("mirror"))})
+        job = self.app.jobs.job
+        copying = bool(job and job.kind == "copy" and job.state.get("running") and st and job.state.get("folder") == st.get("folder"))
+        if copying:
+            self.app.jobs.cancel()  # (the job, not only the optimizer: logged as cancelled, the next in the queue started)
         self._folder("stop")
+        told = None
+        if st and st.get("step") in UNDER_WAY:
+            temp = st.get("temp_folder") or (st.get("folder") or "") + "-new"
+            told = {"folder": st.get("folder"), "host_folder": st.get("host_folder") or st.get("folder"), "title": st.get("title"),
+                    "library": st.get("library"), "step": st.get("step"), "temp": st.get("temp"), "temp_folder": temp,
+                    "left": os.path.isdir(temp), "copy_stopped": copying, "at": time.time()}
         with self.lock:
             self.state = None
+            self.cancelled = told
+            self._cand = None  # (the folder's row as it is now on disk: the new dataset still there, or not)
         self._save()
+        if told:
+            self.app.activity.event("optimizer", M("Converting {folder} to a dataset was cancelled: the folder is as it was",
+                                                   folder=told["host_folder"]))
+        return told
+
+    def dismiss(self) -> dict:
+        """The note that a conversion was cancelled, closed."""
+        with self.lock:
+            self.cancelled = None
+        return self.snapshot()
 
     def refresh(self, force: bool = False) -> dict:
         """Check the current step's conditions again (``force``: Check Again — the other site's files compared afresh too).
@@ -1012,10 +1040,15 @@ class Migration:
         stop = self.blocking("aside")
         if stop:
             raise ValueError(str(stop[0]["title"]))
-        out = self.start_copy(mirror=True)
         with self.lock:
-            st["move_after"] = True
+            st["move_after"] = True  # before the pass is queued: a pass that ends at once still finds it (copy_finished)
             st.pop("move_error", None)
+        try:
+            out = self.start_copy(mirror=True)
+        except ValueError:
+            with self.lock:
+                st.pop("move_after", None)
+            raise
         self._save()
         return out
 
@@ -1080,7 +1113,8 @@ class Migration:
 
     def snapshot(self) -> dict:
         with self.lock:
-            return {"state": dict(self.state) if self.state else None, "checks": list(self.checks), "checked_at": self.checked_at}
+            return {"state": dict(self.state) if self.state else None, "checks": list(self.checks), "checked_at": self.checked_at,
+                    "cancelled": dict(self.cancelled) if self.cancelled else None}
 
 
 class CopyJob(Job):

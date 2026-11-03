@@ -95,6 +95,7 @@ _ASSET = re.compile(r'(/static/[A-Za-z0-9_.-]+\.(?:js|css))"')
 
 
 # Reachable without signing in: the sign-in page's own files and the container health check.
+_UNMATCHED = object()   # (a part of do_POST that doesn't know the path: the next one is asked)
 OPEN_PATHS = {"/healthz", "/login", "/theme.css", "/theme.js"}  # (the sign-in page wears the theme too)
 mimetypes.add_type("font/woff2", ".woff2")
 
@@ -497,29 +498,7 @@ def make_handler(app):
             except SettingsError as e:
                 return self._error(msg(e), 415 if "json" in str(e) else 400)
             if path == "/login":
-                if not auth.enabled:
-                    return self._json({"ok": True})
-                user, pw = body.get("username", ""), body.get("password", "")
-                if not isinstance(user, str) or not isinstance(pw, str) or len(user) > 256 or len(pw) > 1024:
-                    return self._error(M("username and password must be text"), 400)
-                user = user.strip()  # (a space from autofill or a paste shouldn't refuse the sign-in)
-                address = self.client_address[0]
-                if auth.locked_out(address):
-                    return self._error(M("Too many wrong passwords from this device. Try again in 15 minutes."), 429)
-                ok = auth.check_password(user, pw)
-                auth.note_attempt(address, ok)
-                if ok:
-                    if auth.default_password:
-                        app.activity.event("settings", M("sign-in refused: the default password hasn’t been changed"), "warn")
-                        return self._error(M("The default password can’t be used. Set your own PLEXCACHE_PASSWORD (and "
-                                             "username) in the app’s YAML in TrueNAS — Apps → plex-cache → Edit — then sign "
-                                             "in with it."), 403)
-                    app.activity.event("settings", M("signed in to the web UI"))
-                    https = (self.headers.get("X-Forwarded-Proto") or "").lower() == "https"
-                    return self._send(200, b'{"ok": true}', "application/json",
-                                      {"Set-Cookie": auth.cookie(auth.new_session(), SESSION_DAYS * 86400, secure=https)})
-                app.activity.event("settings", M("failed sign-in from {address}", address=self.address_string()), "warn")
-                return self._error(M("wrong username or password"), 401)
+                return self._login(body)
             if path == "/logout":
                 auth.revoke(auth.cookie_value(self.headers))
                 return self._send(200, b'{"ok": true}', "application/json", {"Set-Cookie": auth.cookie("", 0)})
@@ -527,301 +506,356 @@ def make_handler(app):
                 return
             app.note_host(self.headers.get("Host"))
             try:
-                if path == "/api/settings":
-                    libs = (body.get("nextepisode") or {}).get("libraries") if isinstance(body.get("nextepisode"), dict) else None
-                    if libs is not None:
-                        app.check_prefetch_libraries(libs)
-                    for feature in ("warmup", "nowplaying"):
-                        sec = body.get(feature)
-                        if isinstance(sec, dict) and sec.get("enabled") is True:
-                            ok, why = app.feature_available(feature)
-                            if not ok:
-                                raise SettingsError(why)
-                    app.settings.update(body)
-                    if getattr(app, "ha", None):
-                        app.ha.wake.set()  # Home Assistant shows the change straight away
-                    if (body.get("general") or {}).get("update_check") is True and getattr(app, "updates", None):
-                        app.updates.wake.set()  # check now, rather than in a few hours
-                    # Re-run the checks this setting affects, so the page shows whether it worked.
-                    if any(k in body for k in ("plex", "truenas")):
-                        app.test_connections_async(then_checks=True, rescan="plex" in body)
-                    elif "syncthing" in body:  # (its card's lights: asked again now, nothing else re-run)
-                        app.syncthing.tick_async(force=True)
-                        if any(k.startswith(("throttle", "giveway")) for k in body["syncthing"]):
-                            app.syncthing.throttle_tick()  # (what's held follows the settings at once)
-                    elif set(body) != {"themes"}:  # (a theme changes nothing a check looks at)
-                        app.run_checks_async(rescan="excluded_libraries" in body.get("general", {}))
-                    return self._json({"settings": app.settings.public()})
-                if path in ("/api/themes/upload", "/api/themes/remove"):
-                    return self._themes(path, body)
-                if path == "/api/test":
-                    app.test_connections_async(then_checks=True, rescan=True)
-                    return self._json({"started": True})
-                if path == "/api/checks":
-                    rescan = body.get("rescan", True)
-                    if not isinstance(rescan, bool):
-                        raise SettingsError(M("rescan must be true or false"))
-                    app.run_checks_async(rescan=rescan)
-                    return self._json({"started": True})
-                if path == "/api/mqtt/reconnect":
-                    app.ha.retry()
-                    return self._json({"started": True})
-                if path == "/api/benchmark":
-                    app.run_benchmark()
-                    return self._json({"started": True})
-                if path == "/api/warmup/run":
-                    return self._json({"started": app.start_warmup(manual=True)})
-                if path == "/api/cachelog/reset":
-                    app.cachelog.reset_stats()
-                    app.cachelog.save(force=True)
-                    app.activity.event("settings", M("“How Long Cached Data Lasts” started again"))
-                    return self._json({"reset": True})
-                if path == "/api/optimize/library":
-                    key = body.get("library")
-                    if not isinstance(key, str) or not app.library_info(key):
-                        raise SettingsError(M("unknown library: {key}", key=str(key)))
-                    mode = body.get("mode", "optimize")
-                    if mode not in ("optimize", "covers"):
-                        raise SettingsError(M("mode must be optimize or covers"))
-                    from . import peers, safety
-                    why = peers.optimizer_conflict(app, key) or app.mirror_health.hold(key)
-                    if why:
-                        raise SettingsError(why)  # (another Dionysus would undo it, or wouldn't see the claims: said on Health / Mirror Checks too)
-                    if mode == "optimize":  # files are rewritten: room for the largest (and what a snapshot keeps of the rewritten), and a backup that can be made
-                        sums = (app.optimizing.summary or {}).get(key) or {}
-                        ready = safety.readiness(app, key, "largest", retained=int(sums.get("todo_bytes") or 0), tool="optimizer")
-                        if not ready["ready"]:
-                            raise SettingsError(M("Not yet: {why}", why=safety.why_not(ready)))
-                    files = body.get("files")  # (the files ticked on the page, their Plex paths; none: every file that needs it)
-                    if files is not None and (mode != "optimize" or not isinstance(files, list) or not all(isinstance(f, str) for f in files) or not files):
-                        raise SettingsError(M("files must be a list of the files to optimize"))
-                    got = app.optimizing.queue(key, mode, files)  # now, or after the jobs before it
-                    return self._json({"started": got == "started", "queued": got == "queued"})
-                got = _integration_actions(app, path, body)  # (System → Plex and Syncthing: the cards' buttons)
-                if got is not None:
-                    return self._json(got)
-                if path.startswith("/api/peer/"):
-                    # System → Mirror Dionysus (peerlink.py): Pair Now and Unpair on a mirror's link ({"server": its id}), Test Again on every one
-                    link = app.peerlinks.for_server(str(body.get("server") or ""))
-                    if path == "/api/peer/test":
-                        app.peerlinks.tick_async(force=True)
-                    elif link is None:
-                        raise SettingsError(M("Which mirror: name its server."))
-                    elif path == "/api/peer/pair":
-                        link.pair_now()
-                    elif path == "/api/peer/unpair":
-                        link.unpair()
-                    else:
-                        raise SettingsError(M("unknown action"))
-                    return self._json(jsonable(app.peerlinks.snapshot()))
-                if path == "/api/sync/discover":  # the Mirror page's Look for Mirrors: the account's servers that may be mirrors (sync.py)
-                    app.sync.discover_async()
-                    return self._json({"started": True})
-                if path == "/api/updates/check":  # Check Now: GitHub asked for the newest version (and, on dev, commit)
-                    app.updates.check_async()
-                    return self._json(app.updates.status())
-                if path == "/api/updates/apply":  # Update Now: the newer image pulled and the app redeployed by TrueNAS
-                    try:
-                        return self._json(app.update_now())
-                    except ValueError as e:
-                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
-                if path == "/api/tools/snapshot":  # a snapshot of the library's datasets, "I've made a backup", or the last error dismissed: {"library", "action": "take" | "ack" | "dismiss"}
-                    from . import safety
-                    key = str(body.get("library") or "")
-                    if not app.library_info(key):
-                        raise SettingsError(M("unknown library: {key}", key=key))
-                    try:
-                        if body.get("action") == "dismiss":
-                            safety.errors(app).pop(key, None)
-                        else:
-                            safety.take_snapshot(app, key, str(body.get("tool") or ""))
-                    except ValueError as e:
-                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
-                    return self._json(jsonable(safety.readiness(app, key)))
-                if path.startswith("/api/tools/"):
-                    # a tool (tools/): {"action": "scan", "library", "options"} or {"action": "apply", "ids": [...]}
-                    tool = app.tools.get(path[len("/api/tools/"):])
-                    if tool is None:
-                        raise SettingsError(M("unknown tool"))
-                    action = body.get("action")
-                    if action == "scan":
-                        started = tool.scan_async(str(body.get("library") or ""), body.get("options") if isinstance(body.get("options"), dict) else {},
-                                                  refresh=bool(body.get("refresh", True)))  # (Scan Again gathers the data again; the page's own first scan takes it as it is)
-                    elif action == "apply":
-                        choices = c if isinstance(c := body.get("choices"), dict) else {}
-                        try:
-                            started = tool.apply_async([str(i) for i in body.get("ids") or []], {str(k): v for k, v in choices.items() if isinstance(v, dict)})
-                        except ValueError as e:
-                            raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
-                    else:
-                        raise SettingsError(M("unknown action"))
-                    return self._json(dict(jsonable(tool.snapshot()), started=started))
-                if path == "/api/trash":
-                    # a file a tool set aside (trash.py): {"path", "action": "purge" | "restore" | "keep"}
-                    try:
-                        app.trash.act(str(body.get("path") or ""), str(body.get("action") or ""))
-                    except ValueError as e:
-                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
-                    return self._json(jsonable(app.trash.snapshot()))
-                if path == "/api/conversions":
-                    # A converted file's original (converting.py): {"original", "action": "delete" | "keep" | "check"}
-                    try:
-                        app.conversions.act(str(body.get("original") or ""), str(body.get("action") or ""))
-                    except ValueError as e:
-                        why = e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))
-                        raise SettingsError(why) from None
-                    return self._json(jsonable(app.conversions.snapshot()))
-                if path == "/api/migration":
-                    # Turning a library folder into a dataset (migrating.py): one action at a time
-                    mig, action = app.migration, body.get("action")
-                    try:
-                        if action == "plan":
-                            return self._json(jsonable(mig.plan(str(body.get("library") or ""), str(body.get("folder") or ""))))
-                        if action == "check":
-                            return self._json(jsonable(mig.refresh(force=True)))
-                        if action == "scope":  # both servers, or this one only
-                            return self._json(jsonable(mig.set_scope(str(body.get("scope") or ""))))
-                        if action in ("sync_paused", "sync_resumed", "sync_checked", "sync_ignore", "sync_pause", "sync_resume"):  # what you've done where the app can't see; or done through Syncthing's API
-                            return self._json(jsonable(mig.confirm(action)))
-                        if action in ("copy", "catchup"):
-                            if action == "copy":  # the folder copied into the new dataset: a recent snapshot first (room is among its own checks)
-                                from . import safety
-                                ready = safety.readiness(app, str((mig.state or {}).get("library") or ""), 0, keeps=True, tool="dataset")
-                                if not ready["ready"]:
-                                    raise SettingsError(M("Not yet: {why}", why=safety.why_not(ready)))
-                            return self._json(jsonable(mig.start_copy(mirror=action == "catchup")))
-                        if action in ("pause", "resume"):
-                            app.jobs.pause(action == "pause")
-                            return self._json(jsonable(mig.refresh()))
-                        if action == "stop":
-                            app.jobs.cancel()
-                            return self._json(jsonable(mig.refresh()))
-                        if action == "pass_then_move":
-                            return self._json(jsonable(mig.pass_then_move()))
-                        if action == "rename_old":
-                            return self._json(jsonable(mig.rename_old()))
-                        if action == "undo_rename":
-                            return self._json(jsonable(mig.undo_rename()))
-                        if action == "delete_old":
-                            return self._json(jsonable(mig.delete_old()))
-                        if action == "restart":
-                            return self._json(jsonable(mig.restart()))
-                        if action == "cancel":
-                            mig.cancel()
-                            return self._json({"cancelled": True})
-                    except ValueError as e:
-                        why = e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))  # (translated, when it can be)
-                        raise SettingsError(why) from None
-                    raise SettingsError(M("unknown action"))
-                if path == "/api/library/health/ignore":
-                    # an item's Library Health issues ignored (greyed out, kept for good) or brought back:
-                    # {"library", "item", "action": "ignore" | "restore", "ids": [check ids]}
-                    from .libhealth import set_ignored
-                    key = str(body.get("library") or "")
-                    if not app.library_info(key) or not body.get("item"):
-                        raise SettingsError(M("unknown library: {key}", key=key))
-                    from .libhealth import ignored, scanning
-                    busy = scanning(app, key, [str(i) for i in body.get("ids") or []] or ((ignored(app).get(key) or {}).get(str(body["item"])) or []))
-                    if busy:
-                        raise SettingsError(busy)
-                    if body.get("action") == "ignore":
-                        set_ignored(app, key, str(body["item"]), [str(i) for i in body.get("ids") or []])
-                    elif body.get("action") == "restore":  # (``ids``: those only; none: every one)
-                        ids = [str(i) for i in body.get("ids") or []]
-                        set_ignored(app, key, str(body["item"]), ids or None, restore=True)
-                    else:
-                        raise SettingsError(M("unknown action"))
-                    return self._json({"ok": True})
-                if path in ("/api/library/health/scan", "/api/library/health/action"):
-                    # a check page whose findings are worked out in the background (Mirror Checks, libhealth.SOURCES): Scan
-                    # Again {"library", "category"}; a finding's action (Scan Folder) {"library", "item", "check"}
-                    from . import libhealth
-                    key = str(body.get("library") or "")
-                    if not app.library_info(key):
-                        raise SettingsError(M("unknown library: {key}", key=key))
-                    try:
-                        if path == "/api/library/health/scan":
-                            return self._json({"started": libhealth.scan(app, key, str(body.get("category") or ""))})
-                        if not body.get("item") or not body.get("check"):
-                            raise SettingsError(M("item and check must name the finding"))
-                        return self._json({"said": jsonable(libhealth.act(app, key, str(body["item"]), str(body["check"])))})
-                    except (ValueError, PlexError) as e:
-                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
-                if path == "/api/library/survey":
-                    # read the layout of a library's files (Library Health): {"library", "force"?, "pause"?}.
-                    # One library at a time: starting one pauses the other, which carries on when started again.
-                    key = body.get("library")
-                    if not isinstance(key, str) or not app.library_info(key):
-                        raise SettingsError(M("unknown library: {key}", key=str(key)))
-                    if body.get("pause"):
-                        app.inspector.pause(key)
-                        return self._json(app.inspector.snapshot())
-                    # "force": every file again; otherwise only files new or changed since they were inspected
-                    return self._json(app.inspector.start(key, force=bool(body.get("force"))))
-                if path == "/api/optimizer/survey":  # the Optimizer page's Scan Again: every library's files looked at again now
-                    app.optimizing.survey_soon()
-                    return self._json({"started": True})
-                if path == "/api/optimizer/check":
-                    # The optimizer's setup steps, checked again now (the Optimizer page's "Check again")
-                    return self._json(jsonable(app.optimizing.diagnose()))
-                if path == "/api/job":
-                    # The file job running now, whatever kind: {"action": "pause" | "resume" | "cancel"}
-                    a = body.get("action")
-                    if a == "dismiss":
-                        app.jobs.dismiss()
-                        return self._json({"ok": True})
-                    if a == "retry":  # a failed file (from the job log), tried again after the file in hand
-                        got = app.optimizing.retry(str(body.get("job") or ""), str(body.get("file") or ""))
-                        return self._json({"ok": got is not None})
-                    if a == "remove":  # queued work, taken off the queue
-                        return self._json({"ok": app.jobs.remove(str(body.get("id") or ""))})
-                    if a == "plex_revert":  # Plex's records put back from a backup of them (plexbackup.py): {"id"}
-                        try:
-                            return self._json(plexbackup.revert(app, str(body.get("id") or "")))
-                        except ValueError as e:
-                            raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
-                    if a in ("revert", "rollback"):  # a tool's run undone: its changed files put back from the backup, or the whole snapshot rolled back
-                        from .tools import revert_job, rollback_job
-                        try:
-                            return self._json((revert_job if a == "revert" else rollback_job)(app, str(body.get("job") or "")))
-                        except ValueError as e:
-                            raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
-                    ok = app.jobs.pause(a == "pause") if a in ("pause", "resume") else app.jobs.cancel() if a == "cancel" else None
-                    if ok is None:
-                        raise SettingsError(M("unknown action"))
-                    return self._json({"ok": ok})
-                if path == "/api/warmup/stop":
-                    app.stop_warmup()
-                    return self._json({"stopping": True})
-                # Has the Plex sign-in been approved yet? (A POST: it saves the token when it has.)
-                # /api/plex2/pin/<id>: the second Plex server's sign-in (its account's token, to list its servers)
-                m = re.fullmatch(r"/api/plex(2?)/pin/(\d{1,12})", path)
-                if m:
-                    try:
-                        token = check_pin(app.settings.section("general")["client_id"], int(m.group(2)))
-                    except PlexError as e:
-                        return self._error(msg(e), 502)
-                    if token and m.group(1):
-                        app.settings.update({"plex2": {"account_token": token}})
-                        app.activity.event("settings", M("signed in with Plex for the second server"))
-                    elif token:
-                        app.settings.update({"plex": {"token": token}})
-                        app.activity.event("settings", M("signed in with Plex"))
-                        app.test_connections_async(then_checks=True, rescan=True)
-                    return self._json({"done": bool(token)})
-                if path in ("/api/plex2/servers", "/api/plex2/address", "/api/plex2/forget", "/api/plex2/refresh", "/api/plex2/choose"):
-                    try:
-                        return self._json(jsonable(_plex2_call(app, path, body)))
-                    except ValueError as e:
-                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
-                if path in ("/api/plex/pin", "/api/plex2/pin"):
-                    try:
-                        return self._json(create_pin(app.settings.section("general")["client_id"]))
-                    except PlexError as e:
-                        return self._error(msg(e), 502)
+                for part in (self._post_settings, self._post_tools, self._post_migration, self._post_library, self._post_job,
+                             self._post_plex):   # (in turn: the first that knows the path answers it)
+                    if part(path, body) is not _UNMATCHED:
+                        return
             except SettingsError as e:
                 return self._error(msg(e), 400)
             return self._error("not found", 404)
+
+        def _login(self, body: dict):
+            """The sign-in page's POST: the username and password checked, a session's cookie when they're right."""
+            if not auth.enabled:
+                return self._json({"ok": True})
+            user, pw = body.get("username", ""), body.get("password", "")
+            if not isinstance(user, str) or not isinstance(pw, str) or len(user) > 256 or len(pw) > 1024:
+                return self._error(M("username and password must be text"), 400)
+            user = user.strip()  # (a space from autofill or a paste shouldn't refuse the sign-in)
+            address = self.client_address[0]
+            if auth.locked_out(address):
+                return self._error(M("Too many wrong passwords from this device. Try again in 15 minutes."), 429)
+            ok = auth.check_password(user, pw)
+            auth.note_attempt(address, ok)
+            if ok:
+                if auth.default_password:
+                    app.activity.event("settings", M("sign-in refused: the default password hasn’t been changed"), "warn")
+                    return self._error(M("The default password can’t be used. Set your own PLEXCACHE_PASSWORD (and "
+                                         "username) in the app’s YAML in TrueNAS — Apps → plex-cache → Edit — then sign "
+                                         "in with it."), 403)
+                app.activity.event("settings", M("signed in to the web UI"))
+                https = (self.headers.get("X-Forwarded-Proto") or "").lower() == "https"
+                return self._send(200, b'{"ok": true}', "application/json",
+                                  {"Set-Cookie": auth.cookie(auth.new_session(), SESSION_DAYS * 86400, secure=https)})
+            app.activity.event("settings", M("failed sign-in from {address}", address=self.address_string()), "warn")
+            return self._error(M("wrong username or password"), 401)
+
+        def _post_settings(self, path: str, body: dict):
+            """do_POST's settings and the runs it starts: Settings, Test, Run Checks, MQTT, the benchmark, warm-up, the cache log, an optimizer run."""
+            if path == "/api/settings":
+                libs = (body.get("nextepisode") or {}).get("libraries") if isinstance(body.get("nextepisode"), dict) else None
+                if libs is not None:
+                    app.check_prefetch_libraries(libs)
+                for feature in ("warmup", "nowplaying"):
+                    sec = body.get(feature)
+                    if isinstance(sec, dict) and sec.get("enabled") is True:
+                        ok, why = app.feature_available(feature)
+                        if not ok:
+                            raise SettingsError(why)
+                app.settings.update(body)
+                if getattr(app, "ha", None):
+                    app.ha.wake.set()  # Home Assistant shows the change straight away
+                if (body.get("general") or {}).get("update_check") is True and getattr(app, "updates", None):
+                    app.updates.wake.set()  # check now, rather than in a few hours
+                # Re-run the checks this setting affects, so the page shows whether it worked.
+                if any(k in body for k in ("plex", "truenas")):
+                    app.test_connections_async(then_checks=True, rescan="plex" in body)
+                elif "syncthing" in body:  # (its card's lights: asked again now, nothing else re-run)
+                    app.syncthing.tick_async(force=True)
+                    if any(k.startswith(("throttle", "giveway")) for k in body["syncthing"]):
+                        app.syncthing.throttle_tick()  # (what's held follows the settings at once)
+                elif set(body) != {"themes"}:  # (a theme changes nothing a check looks at)
+                    app.run_checks_async(rescan="excluded_libraries" in body.get("general", {}))
+                return self._json({"settings": app.settings.public()})
+            if path in ("/api/themes/upload", "/api/themes/remove"):
+                return self._themes(path, body)
+            if path == "/api/test":
+                app.test_connections_async(then_checks=True, rescan=True)
+                return self._json({"started": True})
+            if path == "/api/checks":
+                rescan = body.get("rescan", True)
+                if not isinstance(rescan, bool):
+                    raise SettingsError(M("rescan must be true or false"))
+                app.run_checks_async(rescan=rescan)
+                return self._json({"started": True})
+            if path == "/api/mqtt/reconnect":
+                app.ha.retry()
+                return self._json({"started": True})
+            if path == "/api/benchmark":
+                app.run_benchmark()
+                return self._json({"started": True})
+            if path == "/api/warmup/run":
+                return self._json({"started": app.start_warmup(manual=True)})
+            if path == "/api/cachelog/reset":
+                app.cachelog.reset_stats()
+                app.cachelog.save(force=True)
+                app.activity.event("settings", M("“How Long Cached Data Lasts” started again"))
+                return self._json({"reset": True})
+            if path == "/api/optimize/library":
+                key = body.get("library")
+                if not isinstance(key, str) or not app.library_info(key):
+                    raise SettingsError(M("unknown library: {key}", key=str(key)))
+                mode = body.get("mode", "optimize")
+                if mode not in ("optimize", "covers"):
+                    raise SettingsError(M("mode must be optimize or covers"))
+                from . import peers, safety
+                why = peers.optimizer_conflict(app, key) or app.mirror_health.hold(key)
+                if why:
+                    raise SettingsError(why)  # (another Dionysus would undo it, or wouldn't see the claims: said on Health / Mirror Checks too)
+                if mode == "optimize":  # files are rewritten: room for the largest (and what a snapshot keeps of the rewritten), and a backup that can be made
+                    sums = (app.optimizing.summary or {}).get(key) or {}
+                    ready = safety.readiness(app, key, "largest", retained=int(sums.get("todo_bytes") or 0), tool="optimizer")
+                    if not ready["ready"]:
+                        raise SettingsError(M("Not yet: {why}", why=safety.why_not(ready)))
+                files = body.get("files")  # (the files ticked on the page, their Plex paths; none: every file that needs it)
+                if files is not None and (mode != "optimize" or not isinstance(files, list) or not all(isinstance(f, str) for f in files) or not files):
+                    raise SettingsError(M("files must be a list of the files to optimize"))
+                got = app.optimizing.queue(key, mode, files)  # now, or after the jobs before it
+                return self._json({"started": got == "started", "queued": got == "queued"})
+            return _UNMATCHED
+
+        def _post_tools(self, path: str, body: dict):
+            """do_POST's cards and tools: Plex and Syncthing, a mirror's link, updates, snapshots, a tool's scan and apply, trash, conversions."""
+            got = _integration_actions(app, path, body)  # (System → Plex and Syncthing: the cards' buttons)
+            if got is not None:
+                return self._json(got)
+            if path.startswith("/api/peer/"):
+                # System → Mirror Dionysus (peerlink.py): Pair Now and Unpair on a mirror's link ({"server": its id}), Test Again on every one
+                link = app.peerlinks.for_server(str(body.get("server") or ""))
+                if path == "/api/peer/test":
+                    app.peerlinks.tick_async(force=True)
+                elif link is None:
+                    raise SettingsError(M("Which mirror: name its server."))
+                elif path == "/api/peer/pair":
+                    link.pair_now()
+                elif path == "/api/peer/unpair":
+                    link.unpair()
+                else:
+                    raise SettingsError(M("unknown action"))
+                return self._json(jsonable(app.peerlinks.snapshot()))
+            if path == "/api/sync/discover":  # the Mirror page's Look for Mirrors: the account's servers that may be mirrors (sync.py)
+                app.sync.discover_async()
+                return self._json({"started": True})
+            if path == "/api/updates/check":  # Check Now: GitHub asked for the newest version (and, on dev, commit)
+                app.updates.check_async()
+                return self._json(app.updates.status())
+            if path == "/api/updates/apply":  # Update Now: the newer image pulled and the app redeployed by TrueNAS
+                try:
+                    return self._json(app.update_now())
+                except ValueError as e:
+                    raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+            if path == "/api/tools/snapshot":  # a snapshot of the library's datasets, "I've made a backup", or the last error dismissed: {"library", "action": "take" | "ack" | "dismiss"}
+                from . import safety
+                key = str(body.get("library") or "")
+                if not app.library_info(key):
+                    raise SettingsError(M("unknown library: {key}", key=key))
+                try:
+                    if body.get("action") == "dismiss":
+                        safety.errors(app).pop(key, None)
+                    else:
+                        safety.take_snapshot(app, key, str(body.get("tool") or ""))
+                except ValueError as e:
+                    raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+                return self._json(jsonable(safety.readiness(app, key)))
+            if path.startswith("/api/tools/"):
+                # a tool (tools/): {"action": "scan", "library", "options"} or {"action": "apply", "ids": [...]}
+                tool = app.tools.get(path[len("/api/tools/"):])
+                if tool is None:
+                    raise SettingsError(M("unknown tool"))
+                action = body.get("action")
+                if action == "scan":
+                    started = tool.scan_async(str(body.get("library") or ""), body.get("options") if isinstance(body.get("options"), dict) else {},
+                                              refresh=bool(body.get("refresh", True)))  # (Scan Again gathers the data again; the page's own first scan takes it as it is)
+                elif action == "apply":
+                    choices = c if isinstance(c := body.get("choices"), dict) else {}
+                    try:
+                        started = tool.apply_async([str(i) for i in body.get("ids") or []], {str(k): v for k, v in choices.items() if isinstance(v, dict)})
+                    except ValueError as e:
+                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+                else:
+                    raise SettingsError(M("unknown action"))
+                return self._json(dict(jsonable(tool.snapshot()), started=started))
+            if path == "/api/trash":
+                # a file a tool set aside (trash.py): {"path", "action": "purge" | "restore" | "keep"}
+                try:
+                    app.trash.act(str(body.get("path") or ""), str(body.get("action") or ""))
+                except ValueError as e:
+                    raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+                return self._json(jsonable(app.trash.snapshot()))
+            if path == "/api/conversions":
+                # A converted file's original (converting.py): {"original", "action": "delete" | "keep" | "check"}
+                try:
+                    app.conversions.act(str(body.get("original") or ""), str(body.get("action") or ""))
+                except ValueError as e:
+                    why = e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))
+                    raise SettingsError(why) from None
+                return self._json(jsonable(app.conversions.snapshot()))
+            return _UNMATCHED
+
+        def _post_migration(self, path: str, body: dict):
+            """do_POST's library folder made a dataset (migrating.py): one action at a time."""
+            if path == "/api/migration":
+                # Turning a library folder into a dataset (migrating.py): one action at a time
+                mig, action = app.migration, body.get("action")
+                try:
+                    if action == "plan":
+                        return self._json(jsonable(mig.plan(str(body.get("library") or ""), str(body.get("folder") or ""))))
+                    if action == "check":
+                        return self._json(jsonable(mig.refresh(force=True)))
+                    if action == "scope":  # both servers, or this one only
+                        return self._json(jsonable(mig.set_scope(str(body.get("scope") or ""))))
+                    if action in ("sync_paused", "sync_resumed", "sync_checked", "sync_ignore", "sync_pause", "sync_resume"):  # what you've done where the app can't see; or done through Syncthing's API
+                        return self._json(jsonable(mig.confirm(action)))
+                    if action in ("copy", "catchup"):
+                        if action == "copy":  # the folder copied into the new dataset: a recent snapshot first (room is among its own checks)
+                            from . import safety
+                            ready = safety.readiness(app, str((mig.state or {}).get("library") or ""), 0, keeps=True, tool="dataset")
+                            if not ready["ready"]:
+                                raise SettingsError(M("Not yet: {why}", why=safety.why_not(ready)))
+                        return self._json(jsonable(mig.start_copy(mirror=action == "catchup")))
+                    if action in ("pause", "resume"):
+                        app.jobs.pause(action == "pause")
+                        return self._json(jsonable(mig.refresh()))
+                    if action == "stop":
+                        app.jobs.cancel()
+                        return self._json(jsonable(mig.refresh()))
+                    if action == "pass_then_move":
+                        return self._json(jsonable(mig.pass_then_move()))
+                    if action == "rename_old":
+                        return self._json(jsonable(mig.rename_old()))
+                    if action == "undo_rename":
+                        return self._json(jsonable(mig.undo_rename()))
+                    if action == "delete_old":
+                        return self._json(jsonable(mig.delete_old()))
+                    if action == "restart":
+                        return self._json(jsonable(mig.restart()))
+                    if action == "cancel":  # what was cancelled, for the page to say (None: a finished one closed)
+                        return self._json(jsonable({"cancelled": mig.cancel()}))
+                    if action == "dismiss":  # the note that a conversion was cancelled, closed
+                        return self._json(jsonable(mig.dismiss()))
+                except ValueError as e:
+                    why = e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))  # (translated, when it can be)
+                    raise SettingsError(why) from None
+                raise SettingsError(M("unknown action"))
+            return _UNMATCHED
+
+        def _post_library(self, path: str, body: dict):
+            """do_POST's Library Health and the optimizer's scans: ignored issues, a check page's Scan Again, a survey."""
+            if path == "/api/library/health/ignore":
+                # an item's Library Health issues ignored (greyed out, kept for good) or brought back:
+                # {"library", "item", "action": "ignore" | "restore", "ids": [check ids]}
+                from .libhealth import set_ignored
+                key = str(body.get("library") or "")
+                if not app.library_info(key) or not body.get("item"):
+                    raise SettingsError(M("unknown library: {key}", key=key))
+                from .libhealth import ignored, scanning
+                busy = scanning(app, key, [str(i) for i in body.get("ids") or []] or ((ignored(app).get(key) or {}).get(str(body["item"])) or []))
+                if busy:
+                    raise SettingsError(busy)
+                if body.get("action") == "ignore":
+                    set_ignored(app, key, str(body["item"]), [str(i) for i in body.get("ids") or []])
+                elif body.get("action") == "restore":  # (``ids``: those only; none: every one)
+                    ids = [str(i) for i in body.get("ids") or []]
+                    set_ignored(app, key, str(body["item"]), ids or None, restore=True)
+                else:
+                    raise SettingsError(M("unknown action"))
+                return self._json({"ok": True})
+            if path in ("/api/library/health/scan", "/api/library/health/action"):
+                # a check page whose findings are worked out in the background (Mirror Checks, libhealth.SOURCES): Scan
+                # Again {"library", "category"}; a finding's action (Scan Folder) {"library", "item", "check"}
+                from . import libhealth
+                key = str(body.get("library") or "")
+                if not app.library_info(key):
+                    raise SettingsError(M("unknown library: {key}", key=key))
+                try:
+                    if path == "/api/library/health/scan":
+                        return self._json({"started": libhealth.scan(app, key, str(body.get("category") or ""))})
+                    if not body.get("item") or not body.get("check"):
+                        raise SettingsError(M("item and check must name the finding"))
+                    return self._json({"said": jsonable(libhealth.act(app, key, str(body["item"]), str(body["check"])))})
+                except (ValueError, PlexError) as e:
+                    raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+            if path == "/api/library/survey":
+                # read the layout of a library's files (Library Health): {"library", "force"?, "pause"?}.
+                # One library at a time: starting one pauses the other, which carries on when started again.
+                key = body.get("library")
+                if not isinstance(key, str) or not app.library_info(key):
+                    raise SettingsError(M("unknown library: {key}", key=str(key)))
+                if body.get("pause"):
+                    app.inspector.pause(key)
+                    return self._json(app.inspector.snapshot())
+                # "force": every file again; otherwise only files new or changed since they were inspected
+                return self._json(app.inspector.start(key, force=bool(body.get("force"))))
+            if path == "/api/optimizer/survey":  # the Optimizer page's Scan Again: every library's files looked at again now
+                app.optimizing.survey_soon()
+                return self._json({"started": True})
+            if path == "/api/optimizer/check":
+                # The optimizer's setup steps, checked again now (the Optimizer page's "Check again")
+                return self._json(jsonable(app.optimizing.diagnose()))
+            return _UNMATCHED
+
+        def _post_job(self, path: str, body: dict):
+            """do_POST's file job running now (pause, resume, cancel, retry, revert…)."""
+            if path == "/api/job":
+                # The file job running now, whatever kind: {"action": "pause" | "resume" | "cancel"}
+                a = body.get("action")
+                if a == "dismiss":
+                    app.jobs.dismiss()
+                    return self._json({"ok": True})
+                if a == "retry":  # a failed file (from the job log), tried again after the file in hand
+                    got = app.optimizing.retry(str(body.get("job") or ""), str(body.get("file") or ""))
+                    return self._json({"ok": got is not None})
+                if a == "remove":  # queued work, taken off the queue
+                    return self._json({"ok": app.jobs.remove(str(body.get("id") or ""))})
+                if a == "plex_revert":  # Plex's records put back from a backup of them (plexbackup.py): {"id"}
+                    try:
+                        return self._json(plexbackup.revert(app, str(body.get("id") or "")))
+                    except ValueError as e:
+                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+                if a in ("revert", "rollback"):  # a tool's run undone: its changed files put back from the backup, or the whole snapshot rolled back
+                    from .tools import revert_job, rollback_job
+                    try:
+                        return self._json((revert_job if a == "revert" else rollback_job)(app, str(body.get("job") or "")))
+                    except ValueError as e:
+                        raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+                ok = app.jobs.pause(a == "pause") if a in ("pause", "resume") else app.jobs.cancel() if a == "cancel" else None
+                if ok is None:
+                    raise SettingsError(M("unknown action"))
+                return self._json({"ok": ok})
+            return _UNMATCHED
+
+        def _post_plex(self, path: str, body: dict):
+            """do_POST's warm-up stop and the Plex sign-ins (a PIN, the second server's calls)."""
+            if path == "/api/warmup/stop":
+                app.stop_warmup()
+                return self._json({"stopping": True})
+            # Has the Plex sign-in been approved yet? (A POST: it saves the token when it has.)
+            # /api/plex2/pin/<id>: the second Plex server's sign-in (its account's token, to list its servers)
+            m = re.fullmatch(r"/api/plex(2?)/pin/(\d{1,12})", path)
+            if m:
+                try:
+                    token = check_pin(app.settings.section("general")["client_id"], int(m.group(2)))
+                except PlexError as e:
+                    return self._error(msg(e), 502)
+                if token and m.group(1):
+                    app.settings.update({"plex2": {"account_token": token}})
+                    app.activity.event("settings", M("signed in with Plex for the second server"))
+                elif token:
+                    app.settings.update({"plex": {"token": token}})
+                    app.activity.event("settings", M("signed in with Plex"))
+                    app.test_connections_async(then_checks=True, rescan=True)
+                return self._json({"done": bool(token)})
+            if path in ("/api/plex2/servers", "/api/plex2/address", "/api/plex2/forget", "/api/plex2/refresh", "/api/plex2/choose"):
+                try:
+                    return self._json(jsonable(_plex2_call(app, path, body)))
+                except ValueError as e:
+                    raise SettingsError(e.args[0] if e.args and isinstance(e.args[0], M) else M("{why}", why=str(e))) from None
+            if path in ("/api/plex/pin", "/api/plex2/pin"):
+                try:
+                    return self._json(create_pin(app.settings.section("general")["client_id"]))
+                except PlexError as e:
+                    return self._error(msg(e), 502)
+            return _UNMATCHED
 
     return Handler
 

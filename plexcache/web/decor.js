@@ -1,11 +1,11 @@
 // Dionysus's decorations: what a theme's "decor" turns on (plexcache/themes.py), drawn on whatever page is open.
 //
-// theme.js marks <html> with the theme's choices before the page draws: data-logo (classic | theatre),
-// data-spots, data-vines and data-film (on | off). This file draws them:
-//  * the logo in the menu, on the sign-in page and on the browser tab;
+// theme.js marks <html> with the theme's choices before the page draws: data-spots, data-vines and data-film (on | off).
+// This file draws them:
 //  * spots round the app and on the menu (a tile made here in the theme's colours);
-//  * vines: a wavy line with a leaf now and then round every card and round the whole app, and down the seam between
-//    the menu and the page. A card's colour stops at its vine (the vine is the card's border);
+//  * vines: a wavy line with a leaf now and then round every card, and down the seam between the menu and the page
+//    (held beside the menu as the page scrolls). A card's colour stops at its vine (the vine is the card's border), and
+//    so do the menu's and the page's at the seam;
 //  * film: a reel unspooling a band of film under every page's title, its wave picked from the page's name, so a page
 //    always looks the same and no two pages quite match.
 // Everything is drawn from the cards and titles the shared code makes (app.js: card markup, top()), so every page and
@@ -21,17 +21,6 @@
   function ease(a, b, t) { var x = Math.max(0, Math.min(1, (t - a) / (b - a))); return x * x * (3 - 2 * x); }
   function css(name) { return getComputedStyle(d).getPropertyValue(name).trim(); }
   var enc = function (s) { return 'url("data:image/svg+xml;charset=utf-8,' + encodeURIComponent(s) + '")'; };
-
-  // ------------------------------------------------------------------ logo
-  function logo() {
-    var theatre = d.getAttribute("data-logo") === "theatre";
-    document.querySelectorAll(".brand img, .brand-row img").forEach(function (img) {
-      var src = theatre ? "/static/theatre.svg" : "/static/logo.svg";
-      if (img.getAttribute("src").split("?")[0] !== src) img.setAttribute("src", src);
-    });
-    var icon = document.querySelector('link[rel="icon"]');
-    if (icon) { var href = theatre ? "/static/theatre-tab.svg" : "/static/logo.svg"; if (icon.getAttribute("href").split("?")[0] !== href) icon.setAttribute("href", href); }
-  }
 
   // ------------------------------------------------------------------ spots
   // a tile of broken rings and dots, in one colour at a low strength, that repeats without a seam
@@ -98,20 +87,25 @@
   }
   var drawn = {};  // vines already worked out, by size and seed: a page draws again every few seconds, the same each time
   function cached(key, make) { if (!drawn[key]) { if (Object.keys(drawn).length > 400) drawn = {}; drawn[key] = make(); } return drawn[key]; }
-  function put(el, cls, html) {
+  // (``before``: where among el's children it goes, when not at the end)
+  function put(el, cls, html, before) {
     var old = el.querySelector(":scope > ." + cls);
     if (!html) { if (old) old.remove(); return; }
     if (old && old.getAttribute("data-k") === html.k) return;
     var t = document.createElement("div"); t.innerHTML = html.svg;
     var svg = t.firstChild; svg.setAttribute("data-k", html.k);
-    if (old) old.replaceWith(svg); else el.appendChild(svg);
+    if (old && !before) old.replaceWith(svg);
+    else { if (old) { if (before === old) before = old.nextSibling; old.remove(); } el.insertBefore(svg, before || null); }
   }
-  // each card: its colour inside the vine, the vine on its border
-  function cards(root) {
+  // (``only``, in cards(), meters() and boxes(): just these drawn again, the rest left as they are)
+  var skip = function (only, el) { return only && only.indexOf(el) < 0; };
+  // each card: its colour inside the vine, the vine on its border (its place among the page's cards picks its vine)
+  function cards(root, only) {
     var list = Array.prototype.slice.call(root.querySelectorAll(".card"));
-    var sizes = list.map(function (c) { return [c.offsetWidth, c.offsetHeight, parseFloat(getComputedStyle(c).borderTopLeftRadius) || 12]; });
+    var sizes = list.map(function (c) { return skip(only, c) ? null : [c.offsetWidth, c.offsetHeight, parseFloat(getComputedStyle(c).borderTopLeftRadius) || 12]; });
     var page = location.pathname;
     list.forEach(function (c, i) {
+      if (!sizes[i]) return;
       var w = sizes[i][0], h = sizes[i][1], rad = sizes[i][2];
       if (!w || !h) return;
       var seed = hs(page + "#" + (c.id || i)), k = w + "x" + h + "x" + rad + "x" + seed;
@@ -122,40 +116,105 @@
       }) });
     });
   }
-  // round the whole app, the spots outside it: the app is cut to the vine, which the vine then covers
+  // ------------------------------------------------------------------ grapes: progress bars
+  // every progress bar (app.js: class "meter", but a usage meter's, "usage") is the leafy, calmer vine of the Decorating
+  // Dionysus marks: a gently curving vine with a grape every 24 px, some hanging just off it, loose leaves and curls. The
+  // grapes ripen with the bar's per cent, the current one turning from green to wine; with no count ("busy") a ripening
+  // wave runs along them. Thin bars are drawn smaller.
+  function vineShape(w) {
+    var R = rng(41), base = 20, amp = 2.6, n = Math.max(4, Math.floor((w - 36) / 24) + 1), X = function (i) { return 18 + i * 24; };
+    var A1 = amp * (.7 + R() * .6), A2 = amp * .45 * (.5 + R()), f1 = .021 + R() * .012, f2 = .05 + R() * .02, p1 = R() * 6.3, p2 = R() * 6.3;
+    var vy = function (x) { return base + A1 * Math.sin(x * f1 + p1) + A2 * Math.sin(x * f2 + p2); };
+    var d = "M4 " + r1(vy(4)), x, i;
+    for (x = 7; x < w - 4; x += 3) d += "L" + x + " " + r1(vy(x));
+    d += "L" + (w - 4) + " " + r1(vy(w - 4));
+    var xs = [], ys = [], o = "";
+    for (i = 0; i < n; i++) {
+      var gx = X(i) + (R() - .5) * 3, v = vy(gx), k = R(), side = k < .2 ? -1 : k < .4 ? 1 : 0, gy = v + side * 9.1;
+      xs.push(r1(gx)); ys.push(r1(gy));
+      if (side) o += '<path d="M' + r1(gx - side * 1.5) + " " + r1(v) + "Q" + r1(gx) + " " + r1(v + side * 1.5) + " " + r1(gx) + " " + r1(gy - side * 6.5) + '" stroke="var(--leaf)" stroke-width="1.3" fill="none"/>';
+    }
+    for (i = 0; i < n - 1; i++) {
+      if (R() > .7) continue;
+      var mx = (xs[i] + xs[i + 1]) / 2, mv = vy(mx), nbr = ys[i] < vy(xs[i]) - 1 || ys[i + 1] < vy(xs[i + 1]) - 1 ? 1 : -1, sd = R() < .5 ? nbr : -nbr;
+      o += R() < .85 ? leafAt(mx - 4, mv + sd * 7.5, sd < 0 ? -25 - R() * 30 : 20 + R() * 30, 9, "var(--leaf)") : curlAt(mx - 2, mv, sd, "var(--leaf)");
+    }
+    return { vine: '<path d="' + d + '" stroke="var(--leaf)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>' + o, xs: xs, ys: ys };
+  }
+  function vineBar(w, pct, busy) {
+    var sh = cached("vshape" + w, function () { return vineShape(w); }), n = sh.xs.length, done = pct / 100 * n, g = "";
+    sh.xs.forEach(function (x, i) {
+      var y = sh.ys[i];
+      if (busy) { g += '<circle cx="' + x + '" cy="' + y + '" r="6.5" fill="var(--unripe)"/><circle class="ripen" cx="' + x + '" cy="' + y + '" r="6.5" style="animation-delay:' + r1((Math.max(0, x - 10) / 200) % 1.6 - 1.6) + 's"/>'; return; }
+      var f = Math.max(0, Math.min(1, done - i));
+      g += '<circle cx="' + x + '" cy="' + y + '" r="6.5" fill="var(--unripe)"/>' + (f > 0 ? '<circle cx="' + x + '" cy="' + y + '" r="6.5" fill="var(--wine)"' + (f < 1 ? ' opacity="' + r1(f) + '"' : "") + "/>" : "");
+    });
+    return sh.vine + g;
+  }
+  function meters(root, only) {
+    var list = Array.prototype.slice.call(root.querySelectorAll(".meter:not(.usage)")).filter(function (m) { return !skip(only, m); });
+    var widths = list.map(function (m) { return m.clientWidth; });
+    list.forEach(function (m, i) {
+      var s = m.classList.contains("thin") ? .7 : 1, w = Math.round(widths[i] / s), busy = m.classList.contains("busy");
+      if (!w) return;
+      var bar = m.querySelector(":scope > div"), pct = parseFloat(m.getAttribute("aria-valuenow"));
+      if (isNaN(pct)) pct = bar ? parseFloat(bar.style.width) || 0 : 0;
+      pct = Math.round(Math.max(0, Math.min(100, pct)) * 2) / 2;
+      var k = w + "x" + s + (busy ? "b" : "p" + pct);
+      put(m, "mvine", { k: k, svg: '<svg class="mvine" width="' + widths[i] + '" height="' + r1(38 * s) + '" viewBox="0 0 ' + w + ' 38" aria-hidden="true" focusable="false">' + vineBar(w, pct, busy) + "</svg>" });
+    });
+  }
+
+  // the Kept and Lost boxes of a side-by-side card (app.js: cmp card): the cards' own vine line on their border, without
+  // leaves, in the box's colour, the box filled out to it (their titles keep their plain line)
+  function boxes(root, only) {
+    var list = Array.prototype.slice.call(root.querySelectorAll(".mgkeep,.mgdrop")).filter(function (b) { return !skip(only, b); });
+    var sizes = list.map(function (b) { var cs = getComputedStyle(b); return [b.offsetWidth, b.offsetHeight, parseFloat(cs.borderTopLeftRadius) || 10, parseFloat(cs.borderTopWidth) || 0]; });
+    list.forEach(function (b, i) {
+      var w = sizes[i][0], h = sizes[i][1], rad = sizes[i][2], bw = sizes[i][3];
+      if (!w || !h) return;
+      var k = "b" + w + "x" + h + "x" + rad + "x" + bw;
+      put(b, "edgevine", { k: k, svg: cached(k, function () {
+        var g = edge(w, h, rad, 3, true);
+        return '<svg class="edgevine" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + " " + h + '" style="left:' + (-bw) + "px;top:" + (-bw) + 'px" aria-hidden="true" focusable="false"><path d="' + g.d +
+          '" fill="var(--panel)" stroke="var(--edge)" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+      }) });
+    });
+  }
+  // the app goes to the window's edges (as Classic): its vine is the one down the seam between the menu and the page
   function frame() {
     var shell = document.querySelector(".shell");
     if (!shell) return;
-    if (!on("vines")) { shell.style.clipPath = ""; put(shell, "framevine", null); put(shell, "seamvine", null); return; }
-    var w = shell.offsetWidth, h = shell.offsetHeight, k = w + "x" + h;
-    if (!w || !h) return;
-    var g = cached("frame" + k, function () { return edge(w, h, 14, 7, true); });
-    shell.style.clipPath = "path('" + g.d + "')";
-    put(shell, "framevine", { k: k, svg: cached("framesvg" + k, function () {
-      return '<svg class="framevine" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + " " + h + '" aria-hidden="true" focusable="false"><path d="' + g.d +
-        '" fill="none" stroke="var(--frame)" stroke-width="1.4" stroke-linejoin="round"/>' + edge(w, h, 14, 7, true).deco("var(--frame-leaf)") + "</svg>";
-    }) });
+    if (!on("vines")) { put(shell, "seamvine", null); return; }
     seam(shell);
   }
-  // down the seam between the menu and the page (along its foot when the menu sits across the top, on a phone)
+  // down the seam between the menu and the page, held beside the menu so it stays as the page scrolls (along the menu's
+  // foot when the menu sits across the top, on a phone)
   function seam(shell) {
     var side = shell.querySelector(".side");
     if (!side) return;
     var across = side.offsetTop + side.offsetHeight <= (shell.querySelector(".main") || side).offsetTop + 1;
-    var L = across ? side.offsetWidth : shell.offsetHeight, X = across ? side.offsetHeight : side.offsetWidth, k = (across ? "a" : "d") + L + "x" + X;
+    var L = across ? side.offsetWidth : side.offsetHeight, X = across ? side.offsetHeight : 6, k = (across ? "a" : "d") + L + "x" + X;
     put(shell, "seamvine", { k: k, svg: cached("seam" + k, function () {
       var R = rng(19), n1 = Math.max(1, Math.round(L / (80 + R() * 30))), n2 = Math.max(3, Math.round(L / (30 + R() * 8))), p1 = R() * 6.3, p2 = R() * 6.3;
       var off = function (t) { return 1.1 * Math.sin(t / L * n1 * 2 * Math.PI + p1) + .45 * Math.sin(t / L * n2 * 2 * Math.PI + p2); };
       var along = function (t) { return across ? [t, X + off(t)] : [X + off(t), t]; }, path = "";
       for (var t = 0; t <= L; t += L > 6000 ? 4 : 2.5) { var p = along(t); path += (t ? "L" : "M") + r1(p[0]) + " " + r1(p[1]); }
-      var o = '<path d="' + path + '" fill="none" stroke="var(--menu-vine)" stroke-width="1.3" stroke-linecap="round"/>';
+      // the menu's colour up to the vine and the page's from it, over the straight edge between them, so the vine divides them
+      var W = 4, end = across ? "L" + L + " " + (X - W) + "L0 " + (X - W) + "z" : "L" + (X - W) + " " + L + "L" + (X - W) + " 0z";
+      var o = (across ? '<rect x="0" y="' + (X - W) + '" width="' + L + '" height="' + 2 * W + '" fill="var(--bg)"/>'
+        : '<rect x="' + (X - W) + '" y="0" width="' + 2 * W + '" height="' + L + '" fill="var(--bg)"/>') +
+        '<path d="' + path + end + '" fill="var(--side)"/>' +
+        '<path d="' + path + '" fill="none" stroke="var(--menu-vine)" stroke-width="1.3" stroke-linecap="round"/>';
       for (t = 40 + R() * 200; t < L - 24; t += 178 + R() * 378) {
         var q = along(t), sd = R() < .5 ? -1 : 1, base = across ? 0 : 90;
         o += R() < .7 ? leafOn(q[0], q[1], base + sd * (40 + R() * 20) * (across ? -1 : 1), 7 + R() * 2, "var(--menu-vine)")
           : '<g transform="rotate(' + base + " " + r1(q[0]) + " " + r1(q[1]) + ')">' + curlAt(q[0], q[1], sd, "var(--menu-vine)") + "</g>";
       }
-      return '<svg class="seamvine" width="' + (across ? L : X + 12) + '" height="' + (across ? X + 12 : L) + '" aria-hidden="true" focusable="false">' + o + "</svg>";
-    }) });
+      // across: over the top of the page; down: an item of the app's row just after the menu, held as the menu is, 12 wide
+      // (a browser doesn't draw an svg of no size) and taking no room: the seam 6 in
+      return '<svg class="seamvine ' + (across ? "across" : "down") + '" width="' + (across ? L : 2 * X) + '" height="' + (across ? X + 12 : L) + '" aria-hidden="true" focusable="false">' + o + "</svg>";
+    }) }, across ? null : side.nextSibling);
   }
 
   // ------------------------------------------------------------------ film
@@ -231,26 +290,69 @@
     busy = true;
     try {
       film(root);
-      if (on("vines")) cards(root);
+      if (on("vines")) { cards(root); boxes(root); }
       else root.querySelectorAll(".card > .vine").forEach(function (v) { v.remove(); });
+      if (on("grapes")) meters(root);
       frame();
     } finally { busy = false; }
+    watch(root);
   }
   var queued = false;
   function soon() { if (queued) return; queued = true; requestAnimationFrame(function () { queued = false; paint(); }); }
+  var DRAWN = ".vine,.edgevine,.mvine,.seamvine,.filmline";
+  var ours = function (n) { return n.nodeType === 1 && n.matches(DRAWN); };
+  var allOurs = function (nodes) { for (var j = 0; j < nodes.length; j++) if (!ours(nodes[j])) return false; return true; };
   if (window.MutationObserver) {
     new MutationObserver(function (list) {
       if (busy) return;
-      // only changes to a page's own content: not the vines and film this file adds
+      // only changes to a page's own content: not the vines and film this file adds (inside them, or put in or taken out)
       for (var i = 0; i < list.length; i++) {
-        var t = list[i].target;
-        if (!(t.closest && t.closest(".vine,.framevine,.seamvine,.filmline"))) { soon(); return; }
+        var r = list[i], t = r.target;
+        if (t.closest && t.closest(DRAWN)) continue;
+        if ((r.addedNodes.length || r.removedNodes.length) && allOurs(r.addedNodes) && allOurs(r.removedNodes)) continue;
+        soon(); return;
       }
     }).observe(document.documentElement, { childList: true, subtree: true });
   }
-  window.addEventListener("resize", soon);
-  // after the theme changes (theme.js): the logo, the spots' colours, and everything drawn again
-  function themed() { drawn = {}; spots(); logo(); soon(); }
+  // A size changed (the window, a card's content wrapping, the menu folded or opened): only what's that size now is
+  // drawn again (ResizeObserver), not the whole page. While the menu's width eases, nothing: the end draws it all again.
+  var easing = false, sized = new WeakMap(), ro = window.ResizeObserver ? new ResizeObserver(resized) : null;
+  var size = function (el) { return el.offsetWidth + "x" + el.offsetHeight; };
+  function watch(root) {
+    if (!ro) return;
+    ro.disconnect();
+    var els = Array.prototype.slice.call(root.querySelectorAll(".card,.mgkeep,.mgdrop,.meter:not(.usage),:scope > .top"));
+    var side = document.querySelector(".shell > .side");
+    if (side) els.push(side);
+    // (its border box: a padding or border that changes moves the vine too; a browser without the choice watches the inside)
+    els.forEach(function (el) { sized.set(el, size(el)); ro.observe(el, { box: "border-box" }); });
+  }
+  function resized(entries) {
+    if (busy || easing || !main) return;
+    var c = [], b = [], m = [], rest = false;
+    entries.forEach(function (e) {
+      var el = e.target, s = size(el);
+      if (sized.get(el) === s || !el.isConnected) return;
+      sized.set(el, s);
+      var cl = el.classList;
+      if (cl.contains("card")) c.push(el); else if (cl.contains("meter")) m.push(el); else if (cl.contains("mgkeep") || cl.contains("mgdrop")) b.push(el); else rest = true;
+    });
+    if (!c.length && !b.length && !m.length && !rest) return;
+    busy = true;
+    try {
+      if (on("vines")) { if (c.length) cards(main, c); if (b.length) boxes(main, b); }
+      if (on("grapes") && m.length) meters(main, m);
+      if (rest) { film(main); frame(); }
+    } finally { busy = false; }
+  }
+  if (!ro) window.addEventListener("resize", soon);
+  var isSide = function (e) { return e.target && e.target.classList && e.target.classList.contains("side"); };
+  document.addEventListener("transitionrun", function (e) { if (isSide(e)) easing = true; });
+  document.addEventListener("transitioncancel", function (e) { if (isSide(e)) { easing = false; soon(); } });
+  // the menu folded or opened (its width eases): the page beside it is another width, its vines drawn again
+  document.addEventListener("transitionend", function (e) { if (isSide(e)) { easing = false; soon(); } });
+  // after the theme changes (theme.js): the spots' colours, and everything drawn again
+  function themed() { drawn = {}; spots(); soon(); }
   window.PCDECOR = { paint: paint, themed: themed };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", themed); else themed();
 })();

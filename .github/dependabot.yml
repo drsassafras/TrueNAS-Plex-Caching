@@ -1,7 +1,9 @@
 # What the build depends on, kept current by pull requests: the GitHub Actions the workflows use, and the image's base
 # (python:3.15-slim-trixie — a new Python minor shows up here as a PR to look at, not to merge blindly: the code's floor
 # is 3.15, and the next Python is tried first with dev/future.py). MKVToolNix, ffmpeg, oxipng and libjpeg-turbo are
-# pinned in the Dockerfile and moved by dev/upkeep.py, the check the suite runs by hand.
+# pinned in the Dockerfile and moved by dev/upkeep.py, the check the suite runs by hand (and tnsync, TN_UPKEEP) — on dev only.
+# Each is watched twice: on main (the default branch; its security updates come from there too) and on dev, which carries
+# the newest software; a PR on main is looked at, not merged blindly, as main gets its updates when dev is merged into it.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -10,5 +12,15 @@ updates:
       interval: weekly
   - package-ecosystem: docker
     directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    target-branch: dev
     schedule:
       interval: weekly
