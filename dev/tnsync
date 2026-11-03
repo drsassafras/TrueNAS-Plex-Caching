@@ -26,6 +26,8 @@
 # code being copied — TN_TEST (the current tests), TN_FUTURE (the suite on the
 # next Python, say: stopped if the current tests fail), TN_VALIDATE (the HTML,
 # scripts and CSS checked), TN_TYPES (the Python validation: the type check),
+# TN_AUDIT (the security audits: which code no audit has seen, past its grace window: orange; red only on a --release
+# run, where the release rules are a check like the others),
 # TN_STYLE (the looks waiting for your approval: orange, a line that says how many and where to see them;
 # it neither blocks the copy nor counts as a failure) — and TN_UPKEEP (the
 # dependencies), in your folder. Each section is blue while it runs, then green,
@@ -53,7 +55,7 @@
 # Settings come from two files (KEY=value lines):
 #   ~/.config/tnsync/config   shared:      TN_HOST, TN_USER, TN_PORT
 #   <project>/.tnsync         per project: TN_APP, TN_DEST, TN_PATHS, TN_EXCLUDE, TN_TEST, TN_VALIDATE, TN_TYPES,
-#                              TN_FUTURE, TN_STYLE, TN_RELEASE, TN_UPKEEP (and may override any shared setting)
+#                              TN_AUDIT, TN_FUTURE, TN_STYLE, TN_RELEASE, TN_UPKEEP (and may override any shared setting)
 #
 # Written for the bash 3.2 that ships with macOS.
 
@@ -137,7 +139,7 @@ esac
 
 # ----------------------------------------------------------------- config
 TN_HOST=""; TN_USER="truenas_admin"; TN_PORT="22"
-TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""; TN_VALIDATE=""; TN_TYPES=""; TN_FUTURE=""; TN_STYLE=""; TN_RELEASE=""; TN_UPKEEP=""
+TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""; TN_VALIDATE=""; TN_TYPES=""; TN_AUDIT=""; TN_FUTURE=""; TN_STYLE=""; TN_RELEASE=""; TN_UPKEEP=""
 
 # Read KEY=value lines. The file is parsed, never executed.
 load_conf() {
@@ -158,7 +160,7 @@ load_conf() {
             \'*\') val="${val#\'}"; val="${val%\'}" ;;
         esac
         case "$key" in
-            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST|TN_VALIDATE|TN_TYPES|TN_FUTURE|TN_STYLE|TN_RELEASE|TN_UPKEEP) printf -v "$key" '%s' "$val" ;;
+            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST|TN_VALIDATE|TN_TYPES|TN_AUDIT|TN_FUTURE|TN_STYLE|TN_RELEASE|TN_UPKEEP) printf -v "$key" '%s' "$val" ;;
             *) warn "$file line $n: unknown setting $key" ;;
         esac
     done < "$file"
@@ -214,6 +216,9 @@ TN_TEST=
 # e.g. TN_VALIDATE=npx eslint .   TN_TYPES=npx pyright
 TN_VALIDATE=
 TN_TYPES=
+# The security audits: which code no audit has seen past its grace window (orange; with --release, the release rules: red).
+# e.g. TN_AUDIT=python3 dev/audit.py
+TN_AUDIT=
 # The suite on the next Python, say: alongside, stopped if TN_TEST fails.
 # e.g. TN_FUTURE=python3 dev/future.py
 TN_FUTURE=
@@ -306,10 +311,12 @@ trap cleanup EXIT
 
 capital() { printf '%s%s' "$(printf '%s' "${1:0:1}" | tr '[:lower:]' '[:upper:]')" "${1:1}"; }   # (bash 3.2 has no ${x^})
 
+SRC_SHA=""      # (a copy from git: the commit it is)
 SRC_COMMIT=""   # (the commit checked, on the board's header after the label: "a1b2c3d", "+ uncommitted" too for local)
 export_ref() {   # export_ref <ref> <label> — the label the board's header shows
     local ref="$1"
     git -C "$ROOT" rev-parse --verify --quiet "$ref^{commit}" >/dev/null || die "can't find $ref in this repository"
+    SRC_SHA="$(git -C "$ROOT" rev-parse "$ref^{commit}")"   # (the copy's lines, as git knows them: TN_AUDIT's blame)
     TMP="$(mktemp -d "${TMPDIR:-/tmp}/tnsync.XXXXXX")"
     git -C "$ROOT" archive "$ref" | tar -x -C "$TMP"
     # The packages installed in your folder (npm ci: node_modules, never in git) linked in, so the tests that use them
@@ -616,6 +623,7 @@ plan_add() { PLAN="${PLAN:+$PLAN,
 CHECK_IDS=()   # the checks on the board, in order
 # What every check is told: which command this is, the repository (the code may be a copy from git), and a release run
 CHECK_ENV="\"TNSYNC_MODE\": $(json_str "$MODE"), \"TNSYNC_REPO\": $(json_str "$ROOT")"
+[ -z "$SRC_SHA" ] || CHECK_ENV="$CHECK_ENV, \"TNSYNC_COMMIT\": $(json_str "$SRC_SHA")"
 [ "$RELEASE" != 1 ] || CHECK_ENV="$CHECK_ENV, \"TNSYNC_RELEASE\": \"1\", \"PLEXCACHE_I18N_RELEASE\": \"1\""
 check_section() {   # check_section <id> <title> <command> [extra JSON fields]
     [ -n "$3" ] || return 0
@@ -643,6 +651,15 @@ told_section() {
     plan_add "{\"id\": \"$1\", \"title\": $(json_str "$2"), \"cmd\": $(json_str "printf '%s\\n' $(printf '%q' "$4")"), \"info\": $(json_str "$3")}"
 }
 # A check that already passed on this code: its block says so, grey, and nothing runs. passed_section <id> <title> <cmd> <line>
+# The Security Audit block: which app code no audit has seen, past its grace window — a warning (orange) that neither blocks
+# the copy nor fails the run; on a --release run its release rules are a check like the others (red when they aren't
+# met). It reads the audits and git, not the tests, so it runs straight away, even on code that already passed. audit_section
+audit_section() {
+    [ -n "$TN_AUDIT" ] || return 0
+    local warn=", \"warn\": {\"rc\": 1, \"note\": \"code to audit\"}"
+    if [ "$RELEASE" = 1 ]; then warn=""; CHECK_IDS+=("audit"); fi
+    plan_add "{\"id\": \"audit\", \"title\": \"Security Audit\", \"cmd\": $(json_str "$TN_AUDIT"), \"cwd\": $(json_str "$SRC"), \"stoppable\": true, \"env\": {$CHECK_ENV}$warn}"
+}
 passed_section() {
     [ -n "$3" ] || return 0
     plan_add "{\"id\": \"$1\", \"title\": $(json_str "$2"), \"cmd\": $(json_str "printf '%s\\n' $(printf '%q' "$4")"), \"info\": \"already passed\"}"
@@ -665,6 +682,7 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
         passed_section validate "HTML/JS/CSS Validation" "$TN_VALIDATE" "$(was validate)"
         passed_section types "Python Validation" "$TN_TYPES" "$(was types)"
         [ "$RELEASE" != 1 ] || passed_section release "Release checks" "$TN_RELEASE" "$(was release)"
+        audit_section
     elif [ "$SKIP_TESTS" != 1 ] && [ "$want_copy" != "nothing" ]; then
         check_section current "Current Tests" "$TN_TEST"
         [ -n "$TN_TEST" ] || told_section current "Current Tests" "not set up" "No TN_TEST in .tnsync, so no tests were run."
@@ -673,9 +691,10 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
         check_section validate "HTML/JS/CSS Validation" "$TN_VALIDATE"
         check_section types "Python Validation" "$TN_TYPES"
         [ "$RELEASE" != 1 ] || check_section release "Release checks" "$TN_RELEASE"
+        audit_section
         [ "$RELEASE" != 1 ] || [ -n "$TN_RELEASE" ] || told_section release "Release checks" "not set up" "No TN_RELEASE in .tnsync, so no release checks were run."
     elif [ "$SKIP_TESTS" = 1 ]; then
-        told_section checks "Tests and checks" "skipped" "None of TN_TEST, TN_VALIDATE, TN_TYPES or TN_FUTURE was run (--skip-tests)."
+        told_section checks "Tests and checks" "skipped" "None of TN_TEST, TN_VALIDATE, TN_TYPES, TN_AUDIT or TN_FUTURE was run (--skip-tests)."
     fi
     local checks="[]"
     [ "${#CHECK_IDS[@]}" = 0 ] || checks="$(json_ids "${CHECK_IDS[@]}")"

@@ -257,6 +257,20 @@ def run(checks: list[Check], bar: str = "main", stream=None) -> int:
     return 1 if any(o.bad() for o in done) else 0
 
 
+def repo_at() -> tuple[str, str] | None:
+    """Where git knows the project's lines, for a check that asks git about them (dev/audit.py's blame): this folder when
+    it's a checkout (its working tree, so uncommitted lines count as not committed yet), else the repository tnsync copied
+    it from, at the commit it copied (TNSYNC_REPO, TNSYNC_COMMIT); None: no history here."""
+    try:
+        got = subprocess.run(["git", "-C", ROOT, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=10)
+        if got.returncode == 0 and os.path.realpath(got.stdout.strip()) == os.path.realpath(ROOT):
+            return ROOT, ""
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    repo, commit = os.environ.get("TNSYNC_REPO", ""), os.environ.get("TNSYNC_COMMIT", "")
+    return (repo, commit) if repo and commit else None
+
+
 def json_out(cmd: list[str], **kw) -> tuple[object | None, subprocess.CompletedProcess]:
     """A tool's JSON output (its findings), or None when it didn't give any."""
     got = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT, **kw)

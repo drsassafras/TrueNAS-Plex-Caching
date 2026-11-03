@@ -1,0 +1,28 @@
+# Security audits (dev/audit.py, tnsync's Security Audit block): what counts as app code, the dev rule, and where the
+# private half of each audit lives. Public on purpose: nothing here names an auditor. The release rules (they do) live in
+# the private audits repo's rules.toml.
+#
+# Each audit's public half is security/audits/<id>.toml (date, commit, full or partial, scope); its private half (auditor,
+# thoroughness, findings) is <private>/audits/<id>.toml. Either way, dev/audit.py record writes them.
+
+# The app code an audit covers, as globs from the project's root (** any folders). Tests, i18n and docs aren't in it.
+code = [
+    "plexcache/**/*.py",
+    "plexcache/web/*.js",
+    "plexcache/web/*.html",
+    "plexcache/web/*.css",
+    "Dockerfile",
+    "compose.yaml",
+    ".github/workflows/*.yml",
+    "dev/tnsync",
+]
+exclude = []
+
+# The private audits repo's checkout, from this project's folder (PLEXCACHE_AUDITS, when set, wins).
+private = "../TrueNAS-Plex-Caching-audits"
+
+# The dev rule (orange only): code changed since its last audit, by any auditor, is fine until the oldest of it is
+# grace_days old or it adds up to grace_share % of the app code. Batched that way, one partial audit covers a feature.
+[dev]
+grace_days = 7
+grace_share = 10

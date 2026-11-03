@@ -5022,6 +5022,7 @@ class TestRunnerTests(unittest.TestCase):
             with open(os.path.join(project, ".tnsync"), "w", encoding="utf-8") as fh:
                 fh.write(f"TN_APP=myapp\nTN_DEST={nas}\nTN_PATHS=app\nTN_TEST={checks[0]}\nTN_VALIDATE={checks[1]}\nTN_TYPES={checks[2]}\n"
                          "TN_UPKEEP=echo current; echo DEPENDENCIES  -  ALL UP TO DATE; echo; echo upkeep: $TNSYNC_UPKEEP\n"
+                         "TN_AUDIT=echo 3 lines no audit has seen; exit 1\n"   # (code to audit: a warning, straight away)
                          "TN_STYLE=echo '  new: css .a'; echo 2 looks need your approval: /the/page.html; exit 1\n")
         env = dict(os.environ, PATH=fake + os.pathsep + os.environ.get("PATH", ""), TNSYNC_CONFIG=os.path.join(folder, "config"),
                    XDG_STATE_HOME=os.path.join(folder, "state"), TMPDIR=folder)
@@ -5041,7 +5042,8 @@ class TestRunnerTests(unittest.TestCase):
         self.assertNotIn("\n  DEPENDENCIES  -  ALL UP TO DATE", out)   # (its box: none when all are current)
         for said in ("Current Tests: PASSED (12 tests passed)", "HTML/JS/CSS Validation: PASSED (checked)", "Python Validation: PASSED (0 errors)",
                      "Dependencies: UP TO DATE", "==> Dependencies: export TNSYNC_UPKEEP=move",
-                     "Style Approval: LOOKS WAITING (2 looks need your approval: /the/page.html)"):
+                     "Style Approval: LOOKS WAITING (2 looks need your approval: /the/page.html)",
+                     "Security Audit: CODE TO AUDIT (3 lines no audit has seen)"):
             self.assertIn(said, out)
         self.assertNotIn("\n  new: css .a\n", out)   # (the looks waiting: its block says how many and where, the rest not printed; nor a failure: rc 0)
         rc, out = tnsync("-y")
@@ -5049,6 +5051,7 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn("Sync to nas.example: ALREADY IN SYNC (Nothing copied · nas.example already has these files", out)   # (in its block, as each check is)
         self.assertRegex(out, r"Current Tests: ALREADY PASSED \(Passed just now \(\d{4}-\d\d-\d\d \d\d:\d\d\) · 12 tests passed\)")   # (when, and its result from then)
         self.assertRegex(out, r"Python Validation: ALREADY PASSED \(Passed just now \(\d{4}-\d\d-\d\d \d\d:\d\d\) · 0 errors\)")
+        self.assertIn("Security Audit: CODE TO AUDIT (3 lines no audit has seen)", out)   # (the audits, read again)
         self.assertNotIn("passed on this code", out)
         self.assertNotIn("ALREADY IN SYNC  -", out)   # (no box of its own: its block says it)
         if shutil.which("git"):   # a change outside what's copied (the tests, the dev tools) is a change to the code too: tested again
@@ -16004,6 +16007,220 @@ class ReleaseTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
+
+class AuditTests(unittest.TestCase):
+    """dev/audit.py, tnsync's Security Audit block: each audit's public half (what was audited, when) and private half
+    (who, how thoroughly, what it found); which lines each audit saw, from git blame; the dev rule's grace window; the
+    release rules; and record, which splits a filled-in template into its two halves."""
+
+    def test_who_a_rule_accepts(self):
+        from dev import audit
+        self.assertTrue(audit.accepts("opus>=5.5 thoroughness<=3", "opus-5.5", 3))
+        self.assertTrue(audit.accepts("opus>=5.5 thoroughness<=3", "opus-5.6", 1))
+        self.assertFalse(audit.accepts("opus>=5.5 thoroughness<=3", "opus-5.5", 4))     # (not thorough enough)
+        self.assertFalse(audit.accepts("opus>=5.5 thoroughness<=3", "opus-5.4", 1))     # (an older version)
+        self.assertFalse(audit.accepts("opus>=5.5", "fable-5.1", 1))                    # (families aren't ranked)
+        self.assertTrue(audit.accepts("fable", "fable-5.1", 5))
+        self.assertTrue(audit.accepts("human", "human:sam", 2))
+        self.assertTrue(audit.accepts("human:sam", "human:sam", 2))
+        self.assertFalse(audit.accepts("human:sam", "human:alex", 2))
+        self.assertTrue(audit.accepts("any", "haiku-5.5", 5))
+        self.assertFalse(audit.accepts("any effort>=high", "opus-5.5", 1))   # (a word it doesn't know never passes)
+
+    def test_what_a_record_needs(self):
+        from dev import audit
+        ok = {"id": "2026-11-10-1", "date": dt.date(2026, 11, 10), "commit": "abc", "kind": "full",
+              "auditor": "fable-5.1", "thoroughness": 4}
+        self.assertEqual(audit.problems(ok, "both"), [])
+        self.assertIn("id 'fable-5.1-full' isn't YYYY-MM-DD-N", audit.problems({**ok, "id": "fable-5.1-full"}, "public"))
+        self.assertIn("a partial audit needs its scope", audit.problems({**ok, "kind": "partial"}, "public"))
+        self.assertIn("thoroughness 0 isn't 1 to 5", audit.problems({**ok, "thoroughness": 0}, "private"))
+        bad = {**ok, "finding": [{"id": "F-2026-001", "title": "t", "lines": ["a.py:3"], "detail": "d",
+                                  "severity": "huge", "status": "open"}]}
+        got = audit.problems(bad, "private")
+        self.assertIn("F-2026-001: severity 'huge' isn't one of info, low, medium, high, critical", got)
+        self.assertIn("F-2026-001: main None isn't one of affected, not-affected, fixed", got)
+        self.assertEqual(audit.problems({**ok, "auditor": ""}, "public"), [])   # (the public half never needs who)
+
+    def project(self):
+        """A project in git: two files committed long ago, its dev/audit.toml, an empty private audits repo beside it;
+        dev/audit.py pointed at them."""
+        import subprocess
+
+        from dev import audit
+        base = tempfile.mkdtemp(dir=TMP)
+        repo, private = os.path.join(base, "app"), os.path.join(base, "audits")
+        os.makedirs(os.path.join(repo, "dev"))
+        os.makedirs(os.path.join(private, "audits"))
+        with open(os.path.join(repo, "dev", "audit.toml"), "w") as fh:
+            fh.write('code = ["*.py"]\nprivate = "../audits"\n[dev]\ngrace_days = 7\ngrace_share = 10\n')
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return user\n\n\ndef other():\n    return 2\n")
+        with open(os.path.join(repo, "b.py"), "w") as fh:
+            fh.write("".join(f"x{i} = {i}\n" for i in range(20)))
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+
+        def git(*a, when=None):
+            e = dict(env, GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when) if when else env
+            return subprocess.run(["git", "-C", repo, *a], check=True, capture_output=True, text=True, env=e).stdout.strip()
+        git("init", "-q")
+        git("add", "a.py", "b.py")
+        git("commit", "-qm", "first", when="2001-01-01T00:00:00Z")
+        for patch in (mock.patch.object(audit, "ROOT", repo), mock.patch.object(audit, "CONFIG", os.path.join(repo, "dev", "audit.toml")),
+                      mock.patch.object(audit, "PUBLIC", os.path.join(repo, "security", "audits")),
+                      mock.patch.object(audit, "_repo", return_value=(repo, "")),
+                      mock.patch.dict(os.environ, {"PLEXCACHE_AUDITS": private, "TNSYNC_RELEASE": ""})):
+            patch.start()
+            self.addCleanup(patch.stop)
+        return repo, private, git
+
+    def write(self, folder, name, text):
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, name), "w") as fh:
+            fh.write(text)
+
+    def audit_files(self, repo, private, aid, date, commit, kind, scope=None, auditor="fable-5.1", thoroughness=4, extra=""):
+        self.write(os.path.join(repo, "security", "audits"), f"{aid}.toml", f'id = "{aid}"\ndate = {date}\ncommit = "{commit}"\nkind = "{kind}"\n'
+                   + (f"scope = {json.dumps(scope)}\n" if scope else ""))
+        self.write(os.path.join(private, "audits"), f"{aid}.toml",
+                   f'id = "{aid}"\nauditor = "{auditor}"\nthoroughness = {thoroughness}\n' + extra)
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_a_line_is_seen_until_it_changes(self):
+        from dev import audit
+        repo, private, git = self.project()
+        first = git("rev-parse", "HEAD")
+        self.audit_files(repo, private, "2026-11-01-1", "2026-11-01", first, "full")
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return user.strip()\n\n\ndef other():\n    return 2\n")
+        git("commit", "-qam", "change")
+        audits, have_private, bad = audit.load()
+        self.assertEqual((have_private, bad, [a.auditor for a in audits]), (True, [], ["fable-5.1"]))
+        m = audit.measure(audits)
+        waiting = sorted((rel, n) for rel, n, ln in m.all() if not ln.seen)
+        self.assertEqual(waiting, [("a.py", 2)])   # (changed since the full audit: no longer seen)
+        self.assertEqual(len(list(m.all())), 24)   # (blank lines don't count)
+
+        # a partial of just that function, at the new commit, sees it again
+        self.audit_files(repo, private, "2026-11-02-1", "2026-11-02", git("rev-parse", "HEAD"), "partial", ["a.py:login"],
+                         auditor="haiku-5.5", thoroughness=5)
+        m = audit.measure(audit.load()[0])
+        self.assertEqual([(rel, n) for rel, n, ln in m.all() if not ln.seen], [])
+        self.assertEqual([a.id for a in m.lines["a.py"][2].seen], ["2026-11-02-1"])
+        self.assertEqual([a.id for a in m.lines["a.py"][5].seen], ["2026-11-01-1"])   # (other(): not in the partial's scope)
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_the_dev_rule_waits_out_its_grace_window(self):
+        from dev import audit
+        repo, private, git = self.project()
+        audits = audit.load()[0]
+        got = audit.coverage_check(audit.measure(audits), audits, time.time(), [])
+        self.assertIn("24 lines no audit has seen: the oldest has waited", (got.findings or [])[0].message)   # (since 2001; all of it)
+        self.assertEqual(got.said(), ["audited 0.0%", "full 0.0%", "no full audit yet"])
+        self.audit_files(repo, private, "2026-11-01-1", "2026-11-01", git("rev-parse", "HEAD"), "full")
+        with open(os.path.join(repo, "b.py"), "a") as fh:
+            fh.write("y = 1\n")   # (1 line of 25, uncommitted: 4%, just now)
+        audits = audit.load()[0]
+        got = audit.coverage_check(audit.measure(audits), audits, time.time(), [])
+        self.assertEqual((got.findings or []), [])   # (inside the window: fine)
+        self.assertEqual(got.said(), ["audited 96.0%", "full 96.0%", "last full 2026-11-01"])
+        git("commit", "-qam", "more", when="2001-06-01T00:00:00Z")
+        got = audit.coverage_check(audit.measure(audits), audits, time.time(), [])
+        self.assertIn("the oldest has waited", (got.findings or [])[0].message)   # (committed long ago, still unaudited: orange)
+        with open(os.path.join(repo, "a.py"), "a") as fh:
+            fh.write("z = 1\n")
+        git("commit", "-qam", "sensitive")
+        audits = audit.load()[0]
+        self.audit_files(repo, private, "2026-11-02-1", "2026-11-02", git("rev-parse", "HEAD~1"), "partial", ["b.py"])
+        got = audit.coverage_check(audit.measure(audit.load()[0]), audit.load()[0], time.time(), ["a.py"])
+        self.assertEqual([(f.path, f.message) for f in (got.findings or [])], [("a.py", "1 line of sensitive code no audit has seen")])
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_the_release_rules(self):
+        from dev import audit
+        repo, private, git = self.project()
+        rule = {"accept": ["opus>=5.5 thoroughness<=3", "fable>=5.1 thoroughness<=4"], "max_age_days": 180, "soak_days": 7,
+                "block_open": "high"}
+        head, now = git("rev-parse", "HEAD"), time.time()
+        today = dt.date.fromtimestamp(now).isoformat()
+        self.audit_files(repo, private, f"{today}-1", today, head, "full", auditor="haiku-5.5", thoroughness=1)
+        audits = audit.load()[0]
+        got = audit.release_check(audit.measure(audits), audits, True, rule, now, release=True)
+        msgs = [f.message for f in (got.findings or [])]
+        self.assertIn("no full audit the release rules accept in the last 180 days", msgs)   # (haiku isn't on the list)
+        self.assertIn("no release candidate tagged (vX.Y.Z-rc.N) on this code", msgs)
+        self.assertEqual({f.severity for f in (got.findings or [])}, {"error"})
+
+        finding = ('[[finding]]\nid = "F-2026-001"\ntitle = "Token compared with =="\nseverity = "high"\nlines = ["a.py:1-2"]\n'
+                   'detail = "d"\nstatus = "open"\nmain = "affected"\n')
+        self.audit_files(repo, private, f"{today}-2", today, head, "full", auditor="fable-5.1", thoroughness=4, extra=finding)
+        git("tag", "-a", "-m", "rc", "v1.0.0-rc.1")   # (annotated: it carries when it was made)
+        audits = audit.load()[0]
+        got = audit.release_check(audit.measure(audits), audits, True, rule, now + 8 * audit.DAY, release=True)
+        self.assertEqual([f.message for f in (got.findings or [])], ["F-2026-001 is open at high"])
+        self.assertEqual([f.message for f in (audit.findings_check(audits).findings or [])], ["F-2026-001 high: Token compared with =="])
+        got = audit.release_check(audit.measure(audits), audits, True, rule, now, release=False)
+        self.assertIn("v1.0.0-rc.1 has soaked 0.0 of 7 days", [f.message for f in (got.findings or [])])
+        self.assertEqual({f.severity for f in (got.findings or [])}, {"warning"})   # (on dev, once an RC is tagged: orange)
+
+    def test_what_who_audits_needs_is_configured_privately(self):
+        from dev import audit
+        public = audit.config_check(False, {}, release=True)   # (anyone's clone: a notice, never a failure)
+        self.assertEqual([f.severity for f in public.findings or []], ["information"])
+        self.assertIn("auditor and thoroughness requirements", (public.findings or [])[0].message)
+        self.assertFalse(public.bad())
+        self.assertEqual(public.said(), ["public records only"])
+        ours = audit.config_check(True, {"release": {"accept": ["opus>=5.5 thoroughness<=3"]}}, release=False)
+        self.assertEqual((ours.findings, ours.said()), ([], ["auditor requirements set"]))
+        unset = audit.config_check(True, {}, release=False)   # (the private repo, but no requirement in it: orange)
+        self.assertEqual([(f.severity, f.message) for f in unset.findings or []],
+                         [("warning", "the private rules.toml has no [release] accept: no auditor is required")])
+        self.assertTrue(unset.bad())
+        typo = audit.config_check(True, {"release": {"accept": ["opus>=5.5 effort>=high"]}}, release=True)
+        self.assertEqual([(f.severity, f.message) for f in typo.findings or []],
+                         [("error", "the private rules.toml's accept entry 'opus>=5.5 effort>=high' can't be read")])
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_the_public_half_alone(self):
+        from dev import audit
+        repo, private, git = self.project()
+        self.audit_files(repo, private, "2026-11-01-1", "2026-11-01", git("rev-parse", "HEAD"), "partial", ["b.py"])
+        with mock.patch.dict(os.environ, {"PLEXCACHE_AUDITS": os.path.join(repo, "nowhere")}):
+            audits, have_private, bad = audit.load()
+            self.assertEqual((have_private, bad, audits[0].auditor, audits[0].kind), (False, [], "", "partial"))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = audit.main([])
+        self.assertEqual(rc, 1)
+        self.assertIn("audited 83.3%", out.getvalue().lower())
+        self.assertIn("public records only", out.getvalue())
+        self.assertNotIn("fable", out.getvalue())   # (who did it stays private)
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_record_splits_a_template_into_its_halves(self):
+        import tomllib
+
+        from dev import audit
+        repo, private, git = self.project()
+        old = git("rev-parse", "HEAD")
+        self.audit_files(repo, private, "2026-10-01-1", "2026-10-01", old, "full", auditor="opus-5.5", thoroughness=3)
+        filled = os.path.join(repo, "filled.toml")
+        self.write(repo, "filled.toml", f'id = "2026-11-10-1"\ndate = 2026-11-10\ncommit = "{old}"\nkind = "partial"\n'
+                   'scope = ["a.py:login"]\nauditor = "fable-5.1"\nthoroughness = 4\nmain_commit = "m"\nprompt = "PROMPT.md@x"\n'
+                   '[[finding]]\nid = "F-2026-002"\ntitle = "Login trusts its input"\nseverity = "medium"\nlines = ["a.py:1-2"]\n'
+                   'detail = """\nTwo lines\nof detail.\n"""\nstatus = "open"\nmain = "affected"\n')
+        rc, said = audit.record(filled)
+        self.assertEqual(rc, 0, said)
+        with open(os.path.join(repo, "security", "audits", "2026-11-10-1.toml"), "rb") as fh:
+            pub = tomllib.load(fh)
+        self.assertEqual(sorted(pub), ["commit", "date", "id", "kind", "scope"])   # (nothing of who, nor what was found)
+        with open(os.path.join(private, "audits", "2026-11-10-1.toml"), "rb") as fh:
+            sec = tomllib.load(fh)
+        self.assertEqual((sec["auditor"], sec["thoroughness"]), ("fable-5.1", 4))
+        f = sec["finding"][0]
+        self.assertEqual((f["introduced_in"], f["missed_by"], f["detail"]), (old, ["2026-10-01-1"], "Two lines\nof detail.\n"))
+        self.assertEqual(audit.record(filled)[0], 1)   # (already recorded: --force to replace it)
+        self.assertEqual(audit.load()[2], [])
 
 class ToolsTests(unittest.TestCase):
     """The Tools pages' tools (tools/): Merge Duplicates, Duplicate Versions, Organize Folders — and
