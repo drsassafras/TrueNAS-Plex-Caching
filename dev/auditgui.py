@@ -34,7 +34,7 @@ import urllib.parse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from dev import audit, auditrun, devpage  # noqa: E402
+from dev import audit, auditfix, auditrun, devpage  # noqa: E402
 from dev.checks import Outcome  # noqa: E402
 from dev.progress import counted  # noqa: E402
 
@@ -50,6 +50,7 @@ class Data:
         self.private = private
         self.runner = auditrun.Runner(private)
         self.lock = threading.Lock()
+        self.confirming: dict = {}   # (Confirm now's run: the fixes, how far it's got, what came of each)
 
     def root(self) -> str:
         return audit.private_root() if self.private is None else self.private
@@ -167,6 +168,11 @@ class Data:
     # ------------------------------------------------------------ findings
     def findings(self) -> list[dict]:
         out, cache, known = [], {}, audit.test_names()
+        led: dict[str, list[str]] = {}   # (the new cases each fix's test found)
+        for a in audit.load(self.private)[0]:
+            for f in a.findings:
+                if f.get("via"):
+                    led.setdefault(str(f["via"]), []).append(str(f.get("id")))
         for a in audit.load(self.private)[0]:
             for f in a.findings:
                 try:
@@ -177,20 +183,11 @@ class Data:
                             "date": a.date.isoformat(), "auditor": a.auditor, "thoroughness": a.thoroughness, "author": a.author,
                             "score": score, "code": audit.code_state(f, a, cache), "now": audit.locate(f, a, cache),
                             "fix": audit.fix_where(f, a)[0] if f.get("status") == "fixed" else "",
-                            "lost": [t for t in f.get("tests", []) if t not in known], "by_audit": audit.by_audit(f)})
+                            "lost": [t for t in f.get("tests", []) if t not in known], "by_audit": audit.by_audit(f),
+                            "waiting": auditfix.waiting(f), "led_to": led.get(str(f.get("id")), []),
+                            "outside": f.get("status") == "fixed" and bool(f.get("reported")) and not f.get("closed_by")})
         return sorted(out, key=lambda f: (f.get("status") != "open", -audit.SEVERITIES.index(f.get("severity", "info"))
                                           if f.get("severity") in audit.SEVERITIES else 0, f.get("id", "")))
-
-    def _items(self, ids: list[str]) -> list[tuple[audit.Audit, dict]]:
-        return [(a, f) for a in audit.load(self.private)[0] for f in a.findings if f.get("id") in ids]
-
-    def brief(self, q: dict) -> dict:
-        """Findings written up for fixing (Copy issue, Copy open issues): those asked for, or every open one."""
-        ids = [x for x in str(q.get("ids", "")).split(",") if x]
-        items = self._items(ids) if ids else [(a, f) for a in audit.load(self.private)[0] for f in a.findings if f.get("status") == "open"]
-        if not items:
-            raise ValueError("no such findings")
-        return {"text": audit.brief(items), "count": len(items)}
 
     def confirm(self, q: dict) -> dict:
         """A person's word that a finding is fixed (Mark as fixed): where the fix is, and its commit, worked out from git."""
@@ -200,72 +197,45 @@ class Data:
         if a is None or f is None:
             raise ValueError(f"no finding {fid} in audit {aid}")
         at, sha = audit.fix_where(f, a)
-        got = {"audit": aid, "id": fid, "status": "fixed", "fixed_in": sha, "_check": f"marked fixed by hand ({at})"}
+        got = {"audit": aid, "id": fid, "status": "fixed", "fixed_in": sha, "closed_by": "hand", "_check": f"marked fixed by hand ({at})"}
         self.finding(got)
         return {"where": at, "commit": sha}
 
-    def report(self, q: dict) -> dict:
-        """A fix report pasted in (Copy issue asks whoever fixes it for one): each finding's tests that guard it, and what
-        was said, kept with it. Its status is left as it is: the fixer's word isn't the audit's (Mark as fixed, or have
-        it re-checked)."""
-        fixes, new = audit.answers(str(q.get("text", "")), "fix"), audit.answers(str(q.get("text", "")), "new")
-        if not fixes and not new:
-            raise ValueError("no [[fix]] or [[new]] blocks in it: paste the report's TOML")
-        known, ids = audit.test_names(), {f.get("id"): a.id for a in audit.load(self.private)[0] for f in a.findings}
-        done, unknown, missing = [], [], []
-        for x in fixes:
-            fid = str(x.get("id", "")).strip()
-            if fid not in ids:
-                unknown.append(fid or "(no id)")
-                continue
-            status = str(x.get("status", "")).strip().lower()
-            status = status if status in audit.REPORTS else "attempted"
-            guard, lost = audit.guards(x.get("tests", []), known)
-            missing += [f"{fid}: {t}" for t in lost]
-            a = next(a for a in audit.load(self.private)[0] if a.id == ids[fid])
-            f = next(f for f in a.findings if f.get("id") == fid)
-            detail = str(x.get("detail", "")).strip()
-            said = f"fix reported ({status})" + (f", guarded by {', '.join(guard)}" if guard else ", no test named") + (f": {detail[:500]}" if detail else "")
-            self.finding({"audit": a.id, "id": fid, "tests": sorted({*f.get("tests", []), *guard}), "reported": status, "_check": said})
-            done.append(fid)
-        added = self._found_by_tests(new, ids, known, unknown, missing)
-        return {"done": done, "added": added, "unknown": unknown, "missing": missing}
+    def fix_how(self, q: dict) -> dict:
+        """What to tell whoever fixes them: one line, the command that has the rest."""
+        return {"text": "Fix the security findings: run `python3 dev/audit.py fixes` and do as it says."}
 
-    def _found_by_tests(self, new: list[dict], ids: dict, known: set[str], unknown: list[str], missing: list[str]) -> list[str]:
-        """A fix report's new findings (``[[new]]``: another case a fix's test found), each kept in the record of the
-        finding whose fix it was, as found by that test: never by that record's audit, nor counted for its auditor."""
-        if not new:
-            return []
-        day = datetime.date.today()
-        _, first = audit.next_ids(day, self.root())
-        added = []
-        for x in new:
-            via = str(x.get("via", "")).strip()
-            if via not in ids:
-                unknown.append(f"{via or '(no via)'} (a new finding's via)")
-                continue
-            f = auditrun.tidy([x], day.year, first + len(added), [])[0]
-            guard, lost = audit.guards(x.get("tests", []), known)
-            missing += [f"{f['id']}: {t}" for t in lost]
-            f.update(source="fix-test", via=via, found=day.isoformat(), main_by="fix report",
-                     prints=audit.spot_prints(f["lines"], audit.ROOT),
-                     checks=[f"{day.isoformat()}: found by a test written for {via}'s fix" + (f" ({', '.join(guard)})" if guard else "")])
-            if guard:
-                f["tests"] = guard
-            audit.scored(f)
-            path = os.path.join(self.root(), "audits", f"{ids[via]}.toml")
-            with self.lock:
-                with open(path, "rb") as fh:
-                    rec = tomllib.load(fh)
-                rec.setdefault("finding", []).append(f)
-                wrong = audit.problems(rec, "private")
-                if wrong:
-                    raise ValueError("; ".join(wrong))
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write(audit.dump(rec, audit.PRIVATE_KEYS, "finding"))
-            ids[f["id"]] = ids[via]
-            added.append(f["id"])
-        return added
+    def stamp(self, q: dict) -> dict:
+        """When the private records last changed (the Findings tab reloads when it does: a fixer's report shows at once)."""
+        folder = os.path.join(self.root(), "audits")
+        try:
+            got = max((os.stat(os.path.join(folder, n)).st_mtime_ns for n in os.listdir(folder) if n.endswith(".toml")), default=0)
+        except OSError:
+            got = 0
+        return {"stamp": str(got), "confirming": self.confirming}
+
+    def confirm_fixes(self, q: dict) -> dict:
+        """Confirm now: each fix reported and waiting, its tests run (in the background: the page shows how it goes);
+        passed, it's closed; failed, it's open again, saying why."""
+        with self.lock:
+            if self.confirming.get("running"):
+                raise ValueError("already confirming")
+            ids = [f["id"] for a in audit.load(self.private)[0] for f in a.findings if auditfix.waiting(f)]
+            if not ids:
+                raise ValueError("no fixes are waiting to be confirmed")
+            self.confirming = {"running": True, "ids": ids, "done": [], "started": time.time()}
+
+        def work():
+            try:
+                for fid in ids:
+                    self.confirming["now"] = fid
+                    self.confirming["done"] += auditfix.confirm(self.root(), [fid])
+            except (OSError, ValueError, subprocess.SubprocessError) as e:
+                self.confirming["error"] = str(e)
+            finally:
+                self.confirming.update(running=False, now="", ended=time.time())
+        threading.Thread(target=work, daemon=True).start()
+        return {"ids": ids}
 
     def refresh(self, q: dict) -> dict:
         """Re-check: a fixed finding whose fix has been committed since gets that commit."""
@@ -287,42 +257,39 @@ class Data:
     def finding(self, q: dict) -> dict:
         """A finding's status, answer for main, the fix's commit and a note, changed in its audit's private half."""
         aid, fid = os.path.basename(str(q.get("audit", ""))), str(q.get("id", ""))
-        path = os.path.join(self.root(), "audits", f"{aid}.toml")
-        with self.lock:
-            with open(path, "rb") as fh:
-                rec = tomllib.load(fh)
+        def change(rec):
             f = next((x for x in rec.get("finding", []) if x.get("id") == fid), None)
             if f is None:
                 raise ValueError(f"no finding {fid} in audit {aid}")
             if "main" in q and str(q["main"]).strip() != f.get("main"):
                 f["main_by"] = "hand"   # (changed here: no longer the audit's answer)
-            for key in ("status", "main", "fixed_in", "main_fix", "note", "cvss", "type", "cve"):
+            for key in ("status", "main", "fixed_in", "main_fix", "note", "cvss", "type", "cve", "closed_by"):
                 if key in q:
                     f[key] = str(q[key]).strip()
+            if f.get("status") == "open":   # (open again: no longer closed, nor reported fixed)
+                f.pop("closed_by", None)
+                if q.get("status") == "open":
+                    f.pop("reported", None)
+            elif "status" in q and "closed_by" not in q:
+                f["closed_by"] = "hand"
             if "tests" in q:   # (the tests that guard it: Class.test_name, a list or written with commas)
                 got = q["tests"] if isinstance(q["tests"], list) else str(q["tests"]).replace(",", " ").split()
                 f["tests"] = [str(t).strip() for t in got if str(t).strip()]
                 if not f["tests"]:
                     f.pop("tests")
-            if "reported" in q:
-                f["reported"] = str(q["reported"]).strip()
             if f.get("type") == "hardening":
                 f.pop("cvss", None)
                 if "priority" in q:
                     f["severity"] = str(q["priority"]).strip()
-            for key in ("cvss", "cve"):
+            for key in ("cvss", "cve", "closed_by"):
                 if key in f and not f[key]:
                     f.pop(key)
             if f.get("cve"):
                 f["cve"] = str(f["cve"]).upper()
             if q.get("_check"):
-                f["checks"] = [*list(f.get("checks") or []), f"{datetime.date.today().isoformat()}: {q['_check']}"]
+                auditfix.note(f, str(q["_check"]))
             audit.scored(f)
-            wrong = audit.problems(rec, "private")
-            if wrong:
-                raise ValueError("; ".join(wrong))
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(audit.dump(rec, audit.PRIVATE_KEYS, "finding"))
+        auditfix.edit(self.root(), aid, change)
         return {"ok": True}
 
     # ------------------------------------------------------------ the explorer
@@ -429,11 +396,11 @@ def serve(data: Data, open_browser: bool = True, port: int = 0, ready=None) -> i
     routes_get = {"/api/overview": lambda q: data.overview(), "/api/options": lambda q: data.options(),
                   "/api/runs": lambda q: data.runs(), "/api/run": lambda q: data.run(str(q.get("id", "")), int(q.get("at", 0) or 0)),
                   "/api/findings": lambda q: data.findings(), "/api/explorer": data.explorer, "/api/file": data.file,
-                  "/api/rules": lambda q: data.rules()}
+                  "/api/rules": lambda q: data.rules(), "/api/stamp": data.stamp, "/api/fix-how": data.fix_how}
     routes_post = {"/api/plan": data.plan, "/api/start": data.start, "/api/mark": data.mark, "/api/draft": data.draft,
                    "/api/finish": data.finish, "/api/cancel": lambda q: {"ok": data.runner.cancel(str(q.get("id", "")))},
                    "/api/finding": data.finding, "/api/cvss": data.cvss, "/api/confirm": data.confirm,
-                   "/api/brief": data.brief, "/api/refresh": data.refresh, "/api/report": data.report, "/api/rules": data.save_rules}
+                   "/api/refresh": data.refresh, "/api/confirm-fixes": data.confirm_fixes, "/api/rules": data.save_rules}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, format, *args):   # noqa: A002  (quiet)

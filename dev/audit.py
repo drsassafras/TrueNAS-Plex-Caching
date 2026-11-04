@@ -9,6 +9,7 @@ audited, and the release rules.
     python3 dev/audit.py record FILE     # a filled-in templates/audit.toml, checked, split and saved
     python3 dev/audit.py record FILE --author   # …an author's own review while building: counts on dev, never at release
     python3 dev/audit.py gui             # all of it on a page in your browser: a person's audit, start to end (dev/auditgui.py)
+    python3 dev/audit.py fixes           # the open findings, and how to fix and report them (fixed, found: dev/auditfix.py)
     python3 dev/audit.py run …           # an audit by an AI auditor installed here, when there is one (dev/auditrun.py)
 
 Each audit has two halves with the same id (``YYYY-MM-DD-N``, never naming an auditor):
@@ -586,6 +587,9 @@ def findings_check(audits: list[Audit]) -> Outcome:
                 said = " (some of its code has changed)" if code == "changed" else ""
                 found.append(Finding("Audit", rel, n, 0, "warning", f"{f.get('id')} {_rated(f)}: {f.get('title')}{said}", "finding"))
     facts = [counted(len(found), "open finding") if found else "no open findings"]
+    confirm = sum(1 for a in audits for f in a.findings if f.get("status") == "open" and f.get("reported") == "fixed")
+    if confirm:
+        facts.append(f"{confirm} fixed, to confirm")   # (a fixer's word: Confirm on the audits page closes them)
     if gone:
         facts.append(f"{gone} to confirm fixed (their code is gone)")
         found.append(Finding("Audit", "findings", 0, 0, "warning", f"{counted(gone, 'finding')} whose code is gone: confirm they're fixed, "
@@ -1090,9 +1094,16 @@ def open_scope(audits: list[Audit]) -> list[str]:
 
 
 def test_names(base: str | None = None) -> set[str]:
-    """The project's tests, as a finding names them: Class.test_name (and a bare test_name, for one not in a class)."""
-    out: set[str] = set()
-    for path in sorted(glob.glob(os.path.join(base or ROOT, "tests", "**", "test*.py"), recursive=True)):
+    """The project's tests, as a finding names them: Class.test_name."""
+    return set(test_ids(base))
+
+
+def test_ids(base: str | None = None) -> dict[str, str]:
+    """The project's tests (Class.test_name), each with the name unittest runs it by (tests.test_x.Class.test_name)."""
+    out: dict[str, str] = {}
+    top = base or ROOT
+    for path in sorted(glob.glob(os.path.join(top, "tests", "**", "test*.py"), recursive=True)):
+        mod = os.path.relpath(path, top)[:-3].replace(os.sep, ".")
         try:
             with open(path, encoding="utf-8") as fh:
                 tree = ast.parse(fh.read())
@@ -1100,8 +1111,9 @@ def test_names(base: str | None = None) -> set[str]:
             continue
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
-                out |= {f"{node.name}.{m.name}" for m in node.body
-                        if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test")}
+                for m in node.body:
+                    if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test"):
+                        out.setdefault(f"{node.name}.{m.name}", f"{mod}.{node.name}.{m.name}")
     return out
 
 
@@ -1134,47 +1146,10 @@ def found_by(f: dict, a: Audit) -> str:
     return f"audit {a.id}, at commit {a.commit[:12]}" + (" (with uncommitted changes)" if a.uncommitted else "")
 
 
-REPORT = """When you're done, end your answer with a report of each finding, in TOML:
-
-```toml
-[[fix]]
-id = "F-YYYY-NNN"
-status = "fixed | attempted | not-real"
-tests = ["TestClass.test_name"]   # the tests that would fail if it came back, added or changed for it
-detail = \"\"\"
-What you changed, and why it fixes it (or why it isn't real).
-\"\"\"
-```
-
-If a test you wrote finds the same kind of problem somewhere else, don't fix it: add it to the report as a new finding,
-
-```toml
-[[new]]
-via = "F-YYYY-NNN"   # the finding whose fix's test found it
-title = "What's wrong, in a line"
-type = "vulnerability | hardening"
-cvss = "CVSS:3.1/..."   # a vulnerability's; a hardening finding has a severity of low, medium or high instead
-lines = ["path:start-end"]
-tests = ["TestClass.test_name"]   # the test that found it
-detail = \"\"\"
-What is wrong, and how it could be used; and what to put back in the test once it's fixed.
-\"\"\"
-```
-
-The report is pasted into the project's security records, where each finding keeps the tests that guard it."""
-
-
 def brief(items: list[tuple[Audit, dict]]) -> str:
-    """Findings, written up for whoever fixes them (a person, or an AI assistant): what's wrong, where it is now, how
-    bad, and what to do."""
-    out = ["# Security findings to fix", "",
-           "Fix each finding below in this repository. Keep each fix to what the finding needs, and don't change unrelated "
-           "code. Keep the tests passing. Add a test that would have caught it. Where it fits, make the test catch the same "
-           "kind of problem anywhere in the code, not just here. If that test finds another case, don't fix it. List it in "
-           "the report as a new finding. (So the tests still pass, leave that case out of the test for now, without saying "
-           "why in the code, and say in the new finding what to put back once it's fixed.) If a finding turns out not to be "
-           "real, say why instead of changing the code.", "",
-           REPORT, ""]
+    """Findings, written up for whoever fixes or re-checks them: what's wrong, where it is now, how bad (how to fix
+    and report them: dev/auditfix.py's HOW)."""
+    out = ["# Security findings", ""]
     cache: dict = {}
     for a, f in items:
         if f.get("type") == "hardening":
@@ -1308,6 +1283,9 @@ def main(argv: list[str] | None = None) -> int:
         for line in said:
             print(f"  {line}")
         return rc
+    if args[:1] in (["fixes"], ["fixed"], ["found"]):
+        from dev import auditfix  # (fixing the findings: dev/auditfix.py)
+        return auditfix.main(args)
     if args[:1] in (["run"], ["gui"]):
         from dev import auditgui, auditrun  # (the runner, and the page: only for these)
         return auditrun.main(args[1:]) if args[0] == "run" else auditgui.main(args[1:])

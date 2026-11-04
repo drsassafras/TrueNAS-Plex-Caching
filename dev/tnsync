@@ -238,8 +238,8 @@ TN_TEST=
 TN_VALIDATE=
 TN_TYPES=
 TN_BUILD=
-# What of the code the tests reach, once they've passed (the coverage TN_TEST saved): exit 0 enough, 1 a test to add
-# (orange; red only with --release). e.g. TN_COVERAGE=python3 dev/coverage.py --tnsync
+# What of the code the tests reach, once they've passed (the coverage TN_TEST saved): exit 0 enough, 1 a test to add,
+# 3 nothing measured (TN_TEST without --coverage) (orange; red only with --release). e.g. TN_COVERAGE=python3 dev/coverage.py --tnsync
 TN_COVERAGE=
 # The security audits: which code no audit has seen past its grace window (orange; with --release, the release rules: red).
 # e.g. TN_AUDIT=python3 dev/audit.py
@@ -729,7 +729,7 @@ passed_section() {
 # others (red when it isn't met). coverage_section <the sections it waits for, as JSON>
 coverage_section() {
     [ -n "$TN_COVERAGE" ] || return 0
-    local warn=", \"warn\": {\"rc\": 1, \"note\": \"tests to add\"}"
+    local warn=", \"warn\": {\"rc\": 1, \"note\": \"tests to add\", \"more\": {\"3\": \"not measured\"}}"   # (3: nothing saved, TN_TEST without --coverage)
     if [ "$RELEASE" = 1 ]; then warn=""; CHECK_IDS+=("coverage"); fi
     plan_add "{\"id\": \"coverage\", \"title\": \"Coverage\", \"cmd\": $(json_str "$TN_COVERAGE"), \"cwd\": $(json_str "$SRC"), \"stoppable\": true, \"after\": $1, \"env\": {$CHECK_ENV}$warn}"
 }

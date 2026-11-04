@@ -109,18 +109,13 @@ const SEV = {critical: "bad", high: "bad", medium: "warn", low: "", info: ""};
 const unpushed = f => f.status === "fixed" && (f.fix === "working copy" || f.fix === "committed" || (!f.fixed_in && f.fix !== "pushed"));
 const FIX = {"working copy": "The fix is only in your working copy: commit and push it.", committed: "The fix is committed, not pushed yet.",
   pushed: "The fix is pushed.", "not fixed": "Its code is as it was: the fix is somewhere else, or it isn't fixed yet."};
-async function copyBrief(ids, btn) {
+async function copyText(text, btn) {
   const was = btn.textContent;
-  try {
-    const got = await api("/api/brief", {ids});
-    try { await navigator.clipboard.writeText(got.text); btn.textContent = "Copied " + plural(got.count, "finding"); }
-    catch (e) {   // (no clipboard here: the text to copy by hand)
-      const t = h("textarea", {rows: 12, class: "mono"}, got.text);
-      btn.after(t); t.select(); btn.textContent = "Select and copy";
-    }
-  } catch (e) { btn.textContent = e.message; }
+  try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; }
+  catch (e) { const t = h("input", {type: "text", value: text, class: "mono", size: 60}); btn.after(t); t.select(); btn.textContent = "Select and copy"; }
   setTimeout(() => { btn.textContent = was; }, 2500);
 }
+let flash = "", stamp = "", keepY = null;   // (what the last button did, said at the top once; the records as last shown)
 const CODE = {there: ["", "code still there"], changed: ["warn", "code changed"], gone: ["", "code gone"], unknown: ["", "code: can't tell"]};
 const plural = (n, one, many) => n + " " + (n === 1 ? one : (many || one + "s"));
 
@@ -393,8 +388,13 @@ async function runDetail(r, box) {
 // ---------------------------------------------------------------- Findings
 async function findings(view) {
   const all = await api("/api/findings");
-  const again = h("button", {class: "quiet", onclick: async () => { await api("/api/refresh", {}).catch(() => {}); checkedAt = Date.now(); show("findings"); }}, "Re-check the code");
-  const copyAll = h("button", {class: "go", onclick: e => copyBrief("", e.target)}, "Copy open issues");
+  const again = h("button", {class: "quiet", onclick: async () => {
+    const got = await api("/api/refresh", {}).catch(() => ({filled: 0}));
+    checkedAt = Date.now(); flash = "Checked each finding's code against your working copy" + (got.filled ? "; " + plural(got.filled, "fix's commit") + " filled in." : ".");
+    show("findings"); }}, "Re-check the code");
+  const how = await api("/api/fix-how").catch(() => ({text: ""}));
+  const st0 = await api("/api/stamp").catch(() => ({stamp: "", confirming: {}}));
+  stamp = st0.stamp;
   if (!all.length) { put(view, h("p", {class: "empty"}, "No findings yet.")); return; }
   const status = ["open", "fixed", "accepted", "false-positive"], main = ["affected", "not-affected", "fixed"];
   const rows = all.map(f => {
@@ -406,7 +406,12 @@ async function findings(view) {
     const tests = h("input", {type: "text", size: 40, value: (f.tests || []).join(", "), placeholder: "TestClass.test_name, …", "aria-label": "Tests that guard it"});
     const said = h("span", {class: "note"});
     const quick = (label, body, cls) => h("button", {class: cls || "quiet", onclick: async () => {
-      try { const got = await api(body.confirm ? "/api/confirm" : "/api/finding", {audit: f.audit, id: f.id, ...body, note: note.value}); show("findings"); return got; }
+      try {
+        const got = await api(body.confirm ? "/api/confirm" : "/api/finding", {audit: f.audit, id: f.id, ...body, note: note.value});
+        flash = f.id + ": " + (body.confirm ? "marked fixed by you; the fix is " + got.where + (got.commit ? " (" + got.commit.slice(0, 10) + ")" : "") + "."
+          : body.status === "open" ? "open again." : "marked " + body.status + ".");
+        show("findings"); return got;
+      }
       catch (e) { said.textContent = e.message; }
     }}, label);
     let pick = null;
@@ -423,7 +428,7 @@ async function findings(view) {
       try {
         await api("/api/finding", {audit: f.audit, id: f.id, status: st.value, main: mn.value, fixed_in: fix.value, note: note.value, cve: cve.value.trim(), type: kind.value, tests: tests.value,
           ...(kind.value === "hardening" ? {priority: prio.value} : pick ? {cvss: pick.value()} : {})});
-        show("findings");
+        flash = f.id + ": saved."; show("findings");
       } catch (e) { said.textContent = e.message; }
     }}, "Save");
     return h("div", {class: "card"},
@@ -431,7 +436,8 @@ async function findings(view) {
         : h("span", {class: "badge " + (SEV[f.severity] || "")}, f.severity + (f.score != null ? " " + f.score.toFixed(1) : "")),
         h("span", {}, f.title), f.cve ? h("code", {class: "badge"}, f.cve) : null, f.status === "open" ? h("span", {class: "badge " + (CODE[f.code] || ["", ""])[0]}, (CODE[f.code] || ["", f.code])[1]) : null,
         unpushed(f) ? h("span", {class: "badge warn"}, f.fix === "committed" ? "fixed, committed, not pushed" : "fixed, not pushed yet") : null,
-        f.status === "open" && f.reported ? h("span", {class: "badge"}, "fix reported: " + f.reported) : null,
+        f.waiting ? h("span", {class: "badge warn"}, "fixed, to confirm") : f.status === "open" && f.reported ? h("span", {class: "badge"}, "fix reported: " + f.reported) : null,
+        f.outside ? h("span", {class: "badge bad", title: "Closed in the records, but not by Confirm, Mark as fixed or a re-check here"}, "closed outside the page") : null,
         f.by_audit === false ? h("span", {class: "badge", title: "Found by a test written for " + f.via + "'s fix, not by an audit: it counts for no auditor"}, "found by a fix's test") : null),
       h("div", {class: "note"}, (f.now && f.now.length && [...f.now].sort().join() !== [...(f.lines || [])].sort().join() ? "now at " + f.now.join(", ") + " · found at " : "") + (f.lines || []).join(", ") + (f.by_audit === false ? " · found by a test written for " + f.via + "'s fix" + (f.found ? ", " + f.found : "") + ", not by an audit (kept in audit " + f.audit + "'s record)"
         : " · audit " + f.audit + " (" + String(f.auditor || "").replace(/^human:/, "") + " at " + f.thoroughness + (f.author ? ", the author's own" : "") + ")")),
@@ -439,12 +445,13 @@ async function findings(view) {
       f.status === "open" && f.code === "changed" ? h("p", {class: "note"}, "Some of its lines have changed since it was found.") : null,
       f.status === "fixed" && FIX[f.fix] ? h("p", {class: "note"}, unpushed(f) && f.fix === "not fixed" ? "Fixed, but not pushed yet: commit and push the fix. (Its lines look as they did, so the fix is elsewhere in the code.)" : FIX[f.fix]) : null,
       (f.checks || []).length ? h("p", {class: "note"}, "Last check: " + f.checks[f.checks.length - 1].split("\n")[0].slice(0, 240)) : null,
+      (f.led_to || []).length ? h("p", {class: "note"}, "Its fix's test found " + plural(f.led_to.length, "more case") + ": " + f.led_to.join(", ") + ".") : null,
       h("p", {class: "note"}, (f.tests || []).length ? ["Tests that guard it: ", ...f.tests.flatMap((t, i) => [i ? ", " : "", h("code", {class: (f.lost || []).includes(t) ? "bad" : ""}, t)]),
         (f.lost || []).length ? " (" + f.lost.join(", ") + (f.lost.length > 1 ? " are" : " is") + " gone from tests/)" : ""] : "No test guards it yet."),
       scoreBox,
       h("details", {}, h("summary", {}, "Detail"), h("pre", {class: "mono log"}, f.detail || "")),
       (f.checks || []).length ? h("details", {}, h("summary", {}, "Checks (" + f.checks.length + ")"), h("ul", {class: "plain note"}, f.checks.map(c => h("li", {}, c)))) : null,
-      h("div", {class: "row"}, h("button", {class: "quiet", onclick: e => copyBrief(f.id, e.target)}, "Copy issue"),
+      h("div", {class: "row"},
         f.status === "open" ? quick("Mark as fixed", {confirm: true}) : null,
         f.status === "open" ? quick("False positive", {status: "false-positive"}) : null,
         f.status !== "open" ? quick("Reopen", {status: "open"}) : null),
@@ -453,10 +460,10 @@ async function findings(view) {
   });
   const open = all.filter(f => f.status === "open"), gone = open.filter(f => f.code === "gone").length;
   const fp = all.filter(f => f.status === "false-positive").length;
-  const waiting = all.filter(unpushed).length;
-  const part = f => f.status !== "open" ? (unpushed(f) ? 2 : 3) : f.code === "gone" ? 1 : 0;
+  const waiting = all.filter(unpushed).length, toConfirm = all.filter(f => f.waiting);
+  const part = f => f.status !== "open" ? (unpushed(f) ? 3 : 4) : f.waiting ? 2 : f.code === "gone" ? 1 : 0;
   const order = all.map((f, i) => [part(f), i]).sort((x, y) => x[0] - y[0] || x[1] - y[1]).map(([, i]) => i);
-  const heads = ["Open", "Code gone: confirm they're fixed", "Fixed, not pushed yet: commit and push the fixes", "Closed"];
+  const heads = ["Open", "Code gone: confirm they're fixed", "Fixed, to confirm", "Fixed, not pushed yet: commit and push the fixes", "Closed"];
   const sorted = [];
   let last = -1;
   for (const i of order) {
@@ -464,33 +471,39 @@ async function findings(view) {
     if (p !== last) { sorted.push(h("h2", {}, heads[p])); last = p; }
     sorted.push(rows[i]);
   }
-  put(view, h("div", {class: "row"}, h("p", {class: "lead", style: "margin:0"}, plural(open.length - gone, "open finding") + " of " + all.length +
-    (gone ? ", " + gone + " to confirm fixed" : "") + (waiting ? ", " + waiting + " fixed but not pushed yet" : "") + (fp ? ", " + fp + " false positive" + (fp === 1 ? "" : "s") : "") +
+  const c = st0.confirming || {};
+  const confirmBar = c.running ? h("div", {class: "card"}, h("b", {}, "Confirming the fixes: "), "running " + (c.now || "") + "'s tests (" + (c.done || []).length + " of " + (c.ids || []).length + " done).")
+    : toConfirm.length ? h("div", {class: "card"}, h("div", {class: "row"}, h("b", {}, plural(toConfirm.length, "fix", "fixes") + " to confirm"),
+        h("button", {class: "go", onclick: async e => {
+          try { const got = await api("/api/confirm-fixes", {}); flash = "Confirming " + plural(got.ids.length, "fix", "fixes") + ": each one's tests run, and the ones that pass are closed."; show("findings"); }
+          catch (err) { e.target.textContent = err.message; }
+        }}, "Confirm now")),
+        h("p", {class: "note"}, "Reported fixed by whoever fixed them: " + toConfirm.map(f => f.id).join(", ") + ". Confirm now runs each one's guarding tests here and closes the ones that pass (where each fix is, and its commit, from git); one that fails is open again, saying why. To have an auditor check the fixes too, Re-check the open findings below."))
+    : null;
+  const lastRun = !c.running && (c.done || []).length ? h("div", {class: "card"}, h("b", {}, "The last Confirm"), c.error ? h("p", {class: "note"}, c.error) : null,
+    h("ul", {class: "plain note"}, c.done.map(d => h("li", {}, d.id + ": " + (d.ok ? "closed, its tests passed (the fix is " + d.where + ")" : "open again: " + (d.said || "").split("\n").slice(-2).join(" ")))))) : null;
+  put(view, h("div", {class: "row"}, h("p", {class: "lead", style: "margin:0"}, plural(open.length - gone - toConfirm.length, "open finding") + " of " + all.length +
+    (toConfirm.length ? ", " + toConfirm.length + " fixed, to confirm" : "") + (gone ? ", " + gone + " to confirm fixed" : "") + (waiting ? ", " + waiting + " fixed but not pushed yet" : "") + (fp ? ", " + fp + " false positive" + (fp === 1 ? "" : "s") : "") +
     ". Each one's code is checked against your working copy, uncommitted changes too" +
-    (checkedAt ? " (checked " + new Date(checkedAt).toLocaleTimeString([], {timeStyle: "short"}) + ")." : ".")), again, open.length ? copyAll : null),
-    reportBox(),
-    h("p", {class: "note"}, "Mark as fixed is your word for it: where the fix is, and its commit, come from git. To have the fixes checked, ",
+    (checkedAt ? " (checked " + new Date(checkedAt).toLocaleTimeString([], {timeStyle: "short"}) + ")." : ".")), again),
+    flash ? h("p", {class: "note", role: "status"}, flash) : null,
+    confirmBar, lastRun,
+    open.length && how.text ? h("div", {class: "row"}, h("span", {class: "note"}, "To fix them, tell your AI assistant: "), h("code", {}, how.text),
+      h("button", {class: "quiet", onclick: e => copyText(how.text, e.target)}, "Copy")) : null,
+    h("p", {class: "note"}, "As it fixes each one, it reports it, and the finding moves to Fixed, to confirm here, with the tests that guard it and any more cases they found. It can't close one: Confirm now does, once its tests pass. Mark as fixed is your own word for it. To have an auditor check the fixes, ",
       h("button", {class: "quiet", onclick: () => { pending = "open"; show("start"); }}, "Re-check the open findings"),
-      " with an auditor: it reads your working copy, the branch as pushed and main, and closes each one it finds fixed. One fixed only in your working copy is closed too, and listed as fixed, not pushed yet, until you push it."),
+      ": it reads your working copy, the branch as pushed and main, and closes each one it finds fixed (one fixed only in your working copy is listed as fixed, not pushed yet, until you push it)."),
     sorted);
-}
-
-function reportBox() {   // (Copy issue asks whoever fixes it for a report: pasted here, each finding keeps its tests)
-  const text = h("textarea", {rows: 8, class: "mono", placeholder: "[[fix]]\nid = \"F-YYYY-NNN\"\nstatus = \"fixed\"\ntests = [\"TestClass.test_name\"]\ndetail = \"…\""});
-  const said = h("p", {class: "note"});
-  const go = h("button", {class: "quiet", onclick: async () => {
-    try {
-      const got = await api("/api/report", {text: text.value});
-      said.textContent = "Kept with " + plural(got.done.length, "finding") + (got.done.length ? " (" + got.done.join(", ") + ")" : "") +
-        (got.added.length ? ". New, found by a fix's test: " + got.added.join(", ") : "") +
-        (got.unknown.length ? ". No such finding: " + got.unknown.join(", ") : "") + (got.missing.length ? ". Not in tests/: " + got.missing.join(", ") : "") +
-        ". Their status is as it was: Mark as fixed, or re-check them.";
-      if (got.done.length || got.added.length) setTimeout(() => show("findings"), 2500);
-    } catch (e) { said.textContent = e.message; }
-  }}, "Keep the report");
-  return h("details", {}, h("summary", {}, "Paste a fix report"),
-    h("p", {class: "note"}, "Copy issue asks whoever fixes it to end with a report: what it did, and the tests that would fail if it came back. Paste it here and each finding keeps its tests; a re-check then reads them, and tnsync's block says if one is ever removed. Another case a fix's test found comes in as a new finding, found by that test, not by an audit or its auditor."),
-    text, h("div", {class: "row"}, go), said);
+  flash = "";
+  if (keepY != null) { window.scrollTo(0, keepY); keepY = null; }
+  const poll = async () => {   // (a fixer's report, or Confirm's progress: shown as it happens)
+    if (tab !== "findings") return;
+    const now = await api("/api/stamp").catch(() => null);
+    const typing = ["INPUT", "TEXTAREA", "SELECT"].includes((document.activeElement || {}).tagName || "");   // (never under your hands)
+    if (now && !typing && (now.stamp !== stamp || JSON.stringify(now.confirming) !== JSON.stringify(c))) { keepY = window.scrollY; show("findings"); return; }
+    timer = setTimeout(poll, 4000);
+  };
+  timer = setTimeout(poll, 4000);
 }
 
 // ---------------------------------------------------------------- Explorer

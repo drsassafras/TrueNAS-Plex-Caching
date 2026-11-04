@@ -215,7 +215,7 @@ def recheck_prompt(private: str | None, ids: list[str], pushed: str, main: str) 
            'cvss = "CVSS:3.1/..."   # only for a vulnerability with no CVSS vector yet: score it',
            'tests = ["TestClass.test_name"]   # the tests that would fail if it came back: of those it names, the ones that would, and any other you found',
            'detail = """', "What you looked at, and what you saw.", '"""', "```", ""]
-    out.append(audit.brief(items).split(audit.REPORT, 1)[-1].lstrip() if items else "")
+    out.append(audit.brief(items).split("\n", 2)[-1].lstrip() if items else "")
     return "\n".join(out).rstrip()
 
 
@@ -472,7 +472,7 @@ class Runner:
                                 pass
                         if working == "fixed":   # (closed: where it's fixed is said, and the commit filled in once it's pushed)
                             at, sha = audit.fix_where(f, a)
-                            f["status"] = "fixed"
+                            f["status"], f["closed_by"] = "fixed", f"audit {r.audit_id}"
                             if pushed == "fixed" and has_upstream:
                                 f["fixed_in"] = sha or _git("rev-parse", "@{upstream}")
                                 said = "fixed and pushed"

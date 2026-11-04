@@ -16639,14 +16639,22 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(saved["tests"], "passed")
 
     def test_the_board_block(self):
-        from dev import coverage
+        from dev import board, coverage
         folder = tempfile.mkdtemp(dir=TMP)
         out = io.StringIO()
         with mock.patch.object(coverage, "SAVED", os.path.join(folder, "none.json")), contextlib.redirect_stdout(out):
-            self.assertEqual(coverage.main(["--tnsync"]), 1)   # (nothing saved: orange, as a test to add)
-        self.assertIn("Coverage not measured", out.getvalue())
+            self.assertEqual(coverage.main(["--tnsync"]), 3)   # (nothing saved: orange, "not measured", not a test to add)
+        self.assertIn("Coverage not measured · no coverage saved yet: the tests save it with --coverage (in .tnsync, TN_TEST=", out.getvalue())
         tnsync = _read(os.path.join(ROOT, "dev", "tnsync"), encoding="utf-8")
-        self.assertIn('\\"warn\\": {\\"rc\\": 1, \\"note\\": \\"tests to add\\"}', tnsync)
+        self.assertIn('\\"warn\\": {\\"rc\\": 1, \\"note\\": \\"tests to add\\", \\"more\\": {\\"3\\": \\"not measured\\"}}', tnsync)
+        # (on the board: 1 a test to add, 3 not measured, both orange; anything else red)
+        warn = {"rc": 1, "note": "tests to add", "more": {"3": "not measured"}}
+        for rc, state, header in ((1, "warn", "TESTS TO ADD"), (3, "warn", "NOT MEASURED"), (2, "fail", "")):
+            s = board.Section({"id": "coverage", "title": "Coverage", "cmd": "true", "warn": warn}, folder)
+            self.addCleanup(s.out.close)
+            s.finished(rc)
+            self.assertEqual(s.state, state, rc)
+            self.assertIn(header, s.lines(80)[0])
         self.assertIn('if [ "$RELEASE" = 1 ]; then warn=""; CHECK_IDS+=("coverage"); fi', tnsync)   # (red at release)
 
 
@@ -18048,52 +18056,78 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(state()[0], "there")
 
     @unittest.skipUnless(shutil.which("git"), "no git here")
-    def test_a_finding_keeps_the_tests_that_guard_it(self):
-        """Copy issue asks whoever fixes it for a report; pasted back, each finding keeps the tests that would fail if it
-        came back (only tests the project has), its status as it was; and the block says if one of them is removed."""
-        from dev import audit, auditgui
+    def test_a_fixer_reports_each_fix_and_confirm_closes_it(self):
+        """Whoever fixes the findings reads them (dev/audit.py fixes) and reports each fix (fixed), with the tests that
+        guard it, and each other case its test found (found: a new finding, found by that test, never by an audit or its
+        auditor). It can't close one: Confirm runs each one's tests and closes those that pass; one that fails is open
+        again. The block says if a guarding test is ever removed."""
+        from dev import audit, auditfix, auditgui
         repo, private, git = self.project()
         self.write(os.path.join(repo, "tests"), "test_app.py", "import unittest\n\n\nclass LoginTests(unittest.TestCase):\n"
-                   "    def test_login_checks(self):\n        pass\n")
+                   "    def test_login_checks(self):\n        pass\n\n    def test_broken(self):\n        self.fail('still there')\n")
         self.audit_files(repo, private, "2026-11-01-1", "2026-11-01", git("rev-parse", "HEAD"), "full",
                          extra='[[finding]]\nid = "F-2026-001"\ntitle = "Login trusts its input"\nseverity = "high"\nlines = ["a.py:1"]\n'
-                               'detail = "d"\nstatus = "open"\nmain = "affected"\n')
-        self.assertEqual(audit.test_names(), {"LoginTests.test_login_checks"})
+                               'detail = "d"\nstatus = "open"\nmain = "affected"\n\n[[finding]]\nid = "F-2026-002"\ntitle = "Other"\n'
+                               'severity = "low"\nlines = ["a.py:5"]\ndetail = "d"\nstatus = "open"\nmain = "affected"\n')
+        self.assertEqual(audit.test_ids()["LoginTests.test_login_checks"], "tests.test_app.LoginTests.test_login_checks")
+        cli = lambda *a: self._cli(audit, *a)
+        rc, text = cli("fixes")
+        self.assertEqual(rc, 0)
+        for want in ("dev/audit.py fixed F-YYYY-NNN", "If that test finds another case, don't fix it. List it in the report as a new finding.",
+                     "You can't close a finding", "## F-2026-001: Login trusts its input"):
+            self.assertIn(want, text)
+        self.assertEqual(cli("fixed", "F-2026-001", "--test", "LoginTests.test_nope")[0], 2)   # (only tests the project has)
+        rc, said = cli("fixed", "F-2026-001", "--test", "tests/test_app.py::LoginTests.test_login_checks", "--note", "checks it")
+        self.assertEqual(rc, 0, said)
+        self.assertEqual(cli("fixed", "F-2026-002", "--test", "LoginTests.test_broken")[0], 0)
+        rc, said = cli("found", "--via", "F-2026-001", "--title", "Other login trusts it too", "--lines", "b.py:5", "--hardening",
+                       "--priority", "low", "--test", "LoginTests.test_login_checks", "--detail", "same kind; put b.py back in the test")
+        self.assertEqual(rc, 0, said)
+        self.assertIn("F-2026-003: a new finding, found by a test written for F-2026-001's fix", said)
         data = auditgui.Data()
-        text = data.brief({"ids": "F-2026-001"})["text"]
-        self.assertIn("[[fix]]", text)   # (the fixer is asked for its report)
+        by = {f["id"]: f for f in data.findings()}
+        self.assertEqual((by["F-2026-001"]["status"], by["F-2026-001"]["waiting"], by["F-2026-001"]["tests"], by["F-2026-001"]["led_to"]),
+                         ("open", True, ["LoginTests.test_login_checks"], ["F-2026-003"]))
+        self.assertIn("fix reported (fixed), guarded by LoginTests.test_login_checks: checks it", by["F-2026-001"]["checks"][-1])
+        new = by["F-2026-003"]
+        self.assertEqual((new["status"], new["source"], new["via"], new["by_audit"], new["waiting"], new["main_by"]),
+                         ("open", "fix-test", "F-2026-001", False, False, "fix report"))
+        self.assertIn("- Found by a test written for F-2026-001's fix", auditfix.fixes_text(private))
+        self.assertIn("New cases a fix's test found: F-2026-003", auditfix.fixes_text(private))
+        self.assertIn("2 fixed, to confirm", audit.findings_check(audit.load()[0]).said())
+        # (Confirm: F-2026-001's test passes, so it's closed; F-2026-002's fails, so it's open again)
+        self.assertEqual(data.confirm_fixes({})["ids"], ["F-2026-001", "F-2026-002"])
+        for _ in range(600):
+            if not data.confirming.get("running"):
+                break
+            time.sleep(0.1)
+        done = {d["id"]: d for d in data.confirming["done"]}
+        self.assertTrue(done["F-2026-001"]["ok"])
+        self.assertFalse(done["F-2026-002"]["ok"])
+        by = {f["id"]: f for f in data.findings()}
+        self.assertEqual((by["F-2026-001"]["status"], by["F-2026-001"]["closed_by"], by["F-2026-001"]["outside"]), ("fixed", "confirm", False))
+        self.assertIn("confirmed: its tests passed (LoginTests.test_login_checks)", by["F-2026-001"]["checks"][-1])
+        self.assertEqual((by["F-2026-002"]["status"], by["F-2026-002"]["waiting"]), ("open", False))
+        self.assertIn("not confirmed, open again", by["F-2026-002"]["checks"][-1])
         with self.assertRaises(ValueError):
-            data.report({"text": "nothing to see"})
-        got = data.report({"text": "Done.\n```toml\n[[fix]]\nid = \"F-2026-001\"\nstatus = \"fixed\"\n"
-                                   "tests = [\"tests/test_app.py::LoginTests.test_login_checks\", \"LoginTests.test_nope\"]\ndetail = \"checks it\"\n"
-                                   "\n[[fix]]\nid = \"F-2026-999\"\n```\n"})
-        self.assertEqual(got, {"done": ["F-2026-001"], "added": [], "unknown": ["F-2026-999"], "missing": ["F-2026-001: LoginTests.test_nope"]})
-        f = data.findings()[0]
-        self.assertEqual((f["status"], f["tests"], f["reported"], f["lost"]), ("open", ["LoginTests.test_login_checks"], "fixed", []))
-        self.assertIn("fix reported (fixed), guarded by LoginTests.test_login_checks: checks it", f["checks"][-1])
-        self.assertIn("- Tests that guard it: LoginTests.test_login_checks", data.brief({"ids": "F-2026-001"})["text"])
+            data.confirm_fixes({})   # (nothing waits now)
+        # (a close the page didn't make: flagged)
+        auditfix.fixed(private, "F-2026-002")
+        auditfix.edit(private, "2026-11-01-1", lambda rec: next(x for x in rec["finding"] if x["id"] == "F-2026-002").update(status="fixed"))
+        self.assertTrue(next(f for f in data.findings() if f["id"] == "F-2026-002")["outside"])
         self.assertEqual(audit.problems({"id": "2026-11-01-1", "auditor": "a", "thoroughness": 3, "finding": [
-            {"id": "F-2026-001", "title": "t", "lines": ["a.py:1"], "detail": "d", "severity": "low", "status": "open", "main": "affected",
-             "tests": ["not a test"]}]}, "private"), ["F-2026-001: tests aren't a list of Class.test_name"])
-        # (another case a fix's test found: a new finding, found by that test, not by the record's audit or its auditor)
-        self.assertIn("If that test finds another case, don't fix it. List it in the report as a new finding.", text)
-        got = data.report({"text": "```toml\n[[new]]\nvia = \"F-2026-001\"\ntitle = \"Other login trusts it too\"\ntype = \"hardening\"\n"
-                                   "severity = \"low\"\nlines = [\"b.py:5\"]\ntests = [\"LoginTests.test_login_checks\"]\ndetail = \"same kind\"\n"
-                                   "\n[[new]]\nvia = \"F-2026-404\"\ntitle = \"x\"\n```\n"})
-        self.assertEqual((got["added"], got["unknown"]), (["F-2026-002"], ["F-2026-404 (a new finding's via)"]))
-        new = next(f for f in data.findings() if f["id"] == "F-2026-002")
-        self.assertEqual((new["status"], new["source"], new["via"], new["by_audit"], new["tests"], new["main_by"]),
-                         ("open", "fix-test", "F-2026-001", False, ["LoginTests.test_login_checks"], "fix report"))
-        self.assertIn("- Found by a test written for F-2026-001's fix", data.brief({"ids": "F-2026-002"})["text"])
-        self.assertTrue(audit.by_audit(next(f for f in audit.load()[0][0].findings if f["id"] == "F-2026-001")))
-        self.assertEqual(audit.problems({"id": "2026-11-01-1", "auditor": "a", "thoroughness": 3, "finding": [
-            {"id": "F-2026-003", "title": "t", "lines": ["a.py:1"], "detail": "d", "severity": "low", "status": "open", "main": "affected",
-             "source": "fix-test"}]}, "private"), ["F-2026-003: a finding a fix's test found names the finding whose fix it was (via = \"F-YYYY-NNN\")"])
-        data.finding({"audit": "2026-11-01-1", "id": "F-2026-001", "tests": "LoginTests.test_login_checks, LoginTests.test_gone"})
-        self.write(os.path.join(repo, "tests"), "test_app.py", "import unittest\n")   # (both removed)
+            {"id": "F-2026-009", "title": "t", "lines": ["a.py:1"], "detail": "d", "severity": "low", "status": "open", "main": "affected",
+             "source": "fix-test", "tests": ["not a test"]}]}, "private"),
+            ["F-2026-009: tests aren't a list of Class.test_name", "F-2026-009: a finding a fix's test found names the finding whose fix it was (via = \"F-YYYY-NNN\")"])
+        self.write(os.path.join(repo, "tests"), "test_app.py", "import unittest\n")   # (its guarding test removed)
         said = [x.message for x in audit.findings_check(audit.load()[0]).findings or []]
-        self.assertIn("F-2026-001's guarding tests LoginTests.test_login_checks, LoginTests.test_gone are gone from tests/", said)
-        self.assertEqual(next(f for f in data.findings() if f["id"] == "F-2026-001")["lost"], ["LoginTests.test_login_checks", "LoginTests.test_gone"])
+        self.assertIn("F-2026-001's guarding test LoginTests.test_login_checks is gone from tests/", said)
+
+    def _cli(self, audit, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = audit.main(list(args))
+        return rc, out.getvalue()
 
     @unittest.skipUnless(shutil.which("git"), "no git here")
     def test_a_fix_is_found_in_git_and_open_findings_can_be_rechecked_or_copied(self):
@@ -18139,8 +18173,6 @@ class AuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             data.finding({"audit": first().id, "id": first().findings[0]["id"], "cve": "CVE-26-1"})
         self.assertEqual(sorted(x["status"] for x in data.findings()), ["false-positive", "fixed"])
-        with self.assertRaises(ValueError):
-            data.brief({"ids": "F-1999-999"})
 
     @unittest.skipUnless(shutil.which("git"), "no git here")
     def test_an_ai_auditor_rechecks_the_open_findings(self):
@@ -18198,7 +18230,7 @@ class AuditTests(unittest.TestCase):
     def test_only_an_ai_auditors_own_plugin_names_it(self):
         """The audit tools are a person's by default: an AI auditor is a plugin (dev/auditor_*.py), named nowhere else."""
         words = re.compile(r"claude|anthropic|opus|fable|sonnet|haiku|\bAI-?(run|done|audit)", re.I)
-        for rel in ("dev/audit.py", "dev/auditrun.py", "dev/auditgui.py", "dev/auditgui.html", "dev/audit.toml"):
+        for rel in ("dev/audit.py", "dev/auditrun.py", "dev/auditfix.py", "dev/auditgui.py", "dev/auditgui.html", "dev/audit.toml"):
             with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
                 hits = [n for n, line in enumerate(fh, 1) if words.search(line)]
             self.assertEqual(hits, [], rel)

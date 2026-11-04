@@ -194,7 +194,7 @@ def load() -> tuple[dict | None, str]:
         with open(SAVED, encoding="utf-8") as fh:
             got = json.load(fh)
     except (OSError, ValueError):
-        return None, "no coverage saved yet: python3 tests/run.py --coverage (tnsync's Current Tests, TN_TEST) saves it"
+        return None, "no coverage saved yet: the tests save it with --coverage (in .tnsync, TN_TEST=python3 tests/run.py --coverage …)"
     if got.get("code") != code_signature():
         return None, "plexcache/ has changed since the coverage was saved: python3 tests/run.py --coverage again"
     return got, ""
@@ -349,10 +349,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     saved, why = load()
     if saved is None:
-        print(f"  {why}")
         from dev.progress import result
-        print(result("coverage not measured"))
-        return 1 if "--tnsync" in args else 2   # (on the board: a warning, orange, like a test to add)
+        print(result("coverage not measured", why))   # (on the board, its last line: why, and what to do)
+        return 3 if "--tnsync" in args else 2   # (on the board: a warning, orange, "not measured": not a test to add)
     files, note = measure(saved["hit"])
     if "--tnsync" not in args:
         table(files, "--missing" in args)
