@@ -12,7 +12,7 @@
 // The lint: Stylelint on the CSS twice, as written (its recommended checks; no browser prefixes written by hand) and as the
 // oldest targets get it (no feature a target lacks: stylelint-no-unsupported-browser-features, caniuse's data, on the CSS
 // postcss-preset-env makes for them, so a newer feature it rewrites for them is one the CSS can use), ESLint on the scripts (its recommended checks; no feature a
-// target lacks: eslint-plugin-compat), html-validate on the pages and the HTML the app draws (its standard checks; no
+// target lacks: eslint-plugin-compat), TypeScript on the app's own scripts (checkJs: dev/jsconfig.json), html-validate on the pages and the HTML the app draws (its standard checks; no
 // element, attribute or input type a target lacks: MDN's data, below). The build: the CSS with the newer features the
 // targets lack rewritten as CSS they read (postcss-preset-env: nesting, newer colour and media syntax and the like, the
 // newer form kept beside it for the browsers that have it), the prefixes they still need added (Autoprefixer), then
@@ -278,6 +278,33 @@ async function lintHtml(files) {
 
 const LINTERS = { ".css": ["Stylelint", lintCss], ".js": ["ESLint", lintJs], ".html": ["html-validate", lintHtml] };
 
+// TypeScript's check of the app's own scripts (dev/jsconfig.json: checkJs, the types in dev/web.d.ts), run when the lint
+// takes one of them: the scripts share their globals, so it checks them together, and what it finds in any of them counts.
+const TYPED = path.join(__dirname, "jsconfig.json");
+function typedScripts(files) {
+  return files.filter((f) => path.extname(f) === ".js" && path.dirname(path.resolve(f)) === WEB);
+}
+function lintTypes() {
+  let tsc;
+  try {
+    tsc = path.join(path.dirname(require.resolve("typescript/package.json")), "bin", "tsc");
+  } catch {
+    console.error("typescript isn't installed: npm ci --prefix dev");
+    process.exit(2);
+  }
+  const got = require("child_process").spawnSync(process.execPath, [tsc, "-p", TYPED, "--pretty", "false"], { encoding: "utf8" });
+  if (got.error) throw got.error;
+  const found = [];
+  for (const line of (got.stdout + got.stderr).split("\n")) {
+    const m = line.match(/^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/);
+    if (m) found.push(`${rel(path.resolve(__dirname, m[1]))}:${m[2]}:${m[3]}: ${m[5]} (${m[4]})`);
+    else if (line.trim() && !/^\s/.test(line)) found.push(line);  // (not a finding's own lines: tsc couldn't run as asked)
+    else if (line.trim() && found.length) found[found.length - 1] += " " + line.trim();
+  }
+  if (got.status && !found.length) found.push(`tsc stopped (${got.status})`);
+  return found;
+}
+
 async function lint(args) {
   const files = args.length ? args : fs.readdirSync(WEB).filter((n) => LINTERS[path.extname(n)]).map((n) => path.join(WEB, n));
   const other = files.filter((f) => !LINTERS[path.extname(f)]);
@@ -292,6 +319,13 @@ async function lint(args) {
     const found = await run(mine);
     for (const f of found) console.error(f);
     console.error(found.length ? `${found.length} found by ${name}` : `${mine.length} file(s) pass ${name}`);
+    total += found.length;
+  }
+  const typed = typedScripts(files);
+  if (typed.length) {
+    const found = lintTypes();
+    for (const f of found) console.error(f);
+    console.error(found.length ? `${found.length} found by TypeScript` : `${typed.length} file(s) pass TypeScript`);
     total += found.length;
   }
   return total ? 1 : 0;

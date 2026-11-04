@@ -1956,7 +1956,7 @@ class AppTests(unittest.TestCase):
         a new check with no place there would never be seen, so each one must have one."""
         from plexcache import filechecks
         js = _read(os.path.join(ROOT, "plexcache", "web", "app.js"), encoding="utf-8")
-        start = js.index("  var CHECK_PARTS = ")
+        start = js.index("  const CHECK_PARTS = ")
         placed = js[start:js.index("\n  }\n", js.index("  function blockChecks(", start))]
         for cid in filechecks.NAMES:
             self.assertIn(f'"{cid}"', placed, f"the check {cid} isn't placed on the Library Health page")
@@ -6039,7 +6039,7 @@ class DataLayerTests(unittest.TestCase):
                 self.assertTrue(en(tool.flag_help), "no help for its chip on Library Health")
                 self.assertTrue(set(tool.applies) <= {"movie", "tv", "audio"} and tool.applies, "applies: which library kinds")
                 self.assertRegex(js, r'\{ page: "' + name + r'", name: N\("', "not on the Tools page's cards")
-                self.assertIn(name + ": 1", js[js.index("var TOOL_PAGES"):js.index("\n", js.index("var TOOL_PAGES"))])
+                self.assertIn(name + ": 1", js[js.index("const TOOL_PAGES"):js.index("\n", js.index("const TOOL_PAGES"))])
                 self.assertIsInstance(tool.flag_lines([]), list)
                 # its options, per library: each for some of its kinds, a switch (true/false) or a choice among values
                 self.assertTrue(tool.options, "no options")
@@ -6424,7 +6424,7 @@ class PageStructureTests(unittest.TestCase):
     def _check_pages(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
-        got = re.findall(r'(\w+): \["(\w+)", "([^"]+)"\]', some(re.search(r"var CHECK_PAGES = \{([^}]*)\}", js)).group(1))
+        got = re.findall(r'(\w+): \["(\w+)", "([^"]+)"\]', some(re.search(r"const CHECK_PAGES = \{([^}]*)\}", js)).group(1))
         self.assertGreaterEqual(len(got), 3)
         return got
 
@@ -6491,8 +6491,8 @@ class PageStructureTests(unittest.TestCase):
         # of their own with their own cards. These two are the only pages let off, by the maintainer: adding a page to
         # them needs the maintainer's express permission, asked for and given first (CLAUDE.md) — never added to make a
         # new page pass
-        nav = set(re.findall(r"(\w+): 1", some(re.search(r"var TOOL_PAGES = \{([^}]*)\}", js)).group(1)))
-        check_pages = dict(re.findall(r'(\w+): \["(\w+)", "[^"]+"\]', some(re.search(r"var CHECK_PAGES = \{([^}]*)\}", js)).group(1)))  # category -> its page
+        nav = set(re.findall(r"(\w+): 1", some(re.search(r"const TOOL_PAGES = \{([^}]*)\}", js)).group(1)))
+        check_pages = dict(re.findall(r'(\w+): \["(\w+)", "[^"]+"\]', some(re.search(r"const CHECK_PAGES = \{([^}]*)\}", js)).group(1)))  # category -> its page
         self.assertEqual(nav - set(tool_pages) - set(check_pages.values()), {"optimizer", "dataset"},
                          "a page under the Tools nav that's neither a tool (app.tools, on toolPage) nor a check page (checksPage) — "
                          "build it on the shared code; letting a page off needs the maintainer's express permission (CLAUDE.md)")
@@ -6834,7 +6834,7 @@ class PageStructureTests(unittest.TestCase):
         got = self._node(fn + "\nconsole.log(JSON.stringify([recordId('1', '190'), recordId(2, 'a/b'), recordLink('plexchecks', '1', 190)]));")
         self.assertEqual(got, ["rec-1-190", "rec-2-a_b", "/plexchecks#rec-1-190"])
         js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
-        self.assertIn('var rid = recordId(key, it.key);', js)                                   # (each health item: its anchor)
+        self.assertIn('const rid = recordId(key, it.key);', js)                                   # (each health item: its anchor)
         self.assertIn('recordLink(bt.page, key, x.key)', js)                                   # (a blocking check's link to it)
 
     def test_blocking_checks_from_elsewhere_go_on_their_records_side(self):
@@ -7059,7 +7059,7 @@ class PageStructureTests(unittest.TestCase):
         turn red with it. With nothing red, a count is yellow with something to do and green at 0."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
-        menu = js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES")]
+        menu = js[js.index("  const TOOLS = ["):js.index("  const TOOL_PAGES")]
         pages = re.findall(r'^    \{ page: "(\w+)", name: N\(', menu, re.M)
         self.assertGreaterEqual(len(pages), 10)
         # one function for every tool: a lookup of the server's word, nothing worked out per tool
@@ -7519,17 +7519,17 @@ class PageStructureTests(unittest.TestCase):
         without it. No tool or place is let off without the maintainer's express permission (CLAUDE.md)."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
-        defs = js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES = ")]
+        defs = js[js.index("  const TOOLS = ["):js.index("  const TOOL_PAGES = ")]
         tools = re.findall(r'\n    \{ page: "(\w+)", name: N\("((?:[^"\\]|\\.)*)"\),(?: short: N\("([^"]*)"\),)?(?: card: N\("([^"]*)"\),)? icon: \'((?:[^\'\\]|\\.)+)\',', defs)
-        nav = set(re.findall(r"(\w+): 1", some(re.search(r"var TOOL_PAGES = \{([^}]*)\}", js)).group(1)))
+        nav = set(re.findall(r"(\w+): 1", some(re.search(r"const TOOL_PAGES = \{([^}]*)\}", js)).group(1)))
         self.assertEqual({t[0] for t in tools}, nav, "a page under the Tools nav whose definition has no icon")
         self.assertEqual(len({t[4] for t in tools}), len(tools), "two tools share a drawing")
-        icons = some(re.search(r"\n  var ICONS = \{\n(.*?)\n  \};", js[js.index("The icons of the app's own places"):], re.S)).group(1)
+        icons = some(re.search(r"\n  const ICONS = \{\n(.*?)\n  \};", js[js.index("The icons of the app's own places"):], re.S)).group(1)
         for page, _n, _s, _c, drawing in tools:
             self.assertNotRegex(icons, r"^    " + page + ": ", f"{page}'s icon is in ICONS as well as in its definition")
             self.assertNotIn(drawing, icons, f"{page}'s drawing is in ICONS too")
             self.assertEqual(js.count(drawing), 1, f"{page}'s drawing appears outside its definition")
-        self.assertRegex(js, r"\n  function icon\(name\) \{\n    var t = toolOf\(name\), d = t \? t\.icon : ICONS\[name\];")
+        self.assertRegex(js, r"\n  function icon\(name\) \{\n    const t = toolOf\(name\), d = t \? t\.icon : ICONS\[name\];")
         self.assertEqual(js.count('<svg class="ico pic" viewBox="0 0 24 24" aria-hidden="true">'), 1, "a place draws an icon without icon()")
         # the jobs: every card and row of one starts with its icon (jobIcon: the tool's for a tool's job)
         self.assertIn('function jobIcon(job) { return icon(job.kind === "tool" ? job.tool : job.kind === "copy" ? "dataset" : "optimizer"); }', js)
@@ -7537,7 +7537,7 @@ class PageStructureTests(unittest.TestCase):
             self.assertIn(call, js, f"a job drawn without its icon: {call}")
         for line in re.findall(r"[^\n]*esc\(jobTitle\([^\n]*", js):                                 # (no title of a job drawn without its icon before it)
             self.assertIn("jobIcon(", line, line.strip())
-        self.assertIn('tools: "tools"', js[js.index("  var EVENT_ICONS = "):js.index("  var STATUS_TEXT")])
+        self.assertIn('tools: "tools"', js[js.index("  const EVENT_ICONS = "):js.index("  const STATUS_TEXT")])
         # as drawn, from one state: the card, the menu and the page's heading each start with the tool's drawing
         app, tt = self._tools_library(mirror=True)
         rows = app.state()["tools"]["unlink"]["scan"]["rows"]
@@ -7563,8 +7563,8 @@ class PageStructureTests(unittest.TestCase):
         toolBlurb("<page>") to top()."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
-        tools = re.findall(r'\n    \{ page: "(\w+)", name: N\("((?:[^"\\]|\\.)*)"\),[^\n]*\n      blurb: N\("((?:[^"\\]|\\.)*)"\)', js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES = ")])
-        nav = set(re.findall(r"(\w+): 1", some(re.search(r"var TOOL_PAGES = \{([^}]*)\}", js)).group(1)))
+        tools = re.findall(r'\n    \{ page: "(\w+)", name: N\("((?:[^"\\]|\\.)*)"\),[^\n]*\n      blurb: N\("((?:[^"\\]|\\.)*)"\)', js[js.index("  const TOOLS = ["):js.index("  const TOOL_PAGES = ")])
+        nav = set(re.findall(r"(\w+): 1", some(re.search(r"const TOOL_PAGES = \{([^}]*)\}", js)).group(1)))
         self.assertEqual({t[0] for t in tools}, nav, "every page under the Tools nav has a card (name and text) on the Tools page")
         for name, _title, text in tools:
             sentences = [x for x in re.split(r"(?<=[.!?])\s+(?=[A-Z])", text.strip()) if x]
@@ -8949,7 +8949,7 @@ class OptimizerTests(unittest.TestCase):
         settings = config.Settings(tempfile.mkdtemp(dir=TMP))
         on = libhealth.enabled(settings.get())
         with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8") as fh:
-            pages = dict(re.findall(r'(\w+): \["(\w+)", "[^"]+"\]', some(re.search(r"var CHECK_PAGES = \{([^}]*)\}", fh.read())).group(1)))
+            pages = dict(re.findall(r'(\w+): \["(\w+)", "[^"]+"\]', some(re.search(r"const CHECK_PAGES = \{([^}]*)\}", fh.read())).group(1)))
         for cat, checks in libhealth.CHECKS.items():
             self.assertIn(cat, pages, f"{cat}: a category of checks without a check page of its own (CHECK_PAGES, on checksPage)")
             for c in checks:
@@ -13589,7 +13589,7 @@ class MQTTTests(unittest.TestCase):
         # ...and nothing mapped that isn't published
         self.assertEqual(set(ha.CONTROL_SETTINGS) - {oid for _, oid in controls}, set())
         # Same conditions: the share-of-disk-time slider only shows while automatic pacing is off (its control: unavailable)
-        self.assertIn("var manual = !w.pacing_auto || !rate;", js)
+        self.assertIn("const manual = !w.pacing_auto || !rate;", js)
         # Watch-only: no controls at all
         self.assertFalse([c for c, _, _ in ha.entities(state, allow_control=False) if c in ("switch", "number", "select", "button")])
 
@@ -15585,6 +15585,7 @@ class WebBuildTests(unittest.TestCase):
         self.assertEqual(got.returncode, 0, got.stderr)
         self.assertIn("pass Stylelint", got.stderr)
         self.assertIn("5 file(s) pass ESLint", got.stderr)
+        self.assertIn("4 file(s) pass TypeScript", got.stderr)  # (the app's own scripts: not the theme script the server makes)
         self.assertIn(f"{len(drawn) + 2} file(s) pass html-validate", got.stderr)
         settings = self._settings()
         config = settings["stylelint"]
@@ -18750,7 +18751,7 @@ class ToolsTests(unittest.TestCase):
         self.assertIn(">File 2<", html)
         self.assertIn('<span class="ssfn">2</span>', html)                                         # (the files listed under the cards)
         js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
-        self.assertIn("can’t be ticked until Merge Duplicates", some(re.search(r"var VERSIONS_HELP = N\((.*?)\);\n", js)).group(1))  # (said in How it works)
+        self.assertIn("can’t be ticked until Merge Duplicates", some(re.search(r"const VERSIONS_HELP = N\((.*?)\);\n", js)).group(1))  # (said in How it works)
         # merged there: both files versions of one record — nothing said of a record there
         assert other is not None
         other.cat["movies"].pop()
@@ -19164,7 +19165,7 @@ class ToolsTests(unittest.TestCase):
         js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
         from plexcache import peers
         for name in peers.FILE_TOOLS:
-            self.assertRegex(js, r"var FILE_TOOLS = .*\b" + name + r": function", f"{name} isn't among the page's FILE_TOOLS: its Apply wouldn't wait for the lights")
+            self.assertRegex(js, r"const FILE_TOOLS = .*\b" + name + r": function", f"{name} isn't among the page's FILE_TOOLS: its Apply wouldn't wait for the lights")
         self.assertIn("if (!gate.ready) u.confirm = false;", js)
         self.assertRegex(js, r'readinessPanel\(key, "largest", "optimizer"')                       # (Optimize Selected)
         self.assertRegex(js, r'readinessPanel\(String\(st\.library\), 0, "dataset"')             # (Start Copying, on the dataset page)
@@ -20079,7 +20080,7 @@ class CountStandardTests(unittest.TestCase):
 
     def _tool_pages(self):
         """Every page of the Tools menu (app.js TOOLS)."""
-        block = some(re.search(r"\n  var TOOLS = \[(.*?)\}\];", self._js(), re.S)).group(1)
+        block = some(re.search(r"\n  const TOOLS = \[(.*?)\}\];", self._js(), re.S)).group(1)
         got = re.findall(r'\{ page: "(\w+)", name: N\("', block)
         self.assertGreaterEqual(len(got), 11)
         return got

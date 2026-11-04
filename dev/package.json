@@ -41,7 +41,22 @@
       "PCI18N": "readonly",
       "PCDECOR": "readonly"
     },
-    "rules": {}
+    "rules": {
+      "eqeqeq": [
+        "error",
+        "smart"
+      ],
+      "no-var": "error",
+      "prefer-const": "error",
+      "no-shadow": "error",
+      "no-implicit-globals": "error",
+      "no-unused-vars": [
+        "error",
+        {
+          "args": "after-used"
+        }
+      ]
+    }
   },
   "htmlvalidate": {
     "extends": [
@@ -61,7 +76,8 @@
     "postcss-preset-env": "11.6.2",
     "stylelint": "18.0.0",
     "stylelint-config-recommended": "19.0.0",
-    "terser": "5.51.2"
+    "terser": "5.51.2",
+    "typescript": "7.0.2"
   },
   "dependencies": {
     "@mdn/browser-compat-data": "8.1.8",

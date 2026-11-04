@@ -1,0 +1,17 @@
+{
+  // TypeScript's check of the web app's scripts (node dev/web.js lint, beside ESLint): checkJs, the scripts as they are
+  // (no build, no emit), with the page's own globals and the types the scripts' JSDoc names in web.d.ts. Not strict: what
+  // it finds is a property that isn't there, a call with arguments nothing takes, a value of the wrong kind.
+  // (lib: the targets' language, es2020, and Error's cause, which a target without it just doesn't keep)
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "es2020",
+    "lib": ["es2020", "es2022.error", "dom", "dom.iterable"],
+    "types": [],
+    "strict": false,
+    "skipLibCheck": true
+  },
+  "include": ["../plexcache/web/*.js", "web.d.ts"]
+}

@@ -268,11 +268,11 @@ def script(themes_settings: dict | None) -> str:
     device's own light or dark setting, and changes with it. It sets data-theme, data-mode (light | dark) and the theme's
     decorations (data-vines, data-film, data-spots, data-grapes) on <html>. app.js calls PCTHEME.use() after a change."""
     info = {t["id"]: t["decor"] for t in everything((themes_settings or {}).get("custom"))}
-    return ("(function(){var INFO=" + json.dumps(info, separators=(",", ":")) + ",SEL=" + json.dumps(resolve(themes_settings), separators=(",", ":")) + ";\n"
-            "var d=document.documentElement,mq=window.matchMedia?window.matchMedia(\"(prefers-color-scheme: dark)\"):null;\n"
-            "function own(){try{var o=JSON.parse(localStorage.getItem(\"pc-theme\")||\"null\");return o&&typeof o===\"object\"?o:null;}catch{return null;}}\n"
-            "function apply(){var o=own()||{},id=INFO[o.theme]?o.theme:SEL.theme,m=o.mode||SEL.mode;if(!INFO[id])id=\"" + DEFAULT + "\";\n"
-            "if(m===\"auto\")m=mq&&mq.matches?\"dark\":\"light\";if(m!==\"dark\")m=\"light\";var x=INFO[id];\n"
+    return ("(function(){let INFO=" + json.dumps(info, separators=(",", ":")) + ",SEL=" + json.dumps(resolve(themes_settings), separators=(",", ":")) + ";\n"
+            "const d=document.documentElement,mq=window.matchMedia?window.matchMedia(\"(prefers-color-scheme: dark)\"):null;\n"
+            "function own(){try{const o=JSON.parse(localStorage.getItem(\"pc-theme\")||\"null\");return o&&typeof o===\"object\"?o:null;}catch{return null;}}\n"
+            "function apply(){const o=own()||{};let id=INFO[o.theme]?o.theme:SEL.theme,m=o.mode||SEL.mode;if(!INFO[id])id=\"" + DEFAULT + "\";\n"
+            "if(m===\"auto\")m=mq&&mq.matches?\"dark\":\"light\";if(m!==\"dark\")m=\"light\";const x=INFO[id];\n"
             "d.setAttribute(\"data-theme\",id);d.setAttribute(\"data-mode\",m);d.setAttribute(\"data-vines\",x.vines?\"on\":\"off\");d.setAttribute(\"data-film\",x.film?\"on\":\"off\");d.setAttribute(\"data-spots\",x.spots?\"on\":\"off\");d.setAttribute(\"data-grapes\",x.grapes?\"on\":\"off\");\n"
             "if(window.PCDECOR)window.PCDECOR.themed();}\n"
             "apply();if(mq){if(mq.addEventListener)mq.addEventListener(\"change\",apply);else if(mq.addListener)mq.addListener(apply);}\n"

@@ -230,12 +230,12 @@ def page_looks(html: str, name: str) -> dict:
 
 
 def mark_looks(src: str, name: str) -> dict:
-    """A decoration script's parts: each top-level function or var of its wrapper (two spaces in), as written."""
+    """A decoration script's parts: each top-level function or variable of its wrapper (two spaces in), as written."""
     code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     code = "\n".join(re.sub(r"(^|\s)//.*$", "", line).rstrip() for line in code.split("\n"))
     found, cur, buf = {}, "(start)", []
     for line in code.split("\n"):
-        m = re.match(r"  (?:function\s+([\w$]+)|var\s+([\w$]+))", line)
+        m = re.match(r"  (?:function\s+([\w$]+)|(?:var|let|const)\s+([\w$]+))", line)
         if m:
             if "".join(buf).strip():
                 found[f"mark {name} {cur}"] = re.sub(r"\s+", " ", "\n".join(buf)).strip()
@@ -558,7 +558,7 @@ def finder(look: str, value) -> dict:
 def app_pages() -> list[str]:
     """Every page of the app (app.js's PAGES), where the sample looks for each look."""
     with open(os.path.join(WEB, "app.js"), encoding="utf-8") as f:
-        m = re.search(r"var PAGES = \{(.*?)\};", f.read(), flags=re.S)
+        m = re.search(r"(?:var|let|const) PAGES = \{(.*?)\};", f.read(), flags=re.S)
     return re.findall(r"([a-z]+):\s*page[A-Z]", m.group(1)) if m else FIXED_PAGES
 
 
