@@ -2,6 +2,8 @@
 """Translation catalogs: find every translatable text and check each language has it.
 
     python3 dev/i18n.py check              # translations match their English (catalogs may lag the code)
+    python3 dev/i18n.py --tnsync           # tnsync's Translations block: how far the catalogs are, overall; between
+                                           # releases it only tells, on master or a --release run every text must be there
     python3 dev/i18n.py check --release    # ...and catalogs in step with the code: nothing missing or unused
     python3 dev/i18n.py check --complete   # ...and every text translated
     python3 dev/i18n.py status             # how much of each language is translated
@@ -53,6 +55,16 @@ CATEGORIES = {  # CLDR plural categories used for whole numbers (and "other" for
 }
 _PLACE = re.compile(r"\{(\w+)\}")
 _TAG = re.compile(r"</?([a-zA-Z][a-zA-Z0-9]*)")
+
+
+def strict_now() -> bool:
+    """Where the catalogs gate — complete, every text translated — decided here once, for tnsync's Translations block
+    and the suite's TranslationTests alike: a release run (TNSYNC_RELEASE; PLEXCACHE_I18N_RELEASE, which CI sets for
+    main and version tags), the release-tag syncs (tnsync release / beta), and master — main must ship complete, hot
+    releases included. Everywhere else the catalogs may lag the code."""
+    return (os.environ.get("PLEXCACHE_I18N_RELEASE", "").lower() in ("1", "true", "yes")
+            or os.environ.get("TNSYNC_RELEASE") == "1"
+            or os.environ.get("TNSYNC_MODE", "").lower() in ("master", "main", "release", "beta"))
 
 
 # ------------------------------------------------------------------ JavaScript
@@ -372,6 +384,36 @@ def main(argv: list[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else "check"
     problems: list[str] = []
     keys = all_keys(problems)
+    if cmd == "--tnsync":
+        # tnsync's Translations block (TN_I18N): the overall share translated — every language's texts as one number.
+        # Between releases the catalogs may lag (exit 3: the board only tells, grey); on master, and on a --release run,
+        # main must ship complete, so anything untranslated is a finding, red, and the copy waits (the same common
+        # checks code and result line as the other check tools).
+        from dev import checks
+        from dev.checks import Check, Finding, Outcome
+        from dev.progress import counted, result, said
+        strict = strict_now()
+        done = {code: len(keys) - len(untranslated(keys, load(code))) for code in TRANSLATED}
+        total = len(keys) * len(TRANSLATED)
+        pct = 100.0 * sum(done.values()) / total if total else 100.0
+        left = {code: len(keys) - n for code, n in done.items() if n < len(keys)}
+        facts = [f"{pct:.1f}% translated", counted(len(TRANSLATED), "language"), counted(len(keys), "text")]
+        if strict:
+            found = [Finding("Translations", os.path.join("plexcache", "web", "i18n", f"{code}.json"), 0, 0, "error",
+                             f"{n} of {counted(len(keys), 'text')} untranslated")
+                     for code, n in sorted(left.items(), key=lambda kv: (-kv[1], kv[0]))]
+            if found:
+                print("  every text must be translated before this lands on main: python3 dev/i18n.py sync, then fill"
+                      " what's null (python3 dev/i18n.py missing <code> says what a language still needs)")
+            outcome = Outcome("Translations", "", found, facts=facts)
+            return checks.run([Check("Translations", lambda: outcome)], bar="i18n")
+        if left:
+            print(f"  {counted(sum(left.values()), 'translation')} still to do in {counted(len(left), 'language')}"
+                  " (the catalogs may lag between releases; a release completes them)")
+        line = result(*facts)
+        print(line)
+        said(line)
+        return 0 if not left else 3
     if cmd == "keys":
         for k in keys:
             print(k)

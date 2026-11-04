@@ -27,6 +27,10 @@
 # next Python, say: stopped if the current tests fail), TN_VALIDATE (the HTML,
 # scripts and CSS checked), TN_TYPES (the Python validation: the type check),
 # TN_BUILD (the build validation: the shell script, the workflows, the Dockerfile),
+# TN_I18N (how far the translation catalogs are, overall: grey between releases, where they may lag; on master and on a
+# --release run a check like the tests — main must ship complete — red when any text is untranslated),
+# TN_RELEASE (everything that has to be true before dev is released, every run, as an overall readiness: grey between
+# releases, saying what's still to go; with --release the blocking check it always was),
 # TN_COVERAGE (what of the code the current tests reach, once they've passed: orange when there's a test to add, never red
 # but on a --release run, where its release bar is a check like the others),
 # TN_AUDIT (the security audits: which code no audit has seen, past its grace window: orange; red only on a --release
@@ -145,7 +149,7 @@ esac
 
 # ----------------------------------------------------------------- config
 TN_HOST=""; TN_USER="truenas_admin"; TN_PORT="22"
-TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""; TN_VALIDATE=""; TN_TYPES=""; TN_BUILD=""; TN_COVERAGE=""; TN_AUDIT=""; TN_FUTURE=""; TN_STYLE=""; TN_RELEASE=""; TN_UPKEEP=""
+TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""; TN_VALIDATE=""; TN_TYPES=""; TN_BUILD=""; TN_COVERAGE=""; TN_I18N=""; TN_AUDIT=""; TN_FUTURE=""; TN_STYLE=""; TN_RELEASE=""; TN_UPKEEP=""
 
 # Read KEY=value lines. The file is parsed, never executed.
 load_conf() {
@@ -166,7 +170,7 @@ load_conf() {
             \'*\') val="${val#\'}"; val="${val%\'}" ;;
         esac
         case "$key" in
-            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST|TN_VALIDATE|TN_TYPES|TN_BUILD|TN_COVERAGE|TN_AUDIT|TN_FUTURE|TN_STYLE|TN_RELEASE|TN_UPKEEP) printf -v "$key" '%s' "$val" ;;
+            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST|TN_VALIDATE|TN_TYPES|TN_BUILD|TN_COVERAGE|TN_I18N|TN_AUDIT|TN_FUTURE|TN_STYLE|TN_RELEASE|TN_UPKEEP) printf -v "$key" '%s' "$val" ;;
             *) warn "$file line $n: unknown setting $key" ;;
         esac
     done < "$file"
@@ -241,6 +245,11 @@ TN_BUILD=
 # What of the code the tests reach, once they've passed (the coverage TN_TEST saved): exit 0 enough, 1 a test to add,
 # 3 nothing measured (TN_TEST without --coverage) (orange; red only with --release). e.g. TN_COVERAGE=python3 dev/coverage.py --tnsync
 TN_COVERAGE=
+# How far the translation catalogs are, overall. The tool decides from TNSYNC_MODE and TNSYNC_RELEASE: exit 0 complete,
+# 3 in progress (grey — between releases they may lag); on master (main must ship complete) and on a --release run,
+# red when any text is untranslated, and the run fails. e.g. TN_I18N=python3 dev/i18n.py --tnsync
+TN_I18N=
+
 # The security audits: which code no audit has seen past its grace window (orange; with --release, the release rules: red).
 # e.g. TN_AUDIT=python3 dev/audit.py
 TN_AUDIT=
@@ -251,8 +260,9 @@ TN_FUTURE=
 # its output not printed: its last line, or what it sends with dev/progress.said, says how many and where to see them).
 # e.g. TN_STYLE=python3 dev/style.py check
 TN_STYLE=
-# The release checks, run only with --release (a check like the tests: red when it fails).
-# e.g. TN_RELEASE=python3 dev/release.py
+# The release checks, every run, as an overall readiness. The tool decides from TNSYNC_RELEASE: exit 0 ready, 3 getting
+# there (grey — "4 of 7 ready", and what's still to go); with --release, the blocking check it always was (red when it
+# fails). e.g. TN_RELEASE=python3 dev/release.py --tnsync
 TN_RELEASE=
 # The dependencies, shown in a last box: a command whose first line is current, behind, cves (or else: not checked),
 # the rest the box's lines. e.g. TN_UPKEEP=python3 dev/upkeep.py --tnsync
@@ -494,7 +504,8 @@ TEST_SIG="$TN_TEST"
 [ -z "$TN_VALIDATE$TN_TYPES$TN_BUILD" ] || TEST_SIG="$TN_TEST | $TN_VALIDATE | $TN_TYPES"
 [ -z "$TN_BUILD" ] || TEST_SIG="$TEST_SIG | $TN_BUILD"   # (as it was without it: a .tnsync without TN_BUILD isn't tested again)
 [ -z "$TN_COVERAGE" ] || TEST_SIG="$TEST_SIG | coverage: $TN_COVERAGE"
-[ "$RELEASE" != 1 ] || TEST_SIG="$TEST_SIG | release: $TN_RELEASE"   # (a release run's checks: those, the release checks too)
+[ -z "$TN_RELEASE" ] || TEST_SIG="$TEST_SIG | release: $TN_RELEASE"
+[ -z "$TN_I18N" ] || TEST_SIG="$TEST_SIG | i18n: $TN_I18N"
 # The future tests asked for this run: TN_FUTURE, or nothing with --skip-future (or no tests at all).
 FUTURE_CMD=""
 [ "$SKIP_TESTS" = 1 ] || [ "$SKIP_FUTURE" = 1 ] || FUTURE_CMD="$TN_FUTURE"
@@ -733,6 +744,23 @@ coverage_section() {
     if [ "$RELEASE" = 1 ]; then warn=""; CHECK_IDS+=("coverage"); fi
     plan_add "{\"id\": \"coverage\", \"title\": \"Coverage\", \"cmd\": $(json_str "$TN_COVERAGE"), \"cwd\": $(json_str "$SRC"), \"stoppable\": true, \"after\": $1, \"env\": {$CHECK_ENV}$warn}"
 }
+# The Translations and Release blocks run every time, and their tool is the one place that decides how strict they
+# are, from TNSYNC_MODE and TNSYNC_RELEASE (so the board, and anything else that reads them, can't disagree): exit 0
+# passed, 3 only telling (grey — the catalogs lagging between releases, the readiness still building), 1 a failure
+# (red — untranslated texts on master or a --release run, a release check not met on a --release run).
+# The Translations block: how far the catalogs are, overall (TN_I18N). i18n_section
+i18n_section() {
+    [ -n "$TN_I18N" ] || return 0
+    CHECK_IDS+=("i18n")
+    plan_add "{\"id\": \"i18n\", \"title\": \"Translations\", \"cmd\": $(json_str "$TN_I18N"), \"cwd\": $(json_str "$SRC"), \"stoppable\": true, \"env\": {$CHECK_ENV}, \"tell\": {\"rc\": 3, \"note\": \"in progress\"}}"
+}
+# The Release block: everything that has to be true before dev is released (TN_RELEASE), as an overall readiness,
+# its line saying what's still to go. release_section <the sections it waits for, as JSON>
+release_section() {
+    [ -n "$TN_RELEASE" ] || return 0
+    CHECK_IDS+=("release")
+    plan_add "{\"id\": \"release\", \"title\": \"Release checks\", \"cmd\": $(json_str "$TN_RELEASE"), \"cwd\": $(json_str "$SRC"), \"stoppable\": true, \"after\": $1, \"env\": {$CHECK_ENV}, \"tell\": {\"rc\": 3, \"note\": \"in progress\"}}"
+}
 run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES (the results file)
     local want_copy="$1" after="[]" cmd
     command -v python3 >/dev/null 2>&1 || die "python3 isn't installed: tnsync's board (dev/board.py) needs it"
@@ -751,9 +779,10 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
         passed_section validate "HTML/JS/CSS Validation" "$TN_VALIDATE" "$(was validate)"
         passed_section types "Python Validation" "$TN_TYPES" "$(was types)"
         passed_section build "Build Validation" "$TN_BUILD" "$(was build)"
-        [ "$RELEASE" != 1 ] || passed_section release "Release checks" "$TN_RELEASE" "$(was release)"
         coverage_section "[]"   # (from the coverage the tests that passed saved: quick, and it says what's still to add)
         audit_section
+        i18n_section
+        release_section "[]"   # (readiness moves between runs of the same code only by what git keeps, so it's run again)
     elif [ "$SKIP_TESTS" != 1 ] && [ "$want_copy" != "nothing" ]; then
         check_section current "Current Tests" "$TN_TEST"
         [ -n "$TN_TEST" ] || told_section current "Current Tests" "not set up" "No TN_TEST in .tnsync, so no tests were run."
@@ -762,10 +791,12 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
         check_section validate "HTML/JS/CSS Validation" "$TN_VALIDATE"
         check_section types "Python Validation" "$TN_TYPES"
         check_section build "Build Validation" "$TN_BUILD"
-        [ "$RELEASE" != 1 ] || check_section release "Release checks" "$TN_RELEASE"
         audit_section
         [ "$RELEASE" != 1 ] || [ -n "$TN_RELEASE" ] || told_section release "Release checks" "not set up" "No TN_RELEASE in .tnsync, so no release checks were run."
         [ -z "$TN_TEST" ] || coverage_section "[\"current\"]"
+        i18n_section
+        # (after the tests when they run: they save the coverage its readiness reads)
+        if [ -n "$TN_TEST" ]; then release_section "[\"current\"]"; else release_section "[]"; fi
     elif [ "$SKIP_TESTS" = 1 ]; then
         told_section checks "Tests and checks" "skipped" "None of TN_TEST, TN_VALIDATE, TN_TYPES, TN_BUILD, TN_COVERAGE, TN_AUDIT or TN_FUTURE was run (--skip-tests)."
     fi
@@ -846,7 +877,7 @@ finish_board() {
     for id in "${CHECK_IDS[@]}"; do
         case "$id" in
             future) case "$(res_get future)" in pass) FUTURE_RESULT="pass" ;; fail) FUTURE_RESULT="fail" ;; esac ;;
-            *) [ "$(res_get "$id")" = "pass" ] || current_ok=0 ;;
+            *) case "$(res_get "$id")" in pass|info) ;; *) current_ok=0 ;; esac ;;   # (info: its tool only told, grey)
         esac
     done
     if [ "$current_ok" = 1 ] && [ "$FUTURE_RESULT" != "fail" ]; then

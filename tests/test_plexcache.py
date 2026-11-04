@@ -5040,6 +5040,25 @@ class TestRunnerTests(unittest.TestCase):
                 self.assertEqual(s.main(["style.py", "review", "--board"]), 0)
                 self.assertEqual(made, [1])   # (not made again)
 
+    def test_a_section_that_only_tells(self):
+        """A section with "tell" (the Translations and Release checks blocks between releases): its exit code means
+        nothing is wrong, only how things stand — grey, its note in the header, its last line the detail. Exit 0 is
+        still a pass, and any other code still a failure: the tool decides which, not the board."""
+        from dev import board
+        folder = tempfile.mkdtemp(dir=TMP)
+        for rc, state, header in ((3, "info", "IN PROGRESS"), (0, "pass", "PASSED"), (1, "fail", "FAILED")):
+            with self.subTest(rc):
+                s = board.Section({"id": "release", "title": "Release checks", "cmd": "true",
+                                   "tell": {"rc": 3, "note": "in progress"}}, folder)
+                self.addCleanup(s.out.close)
+                s.line("4 of 7 ready · to go: version, translations, coverage")
+                s.finished(rc)
+                self.assertEqual(s.state, state)
+                self.assertIn(header, s.lines(80)[0])
+                if rc == 3:
+                    self.assertTrue(s.lines(80)[0].startswith(board.COLOUR["info"]))   # (grey)
+                    self.assertIn("4 of 7 ready", s.lines(80)[2])
+
     def test_a_key_on_the_board_opens_the_review(self):
         """The style guide's block, at any time while the board runs (still running, the board loading, as well as once
         it says looks wait): r starts its review page (on the terminal, in a session of its own, so it outlives the
@@ -15123,6 +15142,7 @@ class TranslationTests(unittest.TestCase):
         problems = []
         cls.keys = cls.tool.all_keys(problems)
         cls.problems = problems
+        cls.RELEASE = cls.tool.strict_now()
 
     def test_house_style(self):
         """The texts' style (README.md → Writing the texts): typographic apostrophes everywhere,
@@ -15204,11 +15224,44 @@ class TranslationTests(unittest.TestCase):
 
     # The catalogs are only brought in step with the code for a release (README.md → Translations):
     # in between, a new text isn't in them yet (the app shows the English) and an old one lingers.
-    # So that's only checked for a release: PLEXCACHE_I18N_RELEASE=1, which CI sets for main and
-    # version tags, or `tnsync release` / `tnsync beta` (TNSYNC_MODE). What a catalog does hold —
-    # placeholders, tags, plural forms — is checked every time.
-    RELEASE = (os.environ.get("PLEXCACHE_I18N_RELEASE", "").lower() in ("1", "true", "yes")
-               or os.environ.get("TNSYNC_MODE") in ("release", "beta"))
+    # So that's only checked where they gate — dev/i18n.py's strict_now, the one place that decides
+    # (for these tests and tnsync's Translations block alike): a release run, master, a tag's sync.
+    # What a catalog does hold — placeholders, tags, plural forms — is checked every time.
+
+    def test_the_board_block(self):
+        """dev/i18n.py --tnsync, tnsync's Translations block: the overall share translated, one number; between
+        releases it only tells (exit 3), and where the catalogs gate (strict_now: master, a release run) anything
+        untranslated is a finding, red — the one place that decides, for this suite's strictness too."""
+        quiet = {"PLEXCACHE_PROGRESS": "", "PLEXCACHE_I18N_RELEASE": "", "TNSYNC_RELEASE": "", "TNSYNC_MODE": ""}
+        catalogs = lambda code: {"Idle": "x", "Busy": "y" if code == "de" else None}
+        patched = lambda: (mock.patch.object(self.tool, "all_keys", return_value={"Idle": None, "Busy": None}),
+                           mock.patch.object(self.tool, "TRANSLATED", ["de", "fr"]),
+                           mock.patch.object(self.tool, "load", side_effect=catalogs))
+        out = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for m in patched() + (mock.patch.dict(os.environ, quiet), contextlib.redirect_stdout(out)):
+                stack.enter_context(m)
+            self.assertEqual(self.tool.main(["i18n.py", "--tnsync"]), 3)   # (between releases: it only tells)
+        self.assertIn("75.0% translated · 2 languages · 2 texts", out.getvalue())
+        self.assertNotIn("error", out.getvalue())
+        for env in ({"TNSYNC_MODE": "master"}, {"TNSYNC_RELEASE": "1"}, {"PLEXCACHE_I18N_RELEASE": "1"}):
+            with self.subTest(env), contextlib.ExitStack() as stack:
+                out = io.StringIO()
+                for m in patched() + (mock.patch.dict(os.environ, quiet | env), contextlib.redirect_stdout(out)):
+                    stack.enter_context(m)
+                self.assertTrue(self.tool.strict_now())
+                self.assertEqual(self.tool.main(["i18n.py", "--tnsync"]), 1)   # (main must ship complete: red)
+            self.assertIn(os.path.join("plexcache", "web", "i18n", "fr.json") + ":0:0 - error: 1 of 2 texts untranslated",
+                          out.getvalue())
+        out = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for m in (mock.patch.object(self.tool, "all_keys", return_value={"Idle": None}),
+                      mock.patch.object(self.tool, "TRANSLATED", ["de", "fr"]),
+                      mock.patch.object(self.tool, "load", return_value={"Idle": "x"}),
+                      mock.patch.dict(os.environ, quiet), contextlib.redirect_stdout(out)):
+                stack.enter_context(m)
+            self.assertEqual(self.tool.main(["i18n.py", "--tnsync"]), 0)   # (complete: green, any run)
+        self.assertIn("100.0% translated · 2 languages · 1 text", out.getvalue())
 
     def test_catalogs_consistent(self):
         for code in self.tool.TRANSLATED + list(self.tool.VARIANTS):
@@ -17293,6 +17346,79 @@ class ReleaseTests(unittest.TestCase):
                                         "command poll_seconds: taken, not in the README's plexcache/set/<name> row",
                                         "command old_one: in the README's plexcache/set/<name> row, not taken"])
 
+    def test_coverage_bar_from_what_the_tests_saved(self):
+        from dev import coverage, release
+        from dev.checks import Finding, Outcome
+        with mock.patch.object(coverage, "load", return_value=(None, "no coverage saved yet: run the tests")):
+            got = release.check_coverage()
+        self.assertFalse(got.ok)
+        self.assertEqual((got.line, got.todo), ("not measured", ["no coverage saved yet: run the tests"]))
+        met = Outcome("Release bar", "", [], facts=["overall 98.5% (release: 98%, each file 90%)"])
+        short = Outcome("Release bar", "", [Finding("Coverage", "plexcache", 0, 0, "error",
+                                                    "97.1% of every line run, under the release's 98%", "release")],
+                        facts=["overall 97.1% (release: 98%, each file 90%)"])
+        for outcome, ok in ((met, True), (short, False)):
+            with self.subTest(ok), mock.patch.object(coverage, "load", return_value=({"hit": {}}, "")), \
+                    mock.patch.object(coverage, "measure", return_value=([], "")), \
+                    mock.patch.object(coverage, "release_check", return_value=outcome):
+                got = release.check_coverage()
+            self.assertEqual(got.ok, ok)
+            self.assertEqual(got.line, outcome.facts[0])
+        self.assertIn("97.1% of every line run, under the release's 98%", got.todo)
+
+    def test_audits_as_a_release_holds_them(self):
+        from dev import release
+        said = "Audited 100% · 0 findings open · release rules met"
+        done = mock.Mock(returncode=0, stdout=f"  (a note)\n{said}\n")
+        with mock.patch.object(release.subprocess, "run", return_value=done) as run:
+            got = release.check_audits()
+        self.assertTrue(got.ok)
+        self.assertEqual(got.line, said)
+        self.assertIn("--release", run.call_args.args[0])   # (as a release run holds them: the one set of rules)
+        bad = mock.Mock(returncode=1, stdout="  sensitive code waits\n2 release rules not met\n")
+        with mock.patch.object(release.subprocess, "run", return_value=bad):
+            got = release.check_audits()
+        self.assertFalse(got.ok)
+        self.assertEqual(got.line, "2 release rules not met")
+        self.assertIn("sensitive code waits", got.todo)
+
+    def test_every_look_approved(self):
+        from dev import release, style
+        with mock.patch.object(style, "pending", return_value={"new": {}, "changed": {}, "gone": {}}):
+            self.assertTrue(release.check_looks().ok)
+        with mock.patch.object(style, "pending", return_value={"new": {}, "changed": {"css .fhit": ["a", "b"]}, "gone": {}}):
+            got = release.check_looks()
+        self.assertFalse(got.ok)
+        self.assertEqual(got.line, "1 looks waiting for approval")
+        self.assertEqual(got.todo[0], "changed: css .fhit")
+
+    def test_the_board_block_is_a_readiness(self):
+        """dev/release.py --tnsync, tnsync's Release checks block: between releases an overall readiness that only
+        tells (exit 3, "N of M ready"); on a release run (TNSYNC_RELEASE — the tool alone decides) the blocking check
+        it always was."""
+        from dev import release
+        from dev.progress import FEED
+        checks = [lambda: release.Result("Version", True, "0.17.0, a new release"),
+                  lambda: release.Result("Coverage", False, "overall 97.1%"),
+                  lambda: release.Result("Looks", False, "2 looks waiting for approval")]
+        quiet = {"PLEXCACHE_PROGRESS": "feed", "TNSYNC_RELEASE": ""}
+        out = io.StringIO()
+        with mock.patch.object(release, "CHECKS", checks), contextlib.redirect_stdout(out), \
+                mock.patch.dict(os.environ, quiet):
+            self.assertEqual(release.main(["--tnsync"]), 3)
+        self.assertIn("1 of 3 ready · to go: coverage, looks", out.getvalue())
+        self.assertIn(FEED + json.dumps({"said": "1 of 3 ready · to go: coverage, looks"}), out.getvalue())   # (its block's line)
+        out = io.StringIO()
+        with mock.patch.object(release, "CHECKS", checks), contextlib.redirect_stdout(out), \
+                mock.patch.dict(os.environ, quiet | {"TNSYNC_RELEASE": "1"}):
+            self.assertEqual(release.main(["--tnsync"]), 1)   # (a release run: red, and the copy waits)
+        self.assertIn(FEED + json.dumps({"said": "Coverage: overall 97.1%; Looks: 2 looks waiting for approval"}), out.getvalue())
+        out = io.StringIO()
+        with mock.patch.object(release, "CHECKS", checks[:1]), contextlib.redirect_stdout(out), \
+                mock.patch.dict(os.environ, quiet):
+            self.assertEqual(release.main(["--tnsync"]), 0)
+        self.assertIn("1 of 1 ready · ready to release", out.getvalue())
+
     def test_runs_each_check_and_says_them(self):
         from dev import release
         checks = [lambda: release.Result("Version", True, "0.16.0, a new release"),
@@ -17307,10 +17433,12 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(release.main(), 0)
 
     @unittest.skipUnless(shutil.which("rsync") and shutil.which("bash"), "no rsync here (tnsync copies with it)")
-    def test_tnsync_runs_them_only_for_a_release(self):
-        """tnsync --release: a Release checks block (TN_RELEASE), a check like the others, red when it fails; the checks
-        told it's a release (TNSYNC_RELEASE, PLEXCACHE_I18N_RELEASE). Without --release, no block and neither is set, so a
-        normal run can't fail on what only a release needs. A pass without --release doesn't count for one with it."""
+    def test_tnsync_release_and_translations_every_run(self):
+        """tnsync's Release checks and Translations blocks (TN_RELEASE, TN_I18N), every run: the tools alone decide how
+        strict they are, from TNSYNC_RELEASE and TNSYNC_MODE — between releases exit 3 only tells (grey, the run goes
+        on), and where they gate exit 1 is a failure like a failing test. The checks are told it's a release
+        (TNSYNC_RELEASE, PLEXCACHE_I18N_RELEASE) only with --release. A pass without --release doesn't count for one
+        with it."""
         import subprocess
         folder = tempfile.mkdtemp(dir=TMP)
         project, nas, fake = (os.path.join(folder, d) for d in ("project", "nas", "bin"))
@@ -17325,11 +17453,13 @@ class ReleaseTests(unittest.TestCase):
         with open(os.path.join(folder, "config"), "w", encoding="utf-8") as fh:
             fh.write("TN_HOST=nas.example\nTN_USER=me\n")
 
-        def settings(release_rc: int):
+        def settings(strict_rc: int):
             with open(os.path.join(project, ".tnsync"), "w", encoding="utf-8") as fh:
                 fh.write(f"TN_APP=myapp\nTN_DEST={nas}\nTN_PATHS=app\n"
                          "TN_TEST=echo tests: release=${TNSYNC_RELEASE:-no} i18n=${PLEXCACHE_I18N_RELEASE:-no}\n"
-                         f"TN_RELEASE=echo the version is wrong; echo 1 release check failed; exit {release_rc}\n")
+                         "TN_I18N=echo 32.9% translated; [ \"${TNSYNC_RELEASE:-}\" = 1 ] && exit 1; exit 3\n"
+                         "TN_RELEASE=echo the version is wrong; echo 4 of 7 ready; "
+                         f"if [ \"${{TNSYNC_RELEASE:-}}\" = 1 ]; then exit {strict_rc}; else exit 3; fi\n")
         env = dict(os.environ, PATH=fake + os.pathsep + os.environ.get("PATH", ""), TNSYNC_CONFIG=os.path.join(folder, "config"),
                    XDG_STATE_HOME=os.path.join(folder, "state"), TMPDIR=folder)
         env.pop("PLEXCACHE_PROGRESS", None)
@@ -17339,25 +17469,39 @@ class ReleaseTests(unittest.TestCase):
                                  text=True, timeout=120, stdin=subprocess.DEVNULL)
             return got.returncode, got.stdout + got.stderr
         settings(1)
-        rc, out = tnsync()
+        rc, out = tnsync()   # (between releases: both blocks only tell, grey, and the run passes)
         self.assertEqual(rc, 0, out)
-        self.assertNotIn("Release checks", out)
+        self.assertIn("Release checks: IN PROGRESS", out)
+        self.assertIn("Translations: IN PROGRESS", out)
         self.assertIn("tests: release=no i18n=no", out)
         rc, out = tnsync("--release")   # (in sync, and passed: but not as a release, so tested again)
         self.assertEqual(rc, 1, out)
         self.assertIn("The last tests weren't a release run (--release) · nothing copied", out)
         self.assertIn("Release checks: FAILED", out)
+        self.assertIn("Translations: FAILED", out)
         self.assertIn("\nthe version is wrong\n", out)   # (what it said, above the board)
         self.assertIn("tests: release=1 i18n=1", out)
         self.assertIn("Local Copy", out)   # (the board's header)
         self.assertRegex(out, r"\nLocal Copy[^\n]* · Release")
         settings(0)
         rc, out = tnsync("--release")
-        self.assertEqual(rc, 0, out)
+        self.assertEqual(rc, 1, out)   # (the translations still gate a release run)
         self.assertIn("Release checks: PASSED", out)
+        self.assertIn("Translations: FAILED", out)
+        with open(os.path.join(project, ".tnsync"), "a", encoding="utf-8") as fh:
+            fh.write("TN_I18N=echo 100% translated; exit 0\n")   # (the last TN_I18N line wins)
         rc, out = tnsync("--release")
         self.assertEqual(rc, 0, out)
-        self.assertIn("Release checks: ALREADY PASSED", out)
+        self.assertIn("Release checks: PASSED", out)
+        self.assertIn("Translations: PASSED", out)
+        rc, out = tnsync("--release")   # (passed, and nothing changed: readiness runs again all the same, quick)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Release checks: PASSED", out)
+        # the blocks' plan: the tool decides, tnsync only tells and counts (one source of truth)
+        tnsync_src = _read(os.path.join(ROOT, "dev", "tnsync"), encoding="utf-8")
+        self.assertIn('\\"id\\": \\"i18n\\", \\"title\\": \\"Translations\\"', tnsync_src)
+        self.assertIn('\\"id\\": \\"release\\", \\"title\\": \\"Release checks\\"', tnsync_src)
+        self.assertEqual(tnsync_src.count('\\"tell\\": {\\"rc\\": 3, \\"note\\": \\"in progress\\"}'), 2)
 
 
 if __name__ == "__main__":

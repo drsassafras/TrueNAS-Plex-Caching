@@ -4,6 +4,9 @@ in a block of their own with --release (TN_RELEASE in .tnsync), on the code it c
 run can't fail on what only a release needs.
 
     python3 dev/release.py           # each check, a line each; what to do for one that fails; exit 1 if any fail
+    python3 dev/release.py --tnsync  # tnsync's Release block, every run: the same checks as an overall readiness —
+                                     # "4 of 7 ready", what's still to go — grey between releases (exit 3), and with
+                                     # --release (TNSYNC_RELEASE=1) the blocking check it always was
 
 The checks:
 * the version: plexcache/__init__.py's __version__ a new X.Y.0, above what's released (main's version and the newest
@@ -11,7 +14,10 @@ The checks:
 * the translations: every text translated, in every language (in step with the code: the suite's, as for a release);
 * the MQTT settings: every setting (plexcache/config.py's DEFAULTS) either a control over MQTT or listed as kept off it,
   with why (plexcache/homeassistant.py: CONTROL_SETTINGS, PER_LIBRARY_CONTROLS, NOT_OVER_MQTT), and nothing listed that's gone;
-* the MQTT docs: the README's topics and commands (MQTT – other tools) the ones the code has.
+* the MQTT docs: the README's topics and commands (MQTT – other tools) the ones the code has;
+* the coverage: the release bar (dev/coverage.py: 98% of every line run, each file at 90%), from what the tests saved;
+* the security audits: dev/audit.py's release rules, as a --release run holds them;
+* the looks: every look the app wears approved into the style guide (dev/style.py), none waiting.
 
 The released version is read from git: the repository tnsync runs in (TNSYNC_REPO, which tnsync sets, since the code it
 tests may be a copy from git rather than a checkout), else this folder.
@@ -205,7 +211,53 @@ def check_mqtt_docs(readme: str | None = None, source: str | None = None) -> Res
     return Result(name, False, f"the README's MQTT table differs from the code ({len(todo) - 1})", todo)
 
 
-CHECKS: list[Callable[[], Result]] = [check_version, check_translations, check_mqtt_settings, check_mqtt_docs]
+def check_coverage() -> Result:
+    """The release's coverage bar (dev/coverage.py): 98% of every line run, each file at 90%, from what the tests saved."""
+    from dev import coverage
+    name = "Coverage"
+    saved, why = coverage.load()
+    if saved is None:
+        return Result(name, False, "not measured", [why])
+    files, _ = coverage.measure(saved["hit"])
+    outcome = coverage.release_check(files)
+    line = outcome.facts[0] if outcome.facts else ""
+    if not outcome.findings:
+        return Result(name, True, line)
+    todo = [f.message if f.path == "plexcache" else f"{f.path}: {f.message}" for f in outcome.findings[:15]]
+    todo.append("python3 dev/coverage.py --missing says which lines; add tests (or run where the optimizer's tools are).")
+    return Result(name, False, line, todo)
+
+
+def check_audits() -> Result:
+    """The security audits' release rules (dev/audit.py --release), as a release run holds them."""
+    from dev.progress import FEED
+    name = "Security audits"
+    try:
+        got = subprocess.run([sys.executable, os.path.join(ROOT, "dev", "audit.py"), "--release"],
+                             capture_output=True, text=True, timeout=300, cwd=ROOT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return Result(name, False, f"couldn't be checked: {e}")
+    lines = [ln.strip() for ln in got.stdout.splitlines() if ln.strip() and not ln.startswith(FEED)]
+    line = lines[-1] if lines else f"exit {got.returncode}"
+    if got.returncode == 0:
+        return Result(name, True, line)
+    return Result(name, False, line, lines[:-1][:15] + ["python3 dev/audit.py gui, and work through what the release rules still need."])
+
+
+def check_looks() -> Result:
+    """Every look the app wears approved into the style guide (dev/style.py): none waiting for the maintainer."""
+    from dev import style
+    name = "Looks"
+    diff = style.pending()
+    todo = [f"{state}: {look}" for state in diff for look in diff[state]]
+    if not todo:
+        return Result(name, True, "every look is in the style guide")
+    return Result(name, False, f"{len(todo)} looks waiting for approval",
+                  todo[:15] + ["python3 dev/style.py review, and approve what's right."])
+
+
+CHECKS: list[Callable[[], Result]] = [check_version, check_translations, check_mqtt_settings, check_mqtt_docs,
+                                      check_coverage, check_audits, check_looks]
 
 
 def summary(results: list[Result]) -> str:
@@ -216,8 +268,11 @@ def summary(results: list[Result]) -> str:
     return "; ".join(f"{r.name}: {r.line}" for r in failed)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     from dev.progress import said
+    args = sys.argv[1:] if argv is None else argv
+    board = "--tnsync" in args   # (tnsync's Release block, every run: readiness between releases, the check on one)
+    strict = "--release" in args or os.environ.get("TNSYNC_RELEASE") == "1"
     results: list[Result] = []
     for check in CHECKS:
         try:
@@ -228,6 +283,13 @@ def main() -> int:
         print(f"{'✔' if r.ok else '✘'} {r.name}: {r.line}")
         for t in r.todo:
             print(f"    {t}")
+    if board and not strict:   # (how ready dev is, in a line: nothing to block between releases)
+        togo = ", ".join(r.name.lower() for r in results if not r.ok)
+        ready = sum(1 for r in results if r.ok)
+        line = f"{ready} of {len(results)} ready" + (f" · to go: {togo}" if togo else " · ready to release")
+        print(line)
+        said(line)
+        return 0 if not togo else 3
     said(summary(results))
     return 0 if all(r.ok for r in results) else 1
 

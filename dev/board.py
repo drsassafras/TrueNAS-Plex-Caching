@@ -14,6 +14,7 @@ section's output is kept beside the results (their folder's logs/, which tnsync 
      "stop_with": ["…"],    # (optional) stopped when one of these fails, at its first failing test (the future tests, with the current ones)
      "stoppable": true,     # (optional) Enter stops it (the tests; a copy under way is left to finish)
      "warn": {"rc": 1, "note": "…", "more": {"3": "…"}},   # (optional) that exit code is a warning (orange: the style guide's looks to approve), said in its block alone
+     "tell": {"rc": 3, "note": "…"},   # (optional) that exit code only tells (grey: the translations between releases), the note its header's
      "not_run_rc": 3,       # (optional) the exit code that means "couldn't be set up" (yellow: nothing is known)
      "upkeep": true,        # (optional) the dependencies: its output's first line says current / behind / cves / else
      "key": {"key": "r", "cmd": "…", "cwd": "…", "does": "Review Style Changes", "opens": "the review page",
@@ -113,6 +114,8 @@ class Section:
         self.warn_rc, self.warn_note = warn.get("rc"), warn.get("note")
         # (and other exit codes that are warnings too, each its own note: {"3": "not measured"})
         self.warn_more = {int(k): str(v) for k, v in (warn.get("more") or {}).items()}
+        tell = spec.get("tell") or {}   # (optional) {"rc": 3, "note": "…"}: that exit code only tells (grey), the note its header's
+        self.tell_rc, self.tell_note = tell.get("rc"), tell.get("note")
         # (optional) its last step, once every other section is done, it's ended in a warning and none has failed, on a
         # terminal: an action of its own run as a step (blue: "doing", its bar's label "label") — tnsync's review page,
         # open until it's closed — then its own check again ("check", with "env"), which gives its end state; Enter skips it
@@ -320,6 +323,9 @@ class Section:
         elif rc in self.warn_more:
             self.state = "warn"
             self.note = self.warn_more[rc]
+        elif self.tell_rc is not None and rc == self.tell_rc:   # (nothing wrong, only how things stand: its last line says)
+            self.state = "info"
+            self.note = self.tell_note
         elif self.not_run_rc is not None and rc == self.not_run_rc:
             self.state = "notrun"
         else:
