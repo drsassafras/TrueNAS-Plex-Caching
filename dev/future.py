@@ -18,7 +18,8 @@ The channels (CHANNELS below): Python's alphas, betas and rcs as Docker Hub tags
 nodejs.org (the page tests need node; the image serves no pages through it, so it's fetched for the run, cached, and
 mounted in); ffmpeg's git snapshot, built from source once a week (FFMPEG_SOURCE and FFMPEG_STAMP in the Dockerfile);
 libjpeg-turbo's and oxipng's GitHub pre-releases; dev/package.json's packages (both sections) at npm's newest dist-tag
-ahead of latest (next, beta, rc…), installed in a copy of it (WEB_DIR) and mounted over the checkout's; MKVToolNix has
+ahead of latest (next, beta, rc…), installed for Linux in a container (WEB_VOLUME) and mounted over the checkout's,
+with Playwright's Chromium (BROWSERS_VOLUME); MKVToolNix has
 releases only. A pre-release counts only while it's
 ahead of the stable release; the choice is kept for a day (like dev/upkeep.py's look, whose report says what this run is
 on), and upstream not reached means the pin.
@@ -57,7 +58,11 @@ IMAGE = "plex-cache:future"
 LOG = os.path.join(tempfile.gettempdir(), "plex-cache-future-build.log")  # the build's full output, kept for a failure
 CACHE = os.path.join(os.path.dirname(upkeep.CACHE), "future.json")  # the day's choices
 NODE_DIR = os.path.join(os.path.dirname(upkeep.CACHE), "node")  # the node tarball fetched for the run (one kept)
-WEB_DIR = os.path.join(os.path.dirname(upkeep.CACHE), "web-future")  # dev/package.json at the channels' choices, installed (one kept)
+# the web's packages at the channels' choices, and Playwright's Chromium: installed in a container, for Linux and this
+# machine's architecture (the checkout's node_modules are the host's, a Mac's binaries: TypeScript's, esbuild's…), in
+# Docker volumes kept between runs, mounted over the checkout's for the suite (install_web)
+WEB_VOLUME = "plexcache-future-web"
+BROWSERS_VOLUME = "plexcache-future-browsers"
 # The web checks a year ahead: dev/web.js takes dev/package.json's "futureBrowserslist" (one year less of browsers)
 WEB_TARGETS = ["-e", "PLEXCACHE_WEB_TARGETS=future"]
 # the build's lines that say where it is: the legacy builder's "Step 8/31 : RUN …", BuildKit's "#8 [ffmpeg 2/3] RUN …"
@@ -245,41 +250,56 @@ def pick_npm(package: str, tags: dict[str, str]) -> Pick:
     return Pick(package, latest, "stable", "no pre-release ahead of it", latest, "npm")
 
 
-def install_web(picks: list[Pick]) -> str | None:
-    """dev/package.json and its lock copied to WEB_DIR and moved to the channels' choices with npm there (the checkout's
-    stay as they are); its node_modules, to mount over the checkout's. Installed once for a set of choices. None: no
-    package picked, no npm, or npm couldn't (the checkout's packages then)."""
-    want = {p.name: p.version for p in picks if p.kind == "npm" and p.channel != "pin"}
-    if not want:
-        return None
-    if not shutil.which("npm"):
-        print(f"    {DIM}no npm here: the web's packages at their pins for this run{OFF}")
-        return None
-    modules, marker = os.path.join(WEB_DIR, "node_modules"), os.path.join(WEB_DIR, "picks.json")
-    stamp = json.dumps(want, sort_keys=True)
-    try:
-        with open(marker, encoding="utf-8") as fh:
-            if fh.read() == stamp and os.path.isdir(modules):
-                return modules
-    except OSError:
-        pass
-    shutil.rmtree(WEB_DIR, ignore_errors=True)
-    os.makedirs(WEB_DIR)
+def web_stamp(want: dict[str, str]) -> str:
+    """What the volume's packages were installed from: dev/package.json, its lock and the choices (installed again when
+    any of them changes)."""
+    import hashlib
+    h = hashlib.sha256(json.dumps(want, sort_keys=True).encode())
     for name in ("package.json", "package-lock.json"):
-        shutil.copy(os.path.join(ROOT, "dev", name), WEB_DIR)
-    cmd = ["npm", "install", "--prefix", WEB_DIR, "--save-exact", "--no-audit", "--no-fund", *[f"{n}@{v}" for n, v in sorted(want.items())]]
-    print(f"    Installing the web's packages at the choices ({len(want)}) for the run…", flush=True)
-    got = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if got.returncode and "ERESOLVE" in got.stdout + got.stderr:  # (a pre-release outside another's peer range: tried anyway)
-        print(f"    {DIM}a peer range doesn't take a pre-release: installed with --legacy-peer-deps{OFF}")
-        got = subprocess.run(cmd + ["--legacy-peer-deps"], capture_output=True, text=True, timeout=600)
+        try:
+            with open(os.path.join(ROOT, "dev", name), "rb") as fh:
+                h.update(fh.read())
+        except OSError:
+            pass
+    return h.hexdigest()[:16]
+
+
+def web_setup(want: dict[str, str]) -> str:
+    """The shell that installs dev/package.json (at the choices, when there are any) into /web, the web volume, for the
+    container's platform — once for a stamp — and Playwright's Chromium into /browsers."""
+    pkgs = "".join(f" {n}@{v}" for n, v in sorted(want.items()))
+    npm = f"npm install --prefix /web --no-audit --no-fund{' --save-exact' + pkgs if pkgs else ''}"
+    stamp = web_stamp(want)
+    return (f"{NODE_SETUP}; node -v >/dev/null 2>&1 || exit 1; mkdir -p /web && cp /src/dev/package.json /src/dev/package-lock.json /web/ || exit 1; "
+            f"if [ \"$(cat /web/node_modules/.stamp 2>/dev/null)\" != {stamp} ]; then "
+            f"echo '    Installing the web’s packages{f' at the choices ({len(want)})' if want else ''} for Linux, in a container…'; "
+            f"{{ {npm} >/tmp/npm.log 2>&1 || {npm} --legacy-peer-deps >/tmp/npm.log 2>&1; }} && echo {stamp} > /web/node_modules/.stamp "
+            "|| { echo \"    npm couldn’t install them: $(tail -c 300 /tmp/npm.log)\"; exit 1; }; fi; "
+            "if [ -d /web/node_modules/playwright ]; then PLAYWRIGHT_BROWSERS_PATH=/browsers npx --prefix /web playwright install chromium >/tmp/pw.log 2>&1 "
+            "|| echo \"    Chromium not added for Playwright: $(tail -c 300 /tmp/pw.log)\"; fi")
+
+
+# what a suite's container adds for Playwright's Chromium (in the browsers volume): the system libraries it needs
+BROWSER_SETUP = ("if [ -d /src/dev/node_modules/playwright ]; then npx --prefix /src/dev playwright install-deps chromium >/tmp/pw.log 2>&1 "
+                 "|| echo \"    Chromium’s libraries not added: $(tail -c 300 /tmp/pw.log)\"; fi")
+
+
+def install_web(picks: list[Pick], image: str, mount: list[str]) -> list[str]:
+    """dev/package.json's packages (at the channels' choices) and Playwright's Chromium, installed in a container on
+    image (node from mount) into the volumes, for Linux: what the suite's containers mount over the checkout's. None
+    mounted when there's no checkout node_modules to stand in for, or the install failed (said)."""
+    if not os.path.isdir(os.path.join(ROOT, "dev", "node_modules")):
+        return []
+    want = {p.name: p.version for p in picks if p.kind == "npm" and p.channel != "pin"}
+    cmd = ["docker", "run", "--rm", "--user", "0", "-v", f"{ROOT}:/src:ro", *mount, "-v", f"{WEB_VOLUME}:/web/node_modules",
+           "-v", f"{BROWSERS_VOLUME}:/browsers", "-w", "/src", "--entrypoint", "sh", image, "-c", web_setup(want)]
+    got = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=1200)
+    for line in (got.stdout or "").split("\n"):
+        if line.strip():
+            print(line if line.startswith("    Installing") else f"    {DIM}{line.strip()}{OFF}", flush=True)
     if got.returncode:
-        print(f"    {DIM}npm couldn't install them ({(got.stderr or got.stdout).strip()[-300:]}): the pins for this run{OFF}")
-        shutil.rmtree(WEB_DIR, ignore_errors=True)
-        return None
-    with open(marker, "w", encoding="utf-8") as fh:
-        fh.write(stamp)
-    return modules
+        return []
+    return ["-v", f"{WEB_VOLUME}:/src/dev/node_modules:ro", "-v", f"{BROWSERS_VOLUME}:/browsers:ro", "-e", "PLAYWRIGHT_BROWSERS_PATH=/browsers"]
 
 
 def host_arch() -> str:
@@ -621,7 +641,7 @@ def parallel_route(tag: str, args: list[str], picks: list[Pick], node_pick: Pick
     def part(name: str, image: str, leave: list[str]) -> None:
         suite = f"python {' '.join(WARN)} tests/run.py" + "".join(f" --exclude {c}" for c in leave) + f" -j{jobs}"
         cmd = ["docker", "run", "--rm", "-e", "PLEXCACHE_PROGRESS=feed", "-e", "CI=1", "-e", f"PLEXCACHE_PINS={json.dumps(pins)}", *WEB_TARGETS,
-               "--user", "0", "-v", f"{ROOT}:/src:ro", *mount, "-w", "/src", "--entrypoint", "sh", image, "-c", f"{NODE_SETUP}; exec {suite}"]
+               "--user", "0", "-v", f"{ROOT}:/src:ro", *mount, "-w", "/src", "--entrypoint", "sh", image, "-c", f"{NODE_SETUP}; {BROWSER_SETUP}; exec {suite}"]
         last = ""
         with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, errors="replace") as proc:
             for line in proc.stdout or []:
@@ -640,9 +660,7 @@ def parallel_route(tag: str, args: list[str], picks: list[Pick], node_pick: Pick
     def early() -> None:   # (node fetched and the web's packages installed, then the tests that need no tools)
         tarball = fetch_node(node_pick) if node_pick else None
         mount.extend(["-v", f"{tarball}:/node.tar.xz:ro"] if tarball else [])
-        modules = install_web(picks)
-        if modules and os.path.isdir(os.path.join(ROOT, "dev", "node_modules")):
-            mount.extend(["-v", f"{modules}:/src/dev/node_modules:ro"])
+        mount.extend(install_web(picks, f"python:{tag}", list(mount)))   # (before either run: both mount it)
         ready.set()
         part("plain", f"python:{tag}", [*(exclude or []), *in_image])
 
@@ -726,10 +744,8 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
     tarball = fetch_node(node_pick) if node_pick else None
     mount = ["-v", f"{tarball}:/node.tar.xz:ro"] if tarball else []
     # the web's packages at the channels' choices, over the checkout's (which stay at the pins); the checks a year ahead
-    modules = install_web(picks)
-    if modules and os.path.isdir(os.path.join(ROOT, "dev", "node_modules")):
-        mount += ["-v", f"{modules}:/src/dev/node_modules:ro"]
-    node = NODE_SETUP
+    mount += install_web(picks, IMAGE, list(mount))
+    node = f"{NODE_SETUP}; {BROWSER_SETUP}"
     tty = ["-t"] if sys.stdout.isatty() else []
     if feeding():  # (on tnsync's board: tests/run.py's bar sent to it, through docker's output)
         tty = ["-e", "PLEXCACHE_PROGRESS=feed"]

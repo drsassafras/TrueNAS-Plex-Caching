@@ -15347,7 +15347,7 @@ class FutureTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": "feed"}), mock.patch.object(sys, "stdout", out), \
                 mock.patch.object(future, "TESTS", [520]), mock.patch.object(future, "build_image", side_effect=build), \
                 mock.patch.object(future, "docker_cpus", return_value=4), mock.patch.object(future, "fetch_node", return_value=None), \
-                mock.patch.object(future, "install_web", return_value=None), mock.patch.object(future, "test_classes", return_value=["AppTests", "OptimizerTests", "StyleGuideTests"]), \
+                mock.patch.object(future, "install_web", return_value=[]), mock.patch.object(future, "test_classes", return_value=["AppTests", "OptimizerTests", "StyleGuideTests"]), \
                 mock.patch.object(future.subprocess, "Popen", Proc), mock.patch.object(future.subprocess, "run", return_value=mock.Mock(returncode=0)):
             rc = future.parallel_route("3.16.0a1-slim-trixie", [], [], None, ["StyleGuideTests"])
         self.assertEqual(rc, 1)
@@ -15356,6 +15356,7 @@ class FutureTests(unittest.TestCase):
         self.assertIn("--exclude StyleGuideTests --exclude OptimizerTests -j8", plain_cmd)   # (the tools' tests left for the image)
         self.assertIn("--exclude AppTests -j8", image_cmd)                                    # (only those, in it)
         self.assertNotIn("OptimizerTests", image_cmd)
+        self.assertTrue(all("playwright install-deps chromium" in c for c in (plain_cmd, image_cmd)))   # (Chromium's libraries in each)
         recs = [json.loads(x[1:]) for x in out.getvalue().split("\n") if x.startswith("\036")]
         bars = [(r["done"], r["total"]) for r in recs if r.get("bar") == "tests"]
         self.assertTrue(all(total >= 520 for _, total in bars), bars)     # (every test in its total from the start, never "-")
@@ -15388,6 +15389,43 @@ class FutureTests(unittest.TestCase):
             self.assertNotIn("does not start", got.stdout)
             self.assertIn("libatomic1", _read(os.path.join(d, "apt"), encoding="utf-8"))
             self.assertTrue(os.path.exists(os.path.join(d, "fixed")))
+
+    def test_the_web_packages_are_installed_for_linux_in_a_container(self):
+        """The suite's containers don't get the checkout's node_modules (the host's: a Mac's binaries, TypeScript's and the
+        rest, which Linux can't load) nor go without Playwright's Chromium: dev/package.json's packages, at the channels'
+        choices, are installed in a container of the run's image into a Docker volume, with Chromium into another, once for
+        what they're installed from; the suite mounts both."""
+        import subprocess
+
+        from dev import future
+        picks = [future.Pick("typescript", "7.1.0-dev.1", "next", "", "7.1.0-dev.1", "npm"), future.Pick("eslint", "10.0.0", "pin", "", "10.0.0", "npm")]
+        runs = []
+
+        def run(cmd, **kw):
+            runs.append(cmd)
+            return mock.Mock(returncode=0, stdout="    Installing the web’s packages\n")
+        with mock.patch.object(future.subprocess, "run", side_effect=run), mock.patch.object(future.os.path, "isdir", return_value=True), \
+                mock.patch.object(future.shutil, "which", side_effect=AssertionError("the host's npm")), mock.patch.object(sys, "stdout", io.StringIO()):
+            mounts = future.install_web(picks, "python:3.16.0a1-slim-trixie", ["-v", "/n.tar.xz:/node.tar.xz:ro"])
+        (cmd,) = runs
+        self.assertEqual(cmd[:2], ["docker", "run"])
+        self.assertIn("python:3.16.0a1-slim-trixie", cmd)
+        self.assertIn(f"{future.WEB_VOLUME}:/web/node_modules", cmd)
+        self.assertIn(f"{future.BROWSERS_VOLUME}:/browsers", cmd)
+        script = cmd[-1]
+        self.assertLess(script.index("node.tar.xz"), script.index("npm install"))                 # (its node first)
+        self.assertIn("npm install --prefix /web --no-audit --no-fund --save-exact typescript@7.1.0-dev.1", script)
+        self.assertNotIn("eslint@", script)                                                       # (a pin: the lock's)
+        self.assertIn("playwright install chromium", script)
+        self.assertEqual(subprocess.run(["sh", "-n", "-c", script]).returncode, 0)                 # (it parses)
+        self.assertEqual(subprocess.run(["sh", "-n", "-c", future.BROWSER_SETUP]).returncode, 0)
+        self.assertIn(f"{future.WEB_VOLUME}:/src/dev/node_modules:ro", mounts)
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/browsers", mounts)
+        self.assertIn(future.web_stamp({"typescript": "7.1.0-dev.1"}), script)                     # (installed again only when it changes)
+        self.assertNotEqual(future.web_stamp({"typescript": "7.1.0-dev.1"}), future.web_stamp({}))
+        with mock.patch.object(future.subprocess, "run", return_value=mock.Mock(returncode=1, stdout="    npm couldn’t install them\n")), \
+                mock.patch.object(future.os.path, "isdir", return_value=True), mock.patch.object(sys, "stdout", io.StringIO()):
+            self.assertEqual(future.install_web(picks, "img", []), [])                           # (failed: said, nothing mounted)
 
     def test_the_bar_counts_the_tests_before_the_build(self):
         """The one bar's total from its start (the build's steps and the tests): the tests counted in the checkout, as the
