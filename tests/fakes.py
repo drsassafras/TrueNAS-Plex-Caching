@@ -11,7 +11,9 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from xml.sax.saxutils import quoteattr
 
 MiB = 1024 * 1024
@@ -124,6 +126,9 @@ class FakePlex:
         self.author = "Author"
         self.sessions: list[dict] = []
         self.requests: list[str] = []
+        self.posts: list[tuple[str, bytes]] = []   # (each POST: its path and body)
+        self.changed_at = "1"                      # (the libraries' contentChangedAt: a test moves it on)
+        self.on_scan: Callable[[str], object] | None = None   # (a test's Plex "finding" files where a scan was asked for)
         root = cat["root"]
         self.libraries = [
             ("1", "Movies", "movie", os.path.join(root, "Movies")),
@@ -135,7 +140,7 @@ class FakePlex:
         fake = self
 
         class H(BaseHTTPRequestHandler):
-            def log_message(self, *a):
+            def log_message(self, format, *args):  # noqa: A002 — (http.server's own name for it)
                 pass
 
             def do_GET(self):
@@ -180,7 +185,7 @@ class FakePlex:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(n) if n else b""
                 fake.requests.append("POST " + self.path)
-                fake.posts = getattr(fake, "posts", []) + [(self.path, body)]
+                fake.posts = fake.posts + [(self.path, body)]
                 parts = self.path.split("?")[0].split("/")
                 if len(parts) == 5 and parts[4] in ("posters", "arts"):  # an image uploaded: chosen by hand now
                     m = next((m for m in fake.cat["movies"] if m["key"] == parts[3]), None)
@@ -302,7 +307,7 @@ class FakePlex:
             return "<MediaContainer>" + "".join(f'<Setting id="{k}" type="text" value="{v}"/>' for k, v in self.prefs.items()) + "</MediaContainer>"
         if u.path == "/library/sections":
             dirs = "".join(
-                f'<Directory key="{k}" title="{t}" type="{ty}" contentChangedAt="{getattr(self, "changed_at", "1")}">'
+                f'<Directory key="{k}" title="{t}" type="{ty}" contentChangedAt="{self.changed_at}">'
                 + "".join(f'<Location id="{k}{i}" path={quoteattr(p)}/>' for i, p in enumerate(loc.split("|")))
                 + "</Directory>"
                 for k, t, ty, loc in self.libraries
@@ -310,7 +315,7 @@ class FakePlex:
             return f"<MediaContainer>{dirs}</MediaContainer>"
         if u.path.startswith("/library/sections/") and u.path.endswith("/refresh"):  # a folder scanned: noted
             self.scanned = getattr(self, "scanned", []) + [q.get("path", [""])[0]]
-            if getattr(self, "on_scan", None):  # (a test's Plex "finding" files there)
+            if self.on_scan is not None:  # (a test's Plex "finding" files there)
                 self.on_scan(q.get("path", [""])[0])
             return "<MediaContainer/>"
         if u.path.startswith("/library/sections/") and u.path.endswith("/all"):
@@ -406,7 +411,7 @@ class FakePlexTV:
         fake = self
 
         class H(BaseHTTPRequestHandler):
-            def log_message(self, *a):
+            def log_message(self, format, *args):  # noqa: A002 — (http.server's own name for it)
                 pass
 
             def _reply(self, data):
@@ -448,6 +453,10 @@ class FakeTrueNAS:
                  workdir: str | None = None):
         self.api_key = api_key
         self.calls: list[str] = []
+        self.methods_missing: tuple[str, ...] | list[str] = ()   # (core.get_methods leaves these out: an older TrueNAS)
+        self.interfaces: list[dict] = []   # (the host's interfaces: [{"name", "aliases": [{"type": "INET", "address"}], "state": {"aliases"}}])
+        self.snapshot_api = "pool.snapshot"   # (the snapshot API by TrueNAS version: pool.snapshot.* from 25.04, zfs.snapshot.* before)
+        self.snapshot_refused = ""            # (a snapshot refused with this message)
         self.pool_data = pool or {
             "name": "tank", "status": "ONLINE",
             "topology": {
@@ -505,6 +514,7 @@ class FakeTrueNAS:
                 req = json.loads(msg)
                 self.calls.append(req["method"])
                 error = None
+                result = None
                 # an unrelated notification first, to test the client skips it
                 self._send(conn, json.dumps({"jsonrpc": "2.0", "method": "collection_update", "params": {}}))
                 if req["method"] == "auth.login_with_api_key":
@@ -523,14 +533,14 @@ class FakeTrueNAS:
                 elif req["method"] == "core.get_methods":  # (every method this TrueNAS has, by name; methods_missing: left out)
                     have = ["auth.login_with_api_key", "system.version", "system.host_id", "interface.query", "pool.query", "pool.dataset.query", "zfs.dataset.query", "disk.query",
                             "app.query", "app.pull_images", "app.redeploy", "core.get_methods"] + \
-                           [getattr(self, "snapshot_api", "pool.snapshot") + x for x in (".query", ".create", ".delete", ".rollback")]
-                    result = {m: {"description": ""} for m in have if m not in getattr(self, "methods_missing", ())}
+                           [self.snapshot_api + x for x in (".query", ".create", ".delete", ".rollback")]
+                    result = {m: {"description": ""} for m in have if m not in self.methods_missing}
                 elif req["method"] == "system.version":
                     result = "TrueNAS-25.10.0"
                 elif req["method"] == "system.host_id":
                     result = "d41d8cd98f00b204e9800998ecf8427e"
                 elif req["method"] == "interface.query":
-                    result = getattr(self, "interfaces", [])  # (a test gives the host its interfaces: [{"name", "aliases": [{"type": "INET", "address"}], "state": {"aliases"}}])
+                    result = self.interfaces  # (a test gives the host its interfaces: [{"name", "aliases": [{"type": "INET", "address"}], "state": {"aliases"}}])
                 elif req["method"] == "pool.query":
                     result = [self.pool_data]
                 elif req["method"] == "pool.dataset.query":
@@ -554,7 +564,7 @@ class FakeTrueNAS:
                 # the snapshot API by TrueNAS version: pool.snapshot.* from 25.04, zfs.snapshot.* before (snapshot_api
                 # says which this fake TrueNAS has; the other name is "Method does not exist", as TrueNAS answers)
                 elif req["method"].endswith((".snapshot.query", ".snapshot.delete", ".snapshot.create", ".snapshot.rollback")) and \
-                        req["method"].rsplit(".", 1)[0] != getattr(self, "snapshot_api", "pool.snapshot"):
+                        req["method"].rsplit(".", 1)[0] != self.snapshot_api:
                     self.snapshot_calls = getattr(self, "snapshot_calls", []) + [req["method"]]
                     error = {"code": -32601, "message": "Method does not exist", "data": {"reason": f"Method {req['method']} does not exist"}}
                 elif req["method"].endswith(".snapshot.query"):
@@ -574,7 +584,7 @@ class FakeTrueNAS:
                 elif req["method"].endswith(".snapshot.create"):
                     self.snapshot_calls = getattr(self, "snapshot_calls", []) + [req["method"]]
                     spec = req["params"][0]
-                    if getattr(self, "snapshot_refused", ""):
+                    if self.snapshot_refused:
                         error = {"code": 1, "message": self.snapshot_refused}
                     else:
                         self.snapshots = getattr(self, "snapshots", {})
@@ -890,7 +900,7 @@ class FakeSyncthing:
 
     def __init__(self, api_key: str = "st-key", folders: list | None = None, my_id: str = ST_MY_ID, other_id: str = ST_OTHER_ID):
         self.api_key, self.my_id, self.other_id = api_key, my_id, other_id
-        self.devices = [{"deviceID": my_id, "name": "Starlit NAS"}, {"deviceID": other_id, "name": "Cottage NAS"}]
+        self.devices: list[dict[str, Any]] = [{"deviceID": my_id, "name": "Starlit NAS"}, {"deviceID": other_id, "name": "Cottage NAS"}]
         self.folders: list[dict] = folders if folders is not None else []
         self.connected: dict[str, bool] = {other_id: True}
         self.connections_address: dict[str, str] = {}  # device -> "host:port" it's connected from
@@ -907,7 +917,7 @@ class FakeSyncthing:
         fake = self
 
         class H(BaseHTTPRequestHandler):
-            def log_message(self, *a):
+            def log_message(self, format, *args):  # noqa: A002 — (http.server's own name for it)
                 pass
 
             def _reply(self, data, code=200):

@@ -47,6 +47,8 @@ import sys
 import time
 import unittest
 import warnings
+from collections.abc import Callable
+from typing import Any
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -128,7 +130,7 @@ class ProgressResult(unittest.TextTestResult):
         self.progress = Progress(total, tty, feed=FEED, bar="tests", tests=True)
         self.progress.before = BEFORE
         self.progress.workers = 1   # (this process alone: on the board, at the bar's right)
-        self.on_stop = None   # the SIGTERM handler main() sets, kept in place between tests
+        self.on_stop: Callable[..., Any] | None = None   # the SIGTERM handler main() sets, kept in place between tests
 
     @property
     def done(self) -> int:
@@ -186,6 +188,7 @@ def run_here(module: str, suite, total: int, tty: bool, started: float) -> int:
         resultclass=lambda stream, desc, verb: ProgressResult(stream, desc, verb, total, tty))
     # TextTestRunner prints its own summary; keep ours instead.
     result = runner._makeResult()
+    assert isinstance(result, ProgressResult)   # (its resultclass's)
     unittest.registerResult(result)
 
     def stop(*_):
@@ -468,7 +471,7 @@ def worker(module: str) -> int:
         def _said(self, test, flavour=None, err=None):
             text = None
             if err is not None:
-                text = f"{self.separator1}\n{flavour}: {self.getDescription(test)}\n{self.separator2}\n{self._exc_info_to_string(err, test)}"
+                text = f"{self.separator1}\n{flavour}: {self.getDescription(test)}\n{self.separator2}\n{self._exc_info_to_string(err, test)}"  # pyright: ignore[reportAttributeAccessIssue] — unittest's own way of saying a failure, not in its stubs
             counted = isinstance(test, unittest.TestCase)  # (a setUpClass/tearDownModule error isn't a test)
             say(t="test", id=test.id() if counted else None, name=_name(test), text=text)
 

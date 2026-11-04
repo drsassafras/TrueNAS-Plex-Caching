@@ -90,6 +90,8 @@ class MirrorHealth:
         self.running: str | None = None
         self.checked_at = float(saved.get("checked_at") or 0)
         self.wanted: set[str] = set()  # libraries to compare again (Scan Again, after Scan Folder): not current until they are
+        self._libs: tuple | None = None  # paired()'s answer: (when, libraries, what it was for)
+        self._snap: tuple | None = None  # the mirror's snapshot: (what it was for, when, what it said)
 
     def save(self) -> None:
         with self.lock:
@@ -114,7 +116,7 @@ class MirrorHealth:
         here."""
         here = tuple(str(lib["key"]) for lib in getattr(self.app, "libraries", []) or [])
         sig = (here, self.app.settings.rev)  # (the libraries here, the pairing chosen: what's paired follows them at once)
-        cached = getattr(self, "_libs", None)
+        cached = self._libs
         if cached and cached[2] == sig and time.time() - cached[0] < 60:
             return cached[1], None
         other = getattr(self.app, "mirrors", None)
@@ -665,7 +667,7 @@ class MirrorHealth:
     def snapshot(self) -> dict:
         """For the state and Library Health (small): what's running, when each library was last checked, the libraries
         compared, the link's health, the libraries held — worked out at most every few seconds."""
-        cached = getattr(self, "_snap", None)
+        cached = self._snap
         from . import libhealth
         quiet = libhealth.ignored(self.app) or {}
         key = (self.running, self.checked_at, self.app.settings.rev, tuple(str(lib["key"]) for lib in getattr(self.app, "libraries", []) or []), tuple(sorted((k, tuple((v or {}).get(SYNC_ITEM) or ())) for k, v in quiet.items())))

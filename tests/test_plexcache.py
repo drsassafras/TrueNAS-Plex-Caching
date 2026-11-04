@@ -1,6 +1,7 @@
 import contextlib
 import copy
 import datetime as dt
+import email.message
 import errno
 import hashlib
 import html
@@ -20,7 +21,9 @@ import time
 import types
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
+from typing import Any, cast
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +31,12 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(__file__))
 
 TMP = tempfile.mkdtemp(prefix="plexcache-test-")
+
+
+def some[T](x: T | None) -> T:
+    """What the code may give as None, here known not to be: said so (the type check holds the test to it)."""
+    assert x is not None
+    return x
 # Never ask GitHub for the latest version while testing (an app started by a test would, after 30 s).
 os.environ["PLEXCACHE_UPDATE_SOURCE"] = "http://127.0.0.1:9/never"
 # No optimizer service: nothing listens there, so the app sees it as not set up.
@@ -60,6 +69,7 @@ zfs.block_sizes = lambda paths: (lambda n: {"checked": n, "single": n, "sizes": 
 import plexcache.plex as _plexmod  # noqa: E402
 from plexcache import peerlink as _peerlink  # noqa: E402
 from plexcache.app import App  # noqa: E402
+from plexcache.optimizing import OptimizerClient  # noqa: E402 — (FakeOptimizer stands in for it)
 
 _plexmod.PLEX_TV = "http://127.0.0.1:9"  # never plex.tv itself: nothing listens there (a test wanting it starts FakePlexTV)
 from plexcache.i18n import M, from_json, jsonable  # noqa: E402
@@ -223,7 +233,9 @@ class PlexTests(unittest.TestCase):
     def test_next_episode_crosses_seasons(self):
         last_s1 = [e for e in CAT["episodes"] if e["season"] == 1][-1]
         nxt = self.c.next_episode(last_s1["key"], "500")
+        assert nxt is not None
         self.assertEqual((nxt["season"], nxt["episode"]), (2, 1))
+        assert nxt is not None
         self.assertTrue(nxt["files"][0][0].endswith("S02E01.mkv"))
         self.assertIsNone(self.c.next_episode(CAT["episodes"][-1]["key"], "500"))
 
@@ -254,7 +266,7 @@ class TrueNASTests(unittest.TestCase):
             pool = tn.pool("tank")
             sizes = tn.disk_sizes(["nvme1n1"])
             props = tn.dataset_cache_props("tank/plexfiles")
-        info = describe_pool(pool, sizes)
+        info = describe_pool(some(pool), sizes)
         self.assertEqual(info["l2_total"], 960 * 10 ** 9)
         self.assertEqual(info["l2_online"], 2)
         self.assertEqual(info["data_disks"], 4)
@@ -289,18 +301,22 @@ class TrueNASTests(unittest.TestCase):
 class ZfsTests(unittest.TestCase):
     def test_arcstats(self):
         a = zfs.arc_summary(zfs.arcstats())
+        assert a is not None
         self.assertAlmostEqual(a["arc_hit_ratio"], 0.94)
+        assert a is not None
         self.assertTrue(a["l2_present"])
 
     def test_mount_for(self):
         m = zfs.mount_for(os.path.join(MEDIA, "Movies", "x.mkv"))
+        assert m is not None
         self.assertEqual(m["dataset"], "tank/plexfiles")
+        assert m is not None
         self.assertEqual(m["pool"], "tank")
-        self.assertEqual(zfs.mount_for("/etc/passwd")["fstype"], "overlay")
+        self.assertEqual(some(zfs.mount_for("/etc/passwd"))["fstype"], "overlay")
 
     def test_escaped_mountpoint(self):
         mounts = [{"root": "/", "mountpoint": "/media/My Films", "fstype": "zfs", "source": "tank/films"}]
-        self.assertEqual(zfs.mount_for("/media/My Films/a.mkv", mounts)["dataset"], "tank/films")
+        self.assertEqual(some(zfs.mount_for("/media/My Films/a.mkv", mounts))["dataset"], "tank/films")
         self.assertEqual(zfs._unescape("/media/My\\040Films"), "/media/My Films")
 
 
@@ -413,7 +429,7 @@ class ReaderAndPlanTests(unittest.TestCase):
         self.assertEqual((r["result"], r["by_kind"]["movie"]["hits"], len(r["sample"])), ("ok", 0, warmup.SAMPLE_FILES))
         missing = [MediaFile(f"/missing/{i}.mkv", 8000, 10 * MiB, "movie") for i in range(3)]
         self.assertEqual(WarmupRun(missing + files[:1], {"movie": 2}, 100, 150, threading.Event()).run()["result"], "errors")
-        w = dict(config.DEFAULTS["warmup"], libraries={})
+        w: dict[str, Any] = dict(config.DEFAULTS["warmup"], libraries={})
         need = plan(self._stats(), w, None)["need_max"]
         self.assertEqual(plan(self._stats(), w, int(need / 0.95) + w["reserve_gb"] * warmup.GB)["status"], "tight")
         self.assertEqual(warmup.resolve_schedule("ram", "1", "default"), "none")
@@ -546,25 +562,25 @@ class PrefetchPlanTests(unittest.TestCase):
     def test_tv_ladder(self):
         from plexcache import prefetch as pf
         steps = pf.tv_steps(self.show(), "12")                     # S01E02
-        self.assertEqual(self.keys(pf.plan(steps, "next")), ["13"])
-        self.assertEqual(self.keys(pf.plan(steps, "rest")), ["13"])
-        self.assertEqual(self.keys(pf.plan(steps, "whole")), ["13", "11"])           # the rest first, then the earlier one
-        self.assertEqual(self.keys(pf.plan(steps, "next_group")), ["13", "11", "21", "22", "23"])
-        self.assertEqual(self.keys(pf.plan(steps, "all_groups")), ["13", "11", "21", "22", "23", "31", "32", "33"])  # no specials
+        self.assertEqual(self.keys(pf.plan(some(steps), "next")), ["13"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "rest")), ["13"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "whole")), ["13", "11"])           # the rest first, then the earlier one
+        self.assertEqual(self.keys(pf.plan(some(steps), "next_group")), ["13", "11", "21", "22", "23"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "all_groups")), ["13", "11", "21", "22", "23", "31", "32", "33"])  # no specials
         lib = [{"rating_key": "", "files": [("/other/show.mkv", 1, 1)]}]
-        self.assertEqual(self.keys(pf.plan(steps, "library", lib))[-1], "")
-        self.assertEqual(pf.plan(steps, "off"), [])
+        self.assertEqual(self.keys(pf.plan(some(steps), "library", lib))[-1], "")
+        self.assertEqual(pf.plan(some(steps), "off"), [])
 
     def test_season_of_what_plays_next(self):
         from plexcache import prefetch as pf
         # At the last episode of season 1, the next one is S02E01, so "the season" is season 2
         steps = pf.tv_steps(self.show(), "13")
-        self.assertEqual(self.keys(pf.plan(steps, "next")), ["21"])
-        self.assertEqual(self.keys(pf.plan(steps, "rest")), ["21", "22", "23"])
-        self.assertEqual(self.keys(pf.plan(steps, "whole")), ["21", "22", "23"])
-        self.assertEqual(self.keys(pf.plan(steps, "next_group")), ["21", "22", "23", "31", "32", "33"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "next")), ["21"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "rest")), ["21", "22", "23"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "whole")), ["21", "22", "23"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "next_group")), ["21", "22", "23", "31", "32", "33"])
         # The last episode of the show: nothing comes next
-        self.assertEqual(pf.plan(pf.tv_steps(self.show(), "33"), "rest"), [])
+        self.assertEqual(pf.plan(some(pf.tv_steps(self.show(), "33")), "rest"), [])
         self.assertIsNone(pf.tv_steps(self.show(), "missing"))
 
     def test_audio_ladders(self):
@@ -574,18 +590,19 @@ class PrefetchPlanTests(unittest.TestCase):
             return [{"rating_key": f"{name}{i}", "files": [(f"/{name}{i}", 1)], "duration_ms": 1000} for i in range(1, n + 1)]
         a, b, c = album("a", 3), album("b", 2), album("c", 2)
         steps = pf.audio_steps(a, "a2", b, [a, b, c], "books")
-        self.assertEqual(self.keys(pf.plan(steps, "next")), ["a3"])
-        self.assertEqual(self.keys(pf.plan(steps, "whole")), ["a3", "a1"])
-        self.assertEqual(self.keys(pf.plan(steps, "next_group")), ["a3", "a1", "b1", "b2"])
-        self.assertEqual(self.keys(pf.plan(steps, "all_groups")), ["a3", "a1", "b1", "b2", "c1", "c2"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "next")), ["a3"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "whole")), ["a3", "a1"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "next_group")), ["a3", "a1", "b1", "b2"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "all_groups")), ["a3", "a1", "b1", "b2", "c1", "c2"])
         # The last chapter: the next book is the one in focus
         steps = pf.audio_steps(a, "a3", b, [a, b, c], "books")
-        self.assertEqual(self.keys(pf.plan(steps, "rest")), ["b1", "b2"])
-        self.assertEqual(self.keys(pf.plan(steps, "next_group")), ["b1", "b2", "c1", "c2"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "rest")), ["b1", "b2"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "next_group")), ["b1", "b2", "c1", "c2"])
         # Music has no next album
         steps = pf.audio_steps(a, "a3", None, [a, b], "music")
-        self.assertEqual(self.keys(pf.plan(steps, "rest")), [])
-        self.assertEqual(self.keys(pf.plan(steps, "whole")), ["a1", "a2"])
+        self.assertEqual(self.keys(pf.plan(some(steps), "rest")), [])
+        self.assertEqual(self.keys(pf.plan(some(steps), "whole")), ["a1", "a2"])
+        assert steps is not None
         self.assertNotIn("next_group", [n for n, _ in steps])
 
     def test_defaults_follow_the_mode_and_fall_back(self):
@@ -614,7 +631,7 @@ class PrefetchPlanTests(unittest.TestCase):
         self.assertEqual(pf.resolve(cm.RAM, "2", "end", "rest", "tv"), "next")       # needs an L2ARC now
         self.assertEqual(pf.resolve(cm.L2ARC, "2", "end", "rest", "tv"), "rest")
         self.assertEqual(pf.resolve(cm.RAM, "2", "end", "none", "tv"), "none")
-        self.assertEqual(pf.plan(pf.tv_steps(self.show(), "12"), "none"), [])
+        self.assertEqual(pf.plan(some(pf.tv_steps(self.show(), "12")), "none"), [])
         # From the 0.15 betas: "off" near the end becomes Nothing; warm-up switched off becomes no warm-up
         d = tempfile.mkdtemp(dir=TMP)
         with open(os.path.join(d, "settings.json"), "w") as fh:
@@ -636,12 +653,12 @@ class PrefetchPlanTests(unittest.TestCase):
     def test_l2arc_only_steps_are_background(self):
         from plexcache import prefetch as pf
         steps = pf.tv_steps(self.show(), "12")
-        tagged = pf.plan_steps(steps, "library", [{"rating_key": "x", "files": [("/x", 1, 1)]}])
+        tagged = pf.plan_steps(some(steps), "library", [{"rating_key": "x", "files": [("/x", 1, 1)]}])
         bg = {it["rating_key"]: pf.background("start", st) for st, it in tagged}
         self.assertFalse(bg["13"])                          # the next episode reads straight away, into RAM
         self.assertTrue(bg["11"] and bg["21"])              # what's needed later goes to the SSD in the background:
         self.assertTrue(bg["31"] and bg["x"])               # earlier episodes, the next season, all seasons, the library
-        ends = [(it["rating_key"], pf.background("end", st)) for st, it in pf.plan_steps(pf.tv_steps(self.show(), "11"), "rest")]
+        ends = [(it["rating_key"], pf.background("end", st)) for st, it in pf.plan_steps(some(pf.tv_steps(self.show(), "11")), "rest")]
         self.assertEqual(ends, [("12", False), ("13", True)])   # in full: the next one into RAM, the rest to the SSD
 
     def test_report_splits_reads_and_next_episodes(self):
@@ -788,7 +805,7 @@ class PrefetchPlanTests(unittest.TestCase):
         later = t + 30 * 86400
         reads(later, 10, 10 * H, True)
         self.assertEqual(log.auto_cooldown("ram", "1", fallback, now=later + 11 * H), 10 * H)
-        self.assertTrue(log.fully_cached("ram", "1", later)["bound"])                    # no misses: at least 10 h
+        self.assertTrue(some(log.fully_cached("ram", "1", later))["bound"])                    # no misses: at least 10 h
         # ...and back down when it doesn't: a miss at the youngest age measured gives the floor
         reads(later + 60 * 86400, 10, 10 * H, False)
         self.assertEqual(log.auto_cooldown("ram", "1", fallback, now=later + 60 * 86400 + 11 * H), cl.AUTO_FLOOR)
@@ -801,7 +818,7 @@ class PrefetchPlanTests(unittest.TestCase):
         days = log.fully_cached_series("ram", ["1"], "day", 3, now=end)
         self.assertEqual(sum(1 for p in days["all"] if p), 1)
         # How likely data of a given age is still cached: the library's own share, else every library's
-        self.assertAlmostEqual(log.still_cached("ram", "1", 2.5 * H), 1.0)
+        self.assertAlmostEqual(some(log.still_cached("ram", "1", 2.5 * H)), 1.0)
         self.assertEqual(log.still_cached("ram", "1", 5 * H), 0.0)
         self.assertIsNone(log.still_cached("ssd", "1", H))
         # Saved and loaded with the rest
@@ -983,7 +1000,7 @@ class PreloadPlanTests(unittest.TestCase):
             app.settings.update({"nowplaying": {"ram_percent": 90}, "nextepisode": {"ram_percent": 20}})
         # Apps using RAM shrink what the ZFS cache can use, whatever its maximum says
         real = zfs.arcstats
-        zfs.arcstats = lambda: dict(real(), size=19 * GiB, memory_free_bytes=3 * GiB, c_max=32 * GiB)
+        zfs.arcstats = lambda: dict(some(real()), size=19 * GiB, memory_free_bytes=3 * GiB, c_max=32 * GiB)
         try:
             b = app.ram_budget()
         finally:
@@ -1021,6 +1038,7 @@ class LayoutTests(unittest.TestCase):
     def test_mkv(self):
         from plexcache.layout import tail_ranges
         size = 40 * MiB
+        kw: dict[str, Any]
         for kw in ({}, {"second_seekhead": True}, {"tags_size": 5000}, {"second_seekhead": True, "tags_size": 5000}):
             p = os.path.join(self.dir, "a.mkv")
             m = fakes.make_mkv(p, size, cues_size=60_000, **kw)
@@ -1038,9 +1056,13 @@ class LayoutTests(unittest.TestCase):
         # the end block (metadata, compressible) is stored compressed
         from plexcache import filemap
         x = filemap.cache_mix(p, filemap.describe(p), MiB)
+        assert x is not None
         self.assertEqual(x["video"] + x["meta"] + x["unused"], x["blocks"] * MiB)
+        assert x is not None
         self.assertLessEqual(x["unused_disk"], x["unused"])
+        assert x is not None
         self.assertLessEqual(x["meta_disk"], x["meta"])
+        assert x is not None
         self.assertEqual(x["video_disk"], x["video"])
         self.assertIsNone(filemap.cache_mix(p, {"size": size}, MiB))      # no layout: nothing to say
 
@@ -1110,21 +1132,30 @@ class LayoutTests(unittest.TestCase):
         # the blocks always cached, each with what's in it — the last one's unused rest (zeros) too
         rec = 64 * 1024
         bm = filemap.block_map(m, size, plan, rec)
+        assert bm is not None
         self.assertEqual([b["n"] for b in bm["start"]], [1])
+        assert bm is not None
         self.assertEqual(sum(p["bytes"] for p in bm["start"][0]["pieces"]), rec)
+        assert bm is not None
         self.assertIn("video", [p["kind"] for p in bm["start"][0]["pieces"]])
+        assert bm is not None
         last = bm["end"][-1]
         self.assertEqual(last["pieces"][-1]["kind"], "empty")
         self.assertEqual(last["data"] + last["pieces"][-1]["bytes"], rec)
+        assert bm is not None
         kinds = {p["kind"] for b in bm["end"] for p in b["pieces"]}
         self.assertTrue({"image", "font", "index", "tags"} <= kinds)
+        assert bm is not None
         self.assertEqual(bm["total_blocks"], -(-size // rec))
         self.assertIsNone(filemap.block_map(None, size, plan, rec))
         # a file whose layout isn't read (a format the inspector doesn't open) is still one block or more: shown as one piece
         small = filemap.block_map({"format": "stream", "size": 7 * 1024 * 1024, "parts": [], "tracks": []}, 7 * 1024 * 1024, plan, rec)
+        assert small is not None
         self.assertEqual((len(small["start"]), small["total_blocks"], small["streams"]), (1, 7 * 1024 * 1024 // rec + (1 if (7 * 1024 * 1024) % rec else 0), ["audio"]))
+        assert small is not None
         self.assertEqual([p["kind"] for p in small["start"][0]["pieces"]][:1], ["other"])
         tiny = filemap.block_map({"format": "stream", "size": 10000, "parts": [], "tracks": []}, 10000, {"floor": rec, "start": 40 * rec}, rec)
+        assert tiny is not None
         self.assertEqual((len(tiny["start"]), tiny["lead_blocks"], tiny["total_blocks"]), (1, 0, 1))  # (a lead-in longer than the file: no blocks it hasn't got)
         # how ZFS might store them: the last block's zeros compress away; random data (video) doesn't
         est = filemap.estimate_blocks(p, [1, last["n"], 999999], rec, size)
@@ -1167,8 +1198,9 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual([filemap.codec_name(x) for x in ("V_MPEGH/ISO/HEVC", "v_mpeg4/iso/avc", "A_AAC", "S_TEXT/UTF8", "S_VOBSUB", "S_HDMV/PGS", "X_NEW")],
                          ["HEVC/H.265/MPEG-H", "AVC/H.264/MPEG-4p10", "AAC", "SubRip/SRT", "VobSub", "HDMV PGS", ""])
         spec = importlib.util.spec_from_file_location("codecs_tool", os.path.join(ROOT, "dev", "codecs.py"))
-        tool = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(tool)
+        tool = importlib.util.module_from_spec(some(spec))
+        assert spec is not None
+        some(spec.loader).exec_module(tool)
         cpp = ('s_codecs.emplace_back("AAC", type_e::A_AAC, track_audio, "mp4a|aac.|A_AAC.*");\n'
                's_codecs.emplace_back("Odd", type_e::V_X, track_video, "", fourcc_c{1u});\n'
                's_codecs.emplace_back("HDMV PGS", type_e::S_HDMV_PGS, track_subtitle, MKV_S_HDMV_PGS);\n'
@@ -1250,7 +1282,7 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual((m["format"], m["tracks"][0]["type"]), ("stream", "audio"))
         from plexcache.app import file_block
         self.assertEqual(file_block(dict(m, blksize=None), 300_000, 512 * 1024), 303_104)  # smaller than a record: one block of its own size
-        self.assertEqual(len(filemap.block_map(m, 300_000, {"floor": 0, "start": 0}, 303_104)["start"]), 1)
+        self.assertEqual(len(some(filemap.block_map(m, 300_000, {"floor": 0, "start": 0}, 303_104))["start"]), 1)
 
     def test_projection(self):
         """What optimizing would make of a file, from its inspection alone: cover art in front (the
@@ -1266,28 +1298,45 @@ class LayoutTests(unittest.TestCase):
         self.assertGreater(m["video_start"], rec)                               # the cover art pushes the video out of the first block
         keep = projection.project(m, rec, "compress", False)
         gone = projection.project(m, rec, "remove", True)
+        assert keep is not None
         self.assertEqual(keep["removed"], {})
+        assert gone is not None
         self.assertEqual(set(gone["removed"]), {"image", "tags"})
+        assert gone is not None
         self.assertGreater(gone["removed"]["image"], 40_000)
+        assert keep is not None
         self.assertEqual(keep["first_video_now"], 0)
+        assert keep is not None
         self.assertGreater(keep["first_video"], rec // 2)                       # only the header in front now
+        assert gone is not None
+        assert keep is not None
         self.assertLess(gone["mix"]["meta_disk"], keep["mix"]["meta_disk"])
-        self.assertLessEqual(keep["mix"]["meta"], m["mix"]["meta"])
+        assert keep is not None
+        assert m is not None
+        self.assertLessEqual(keep["mix"]["meta"], some(m["mix"])["meta"])
         # the charts' rows: the video split into the start's (the lead-in's) and the end's (cached with the
         # metadata there); the total kept never counts what's taken out — now, or once optimized
         v = projection.views(m, gone)
         now, after = v["now"], v["after"]
         # now, what's to go is read and cached like the rest (players read cover art when they open a
         # file): in the total; once optimized, it's gone — the total is that much less
+        assert gone is not None
         for row, mix, out in ((now, m["mix"], True), (after, gone["mix"], False)):
             st, ca = row["stream"], row["cache"]
+            assert mix is not None
             self.assertEqual(st["lead"] + st["tail"], mix["video"])
             self.assertEqual(st["total"], st["lead"] + st["tail"] + st["meta"] + (st["out"] if out else 0))
             self.assertEqual(ca["total"], ca["lead"] + ca["tail"] + ca["meta"] + ca["round"] + (ca["out"] if out else 0))
-        self.assertEqual(now["stream"]["total"], m["mix"]["video"] + m["mix"]["meta"])             # every byte of the cached blocks a play reads
-        self.assertEqual(now["cache"]["total"], m["mix"]["video_disk"] + m["mix"]["meta_disk"] + m["mix"]["unused_disk"] + m["mix"]["round_disk"])
+        assert m is not None
+        self.assertEqual(now["stream"]["total"], some(m["mix"])["video"] + some(m["mix"])["meta"])             # every byte of the cached blocks a play reads
+        assert m is not None
+        self.assertEqual(now["cache"]["total"], some(m["mix"])["video_disk"] + some(m["mix"])["meta_disk"] + some(m["mix"])["unused_disk"] + some(m["mix"])["round_disk"])
+        assert gone is not None
         self.assertEqual(now["stream"]["out"], sum(gone["removed"].values()))
-        self.assertEqual(now["stream"]["meta"], m["mix"]["meta"] - sum(gone["removed"].values()))   # (what's to go: apart)
+        assert m is not None
+        assert gone is not None
+        assert m is not None
+        self.assertEqual(now["stream"]["meta"], some(m["mix"])["meta"] - sum(gone["removed"].values()))   # (what's to go: apart)
         self.assertEqual((now["gone"], after["gone"]), (False, True))
         self.assertNotIn("image", after["kinds"])
         # meaningful: what's streamed less the dead weight — the video at the end, tags, cover art
@@ -1507,7 +1556,9 @@ class LayoutTests(unittest.TestCase):
         self.assertIsNone(checks._shared_record_check(app, "tank/films", ["1", "2"]))
         # Music (512K or 1M) can't share with them: move it out, the others keep 2M or 4M
         r = checks._shared_record_check(app, "tank/media", ["1", "2", "3"])
+        assert r is not None
         self.assertEqual((r["move"], r["keep"]), (["Music"], 4 * 1024 * 1024))
+        assert r is not None
         self.assertIn("Music: 512K or 1M", [str(x) for x in r["needs"]])
         self.assertIsNone(checks._shared_record_check(app, "tank/m", ["3"]))  # one library: nothing to share
 
@@ -1623,7 +1674,7 @@ class WarmupPauseTests(unittest.TestCase):
         p = L2arcPauses(app, manual=False)
         self.assertIsNone(p.reason())
         app.monitor.last_buffering = (time.time(), "Dune on Living room TV")
-        self.assertIn("buffering (Dune on Living room TV)", p.reason())
+        self.assertIn("buffering (Dune on Living room TV)", some(p.reason()))
         app.settings.update({"warmup": {"pause_buffering": False}})
         self.assertIsNone(p.reason())
         app.monitor.preloading = lambda foreground_only=False: "Now-playing is loading Dune"
@@ -1639,16 +1690,16 @@ class WarmupPauseTests(unittest.TestCase):
         mon = app.monitor
         self.assertIsNone(mon._background_pause())
         mon.last_buffering = (time.time(), "Dune on Living room TV")
-        self.assertIn("buffering (Dune on Living room TV)", mon._background_pause())
+        self.assertIn("buffering (Dune on Living room TV)", some(mon._background_pause()))
         msgs = [e["message"] for e in app.activity.snapshot()["events"]]
         self.assertTrue(any(m.startswith("L2ARC-only reads paused: a player was buffering") for m in msgs))
         # A background read doesn't make others wait; a foreground one does
         bg = Job("nextepisode", "Show · S01E05", "/x", [(0, 1)], 1, background=True, state="reading")
         mon._chains["p"] = [bg]
         self.assertIsNone(mon.preloading(foreground_only=True))
-        self.assertIn("Prefetch is loading", mon.preloading())
+        self.assertIn("Prefetch is loading", some(mon.preloading()))
         bg.background = False
-        self.assertIn("Prefetch is loading", mon.preloading(foreground_only=True))
+        self.assertIn("Prefetch is loading", some(mon.preloading(foreground_only=True)))
 
     def test_scrub(self):
         from plexcache.pauses import L2arcPauses
@@ -1674,7 +1725,7 @@ class WarmupPauseTests(unittest.TestCase):
             time.sleep(1.0)
             with open(stats, "w") as fh:
                 fh.write(line.format(name="sdq", ms=1800))   # busy ~80% of the last second
-            self.assertIn("% busy with other work", p.reason())
+            self.assertIn("% busy with other work", some(p.reason()))
             # manual "Run now" goes at full speed and ignores it
             m = L2arcPauses(app, manual=True)
             m.mark_idle()
@@ -1731,7 +1782,7 @@ class AppTests(unittest.TestCase):
         self.assertIsNone(app.health_kept("1"))
         with app._health_lock:
             app._health["1"] = ("an old signature", {"items": ["kept"]})
-        self.assertEqual(app.health_kept(1), {"items": ["kept"]})
+        self.assertEqual(app.health_kept("1"), {"items": ["kept"]})
 
     def test_job_and_process_endpoints(self):
         """The Processes page's reads, the job and folder-move actions, and the poster thumbnails."""
@@ -1847,7 +1898,7 @@ class AppTests(unittest.TestCase):
         from types import SimpleNamespace
         app = _new_app()
         asked = []
-        app.plex = lambda timeout=None: SimpleNamespace(thumb=lambda p: asked.append(p) or p.encode())
+        self.enterContext(mock.patch.object(app, "plex", lambda timeout=None: SimpleNamespace(thumb=lambda p: asked.append(p) or p.encode())))
         self.assertEqual(app.poster_thumb("/library/metadata/1/thumb/1"), b"/library/metadata/1/thumb/1")
         app.poster_thumb("/library/metadata/1/thumb/1")
         self.assertEqual(asked, ["/library/metadata/1/thumb/1"])
@@ -1873,7 +1924,7 @@ class AppTests(unittest.TestCase):
                 files.append(SimpleNamespace(path=p, library_key=lib, size=1, kbps=1, kind="movie"))
         files.append(SimpleNamespace(path=os.path.join(d, "gone.mkv"), library_key="1", size=1, kbps=1, kind="movie"))
         app.files = files
-        app.map_path = lambda p: p
+        self.enterContext(mock.patch.object(app, "map_path", lambda p: p))
         app.library_info = lambda key: {"title": "Movies " + key}
         ins = filemap.Inspector(app)
         gate = threading.Event()
@@ -1972,21 +2023,29 @@ class AppTests(unittest.TestCase):
         self.assertEqual(get("/api/library?key=" + key + "&offset=x")[0], 400)
         code, d = get("/api/library?key=" + key)
         self.assertEqual(code, 200)
+        assert d is not None
         self.assertEqual(d["total"], len([f for f in app.files if str(f.library_key) == key]))
+        assert d is not None
         self.assertEqual(d["files"], sorted(d["files"], key=lambda f: (f["label"].lower(), f["file"])))   # by title
+        assert d is not None
         self.assertTrue(all(f["plan"]["estimated"] and f["blocks"] is None for f in d["files"] if not f["read"]))
         self.assertEqual(self.post("/api/library/survey", {"library": "nope"})[0], 400)
         self.assertEqual(self.post("/api/library/survey", {"library": key})[0], 200)
         self.assertTrue(wait_for(lambda: not (app.inspector.snapshot()["libs"].get(key) or {}).get("running")))
         self.assertEqual(self.post("/api/library/survey", {"library": key, "pause": True})[0], 200)
         code, d = get("/api/library?key=" + key)
+        assert d is not None
         self.assertEqual(d["surveyed"], d["total"])
+        assert d is not None
         one = d["files"][0]
         self.assertTrue(one["read"])
         code, full = get("/api/library/file?path=" + urllib.parse.quote(one["file"]))
+        assert full is not None
         self.assertEqual((code, full["file"], full["format"]), (200, one["file"], "mkv"))
+        assert full is not None
         self.assertIsNotNone(full["blocks"])
         code, est = get("/api/library/blocks?path=" + urllib.parse.quote(one["file"]) + "&n=1")
+        assert est is not None
         self.assertEqual((code, [b["n"] for b in est["blocks"]]), (200, [1]))
         self.assertEqual(get("/api/library/blocks?path=/etc/passwd&n=1")[0], 404)
         self.assertEqual(get("/api/library/blocks?path=" + urllib.parse.quote(one["file"]) + "&n=x")[0], 400)
@@ -1994,11 +2053,14 @@ class AppTests(unittest.TestCase):
         self.assertEqual(get("/api/library/nope")[0], 404)
         self.assertNotIn("survey", [j["kind"] for j in app.jobs.log.jobs()])         # not a job: nothing changes on disk
         self.assertIn(one["health"], ("ideal", "pass", "warn"))                        # each file's caching checks, worst wins
+        assert full is not None
+        assert d is not None
         self.assertTrue(full["checks"] and d["summary"]["checked"] >= 1)
-        self.assertEqual(len(get("/api/library?key=" + key + "&q=zzzz-none")[1]["files"]), 0)
+        self.assertEqual(len(some(some(get("/api/library?key=" + key + "&q=zzzz-none"))[1])["files"]), 0)
 
     def test_health_results(self):
         h = self.app.health
+        assert h is not None
         groups = {g["id"]: g for g in h["groups"]}
         media = {r["library"]: r for r in groups["media"]["table"]}
         self.assertEqual(media["Movies"]["status"], "pass")
@@ -2042,6 +2104,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual("sudo zfs set primarycache=all tank/plexfiles", bad["fix_cmd"])
         self.assertNotIn(f"Cache settings for {TV_DS}", zitems)
         # the good dataset keeps the features usable; the bad one's libraries are named as skipped
+        assert h is not None
         recs = {r["feature"]: r for r in h["recommendations"]}
         self.assertEqual({k: r["verdict"] for k, r in recs.items()}, {"warmup": "use", "nextepisode": "use", "nowplaying": "use"})
         self.assertIn("Skips Movies and Audiobooks (tank/plexfiles has primarycache=metadata)", recs["nowplaying"]["reason"])
@@ -2055,7 +2118,7 @@ class AppTests(unittest.TestCase):
             self.assertEqual(c[k]["status"], "ok", (k, c[k]))
         self.assertEqual(c["summary"]["status"], "ok")
         self.assertIn("libraries visible", c["plex_token"]["detail"])
-        groups = {g["id"]: g for g in self.app.health["groups"]}
+        groups = {g["id"]: g for g in some(self.app.health)["groups"]}
         titles = [i["title"] for i in groups["plex"]["items"]]
         self.assertIn("Plex server found", titles)
         self.assertIn("Signed in to Plex", titles)
@@ -2225,7 +2288,7 @@ class AppTests(unittest.TestCase):
                     break
                 time.sleep(0.1)
             self.app.run_checks()
-            groups = {g["id"]: g for g in self.app.health["groups"]}
+            groups = {g["id"]: g for g in some(self.app.health)["groups"]}
             rows = {r["dataset"]: r for r in groups["datasets"]["datasets"]}
             self.assertEqual(rows["tank/plexfiles"]["libraries"], ["Audiobooks"])
             self.assertEqual(rows["tank/plexfiles"]["in_use"]["text"], "Audiobooks · not cached: Movies")
@@ -2314,7 +2377,7 @@ class AppTests(unittest.TestCase):
             self.app.run_checks()
         finally:
             mapping.SYSTEM_MOUNTS = saved
-        groups = {g["id"]: g for g in self.app.health["groups"]}
+        groups = {g["id"]: g for g in some(self.app.health)["groups"]}
         rows = {r["dataset"]: r for r in groups["datasets"]["datasets"]}
         self.assertEqual(rows["tank/spare"]["in_use"], {"status": "warn", "text": "No Plex library"})
         self.assertIsNone(rows["tank/spare"]["cache"])                 # nothing cached from it, so not checked
@@ -2328,6 +2391,7 @@ class AppTests(unittest.TestCase):
         def spy(path, size):
             p = self.app.benchmark_progress
             saved = set(self.app.settings.section("general")["disk_speeds"])
+            assert p is not None
             seen.append((p["dataset"], p["done"], p["total"], tuple(p["finished"]), saved))
             return real(path, size)
         appmod.benchmark_file = spy
@@ -2356,7 +2420,7 @@ class AppTests(unittest.TestCase):
             speeds = self.app.settings.section("general")["disk_speeds"]
             self.assertEqual(set(speeds), {"tank/plexfiles", TV_DS})
             self.assertTrue(all(v["mb_s"] >= 10 and v["measured_at"] for v in speeds.values()))
-            self.assertEqual({r["dataset"] for r in self.app.benchmark["rows"]}, {"tank/plexfiles", TV_DS})
+            self.assertEqual({r["dataset"] for r in some(self.app.benchmark)["rows"]}, {"tank/plexfiles", TV_DS})
             # each library's files are judged against their own dataset's speed
             self.app.settings.update({"general": {"disk_speeds": {TV_DS: {"mb_s": 900}, "tank/plexfiles": {"mb_s": 120}}}})
             self.assertEqual(self.app.disk_speed_for_library("2"), 900)
@@ -2433,8 +2497,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(run["index"]["tv"]["largest"], 20_012)
         msgs = [e["message"] for e in self.app.activity.snapshot()["events"]]
         self.assertTrue(any("TV episodes: 6 of 6 had some" in m for m in msgs), msgs[:5])
-        self.assertAlmostEqual(self.app.index_avg()["tv"], 20_012)
-        self.assertEqual(self.app.index_layout()["tv"], {"share": 1.0, "avg": 20_012, "front": 96})   # front: before the video
+        self.assertAlmostEqual(some(self.app.index_avg())["tv"], 20_012)
+        self.assertEqual(some(self.app.index_layout())["tv"], {"share": 1.0, "avg": 20_012, "front": 96})   # front: before the video
         self.assertEqual(run["errors"], 0)
         self.assertTrue(run["manual"])
 
@@ -2442,6 +2506,7 @@ class AppTests(unittest.TestCase):
         ep = CAT["episodes"][2]  # S01E03 -> next is S02E01
         PLEX.sessions = [{"id": "s9", "item": ep, "offset": 700000, "duration": 1200000}]
         try:
+            jobs = None
             for _ in range(60):
                 snap = self.app.monitor.snapshot()
                 jobs = [j for s in snap for j in s["jobs"]]
@@ -2449,6 +2514,7 @@ class AppTests(unittest.TestCase):
                     break
                 time.sleep(0.2)
             feats = {}
+            assert jobs is not None
             for j in jobs:
                 feats.setdefault(j["feature"], j)                   # the first of each: the next episode comes first
             self.assertEqual(feats["nextepisode"]["target"], "Show's Name · S02E01")
@@ -2472,6 +2538,21 @@ def force_settings(app, patch):
     with app.settings._lock:
         for sec, values in patch.items():
             app.settings._data[sec].update(values)
+
+
+def swap(test: unittest.TestCase, obj: object, name: str, value: object) -> None:
+    """obj.name is value until the test ends, then what it was (a method the class has: the class's again), however often
+    it was swapped, or taken away (del) meanwhile. (mock.patch.object can't: two patches of one method on the same object,
+    or one and a del, each take it away from the object at the end, and the second finds nothing to take.)"""
+    swapped = test.__dict__.setdefault("_swapped", set())
+    if (id(obj), name) not in swapped:
+        swapped.add((id(obj), name))
+        own = vars(obj)
+        if name in own:
+            test.addCleanup(own.__setitem__, name, own[name])
+        else:
+            test.addCleanup(own.pop, name, None)
+    setattr(obj, name, value)
 
 
 def wait_for(cond, timeout=10.0, step=0.05):
@@ -2622,7 +2703,7 @@ class PlaybackMonitorTests(unittest.TestCase):
             self.poll()
             self.poll()
             self.assertEqual(sum("isn’t found here" in en(e) for e in self.events()), 1)
-            self.assertEqual(app.monitor.last_sessions["sessions"][0]["rating_key"], "9999")   # (for the exported log)
+            self.assertEqual(some(some(some(app.monitor.last_sessions)["sessions"])[0])["rating_key"], "9999")   # (for the exported log)
             self.assertIn("plex_sessions", app.diagnostics())
             # Within the whole-file cooldown: not read again, and Recent events says why
             app.settings.update({"general": {"ram_cooldown_whole_minutes": 180}})
@@ -2794,7 +2875,7 @@ class PlaybackMonitorTests(unittest.TestCase):
         self.session(CAT["episodes"][0], 60000, state="buffering")
         self.poll()
         self.assertEqual(self.app.monitor.active_streams(), 1)
-        self.assertIn("Show's Name · S01E01", self.app.monitor.last_buffering[1])
+        self.assertIn("Show's Name · S01E01", some(self.app.monitor.last_buffering)[1])
         self.assertEqual(self.jobs(), [])                       # Plex isn't playing yet
         self.session(CAT["episodes"][0], 60000)
         self.poll()
@@ -2807,7 +2888,7 @@ class PlaybackMonitorTests(unittest.TestCase):
         self.poll()
         job = self.app.monitor.sessions["m1:" + CAT["episodes"][1]["key"]]["jobs"][0]
         job.state = "reading"                                   # as if mid-read
-        self.assertIn("Now Playing Cache is loading", self.app.monitor.preloading())
+        self.assertIn("Now Playing Cache is loading", some(self.app.monitor.preloading()))
         job.state = "waiting"
         self.assertIsNone(self.app.monitor.preloading())
 
@@ -2875,7 +2956,7 @@ class PlaybackMonitorTests(unittest.TestCase):
             for boom, expect in ((PlexError("Plex is down"), "can’t read Plex sessions"), (ValueError("bad"), "unexpected error")):
                 def failing(_settings, e=boom):
                     raise e
-                mon.poll = failing
+                self.enterContext(mock.patch.object(mon, "poll", failing))
                 mon.stop.clear()
                 t = threading.Thread(target=mon._loop, daemon=True)
                 t.start()
@@ -3362,7 +3443,7 @@ class ThemeTests(unittest.TestCase):
         is text, or the Play bunch on its stem in a theme with grapes; both point at the one kept."""
         css = _read(self._root("plexcache", "web", "app.css"), encoding="utf-8")
         for cls in ("mgkeeplbl", "mgdroplbl"):
-            rule = re.search(r"\." + cls + r"\{([^}]*)\}", css).group(1)
+            rule = some(re.search(r"\." + cls + r"\{([^}]*)\}", css)).group(1)
             self.assertIn("border-radius:999px", rule, cls)
             self.assertRegex(rule, r"border:2px solid var\(--(accent|lost)\)", cls)
         self.assertIn(':root[data-grapes="on"] .mgarrow .grapearrow{display:block}', css)
@@ -3393,7 +3474,7 @@ class ThemeTests(unittest.TestCase):
         theme with its Download, an uploaded one's Remove, and Upload a Theme."""
         st = copy.deepcopy(self.app.state())
         st["themes"].append({"id": "mine", "name": "Mine", "builtin": False, "decor": {}})
-        html = PageStructureTests._render(self, st, "system")["html"]
+        html = PageStructureTests._render(cast(PageStructureTests, self), st, "system")["html"]
         card = html[html.index('id="themes"'):]
         card = card[:card.index("</section>")]
         self.assertIn('data-set="themes.theme"', card)
@@ -3607,7 +3688,7 @@ class BlockSizeTests(unittest.TestCase):
         app = _new_app()
         app.scan_library()
         app.run_checks()
-        rows = {r["dataset"]: r for g in app.health["groups"] if g["id"] == "datasets" for r in g["datasets"]}
+        rows = {r["dataset"]: r for g in some(app.health)["groups"] if g["id"] == "datasets" for r in g["datasets"]}
         tv = next(d for d in app.zfs["datasets"] if d["dataset"] == TV_DS)
         self.assertTrue(tv["blocks"]["full"] and tv["blocks"]["complete"])
         self.assertEqual(tv["blocks"]["checked"], len([n for _, _, fs in os.walk(tv["mountpoint"]) for n in fs if not n.startswith(".")]))
@@ -3616,7 +3697,6 @@ class BlockSizeTests(unittest.TestCase):
 
     def test_rewrite_script_rewrites_safely(self):
         import subprocess
-        import urllib.request
         srv_app = _new_app()
         from plexcache.server import serve
         httpd = serve(srv_app, "127.0.0.1", 0)
@@ -3670,8 +3750,9 @@ class BlockSizeTests(unittest.TestCase):
     def load_rewrite():
         import importlib.util
         spec = importlib.util.spec_from_file_location("rewrite_blocks", os.path.join(ROOT, "plexcache", "tools", "rewrite_blocks.py"))
-        rb = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(rb)
+        rb = importlib.util.module_from_spec(some(spec))
+        assert spec is not None
+        some(spec.loader).exec_module(rb)
         return rb
 
     def run_rewrite(self, bin_dir, args, answer=None):
@@ -3833,8 +3914,9 @@ class BlockSizeTests(unittest.TestCase):
         """The script runs as root: a file or folder swapped for a link after the scan is skipped."""
         import importlib.util
         spec = importlib.util.spec_from_file_location("rewrite_blocks", os.path.join(ROOT, "plexcache", "tools", "rewrite_blocks.py"))
-        rb = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(rb)
+        rb = importlib.util.module_from_spec(some(spec))
+        assert spec is not None
+        some(spec.loader).exec_module(rb)
         d = tempfile.mkdtemp(dir=TMP)
         media, private = os.path.join(d, "media"), os.path.join(d, "private")
         os.makedirs(media)
@@ -3884,7 +3966,7 @@ class StartupTests(unittest.TestCase):
         d = tempfile.mkdtemp(dir=TMP)
         blocker = os.path.join(d, "config")
         open(blocker, "w").close()  # a file where the folder should be: can't be written into
-        self.assertIn("Can't save settings in " + blocker, entry.config_problem(blocker))
+        self.assertIn("Can't save settings in " + blocker, some(entry.config_problem(blocker)))
         self.assertIsNone(entry.config_problem(os.path.join(d, "ok")))
         stop = threading.Event()
         old = entry.RETRY_SECONDS
@@ -3994,7 +4076,7 @@ class AppEdgeTests(unittest.TestCase):
         self.assertFalse(app.prefetch_active())
         app.settings.update({"general": {"ram_cooldown_lead_in_minutes": config.AUTO}})
         self.assertGreater(app.cooldown_seconds(False), 0)
-        app.warmup_run = object()                                                # one warm-up at a time
+        self.enterContext(mock.patch.object(app, "warmup_run", object()))                                                # one warm-up at a time
         self.assertFalse(app.start_warmup(manual=True))
         app.check_next_day()                                                     # (waits for the warm-up)
         app.warmup_run = None
@@ -4010,9 +4092,9 @@ class AppEdgeTests(unittest.TestCase):
         app.scan_library()
         app.run_checks()                      # finds the L2ARC: without one, a daily warm-up can't run
         started = []
-        app.start_warmup = lambda manual, libs=None, why=None: started.append(manual) or self.assertEqual(libs, {"2"})
+        self.enterContext(mock.patch.object(app, "start_warmup", lambda manual, libs=None, why=None: started.append(manual) or self.assertEqual(libs, {"2"})))
         waits = iter([False, True])
-        app.stopping.wait = lambda t: next(waits)
+        self.enterContext(mock.patch.object(app.stopping, "wait", lambda t: next(waits)))
         real_due = appmod.due
         appmod.due = lambda *a: True
         try:
@@ -4091,7 +4173,7 @@ class AppEdgeTests(unittest.TestCase):
         app = _new_app()
         app.scan_library()
         app.run_checks()
-        app.probe_zfs = lambda: None
+        self.enterContext(mock.patch.object(app, "probe_zfs", lambda: None))
         app.zfs["pools"]["tank"] = dict(app.zfs["pools"]["tank"], l2_online=0, l2_total=0)
         app._warmup_worker(manual=True)
         msgs = [e["message"] for e in app.activity.snapshot()["events"]]
@@ -4113,7 +4195,7 @@ class AppEdgeTests(unittest.TestCase):
         app = _new_app()
         app.scan_library()
         app.run_checks()
-        app.probe_zfs = lambda: None
+        self.enterContext(mock.patch.object(app, "probe_zfs", lambda: None))
         calls = iter(["a player was buffering (x)", None])
 
         class P:
@@ -4144,7 +4226,7 @@ class AppEdgeTests(unittest.TestCase):
         app = _new_app()
         app.run_benchmark()
         app.benchmark_thread.join(30)
-        self.assertIn("No readable media files", app.benchmark["error"])
+        self.assertIn("No readable media files", some(app.benchmark)["error"])
 
     def test_fallbacks(self):
         app = App(tempfile.mkdtemp(dir=TMP))
@@ -4162,7 +4244,7 @@ class AppEdgeTests(unittest.TestCase):
             fh.write("MemTotal:       32000000 kB\nMemFree:         4000000 kB\n")
         real = zfs.arcstats
         try:
-            zfs.arcstats = lambda: {k: v for k, v in real().items() if k != "memory_free_bytes"}
+            zfs.arcstats = lambda: {k: v for k, v in some(real()).items() if k != "memory_free_bytes"}
             b = app.ram_budget()
             self.assertEqual(b["available"], min(56 * 2 ** 30, 48 * 2 ** 30 + 4_000_000 * 1024))
             zfs.arcstats = lambda: None
@@ -4173,7 +4255,7 @@ class AppEdgeTests(unittest.TestCase):
             os.remove(meminfo)
         # the browser's address only triggers auto-detection once
         seen = []
-        app._autodetect = seen.append
+        self.enterContext(mock.patch.object(app, "_autodetect", seen.append))
         app.note_host("192.0.2.1:8642")
         app.note_host("192.0.2.1:8642")
         self.assertEqual(app.host, "192.0.2.1")
@@ -4235,6 +4317,8 @@ class AppEdgeTests(unittest.TestCase):
         stopped = []
 
         class FakeHTTPD:
+            done = threading.Event()
+
             def serve_forever(self):
                 handlers[signal.SIGTERM]()                          # TrueNAS stops the app
                 self.done.wait(10)
@@ -4242,7 +4326,6 @@ class AppEdgeTests(unittest.TestCase):
             def shutdown(self):
                 stopped.append(True)
                 self.done.set()
-        FakeHTTPD.done = threading.Event()
         env = {"PLEXCACHE_CONFIG": tempfile.mkdtemp(dir=TMP), "PLEXCACHE_PORT": "9998",
                "PLEXCACHE_USERNAME": "admin", "PLEXCACHE_PASSWORD": "change-me"}
         try:
@@ -4383,10 +4466,11 @@ class TestRunnerTests(unittest.TestCase):
         bar.draw("A.test_2", bad=1)
         bar.show("looking up ffmpeg", ticking=True)
         bar.at(5, 9, "step 5 of 9")
-        recs = [record(line) for line in out.getvalue().split("\n")[:-1]]   # (not splitlines: it splits at FEED too)
+        recs = [some(record(line)) for line in out.getvalue().split("\n")[:-1]]   # (not splitlines: it splits at FEED too)
         self.assertNotIn(None, recs)
         self.assertEqual([(r["bar"], r["done"], r["total"], r["bad"]) for r in recs], [("tests", 1, 3, 0), ("tests", 2, 3, 1), ("tests", 2, 3, 1), ("tests", 5, 9, 1)])
-        self.assertEqual((recs[2]["label"], recs[2]["ticking"], recs[3]["ticking"]), ("looking up ffmpeg", True, False))
+        assert recs is not None
+        self.assertEqual((some(recs[2])["label"], some(recs[2])["ticking"], some(recs[3])["ticking"]), ("looking up ffmpeg", True, False))
         self.assertIsNone(record("    2 tests passed"))
         self.assertIsNone(record(FEED + "not a record"))
         with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": "feed"}):
@@ -4394,14 +4478,14 @@ class TestRunnerTests(unittest.TestCase):
             self.assertTrue(Progress(1, stream=io.StringIO()).feed)
         # the board's side: the same line a terminal would have drawn
         board = Progress(0, tty=True, feed=False)
-        board.apply(recs[1])
+        board.apply(some(recs[1]))
         term = io.StringIO()
         drawn = Progress(3, tty=True, stream=term)
         drawn.draw("A.test_1")
         drawn.draw("A.test_2", bad=1)
         with mock.patch.dict(os.environ, {"COLUMNS": "80"}):
             self.assertEqual(term.getvalue().split("\r\033[K")[-1], board.render(80))
-        board.apply(recs[2])
+        board.apply(some(recs[2]))
         self.assertIsNotNone(board.since)
         self.assertIn("looking up ffmpeg  (0 s)", re.sub(r"\033\[[0-9;]*m", "", board.render(100)))
         self.assertLess(len(re.sub(r"\033\[[0-9;]*m", "", Progress(3, tty=True).render(40))), 40)
@@ -4416,7 +4500,9 @@ class TestRunnerTests(unittest.TestCase):
         bar = Progress(4, stream=out, feed=True)
         bar.show("A.test_slow", ticking=True, since=time.time() - 30)
         rec = record(out.getvalue().split("\n")[-2])
+        assert rec is not None
         self.assertEqual((rec["label"], rec["ticking"]), ("A.test_slow", True))
+        assert rec is not None
         self.assertGreaterEqual(rec["age"], 30)
         board = Progress(0, tty=True, feed=False)
         board.apply(rec)
@@ -4834,7 +4920,6 @@ class TestRunnerTests(unittest.TestCase):
         import importlib.util
         import re as _re
         import threading
-        import urllib.request
         spec = importlib.util.spec_from_file_location("style_tool_bye", os.path.join(ROOT, "dev", "style.py"))
         assert spec and spec.loader
         s = importlib.util.module_from_spec(spec)
@@ -4873,9 +4958,9 @@ class TestRunnerTests(unittest.TestCase):
                 self.assertIn("default-src 'none'", csp)
                 self.assertNotIn("unsafe-inline", csp)               # (its styles too only by this response's nonce)
                 self.assertRegex(csp, r"style-src 'nonce-[^']+'")
-                self.assertIn(f'<script nonce="{_re.search(r"script-src .nonce-([^\']+)", csp).group(1)}">', page)
+                self.assertIn(f'<script nonce="{some(_re.search(r"script-src .nonce-([^\']+)", csp)).group(1)}">', page)
                 self.assertIn("sendBeacon('/bye'", page)
-                token = _re.search(r'token:"([^"]+)"', page).group(1)
+                token = some(_re.search(r'token:"([^"]+)"', page)).group(1)
                 q = f"?tab=one&t={urllib.parse.quote(token)}"
                 post = lambda path, base=base, browser=browser: browser.open(urllib.request.Request(base + path, data=b"", method="POST")).status
                 self.assertEqual(post("/alive" + q), 204)
@@ -4977,7 +5062,7 @@ class TestRunnerTests(unittest.TestCase):
         s.press(null)                                     # (while it runs: its page opens, its header says so)
         self.assertIn("RUNNING: THE REVIEW PAGE IS OPEN", s.lines(80)[0])
         self.assertTrue(s.lines(80)[0].startswith(board.BLUE))   # (still blue: it runs on)
-        s.helper.wait(5)
+        some(s.helper).wait(5)
         s.helped()
         self.assertIn("RUNNING: THE REVIEW PAGE HAS CLOSED", s.lines(80)[0])
         s.line(FEED + json.dumps({"said": "3 looks need your approval: python3 dev/style.py review"}))
@@ -4994,12 +5079,12 @@ class TestRunnerTests(unittest.TestCase):
             b.keys("x r")
         self.assertTrue(b.pressed)
         self.assertIn("LOOKS WAITING: THE REVIEW PAGE IS OPEN", s.lines(80)[0])
-        s.helper.wait(5)
+        some(s.helper).wait(5)
         s.helped()
         self.assertIn("LOOKS WAITING: THE REVIEW PAGE HAS CLOSED", s.lines(80)[0])
         s.key["cmd"] = "echo \"There's no sample to review. To make it: python3 dev/style.py sample\" >&2; exit 1"
         s.press(null)
-        s.helper.wait(5)
+        some(s.helper).wait(5)
         s.helped()
         self.assertIn("THE REVIEW PAGE DIDN'T OPEN", s.lines(80)[0])
         self.assertIn("There's no sample to review", s.lines(80)[2])   # (why, in its last line)
@@ -5008,7 +5093,7 @@ class TestRunnerTests(unittest.TestCase):
         s.press(null)
         self.assertNotIn("no sample", s.lines(80)[2])
         self.assertTrue(s.lines(80)[0].startswith(board.MEH))
-        s.helper.wait(5)
+        some(s.helper).wait(5)
         s.key_said = ""
         s.live = False                                     # (the board done: the command again, and no key)
         self.assertFalse(s.keyed)
@@ -5094,6 +5179,7 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn("IN REVIEW", out)                             # (blue while it's open)
         self.assertRegex(out, r"Style Approval +ALL APPROVED")     # (then the check again: nothing waits)
         self.assertIn("2 approved just now · commit dev/style-guide.json and dev/style-approved.zip", out)
+        kw: dict[str, Any]
         for args, kw in ((("--no-sample",), {}), ((), {"terminal": False}), ((), {"test": "echo 1/1 test failed; exit 1"})):
             rc, out = run(*args, **kw)
             self.assertEqual(rc, 1 if kw.get("test") else 0, out)
@@ -5172,7 +5258,7 @@ class TestRunnerTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(os.path.join(nas, "app", "out")), out)
         self.assertFalse(os.path.lexists(os.path.join(nas, "app", "etc")), out)
         args = _read(os.path.join(folder, "ssh-args"), encoding="utf-8")
-        sock = os.path.dirname(re.search(r"ControlPath=(\S+)", args).group(1))
+        sock = os.path.dirname(some(re.search(r"ControlPath=(\S+)", args)).group(1))
         # (the state folder's; one of your own in /tmp only when that path is too long for a socket's name, as here maybe)
         self.assertIn(sock, (os.path.join(state, "tnsync", "ssh"), f"/tmp/tnsync-ssh-{os.getuid()}"))
         self.assertEqual((stat.S_IMODE(os.lstat(sock).st_mode), os.lstat(sock).st_uid), (0o700, os.getuid()))
@@ -5244,8 +5330,9 @@ class TestRunnerTests(unittest.TestCase):
         self.assertTrue(all("-- me@nas.example" in line for line in args.splitlines() if "-O exit" in line or line.endswith("me@nas.example true")), args)
         rc, out = run(good, "-n")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(_read(os.path.join(folder, "npm-args"), encoding="utf-8"),
-                         f"ci --prefix {project}/dev --ignore-scripts --no-audit --no-fund\n")
+        # (the folder as the shell has it: on a Mac, /var is /private/var)
+        self.assertIn(_read(os.path.join(folder, "npm-args"), encoding="utf-8"),
+                      {f"ci --prefix {where}/dev --ignore-scripts --no-audit --no-fund\n" for where in (project, os.path.realpath(project))})
         # the .tnsync: the project's own, from a folder of the project below it (and said which), never one others may change
         rc, out = run(None, "-n", "--skip-tests", cwd=os.path.join(project, "app"))
         self.assertEqual(rc, 0, out)
@@ -5462,7 +5549,7 @@ class TrueNASEdgeTests(unittest.TestCase):
             srv.close()
         # and auto-detect, which runs it in the background, logs any surprise instead of dying
         app = App(tempfile.mkdtemp(dir=TMP))
-        app._autodetect_inner = lambda host: 1 / 0
+        self.enterContext(mock.patch.object(app, "_autodetect_inner", lambda host: 1 / 0))
         with self.assertLogs("plexcache", level="ERROR"):
             app._autodetect("192.0.2.1")
 
@@ -5574,7 +5661,7 @@ class SmallModuleTests(unittest.TestCase):
             p.check()
         waits = iter([True])
         held = Pacer(50, threading.Event(), pause=lambda: next(waits, False))
-        held.stop.wait = lambda t: True                          # stopped while paused
+        self.enterContext(mock.patch.object(held.stop, "wait", lambda t: True))                          # stopped while paused
         with self.assertRaises(Stopped):
             held.check()
         # A share of disk time: 10% busy means waiting 9 s after a 1 s read
@@ -5606,8 +5693,7 @@ class SmallModuleTests(unittest.TestCase):
         b = Activity(d)
         self.assertEqual(b.runs[0]["started"], 1)
         self.assertEqual(b.snapshot()["events"][0]["message"], "hello")
-        b.dir = os.path.join(d, "missing", "deeper")              # can't save: logged, not fatal
-        b.path = os.path.join(b.dir, "activity.json")
+        b.path = os.path.join(d, "missing", "deeper", "activity.json")                                    # can't save: logged, not fatal
         with self.assertLogs("plexcache", level="WARNING"):
             b.add_run({"started": 2})
 
@@ -5818,12 +5904,8 @@ class TrueNASWatchTests(unittest.TestCase):
     with no name left reported."""
 
     def test_calls_found_in_the_middleware_source(self):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        sys.path.insert(0, os.path.join(root, "dev"))
-        try:
-            import truenas_api
-        finally:
-            sys.path.pop(0)
+        root = ROOT
+        from dev import truenas_api
         d = tempfile.mkdtemp(dir=TMP)
         os.makedirs(os.path.join(d, "plugins", "pool_"))
         os.makedirs(os.path.join(d, "service"))
@@ -5926,6 +6008,7 @@ class DataLayerTests(unittest.TestCase):
         for fn in ("mergeCard", "versionsCard", "syncCard") + tuple("page" + n.capitalize() for n in ("folders", "unlink", "convert")):
             body = re.search(r"\n  function " + fn + r"\(.*?\{(.*?)(?=\n  function |\n  var )", js, re.S)
             self.assertIsNotNone(body, fn)
+            assert body is not None
             rows = body.group(1)
             # the issue a row is about is a chip marked with it (issue: the option id): yellow on, grey off
             self.assertRegex(rows, r"\bissue: ", f"{fn}: no chip names the row's issue")
@@ -6238,11 +6321,13 @@ class PageStructureTests(unittest.TestCase):
         self.assertIn("Files differ", plain(row))
         self.assertIn("doesn’t have most of this library’s files", plain(row))
         self.assertNotIn("Mirrored", plain(row).replace("Mirrored by", ""))
-        app.mirrors.rates.pop("1"), app.mirrors.counts.pop("1")
+        app.mirrors.rates.pop("1")
+        app.mirrors.counts.pop("1")
         # a pair whose mirror's files couldn't be read: said on its row, not left as "not compared yet"; a server the look
         # couldn't read: its light says it answered, then stopped (the look's own line is for servers not in use)
         app.mirrors.compare_errors["1"] = "Can’t reach Plex at http://s: timed out"
         app.mirrors.libs["xyz"] = (app.mirrors.libs["xyz"][0], time.time(), "Connection reset by peer")
+        assert other is not None
         app.sync.candidates.append({"id": "xyz", "name": "Starlit", "url": other.url, "rate": None, "libraries": [], "error": "Connection reset by peer"})
         text = self._render(app.state(), "mirrors")["text"]
         self.assertIn("Movies on Starlit: its files couldn’t be compared — Can’t reach Plex at http://s: timed out", text)
@@ -6268,6 +6353,7 @@ class PageStructureTests(unittest.TestCase):
         self.assertIn('<a href="http://10.0.0.9:8642/system#peer" target="_blank" rel="noopener">', got["html"])
         lk.window, lk.found = 0.0, None
         # two servers, Audiobooks mirrored by Cabin's Books: a light for each (Cabin not answering), an address field for it
+        assert other is not None
         app.settings.update({"plex2": {"servers": {"xyz": {"name": "Starlit", "url": other.url, "token": "other-token"}, "zzz": {"name": "Cabin", "url": "http://127.0.0.1:1", "token": "t"}},
                                        "libraries": {"1": {"state": "mirror", "server": "xyz", "key": ""}, "3": {"state": "mirror", "server": "zzz", "key": "7"}}}})
         app.mirrors.libs["zzz"] = (None, time.time(), "Connection refused")                          # (its libraries couldn't be read: not asked again at once)
@@ -6291,6 +6377,7 @@ class PageStructureTests(unittest.TestCase):
             app.mirrors.run("zzz", dropped)
         self.assertIn("Only Plex’s relay reaches Cabin from here, and the relay doesn’t answer this app (Can’t reach Plex at", en(got.exception.args[0]))
         self.assertIn("Turn on Remote Access in Cabin’s Plex settings", en(got.exception.args[0]))
+        assert other is not None
         app.settings.update({"plex2": {"servers": {"xyz": {"name": "Starlit", "url": other.url, "token": "other-token"}}}})
         # a server forgotten while a library still names it: not reached, said so
         app.mirrors.forget("xyz")
@@ -6312,6 +6399,7 @@ class PageStructureTests(unittest.TestCase):
             seg = js[m.end():m.end() + 400]
             label, inf = seg.find("<label"), re.search(r"\b(info|infoOrGap)\(", seg)
             self.assertIsNotNone(inf, f"a row of checks without an ⓘ (or its gap): {seg[:80]!r}")
+            assert inf is not None
             self.assertTrue(label < 0 or inf.start() < label, f"a row of checks puts its ⓘ after the label: {seg[:100]!r}")
         for m in re.finditer(r"([^{}]*)\{([^}]*)\}", css):
             sel, body = m.group(1).strip(), m.group(2)
@@ -6336,7 +6424,7 @@ class PageStructureTests(unittest.TestCase):
     def _check_pages(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
-        got = re.findall(r'(\w+): \["(\w+)", "([^"]+)"\]', re.search(r"var CHECK_PAGES = \{([^}]*)\}", js).group(1))
+        got = re.findall(r'(\w+): \["(\w+)", "([^"]+)"\]', some(re.search(r"var CHECK_PAGES = \{([^}]*)\}", js)).group(1))
         self.assertGreaterEqual(len(got), 3)
         return got
 
@@ -6403,8 +6491,8 @@ class PageStructureTests(unittest.TestCase):
         # of their own with their own cards. These two are the only pages let off, by the maintainer: adding a page to
         # them needs the maintainer's express permission, asked for and given first (CLAUDE.md) — never added to make a
         # new page pass
-        nav = set(re.findall(r"(\w+): 1", re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)))
-        check_pages = dict(re.findall(r'(\w+): \["(\w+)", "[^"]+"\]', re.search(r"var CHECK_PAGES = \{([^}]*)\}", js).group(1)))  # category -> its page
+        nav = set(re.findall(r"(\w+): 1", some(re.search(r"var TOOL_PAGES = \{([^}]*)\}", js)).group(1)))
+        check_pages = dict(re.findall(r'(\w+): \["(\w+)", "[^"]+"\]', some(re.search(r"var CHECK_PAGES = \{([^}]*)\}", js)).group(1)))  # category -> its page
         self.assertEqual(nav - set(tool_pages) - set(check_pages.values()), {"optimizer", "dataset"},
                          "a page under the Tools nav that's neither a tool (app.tools, on toolPage) nor a check page (checksPage) — "
                          "build it on the shared code; letting a page off needs the maintainer's express permission (CLAUDE.md)")
@@ -6428,11 +6516,14 @@ class PageStructureTests(unittest.TestCase):
         for name in tool_pages:
             body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S)
             self.assertIsNotNone(body, f"no page{name.capitalize()}()")
+            assert body is not None
             self.assertIn("toolPage({", body.group(1), f"page{name.capitalize()} isn't built on toolPage")
             # the library tabs the page offers are the kinds the tool works on (Plex's types: movie, show, artist)
+            assert body is not None
             types = re.search(r"types: \[([^\]]*)\]", body.group(1))
             offered = {KIND_BY_LIBRARY_TYPE.get(t, t) for t in re.findall(r"\"(\w+)\"", types.group(1))} if types else set(KIND_BY_LIBRARY_TYPE.values())
             self.assertEqual(offered, set(app.tools[name].applies), f"page{name.capitalize()}'s library tabs (types) aren't the tool's kinds (applies)")
+            assert body is not None
             self.assertNotIn('<p class="help">', body.group(1), f"page{name.capitalize()} explains itself in a paragraph: put it behind the card's How it works")
         # a library with something for every tool: a duplicate record, a duplicate file, a loose film, a hard link
         rootd = os.path.join(cat["root"], "Movies")
@@ -6504,7 +6595,7 @@ class PageStructureTests(unittest.TestCase):
                 self.assertEqual(tool.counts()["libraries"]["1"], 0)
                 got = self._render(app.state(), name)
                 self.assertIn("No issues found", got["text"])
-                read = int(re.search(r"(\d+) (records|files) read", got["text"]).group(1))
+                read = int(some(re.search(r"(\d+) (records|files) read", got["text"])).group(1))
                 self.assertIn(f"{read} pass current tests", got["text"])                               # (nothing switched on: every one passes)
                 self.assertNotIn(f"{read} pass all tests", got["text"])                                # (what was found is still there)
                 self.assertIn("Nothing to do", got["text"])
@@ -6609,7 +6700,7 @@ class PageStructureTests(unittest.TestCase):
         app, tt = self._tools_library(mirror=True)
         # the source: the tools pass a card; only cmpRow draws one (its frames, its arrow); toolPage and the optimizer call it
         for name in app.tools:
-            body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S).group(1)
+            body = some(re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S)).group(1)
             self.assertRegex(body, r"\n      card: function \(r(, sc)?\)", f"page{name.capitalize()} doesn't pass its rows as cards (card:)")
             self.assertNotRegex(body, r"\n      (rows|columns|row|sub): ", f"page{name.capitalize()} draws rows of its own")
         cmp = js[js.index("  function cmpRow("):js.index("  function cmpQuiet(")]
@@ -6621,7 +6712,7 @@ class PageStructureTests(unittest.TestCase):
         for gone in ("function toolTable(", "function versionsRows(", "function mergeRows(", "vssame", "merge-swap", "function optCard(", "optlibs"):
             self.assertNotIn(gone, js)
         # as drawn: each tool's labels, its arrow, its files
-        st = app.state()
+        st: dict[str, Any] = app.state()
         labels = {"merge": ("Metadata kept", "Metadata lost", True), "versions": ("This file kept", "This file deleted", True),
                   "folders": ("Folder moved here", "Original folder", False), "convert": ("New MKV created", "Original file deleted", False),
                   "unlink": ("File kept", "This hardlink deleted|Hardlink replaced with file|Symlink replaced with file", False),
@@ -6928,7 +7019,7 @@ class PageStructureTests(unittest.TestCase):
             body = body[:body.index("\n  }\n") + 4]
             self.assertNotIn('status: "warn"', body, f"{fn_name} gives a yellow that isn't its issue")
         for name in ("folders", "unlink", "convert"):
-            body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S).group(1)
+            body = some(re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S)).group(1)
             self.assertNotIn('status: "warn"', body, f"page{name.capitalize()} gives a yellow that isn't its issue")
         self.assertIn('return String(html).replace(/\\bb-(warn|fail)\\b/g, "b-grey")', js)            # (a side drawn by the tool's own code: greyed)
         # as drawn: every row shown has a yellow or a red; its tick is open exactly when it has yellow and no red; yellow only
@@ -7104,7 +7195,7 @@ class PageStructureTests(unittest.TestCase):
                [("page_" + page, "/" + page, title, "Hide", "0", False) for _cat, page, title in self._check_pages()]
         self.assertEqual(got, want)
         self.assertRegex(lib, r'<a href="/sync" data-nav>Sync Libraries</a> <span class="count na"')   # (no mirror: grey, never a green 0)
-        self.assertNotIn('type="checkbox"', re.search(r'<div class="lhtools">.*?(?=<div class="det">|<div class="sshdr)', lib, re.S).group(0))
+        self.assertNotIn('type="checkbox"', some(re.search(r'<div class="lhtools">.*?(?=<div class="det">|<div class="sshdr)', lib, re.S)).group(0))
         self.assertEqual(set(re.findall(r'data-lhcheck="([^"]+)"', lib)) & set().union(*ids.values()), set(),
                          "a file or Plex check's switch on the Library page")
         for attr in ("data-lhlang", "data-lhquality", "data-lhcheck-revert"):
@@ -7245,7 +7336,7 @@ class PageStructureTests(unittest.TestCase):
         tt = ToolsTests()
         app, plex, client, cat, _ = tt._app(mirror=True)                                               # (Sync Libraries: a mirror to compare with)
         for name in app.tools:
-            body = re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S).group(1)
+            body = some(re.search(r"\n  function page" + name.capitalize() + r"\(\) \{(.*?)(?=\n  function |\n  var )", js, re.S)).group(1)
             self.assertRegex(body, r"\n      applies: function \(sc\)", f"page{name.capitalize()} doesn't say what Apply does (applies:)")
         self.assertIn("toolApply(name, t, cards.can, spec.confirm, spec.applies(sc))", js)
         # drawn with rows: the box, then the Apply row straight after it — what it does, what it changes, the backup plan
@@ -7296,11 +7387,12 @@ class PageStructureTests(unittest.TestCase):
         app, plex, client, cat, other = tt._app(mirror=True)
         copy = os.path.join(cat["root"], "Movies", "Film 1 (2011) [copy].mkv")
         fakes.make_mkv(copy, 1024 * 1024)
+        assert other is not None
         for c in (plex.cat, other.cat):
             c["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000})
         app.scan_library()
         tt._run(app.tools["merge"], app.tools["merge"].scan_async("1"))
-        self.assertEqual(app.tools["merge"].scan_result["mirror"], {"name": "Starlit", "how": "watched"})
+        self.assertEqual(some(some(app.tools)["merge"].scan_result)["mirror"], {"name": "Starlit", "how": "watched"})
         for sync, says, warn in (({"source": "this", "grouping": True}, "and applying it merges them on Starlit", False),
                                  ({"source": "this", "grouping": False}, "can merge them there too once “Versions grouped differently” is on", False),
                                  ({"source": "mirror", "grouping": True}, "Starlit’s edits win</strong> in Sync Libraries, so it can’t carry a merge from here", True)):
@@ -7365,7 +7457,7 @@ class PageStructureTests(unittest.TestCase):
             self.assertNotRegex(src, r'\["(title|label)"\]\.lower\(\)\)', f"{mod} sorts titles by .lower() alone")
         # the pager: one look for every page, the open one framed (no size of its own)
         css = _read(os.path.join(root, "plexcache", "web", "app.css"), encoding="utf-8")
-        cur = re.search(r"\.pager \.pg\.cur\{([^}]*)\}", css).group(1)
+        cur = some(re.search(r"\.pager \.pg\.cur\{([^}]*)\}", css)).group(1)
         self.assertNotRegex(cur, r"padding|font-weight|font-size|line-height|min-height", "the open page's chip is sized differently from the others")
         self.assertRegex(css, r"\.pager button\.link\.pg\{[^}]*min-height", "the page links keep .link's own height: taller than the open page's chip")
         self.assertIn("border-color:var(--ink)", cur)
@@ -7413,6 +7505,7 @@ class PageStructureTests(unittest.TestCase):
                 continue  # (the description is the tool's card text: test_tool_pages_open_with_their_card_text)
             m = re.search(r"\btop\(([^,]+),\s*(.+)", body)
             self.assertIsNotNone(m, f"{name} doesn't call top(title, description)")
+            assert m is not None
             desc = m.group(2).strip()
             self.assertFalse(desc.startswith('""') or desc.startswith("''"), f"{name} opens without a description")
             self.assertTrue(desc.startswith(("H(", "T(", "esc(", "(", "LIB.", "libs", "S.", "ST.", "op.", "sy.")) or '"' in desc, f"{name}: {desc[:60]}")
@@ -7428,10 +7521,10 @@ class PageStructureTests(unittest.TestCase):
         js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         defs = js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES = ")]
         tools = re.findall(r'\n    \{ page: "(\w+)", name: N\("((?:[^"\\]|\\.)*)"\),(?: short: N\("([^"]*)"\),)?(?: card: N\("([^"]*)"\),)? icon: \'((?:[^\'\\]|\\.)+)\',', defs)
-        nav = set(re.findall(r"(\w+): 1", re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)))
+        nav = set(re.findall(r"(\w+): 1", some(re.search(r"var TOOL_PAGES = \{([^}]*)\}", js)).group(1)))
         self.assertEqual({t[0] for t in tools}, nav, "a page under the Tools nav whose definition has no icon")
         self.assertEqual(len({t[4] for t in tools}), len(tools), "two tools share a drawing")
-        icons = re.search(r"\n  var ICONS = \{\n(.*?)\n  \};", js[js.index("The icons of the app's own places"):], re.S).group(1)
+        icons = some(re.search(r"\n  var ICONS = \{\n(.*?)\n  \};", js[js.index("The icons of the app's own places"):], re.S)).group(1)
         for page, _n, _s, _c, drawing in tools:
             self.assertNotRegex(icons, r"^    " + page + ": ", f"{page}'s icon is in ICONS as well as in its definition")
             self.assertNotIn(drawing, icons, f"{page}'s drawing is in ICONS too")
@@ -7471,7 +7564,7 @@ class PageStructureTests(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = _read(os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8")
         tools = re.findall(r'\n    \{ page: "(\w+)", name: N\("((?:[^"\\]|\\.)*)"\),[^\n]*\n      blurb: N\("((?:[^"\\]|\\.)*)"\)', js[js.index("  var TOOLS = ["):js.index("  var TOOL_PAGES = ")])
-        nav = set(re.findall(r"(\w+): 1", re.search(r"var TOOL_PAGES = \{([^}]*)\}", js).group(1)))
+        nav = set(re.findall(r"(\w+): 1", some(re.search(r"var TOOL_PAGES = \{([^}]*)\}", js)).group(1)))
         self.assertEqual({t[0] for t in tools}, nav, "every page under the Tools nav has a card (name and text) on the Tools page")
         for name, _title, text in tools:
             sentences = [x for x in re.split(r"(?<=[.!?])\s+(?=[A-Z])", text.strip()) if x]
@@ -7494,6 +7587,7 @@ class PageStructureTests(unittest.TestCase):
                 html = self._render(st, name)["html"]
                 sub = re.search(r'<div class="top"><div><h1>.*?</h1><div class="sub">(.*?)(?:<br>|</div>)', html, re.S)
                 self.assertIsNotNone(sub, f"{name}: no description under the title")
+                assert sub is not None
                 self.assertEqual(sub.group(1), cards[name])
 
     def _js_fn(self, name):
@@ -7560,8 +7654,9 @@ class PageStructureTests(unittest.TestCase):
         import importlib.util
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         spec = importlib.util.spec_from_file_location("i18n_tool", os.path.join(root, "dev", "i18n.py"))
-        tool = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(tool)
+        tool = importlib.util.module_from_spec(some(spec))
+        assert spec is not None
+        some(spec.loader).exec_module(tool)
         with open(os.environ.get("PLEXCACHE_CHECK_JS") or os.path.join(root, "plexcache", "web", "app.js"), encoding="utf-8") as fh:
             src = fh.read()
         toks = tool.js_tokens(src)
@@ -7661,7 +7756,7 @@ class LogFileEdgeTests(unittest.TestCase):
         cov.hours.append({"t": now + 3600, "libs": {"2": [0] * 12}})
         series = cov.series({"1": "Films", "2": "Empty"})
         self.assertIsNone(series["libs"]["2"][-1])                              # (an hour with no files in it)
-        self.assertIsNone(cachelog._load_lib("not a dict", True))
+        self.assertIsNone(cachelog._load_lib(cast(dict, "not a dict"), True))   # (what a file may hold: not what it should)
         self.assertIsNone(cachelog._load_lib({"first": [1, 2, 3], "ages": []}, True))
         log = cachelog.CacheLog(os.path.join(d, "no-such-folder", "cachelog.json"))
         log.note("/a.mkv", whole=False)
@@ -7713,10 +7808,10 @@ class MoreEdgeTests(unittest.TestCase):
             def settimeout(self, t):
                 raise OSError("bad file descriptor")
         c = MQTTClient("127.0.0.1", 1883)
-        c.sock = Stuck()
+        self.enterContext(mock.patch.object(c, "sock", Stuck()))
         c._drop()
         self.assertIsNone(c.sock)
-        c.sock = Stuck()
+        self.enterContext(mock.patch.object(c, "sock", Stuck()))
         c.close()
         self.assertIsNone(c.sock)
 
@@ -7825,7 +7920,7 @@ def _read_bytes(path):
         return fh.read()
 
 
-def build_mkv(path, tail=("Cues", "Tags"), front_atts=(), tail_atts=(), pgs_algo="none", void=0, cluster=b"", ours=None, chapters=False):
+def build_mkv(path, tail=("Cues", "Tags"), front_atts=(), tail_atts=(), pgs_algo: int | str = "none", void=0, cluster=b"", ours=None, chapters=False):
     """A small, real-structured MKV for the optimizer: header, SeekHead (+ Void), Info, Tracks
     (video + PGS), optional Attachments before the cluster, one Cluster, then ``tail`` in order
     (names from Cues, Tags, Attachments). ``pgs_algo``: "none" (no ContentEncodings) or a number.
@@ -7835,7 +7930,7 @@ def build_mkv(path, tail=("Cues", "Tags"), front_atts=(), tail_atts=(), pgs_algo
     att = lambda files: _el("1941A469", b"".join(
         _el("61A7", _el("466E", n.encode()) + _el("4660", m.encode()) + _el("46AE", (1000 + i).to_bytes(8, "big")) + _el("465C", d))
         for i, (n, m, d) in enumerate(files)))
-    enc = b"" if pgs_algo == "none" else _el("6D80", _el("6240", _el("5034", _el("4254", bytes([pgs_algo])))))
+    enc = b"" if pgs_algo == "none" else _el("6D80", _el("6240", _el("5034", _el("4254", bytes([int(pgs_algo)])))))
     tracks = _el("1654AE6B", _el("AE", _el("D7", b"\x01") + _el("86", b"V_MPEG4/ISO/AVC")) +
                  _el("AE", _el("D7", b"\x02") + _el("86", b"S_HDMV/PGS") + enc))
     info = _el("1549A966", _el("2AD7B1", (1000000).to_bytes(3, "big")))
@@ -8094,21 +8189,28 @@ class OptimizerTests(unittest.TestCase):
                     optimize_file(f, images, cover=plex if images == "plex" else None, tags_mode="strip" if strip else "keep")
                     got = filemap.describe(f)
                     got["mix"] = filemap.cache_mix(f, got, rec)
+                    assert want is not None
                     pm, gm = want["mix"], got["mix"]
                     # (cover art — the file's own, or Plex's poster — is compressed losslessly where a tool for it is
                     # installed: a few % smaller than the estimate, which can't know the tool's gain, so the
                     # estimate may be a block over, never under)
                     # (a remux also repacks the video a little — another mkvmerge version, another few KB — so the
                     # tail may cross a block boundary either way: one block of leeway)
+                    assert gm is not None
                     self.assertIn(pm["blocks"], (gm["blocks"] - 1, gm["blocks"], gm["blocks"] + 1), kw)
+                    assert want is not None
                     self.assertAlmostEqual(want["first_video"], max(0, rec - got["video_start"]), delta=256, msg=kw)
                     slack = rec  # (the tail crossing a block boundary — see above — moves a block of video in or out of the count)
+                    assert gm is not None
                     self.assertAlmostEqual(pm["meta"], gm["meta"], delta=256 + gm["meta"] * 0.03 + slack, msg=kw)
+                    assert gm is not None
                     self.assertAlmostEqual(pm["video"], gm["video"], delta=8192 + slack, msg=kw)
-                    self.assertAlmostEqual(pm["video_tail"], projection.tail_video(got), delta=8192 + slack, msg=kw)   # the end's video, as written
+                    self.assertAlmostEqual(pm["video_tail"], some(projection.tail_video(got)), delta=8192 + slack, msg=kw)   # the end's video, as written
+                    assert gm is not None
                     self.assertAlmostEqual(pm["meta_disk"], gm["meta_disk"], delta=4096 + gm["meta_disk"] * 0.05, msg=kw)
                     if images != "plex":
                         gone = m["size"] - got["size"]                  # what the file lost, against what was said to go
+                        assert want is not None
                         self.assertAlmostEqual(sum(want["removed"].values()), max(0, gone), delta=8192, msg=kw)
 
     def test_converting_to_mkv(self):
@@ -8150,8 +8252,8 @@ class OptimizerTests(unittest.TestCase):
         for f in app.files:
             f.rating_key, f.title = "r-" + os.path.basename(f.path), os.path.basename(f.path)
         app.settings.update({"optimizer": {"libraries": {"1": {"sync": False}}}})
-        here = {"r-old.avi": None}
-        app.plex = lambda timeout=30: types.SimpleNamespace(scan=lambda k, f: None, item_files=lambda rk: here.get(rk))
+        here: dict[str, list[str] | None] = {"r-old.avi": None}
+        self.enterContext(mock.patch.object(app, "plex", lambda timeout=30: types.SimpleNamespace(scan=lambda k, f: None, item_files=lambda rk: here.get(rk))))
         there_dir = "/srv/other/Movies"
         theirs = {there_dir + "/old.avi": "t1", there_dir + "/b.avi": "t2"}
         items, scans = {"t1": [there_dir + "/old.avi"]}, []
@@ -8171,10 +8273,10 @@ class OptimizerTests(unittest.TestCase):
 
             def identity(self):
                 return {"machine_id": "abc"}
-        app.mirrors.client = lambda server, timeout=30: Other()
+        swap(self, app.mirrors, "client", lambda server, timeout=30: Other())
         app.settings.update({"plex2": {"servers": {"abc": {"name": "Cabin", "url": "http://10.9.0.2:32400", "token": "tok"}}, "libraries": {"*": {"state": "mirror", "server": "abc", "key": ""}}}})
         self.assertEqual({k: (v.key if v else None) for k, v in app.mirrors.pairs().items()}, {"1": "7"})     # by name and kind
-        self.assertEqual(app.mirrors.paths_there("1", avi, app.mirrors.pairs()["1"]), [there_dir + "/old.avi"])
+        self.assertEqual(app.mirrors.paths_there("1", avi, some(app.mirrors.pairs()["1"])), [there_dir + "/old.avi"])
         app.mirrors.refresh()
         self.assertEqual(app.mirrors.snapshot()["rates"], {"1": 1.0})
         with open(os.path.join(d, "old.mkv"), "wb") as fh:                                       # (converted by the tool)
@@ -8183,11 +8285,12 @@ class OptimizerTests(unittest.TestCase):
         here["r-old.avi"] = [avi, os.path.join(d, "old.mkv")]                                    # this server has it…
         app.conversions.act(avi, "check")
         e = app.conversions.get(avi)
+        assert e is not None
         self.assertEqual((e["state"], e["servers"]), ("waiting", {"here": "same", "there": "waiting"}))  # …the other doesn't yet
         self.assertEqual(scans, [there_dir])                                                    # its folder scanned there
         items["t1"] = [there_dir + "/old.avi", there_dir + "/old.mkv"]
         app.conversions.act(avi, "check")
-        self.assertEqual(app.conversions.get(avi)["state"], "deleted")                          # (both have it: the original goes at once)
+        self.assertEqual(some(app.conversions.get(avi))["state"], "deleted")                          # (both have it: the original goes at once)
         self.assertFalse(os.path.exists(avi))
         # the other server doesn't have a file at all: nothing there to lose (its paths line up)
         b = os.path.join(d, "b.avi")
@@ -8282,7 +8385,7 @@ class OptimizerTests(unittest.TestCase):
         app, op, client, d, state = self._app(names=("film.mkv",))
         app.libraries = [{"key": "1", "title": "Movies", "type": "movie", "kind": "movie", "locations": ["/data/Movies"]},
                          {"key": "2", "title": "TV", "type": "show", "kind": "tv", "locations": ["/data/TV"]}]
-        app.map_path = lambda p: p
+        self.enterContext(mock.patch.object(app, "map_path", lambda p: p))
         app.files = [types.SimpleNamespace(path="/data/Movies/A/a.mkv", library_key="1"), types.SimpleNamespace(path="/data/TV/S/e1.mkv", library_key="2")]
         item = lambda key, title, files=(), guid="plex://x", fields=None, parent="", grandparent="", edition="", colls=(), labels=(), art=(), typ="movie", summary=True: dict(
             key=key, parent=parent, grandparent=grandparent, type=typ, title=title, label=title, index=0, guid=guid, matched=not guid.startswith("local://"),
@@ -8303,9 +8406,9 @@ class OptimizerTests(unittest.TestCase):
                                                 item_files=lambda rk: None, scan=lambda k, f: None, library_files=lambda lib, limit=None: [],
                                                 identity=lambda: {"machine_id": "abc"},
                                                 item_detail=lambda key: next((it for its in data.values() for it in its if it["key"] == str(key)), None))
-        app.plex = lambda timeout=30: mk(here)
-        app.mirrors.client = lambda server, timeout=30: mk(there)
-        app.run_checks_async = lambda **kw: None
+        self.enterContext(mock.patch.object(app, "plex", lambda timeout=30: mk(here)))
+        swap(self, app.mirrors, "client", lambda server, timeout=30: mk(there))
+        self.enterContext(mock.patch.object(app, "run_checks_async", lambda **kw: None))
         tool = app.tools["sync"]
         scan = lambda key="1": tool.analysis(app.libdata.gather(key, wait=True, refresh=True))
         # nothing chosen yet: Health asks, converted originals wait, and there's nothing to compare with
@@ -8349,11 +8452,11 @@ class OptimizerTests(unittest.TestCase):
         detail_there = dict(there[("7", 1)][1], locked=["studio"], fields={})
         mk_there = mk(there)
         mk_there.item_detail = lambda key: detail_there if str(key) == "71" else next((it for its in there.values() for it in its if it["key"] == str(key)), None)
-        app.mirrors.client = lambda server, timeout=30: mk_there
+        swap(self, app.mirrors, "client", lambda server, timeout=30: mk_there)
         b_row = next(it for it in scan()["rows"] if it["title"] == "B")
         self.assertIn("studio", en(next(c["to"] for c in b_row["changes"] if c["kind"] == "edits")))
         self.assertEqual(b_row["dst"]["locked"], ["studio"])
-        app.mirrors.client = lambda server, timeout=30: mk(there)
+        swap(self, app.mirrors, "client", lambda server, timeout=30: mk(there))
         # a field edited the same on both: not a difference
         here[("1", 1)][1]["locked"] = there[("7", 1)][1]["locked"] = ["title", "genre"]
         here[("1", 1)][1]["fields"] = there[("7", 1)][1]["fields"] = {"title": "B"}
@@ -8532,6 +8635,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in libhealth.file_checks(m, on)], [])                                     # (its forced Signs track is English, like its audio)
         fsize = os.path.getsize(os.path.join(root, "tests", "fixtures", "feature-rich.mkv"))
         bm = filemap.block_map(m, fsize, filemap.cache_plan(m, fsize, 5000, 60, 1 << 20, "movie"), 1 << 20)
+        assert bm is not None
         self.assertEqual((bm["streams"], bm["forced"]), (["video", "audio", "subtitles"], 1))
         # each check says which libraries it applies to; an audio library gets only its own
         self.assertTrue(all(c.get("applies") for cat in libhealth.CHECKS.values() for c in cat))
@@ -8769,7 +8873,7 @@ class OptimizerTests(unittest.TestCase):
         libhealth.set_ignored(app, "1", "r1", ["no_audio"])
         got = libhealth.library_health(app, "1")
         self.assertEqual((got["items"][0]["results"][0]["ignored"], got["items"][0]["live"], got["counts"]), (True, 0, {}))
-        app._lh_ignored = None                                                                   # (a restart: read from disk)
+        self.enterContext(mock.patch.object(app, "_lh_ignored", None))                                                                   # (a restart: read from disk)
         self.assertTrue(libhealth.library_health(app, "1")["items"][0]["results"][0]["ignored"])
         # a new kind of issue on the item: a warning still
         app.file_maps.get = lambda path, st=None, full=False: {"tracks": [{"type": "video", "codec": "V_X"}, {"type": "audio", "codec": "A_X", "language": "eng"}, {"type": "subtitles", "codec": "S_X", "language": "eng"}]}
@@ -8845,7 +8949,7 @@ class OptimizerTests(unittest.TestCase):
         settings = config.Settings(tempfile.mkdtemp(dir=TMP))
         on = libhealth.enabled(settings.get())
         with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8") as fh:
-            pages = dict(re.findall(r'(\w+): \["(\w+)", "[^"]+"\]', re.search(r"var CHECK_PAGES = \{([^}]*)\}", fh.read()).group(1)))
+            pages = dict(re.findall(r'(\w+): \["(\w+)", "[^"]+"\]', some(re.search(r"var CHECK_PAGES = \{([^}]*)\}", fh.read())).group(1)))
         for cat, checks in libhealth.CHECKS.items():
             self.assertIn(cat, pages, f"{cat}: a category of checks without a check page of its own (CHECK_PAGES, on checksPage)")
             for c in checks:
@@ -8956,13 +9060,13 @@ class OptimizerTests(unittest.TestCase):
         os.utime(path, (time.time() - 3600, time.time() - 3600))
         f = app.files[0]
         f.poster, f.matched, f.title, f.rating_key, f.size = "/library/metadata/5/thumb/1", True, "Film", "5", os.path.getsize(path)
-        app._library_file = lambda p: f if p == path else None
-        app.record_for = lambda key: 256 * 1024
+        self.enterContext(mock.patch.object(app, "_library_file", lambda p: f if p == path else None))
+        self.enterContext(mock.patch.object(app, "record_for", lambda key: 256 * 1024))
         app.file_maps.read(path, force=True)
         with open(filemap.__file__, encoding="utf-8") as fh:
             self.assertNotIn("settings", fh.read())                                                  # what's kept of a file is read from it only
         app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "compress"}}}})
-        before = app.file_view(path)["projected"]
+        before = some(app.file_view(path))["projected"]
         self.assertEqual(before["removed"], {})
         summary = app.library_view("1")["summary"]["projected"]
         self.assertEqual(summary["removed"], {})
@@ -8971,14 +9075,14 @@ class OptimizerTests(unittest.TestCase):
         rev = app.settings.rev
         app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "remove"}}}})
         self.assertEqual(app.settings.rev, rev + 1)
-        after = app.file_view(path)["projected"]
+        after = some(app.file_view(path))["projected"]
         self.assertGreater(after["removed"]["image"], 300_000)                                     # straight away, not inspected again
         self.assertLess(after["mix"]["meta"], before["mix"]["meta"])
         self.assertGreater(app.library_view("1")["summary"]["projected"]["removed"]["image"], 300_000)
         # Plex's poster: its real size once it's known (fetched for one file; learnt in the background for a library)
         app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "plex"}}}})
         with mock.patch.object(op, "_poster", lambda p: b"p" * 50_000):
-            cover = app.file_view(path)["projected"]["cover"]
+            cover = some(some(app.file_view(path))["projected"])["cover"]
         self.assertEqual((cover["before"] > 300_000, cover["after"], cover["known"]), (True, 50_000, True))
         app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "images": "plex", "tags": "keep"}}}})
         self.assertEqual(op.poster_size("/library/metadata/5/thumb/1"), 50_000)                    # kept by its path
@@ -9055,6 +9159,7 @@ class OptimizerTests(unittest.TestCase):
             fh.write(b"\x00\x01 not a program")
         os.chmod(os.path.join(bin_dir, "ffprobe"), 0o755)
         with mock.patch.dict(os.environ, {"PLEXCACHE_TOOLS_PATH": bin_dir, "PATH": bin_dir}):
+            kw: dict[str, Any]
             for kw in ({}, {"lines": lambda line: None}):
                 t0 = time.time()
                 with self.assertRaises(tools.ToolError) as e:
@@ -9191,8 +9296,8 @@ class OptimizerTests(unittest.TestCase):
             open(p, "wb").close()
         st = os.stat(src)
         from types import SimpleNamespace
-        other = SimpleNamespace(st_uid=st.st_uid + 1, st_gid=st.st_gid, st_mode=st.st_mode, st_atime_ns=st.st_atime_ns,
-                                st_mtime_ns=st.st_mtime_ns)                        # owned by someone else
+        other = cast(os.stat_result, SimpleNamespace(st_uid=st.st_uid + 1, st_gid=st.st_gid, st_mode=st.st_mode, st_atime_ns=st.st_atime_ns,
+                                                     st_mtime_ns=st.st_mtime_ns))   # owned by someone else
         with mock.patch.object(os, "chown", mock.Mock(side_effect=PermissionError)):
             with self.assertRaises(opt.Skipped):
                 opt._copy_meta(other, src, dst, False)
@@ -9470,7 +9575,7 @@ class OptimizerTests(unittest.TestCase):
         from plexcache import healthcheck
 
         class H(BaseHTTPRequestHandler):
-            def log_message(self, *a):
+            def log_message(self, format, *args):  # noqa: A002 — (http.server's own name for it)
                 pass
 
             def do_GET(self):
@@ -9564,7 +9669,7 @@ class OptimizerTests(unittest.TestCase):
                 self.assertEqual((svc.results[-1]["result"], svc.results[-1]["reason"]), want)
         self.assertEqual(svc.results[-3]["verified"], "failed")                    # (the check that failed)
         with mock.patch.object(osrv, "resolve_conflict", mock.Mock(return_value={"result": "deleted"})):
-            svc._work(p, "compress", False, p, action="conflict")
+            svc._work(p, "compress", False, None, action="conflict")
         self.assertEqual(svc.results[-1]["result"], "deleted")
         # the token: why there's none
         self.assertIsNone(svc.token_problem())
@@ -9642,12 +9747,15 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(call("/api/check", {"path": good})[1]["optimized"], True)
         code, r = call("/api/optimize", {"path": good})
         self.assertEqual((code, r["started"]), (200, True))
+        st = None
         for _ in range(50):
             st = call("/api/status")[1]
             if st["results"]:
                 break
             time.sleep(0.1)
+        assert st is not None
         self.assertEqual(st["results"][-1]["result"], "already")
+        assert st is not None
         self.assertIsNone(st["current"])
         # any file can be written again (record size, compression), still only under the media folders
         other = os.path.join(d, "notes.txt")
@@ -9655,11 +9763,13 @@ class OptimizerTests(unittest.TestCase):
             fh.write("hello")
         self.assertEqual(call("/api/rewrite", {"path": "/etc/hosts"})[0], 403)
         self.assertEqual(call("/api/rewrite", {"path": other})[1], {"started": True})
+        st = None
         for _ in range(50):
             st = call("/api/status")[1]
             if st["results"][-1]["path"] == other:
                 break
             time.sleep(0.1)
+        assert st is not None
         self.assertEqual((st["results"][-1]["result"], st["results"][-1]["action"]), ("rewritten", "rewrite"))
         # claims: one file per system in the library folder; the earliest wins; others are seen
         code, r = call("/api/claim", {"dir": d, "key": "abcd1234", "instance": "system-a"})
@@ -9692,11 +9802,11 @@ class OptimizerTests(unittest.TestCase):
         app.files = files
         state = {"comp": comp}
         app.library_records = lambda: {"1": {"rs": None, "dataset": "tank/movies", "compression": state["comp"]}}
-        app.map_path = lambda p: p
+        self.enterContext(mock.patch.object(app, "map_path", lambda p: p))
         app.libraries = [{"key": "1", "title": "Movies", "type": "movie", "kind": "movie", "locations": [d]}]
         app.refresh_library_files = lambda key: None  # (the files are made here by hand: not listed from the Plex stand-in)
         client = FakeOptimizer()
-        app.optimizing = Optimizing(app, client)
+        app.optimizing = Optimizing(app, cast(OptimizerClient, client))
         return app, app.optimizing, client, d, state
 
     def test_app_survey_checks_and_job(self):
@@ -9752,7 +9862,7 @@ class OptimizerTests(unittest.TestCase):
         # kept across restarts (its tag isn't read again: the record says what it is)
         from plexcache.optimizing import Optimizing
         with mock.patch("plexcache.optimize.mkv.check", side_effect=AssertionError("not read again")):
-            again = Optimizing(app, client)
+            again = Optimizing(app, cast(OptimizerClient, client))
             again.survey()
         self.assertEqual(again.snapshot()["libraries"]["1"]["mkv_done"], 3)
         # a newer optimizer *minor* version: done again; a newer patch version: not
@@ -9797,11 +9907,13 @@ class OptimizerTests(unittest.TestCase):
         # a job that was running when the app stopped: started again, counted as resumed
         app._save_json(jobs.JOB_FILE, {"kind": "optimize", "args": {"library": "1", "mode": "optimize"}, "resumes": 1})
         op.resume_job(wait=0)
+        j = None
         for _ in range(200):
             j = app.jobs.snapshot()
             if j and not j["running"] and not j.get("waiting"):
                 break
             time.sleep(0.05)
+        assert j is not None
         self.assertEqual((j["resumed"], j["resumes"], j["optimized"], j["phase"], j["checked"]), (True, 2, 2, "working", 2))
         self.assertEqual(app._load_json(jobs.JOB_FILE), {})                        # done: nothing to resume
         # one file job at a time: a second one doesn't start while one runs (it's queued instead: test_queue)
@@ -9818,7 +9930,7 @@ class OptimizerTests(unittest.TestCase):
             if not app.jobs.busy():
                 break
             time.sleep(0.05)
-        self.assertTrue(app.jobs.snapshot()["cancelled"])
+        self.assertTrue(some(app.jobs.snapshot())["cancelled"])
 
     def test_retry_a_failed_file(self):
         """Retry: after the file in hand (not queued), and its result replaces the failure in its job."""
@@ -9857,6 +9969,7 @@ class OptimizerTests(unittest.TestCase):
         rows = app.jobs.log.files(first["id"])["files"]
         self.assertEqual([(r["file"], r["result"]) for r in rows], [(a, "optimized"), (b, "failed")])   # in its place
         last = app.jobs.snapshot()
+        assert last is not None
         self.assertEqual(last["kind"], "copy")                                    # (the copy ended after)
         # with an optimizing job running, it takes the retry between its own files
         with mock.patch.object(op, "_retry_worker", lambda: None):
@@ -9948,7 +10061,7 @@ class OptimizerTests(unittest.TestCase):
             if not app.jobs.busy():
                 break
             time.sleep(0.02)
-        self.assertEqual((app.jobs.snapshot()["kind"], app.jobs.snapshot()["running"]), ("broken", False))
+        self.assertEqual((some(app.jobs.snapshot())["kind"], some(app.jobs.snapshot())["running"]), ("broken", False))
         self.assertIn("unexpected error", json.dumps(app.activity.snapshot()["events"], default=str))
         self.assertIsNone(b.dataset())
         self.assertEqual(b.args(), {})
@@ -9960,7 +10073,7 @@ class OptimizerTests(unittest.TestCase):
         app.jobs.retried("L1", "/b", {"result": "failed", "reason": "again"})
         app.jobs.retried("L1", "/zzz", {"result": "optimized"})                  # not one of its failures
         self.assertEqual((app.jobs.last["failed"], app.jobs.last["optimized"], [e["reason"] for e in app.jobs.last["errors"]]), (1, 1, ["again"]))
-        self.assertEqual(app._load_json(jobs.LAST_FILE)["failed"], 1)
+        self.assertEqual(some(app._load_json(jobs.LAST_FILE))["failed"], 1)
         # resilvers: asked of TrueNAS, at most once a minute; can't ask: not held
         asked = []
 
@@ -9974,7 +10087,7 @@ class OptimizerTests(unittest.TestCase):
             def pool(self, name):
                 asked.append(name)
                 return {"scan": {"state": "SCANNING", "function": "RESILVER"}}
-        app.truenas = lambda: TN()
+        self.enterContext(mock.patch.object(app, "truenas", lambda: TN()))
         self.assertIsNone(app.jobs.resilvering(None))
         self.assertIn("tank is resilvering", str(app.jobs.resilvering("tank/media")))
         app.jobs.resilvering("tank/other")
@@ -10010,6 +10123,7 @@ class OptimizerTests(unittest.TestCase):
         self.addCleanup(nap.stop)
         app.jobs.resume_saved(ready=ready.is_set, wait=30)
         j = app.jobs.snapshot()
+        assert j is not None
         self.assertEqual((j["waiting"], j["running"], j["id"], j["done"], j["title"]), (True, False, "w1", 3, "Movies"))
         self.assertTrue(app.jobs.busy())
         self.assertEqual(op.queue("1", "covers"), "queued")                        # waits behind it
@@ -10020,6 +10134,7 @@ class OptimizerTests(unittest.TestCase):
             if j and j.get("mode") == "covers" and not j.get("running") and not j.get("waiting"):
                 break
             threading.Event().wait(0.05)  # (time.sleep is patched)
+        assert j is not None
         self.assertEqual(j["mode"], "covers", j)                                   # the queued one ran after it
         self.assertFalse(app.jobs.busy())
 
@@ -10042,7 +10157,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(op.queue("1", "covers"), "queued")
         q = app.jobs.queued()
         self.assertEqual([(x["kind"], x["args"]["mode"]) for x in q], [("optimize", "optimize"), ("optimize", "covers")])
-        self.assertEqual(app._load_json(jobs.QUEUE_FILE)["items"], q)              # kept across a restart
+        self.assertEqual(some(app._load_json(jobs.QUEUE_FILE))["items"], q)              # kept across a restart
         self.assertTrue(app.jobs.remove(q[1]["id"]))                               # taken off the queue
         self.assertFalse(app.jobs.remove(q[1]["id"]))
         self.assertEqual(len(app.jobs.queued()), 1)
@@ -10051,13 +10166,15 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual([x["id"] for x in again.queued()], [q[0]["id"]])
         # when the running job ends, the next starts by itself
         gate.set()
+        j = None
         for _ in range(200):
             j = app.jobs.snapshot()
             if j and j.get("kind") == "optimize" and not j["running"]:
                 break
             time.sleep(0.05)
+        assert j is not None
         self.assertEqual((j["kind"], j["library"], j["optimized"]), ("optimize", "1", 1), j)
-        self.assertEqual((app.jobs.queued(), app._load_json(jobs.QUEUE_FILE)["items"]), ([], []))
+        self.assertEqual((app.jobs.queued(), some(app._load_json(jobs.QUEUE_FILE))["items"]), ([], []))
         # nothing running: it starts straight away
         self.assertEqual(op.queue("1", "covers"), "started")
         for _ in range(200):
@@ -10083,13 +10200,15 @@ class OptimizerTests(unittest.TestCase):
         pick = sorted(f.path for f in app.files)[1:2]
         self.assertEqual(op.queue("1", files=pick), "queued")
         self.assertIsNone(op.queue("1", files=list(pick)))                         # the same files once
-        self.assertEqual(app._load_json(jobs.QUEUE_FILE)["items"][0]["args"], {"library": "1", "mode": "optimize", "files": pick})
+        self.assertEqual(some(some(some(app._load_json(jobs.QUEUE_FILE))["items"])[0])["args"], {"library": "1", "mode": "optimize", "files": pick})
         gate.set()
+        j = None
         for _ in range(200):
             j = app.jobs.snapshot()
             if j and j.get("kind") == "optimize" and not j["running"]:
                 break
             time.sleep(0.05)
+        assert j is not None
         self.assertEqual((j["kind"], j["files"], j["optimized"]), ("optimize", 1, 1), j)
         self.assertEqual(sum(1 for f in app.files if op.file_status(app.map_path(f.path), "1", {}).get("problems")), 2)  # (the other two still to do)
 
@@ -10104,12 +10223,14 @@ class OptimizerTests(unittest.TestCase):
                                        "done_bytes": 200, "work_seconds": 10.0, "work_bytes": 200, "paused": True})
         with mock.patch.object(OptimizeJob, "POLL", 0.02):
             op.resume_job(wait=0)
+            j = None
             for _ in range(100):
                 j = app.jobs.snapshot()
                 if j and j.get("paused_by") == "user":
                     break
                 time.sleep(0.05)
             # it carries on from 2, not 0; nothing is sent while it's paused
+            assert j is not None
             self.assertEqual((j["done"], j["total"], j["paused_by"], j["resumes"]), (2, 5, "user", 1))
             self.assertEqual([x for x in client.sent if x["action"] == "optimize"], [])
             # a resilver: paused for it, and resuming by hand doesn't lift it
@@ -10117,6 +10238,7 @@ class OptimizerTests(unittest.TestCase):
                 op.set_paused(False)
                 time.sleep(0.3)
                 j = app.jobs.snapshot()
+                assert j is not None
                 self.assertEqual((j["paused_by"], j["paused_why"]), ("resilver", "tank is resilvering"))
                 self.assertEqual([x for x in client.sent if x["action"] == "optimize"], [])
             for _ in range(400):
@@ -10124,7 +10246,9 @@ class OptimizerTests(unittest.TestCase):
                     break
                 time.sleep(0.05)
         j = app.jobs.snapshot()
+        assert j is not None
         self.assertEqual((j["done"], j["total"], j["optimized"]), (5, 5, 5))
+        assert j is not None
         self.assertIsNotNone(j["eta"])                                             # the estimate, from the real rate
         self.assertEqual(app._load_json(jobs.JOB_FILE), {})
 
@@ -10146,7 +10270,7 @@ class OptimizerTests(unittest.TestCase):
         op.survey()
         self.assertEqual(op.snapshot()["libraries"]["1"]["leftovers"], [left])
         calls = []
-        client._call = lambda path, body, timeout=5: calls.append(body) or {"deleted": True}
+        swap(self, client, "_call", lambda path, body, timeout=5: calls.append(body) or {"deleted": True})   # (what the optimizer's sent)
         run_job(op)
         self.assertEqual(calls, [{"action": "cleanup", "path": left}])
 
@@ -10163,7 +10287,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertTrue(job["errors"][0]["file"].endswith(".mkv"))
         self.assertEqual(_read(os.path.join(d, "a.mkv"), "rb"), before)        # untouched
         # kept after the job and across a restart, until dismissed
-        self.assertEqual(len(jobs.Jobs(app).snapshot()["errors"]), 2)
+        self.assertEqual(len(some(jobs.Jobs(app).snapshot())["errors"]), 2)
         self.assertEqual([en(i["title"]) for i in checks._job_failures(app)], ["2 files weren’t optimized"])
         app.jobs.dismiss()
         self.assertIsNone(app.jobs.snapshot())
@@ -10188,15 +10312,21 @@ class OptimizerTests(unittest.TestCase):
         build_mkv(p, cluster=os.urandom(3 * 1024 * 1024), tail=("Cues", "Tags"), ours={"PLEXCACHE_OPTIMIZER": "9", "NOTES": text.decode()[:200_000]})
         m = filemap.describe(p)
         m["mix"] = mix = filemap.cache_mix(p, m, 1024 * 1024)  # (as in 1M records: this folder's are 4K, too small to show compression)
-        self.assertIn("lz4", mix)
+        self.assertIn("lz4", some(mix))
+        assert mix is not None
         self.assertEqual(len(mix["kinds"]["tags"]), 3)                                             # as it is, ZSTD, LZ4
         lz4, off = projection.existing(mix, "lz4"), projection.existing(mix, "off")
         stored = lambda x: x["meta_disk"] + x["unused_disk"]
         self.assertLessEqual(stored(mix), stored(lz4))
         self.assertLessEqual(stored(lz4), stored(off))
+        assert mix is not None
         pr = projection.project(m, mix["record"], "keep", False, comp="zstd", rewrite=True, comp_now="lz4")
+        assert pr is not None
         self.assertTrue(pr["rewrite"])
+        assert pr is not None
+        assert mix is not None
         self.assertEqual((pr["mix"]["video"], pr["removed"]), (mix["video"], {}))                  # the same file, written again
+        assert pr is not None
         self.assertLess(pr["mix"]["meta_disk"], lz4["meta_disk"])                                  # ZSTD keeps less than LZ4 did
         v = projection.views(m, pr, None, "lz4")
         self.assertTrue(v["rewrite"])
@@ -10235,6 +10365,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(row["mix_before"], first)
         self.assertGreater(row["mix_before"]["mix"]["meta"], row["mix_after"]["mix"]["meta"])   # the cover art's gone
         views = filehistory.file_views(row["mix_before"], row["mix_after"])
+        assert views is not None
         self.assertGreater(views["before"]["stream"]["total"], views["after"]["stream"]["total"])
         e = app.history.files[a]
         self.assertEqual((e["runs"], e["original"], e["now"]), (1, first, row["mix_after"]))
@@ -10293,7 +10424,7 @@ class OptimizerTests(unittest.TestCase):
         os.remove(again.path)
         fresh = filehistory.FileHistory(app.config_dir)
         for p, entry in maps.files.items():
-            fresh.seed(p, "", entry.get("before"), entry.get("map"), entry.get("id"))
+            fresh.seed(p, "", entry.get("before"), entry.get("map"), some(entry.get("id")))
         self.assertEqual((fresh.files[c]["original"]["mix"], fresh.files[c]["runs"], list(fresh.files)), (first["mix"], 1, [c]))
         self.assertEqual(fresh.observe(c, "1", maps.files[c]["map"], maps.files[c]["id"], {"PLEXCACHE_OPTIMIZER": VERSION}), None)
         self.assertEqual((fresh.files[c]["lib"], fresh.library("1")["files"]), ("1", 1))
@@ -10447,7 +10578,9 @@ class OptimizerTests(unittest.TestCase):
                 return True
 
             def carry(self, key, marker=None, claims=None):
+                assert claims is not None
                 carried.append((key, claims[0]))
+                assert claims is not None
                 c = claims[0]
                 theirs = [{"instance": "system-b", "at": c["at"] - 100}] if c["key"] == a_key else []  # (its claim on a.mkv came first)
                 return {"carried": True, "claims": {c["key"]: theirs + [{"instance": me, "at": c["at"]}]}}
@@ -10532,8 +10665,9 @@ class FixtureTests(unittest.TestCase):
             self.skipTest("MKVToolNix and ffmpeg aren't installed (CI runs these inside the image)")
         import importlib.util
         spec = importlib.util.spec_from_file_location("make_fixtures", os.path.join(ROOT, "dev", "make_fixtures.py"))
-        self.fx = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.fx)
+        self.fx = importlib.util.module_from_spec(some(spec))
+        assert spec is not None
+        some(spec.loader).exec_module(self.fx)
 
     def test_fixtures(self):
         from plexcache.optimize import mkv
@@ -10755,7 +10889,7 @@ class MigrateTests(unittest.TestCase):
         a failure listed with the job; a copy that can't start; and the wizard's errors from the optimizer."""
         from plexcache import migrating
         app = _new_app()
-        app.run_checks_async = lambda **kw: None  # (Health is told when what's next changes: not this test's)
+        self.enterContext(mock.patch.object(app, "run_checks_async", lambda **kw: None))  # (Health is told when what's next changes: not this test's)
         statuses, calls = [], []
         folder = "/data/Movies"
 
@@ -10772,7 +10906,7 @@ class MigrateTests(unittest.TestCase):
                 calls.append(body["action"])
                 return start_answer if body["action"] == "copy" else {"ok": True}
         start_answer = {"started": True}
-        app.optimizing.client = Client()
+        self.enterContext(mock.patch.object(app.optimizing, "client", Client()))
         mig = migrating.Migration(app)
         fresh = lambda: {"folder": folder, "temp_folder": folder + "-new", "child": "tank/Movies", "mirror": False, "library": "1",
                          "title": "Movies", "dataset": "tank", "step": "copy", "copying": True}
@@ -10803,7 +10937,7 @@ class MigrateTests(unittest.TestCase):
         self.assertNotIn("copy", calls)                                             # still running: followed, not started again
         self.assertEqual(calls[:2], ["pause", "resume"])                            # while something played
         self.assertEqual((mig.state["copy"]["result"], mig.state["copying"]), ("failed", False))
-        self.assertEqual(app.jobs.snapshot()["errors"][0]["reason"], "disk full")
+        self.assertEqual(some(some(some(app.jobs.snapshot())["errors"])[0])["reason"], "disk full")
         (logged,) = [e for e in app.jobs.log.entries() if e.get("type") == "file" and e.get("job") == job.state["id"]]
         self.assertEqual((logged["result"], logged["verified"]), ("failed", "failed"))
         # a copy the optimizer won't start
@@ -10831,7 +10965,7 @@ class MigrateTests(unittest.TestCase):
             mig.cancel()
             self.assertEqual((mig.state, app.jobs.queued()), (None, []))
         # the optimizer's errors, as the wizard shows them
-        err = lambda body: urllib.error.HTTPError("http://x", 400, "Bad", {}, io.BytesIO(body))
+        err = lambda body: urllib.error.HTTPError("http://x", 400, "Bad", email.message.Message(), io.BytesIO(body))
         for raised, want in ((err(b'{"error": "not allowed"}'), "not allowed"), (err(b"not json"), "HTTP Error 400: Bad"),
                              (urllib.error.URLError("refused"), "refused")):
             with mock.patch.object(Client, "_call", mock.Mock(side_effect=raised)):
@@ -10873,7 +11007,7 @@ class MigrateTests(unittest.TestCase):
         app = _new_app()
         app.libraries = [{"key": "9", "title": "Books", "kind": "audio", "type": "artist", "locations": [folder]}]
         app.files = [SimpleNamespace(path=os.path.join(folder, "Book Two.m4b"), library_key="9", size=150_000, kind="audio")]
-        app.map_path = lambda p: p
+        self.enterContext(mock.patch.object(app, "map_path", lambda p: p))
         mounted = {d}
         ml = [{"mountpoint": d, "fstype": "zfs", "source": "tank/media", "root": "/", "options": ["rw"], "optional": ["master:1"]}]
         props, count = {}, {"n": 12}
@@ -10892,9 +11026,9 @@ class MigrateTests(unittest.TestCase):
             def call(self, method, params=None):
                 calls.append((method, params))
         calls, opt = [], {"prop": True, "since": 0}
-        app.truenas = lambda: TN()
-        app.plex = lambda timeout=None: SimpleNamespace(library_count=lambda key: count["n"])
-        app.run_checks_async = lambda **kw: None  # (Health is told when what's next changes: not this test's)
+        self.enterContext(mock.patch.object(app, "truenas", lambda: TN()))
+        self.enterContext(mock.patch.object(app, "plex", lambda timeout=None: SimpleNamespace(library_count=lambda key: count["n"])))
+        self.enterContext(mock.patch.object(app, "run_checks_async", lambda **kw: None))  # (Health is told when what's next changes: not this test's)
 
         class Client:
             configured = True
@@ -10924,7 +11058,7 @@ class MigrateTests(unittest.TestCase):
                     migrate.delete_old(body["path"])
                     return {"deleted": True}
                 return {"ok": True}
-        app.optimizing.client = Client()
+        self.enterContext(mock.patch.object(app.optimizing, "client", Client()))
         record = lambda app, key, rs=None: {"status": "warn", "rs": 1024 * K, "best": 512 * K, "alt": 128 * K}
         with mock.patch.object(zfs, "mounts", lambda: ml), mock.patch.object(checks, "library_record", record):
             mig = migrating.Migration(app)
@@ -10992,13 +11126,13 @@ class MigrateTests(unittest.TestCase):
                     time.sleep(0.05)
             def settled(cond):
                 for _ in range(300):
-                    if cond() and not app.jobs.busy() and not mig.state.get("copying"):
+                    if cond() and not app.jobs.busy() and not some(mig.state).get("copying"):
                         return
                     time.sleep(0.05)
                 raise AssertionError("the copy didn't settle")
             mig.start_copy()
             # the copy, then the last pass by itself: both compared, and when
-            settled(lambda: mig.state.get("compare"))
+            settled(lambda: some(mig.state).get("compare"))
             st = mig.refresh()["state"]
             self.assertEqual((st["step"], st["compare"]["same"], st["last_pass"]["copied"]), ("switch", True, 0))
             self.assertLess(time.time() - st["compare_at"], 60)
@@ -11007,8 +11141,9 @@ class MigrateTests(unittest.TestCase):
             with open(os.path.join(folder, "Late.m4b"), "wb") as fh:
                 fh.write(b"late")
             mig.pass_then_move()
-            settled(lambda: mig.state.get("old_path"))
+            settled(lambda: some(mig.state).get("old_path"))
             st = mig.state
+            assert st is not None
             self.assertEqual((st["compare"]["same"], st["last_pass"]["copied"]), (True, 1))
             self.assertTrue(os.path.exists(os.path.join(folder + "-new", "Late.m4b")))
             self.assertTrue(os.path.isdir(os.path.join(d, ".Books.plexcache-old")))
@@ -11019,10 +11154,10 @@ class MigrateTests(unittest.TestCase):
             mig.undo_rename()                                                          # put back, then again
             self.assertTrue(os.path.isdir(folder))
             self.assertIsNone(app.jobs.hold_reason("optimize"))
-            mig.state["compare_at"] = time.time() - 3600                               # compared a while ago: not without a last pass
+            some(mig.state)["compare_at"] = time.time() - 3600                               # compared a while ago: not without a last pass
             with self.assertRaises(ValueError):
                 mig.rename_old()
-            mig.state["compare_at"] = time.time()
+            some(mig.state)["compare_at"] = time.time()
             mig.rename_old()
             # you rename the dataset in TrueNAS: it's mounted at the folder's path now
             os.rename(folder + "-new", folder)
@@ -11050,7 +11185,7 @@ class MigrateTests(unittest.TestCase):
         moved = []
 
         def start_copy(mirror=False):  # (the job ends before start_copy returns)
-            mig.state.update(copying=True, mirror=mirror)
+            some(mig.state).update(copying=True, mirror=mirror)
             mig.copy_finished({"result": "copied", "copied": 0})
             return {}
         with mock.patch.object(mig, "refresh"), mock.patch.object(mig, "blocking", return_value=[]), \
@@ -11085,12 +11220,12 @@ class MirrorMigrationTests(unittest.TestCase):
         from plexcache.optimize import migrate
         d = tempfile.mkdtemp(dir=TMP)
         folder = os.path.join(d, "Books")
-        MigrateTests._tree(self, folder)
+        MigrateTests._tree(cast(MigrateTests, self), folder)
         app = _new_app()
         app.libraries = [{"key": "9", "title": "Books", "kind": "audio", "type": "artist", "locations": [folder], "excluded": False, "count": 1}]
         app.files = [SimpleNamespace(path=os.path.join(folder, "Book Two.m4b"), library_key="9", size=150_000, kind="audio")]
-        app.map_path = lambda p: p
-        app.run_checks_async = lambda **kw: None
+        self.enterContext(mock.patch.object(app, "map_path", lambda p: p))
+        self.enterContext(mock.patch.object(app, "run_checks_async", lambda **kw: None))
         mounted = {d}
         self.ml = [{"mountpoint": d, "fstype": "zfs", "source": "tank/media", "root": "/", "options": ["rw"], "optional": ["master:1"]}]
         props = {}
@@ -11104,8 +11239,8 @@ class MirrorMigrationTests(unittest.TestCase):
 
             def dataset_cache_props(self, name):
                 return props.get(name)
-        app.truenas = lambda: TN()
-        app.plex = lambda timeout=None: SimpleNamespace(library_count=lambda key: 12)
+        self.enterContext(mock.patch.object(app, "truenas", lambda: TN()))
+        self.enterContext(mock.patch.object(app, "plex", lambda timeout=None: SimpleNamespace(library_count=lambda key: 12)))
 
         class Client:
             configured = True
@@ -11131,8 +11266,8 @@ class MirrorMigrationTests(unittest.TestCase):
                     migrate.delete_old(body["path"])
                     return {"deleted": True}
                 return {"ok": True}
-        app.optimizing.client = Client()
-        self.facts = {"v": None}
+        self.enterContext(mock.patch.object(app.optimizing, "client", Client()))
+        self.facts: dict[str, dict | None] = {"v": None}
         if mirror:  # (every library mirrored by Cabin — not answering, and plex.tv not asked for another address — the Dionysus at its site as said)
             app.settings.update({"plex2": {"servers": {"plexB": {"name": "Cabin", "url": "http://127.0.0.1:1", "token": "t"}},
                                            "libraries": {"*": {"state": "mirror", "server": "plexB", "key": ""}}}})
@@ -11197,7 +11332,7 @@ class MirrorMigrationTests(unittest.TestCase):
         mig.plan("9", folder)
         ids = self._by_id(mig.refresh())
         self.assertFalse({"sync_root", "sync_ignore", "sync_checked"} & set(ids))     # (no Syncthing, no mirror)
-        self.assertEqual(mig.state["scope"], "this")
+        self.assertEqual(some(mig.state)["scope"], "this")
         os.mkdir(os.path.join(d, ".stfolder"))                                          # Syncthing's root above the folder
         c = self._by_id(mig.refresh())["sync_ignore"]
         self.assertFalse(c["ok"])
@@ -11215,7 +11350,7 @@ class MirrorMigrationTests(unittest.TestCase):
         self.assertTrue(ids["sync_root"]["ok"])
         self.assertNotIn("sync_ignore", ids)
         # the switch: paused before the set-aside, which it stops until then
-        mig.state.update(step="switch", compare={"same": True}, compare_at=time.time())
+        some(mig.state).update(step="switch", compare={"same": True}, compare_at=time.time())
         c = self._by_id(mig.refresh())["sync_paused"]
         self.assertEqual((c["ok"], c["action"], c["gate"]), (False, "sync_paused", "aside"))
         with self.assertRaises(ValueError):
@@ -11225,7 +11360,7 @@ class MirrorMigrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mig.confirm("sync_resumed")                                                 # (not before the dataset is in place)
         mig.confirm("sync_paused")
-        mig.state["compare_at"] = time.time()
+        some(mig.state)["compare_at"] = time.time()
         mig.rename_old()
         self.assertTrue(os.path.isdir(os.path.join(d, ".Books.plexcache-old")))
         self.assertTrue(self._by_id(mig.refresh())["sync_paused"]["ok"])
@@ -11288,7 +11423,7 @@ class MirrorMigrationTests(unittest.TestCase):
         self.facts["v"] = self._facts()
         mig.plan("9", folder)
         mig.confirm("sync_checked")
-        self.assertEqual(mig.state["scope"], "both")
+        self.assertEqual(some(mig.state)["scope"], "both")
         ids = self._by_id(mig.refresh())
         self.assertEqual(en(ids["scope"]["title"]), "Both servers: Cabin converts its copy once this one is done")
         self.assertTrue(ids["mirror_room"]["ok"])
@@ -11318,7 +11453,7 @@ class MirrorMigrationTests(unittest.TestCase):
         self.assertEqual(mig.blocking(), [])
         with self.assertRaises(ValueError):
             mig.set_scope("everywhere")
-        mig.state["step"] = "switch"
+        some(mig.state)["step"] = "switch"
         with self.assertRaises(ValueError):
             mig.set_scope("this")                                                       # (chosen before the switch)
 
@@ -11339,7 +11474,7 @@ class MirrorMigrationTests(unittest.TestCase):
         self.assertIn("Cabin has a partly finished conversion of Books (Switch, since", en(c["detail"]))
         self.assertIn("Put the Old Folder Back, Cancel, then delete Books-new", en(c["detail"]))
         self.assertEqual(mig.blocking(), [])                                            # (the copy can go ahead)
-        mig.state.update(step="switch", compare={"same": True}, compare_at=time.time())
+        some(mig.state).update(step="switch", compare={"same": True}, compare_at=time.time())
         mig.confirm("sync_paused")
         c = self._by_id(mig.refresh())["mirror_partial"]
         self.assertEqual((c["ok"], c["level"], c["gate"]), (False, "error", "aside"))
@@ -11368,7 +11503,7 @@ class MirrorMigrationTests(unittest.TestCase):
         self.assertEqual(checks._migration_items(app)[0]["status"], "fail")
         self.assertEqual({x["id"] for x in mig.blocking("aside")}, {"mirror_holding"})
         # the last pass's compare not there (it runs by itself when the copy ends): waited for, then red
-        saved = mig.state.pop("compare")
+        saved = some(mig.state).pop("compare")
         c = self._by_id(mig.refresh())["compare"]
         self.assertEqual((c["level"], en(c["doing"])), ("waiting", "Comparing"))
         mig.waits["compare"] -= mg.COMPARE_WAIT + 1
@@ -11376,16 +11511,16 @@ class MirrorMigrationTests(unittest.TestCase):
         self.assertEqual(c["level"], "error")
         self.assertIn("after 2 minutes", en(c["detail"]))
         self.assertIn("Press Copy Changes & Compare to run it again.", en(c["detail"]))
-        mig.state["compare"] = saved
+        some(mig.state)["compare"] = saved
         # holding its file jobs: the old folder can be set aside
         self.facts["v"] = self._facts(folders=[{"name": "Books", "state": "dataset", "rs": 512 * self.K}], holding=True)
         ids = self._by_id(mig.refresh())
         self.assertTrue(ids["mirror_partial"]["ok"] and ids["mirror_holding"]["ok"])
         self.assertEqual(mig.waits, {})                                                      # (done: no longer waited for)
         self.assertEqual(app._tools_red(dict(app.state(), migration=mig.snapshot()))["dataset"], [])
-        mig.state["compare_at"] = time.time()
+        some(mig.state)["compare_at"] = time.time()
         mig.rename_old()
-        self.assertTrue(mig.state["old_path"])
+        self.assertTrue(some(mig.state)["old_path"])
         # only the marker: holding can't be confirmed, said as a warning
         mig.undo_rename()
         self.facts["v"] = dict(self._facts(), via="marker")
@@ -11420,8 +11555,8 @@ class MirrorMigrationTests(unittest.TestCase):
         mig.undo_rename()
         self.assertTrue(os.path.isdir(folder))
         # migration.json out of step: the old folder found set aside by hand — picked up from there, and said
-        mig.state.update(step="copy", copying=False)
-        mig.state.pop("old_path", None)
+        some(mig.state).update(step="copy", copying=False)
+        some(mig.state).pop("old_path", None)
         os.rename(folder, os.path.join(d, ".Books.plexcache-old"))
         st = mig.refresh()["state"]
         self.assertEqual((st["step"], st["old_path"]), ("switch", os.path.join(d, ".Books.plexcache-old")))
@@ -11465,23 +11600,24 @@ class MirrorMigrationTests(unittest.TestCase):
         app.zfs = {"datasets": [{"dataset": "tank/media", "pool": "tank", "keys": ["9"]}], "pools": {}}   # (looked at)
         mig.plan("9", folder)
         # the copy stopped by its own Cancel: what that means, and the two ways on
-        mig.state.update(step="copy", copying=False, copy={"result": "stopped"})
+        some(mig.state).update(step="copy", copying=False, copy={"result": "stopped"})
         html = PageStructureTests()._render(app.state(), "dataset")["html"]
         self.assertIn("Copying stopped. What’s copied so far stays in tank/media/Books-new", html)
         self.assertNotIn("Stopped: stopped", html)
         # the last pass stopped: said, with the way to run it again
-        mig.state.update(step="switch", copying=False, copy={"result": "stopped"}, mirror=True)
-        mig.state.pop("compare", None)
+        some(mig.state).update(step="switch", copying=False, copy={"result": "stopped"}, mirror=True)
+        some(mig.state).pop("compare", None)
         html = PageStructureTests()._render(app.state(), "dataset")["html"]
         self.assertIn("The last pass was stopped", html)
         self.assertNotIn("It runs by itself once the copy is done", html)
         # Cancel while the copy runs: the job is cancelled too, not only the optimizer told
-        mig.state.update(step="copy", copying=True, copy=None)
+        some(mig.state).update(step="copy", copying=True, copy=None)
         job = mock.Mock(kind="copy", state={"running": True, "folder": folder})
         with mock.patch.object(app.jobs, "job", job), mock.patch.object(app.jobs, "cancel") as cancel:
             told = mig.cancel()
         cancel.assert_called_once()
         self.assertIsNone(mig.state)
+        assert told is not None
         self.assertEqual((told["folder"], told["left"], told["copy_stopped"], told["step"]), (folder, True, True, "copy"))
         self.assertEqual(mig.snapshot()["cancelled"]["temp_folder"], folder + "-new")
         html = PageStructureTests()._render(app.state(), "dataset")["html"]
@@ -11499,7 +11635,7 @@ class MirrorMigrationTests(unittest.TestCase):
         self.assertIsNotNone(mig.cancel())
         mig.plan("9", folder)
         self.assertIsNone(mig.snapshot()["cancelled"])
-        mig.state["step"] = "done"
+        some(mig.state)["step"] = "done"
         self.assertIsNone(mig.cancel())
         self.assertIsNone(mig.snapshot()["cancelled"])
 
@@ -11522,7 +11658,7 @@ class MirrorMigrationTests(unittest.TestCase):
         self.assertGreater(row["room"]["needed"], 150_000)
         self._ready_dataset(folder, mounted, props)
         mig.plan("9", folder)
-        mig.state["step"] = "switch"
+        some(mig.state)["step"] = "switch"
         lib = pl.own_library(app, "9")
         self.assertEqual((lib["folders"][0]["state"], lib["converting"]["step"], lib["holding"]), ("converting", "switch", False))
         self.assertEqual(pl.own_facts(app)["migration"]["step"], "switch")
@@ -11533,8 +11669,9 @@ class MirrorMigrationTests(unittest.TestCase):
         link.paired, link.last_ok = {"instance": "b", "name": "Cabin"}, time.time()
         link.status = {"name": "Cabin", "platform": own["platform"], "truenas_api": True, "migration": None,
                        "libraries": {"3": {"folders": [{"name": "Books", "state": "dataset"}], "converting": None, "holding": True}}}
-        app.mirrors.pairs = lambda: {"9": SimpleNamespace(key="3", server="plexB")}
+        self.enterContext(mock.patch.object(app.mirrors, "pairs", lambda: {"9": SimpleNamespace(key="3", server="plexB")}))
         f = link.facts()
+        assert f is not None
         self.assertEqual((f["via"], f["libraries"]["9"]["key"], f["libraries"]["9"]["holding"]), ("link", "3", True))
         # not talking: the marker, the one next to the mirror's Plex
         link.paired, link._facts = None, None
@@ -11542,8 +11679,9 @@ class MirrorMigrationTests(unittest.TestCase):
                                                            "y": {"marker": {"plex": "plexB", "name": "Cabin", "at": 5, "platform": {"truenas": True}},
                                                                  "by_library": {"9": {"converting": {"step": "verify"}, "folders": []}}}}):
             f = link.facts()
+        assert f is not None
         self.assertEqual((f["via"], f["name"], f["libraries"]["9"]["converting"]["step"]), ("marker", "Cabin", "verify"))
-        link._facts = None
+        self.enterContext(mock.patch.object(link, "_facts", None))
         with mock.patch.object(peers, "read", lambda app: {}):
             self.assertIsNone(link.facts())
 
@@ -11556,7 +11694,7 @@ class MirrorMigrationTests(unittest.TestCase):
         app.libraries = [{"key": "9", "title": "Books", "kind": "audio", "type": "artist", "locations": ["/data/Books"]}]
         app.settings.update({"plex2": {"servers": {"plexA": {"name": "Home", "url": "http://127.0.0.1:1", "token": "t"}}, "libraries": {"*": {"state": "mirror", "server": "plexA", "key": ""}}}})
         app.mirrors._reconnected = {"plexA": time.time() + 1e9}
-        facts = {"v": None}
+        facts: dict[str, dict | None] = {"v": None}
         app.peerlinks.link("plexA").facts = lambda: facts["v"]
         health = app.mirror_health
         health.paired = lambda: (["9"], None)
@@ -11586,9 +11724,9 @@ class MirrorMigrationTests(unittest.TestCase):
         old = time.time() - 7200
         rows = [{"local": folder + "/a.m4b", "size": 10, "mtime": old}, {"local": folder + "/b.m4b", "size": 20, "mtime": old},
                 {"local": folder + "/new.m4b", "size": 5, "mtime": time.time()}]
-        app.libdata.data = lambda key: SimpleNamespace(ready=True, files=rows, unlisted=[])
+        self.enterContext(mock.patch.object(app.libdata, "data", lambda key: SimpleNamespace(ready=True, files=rows, unlisted=[])))
         theirs = {"ready": True, "files": [["a.m4b", 10, old], ["b.m4b", 20, old]]}
-        app.peerlinks.link("plexB").files = lambda key: theirs
+        self.enterContext(mock.patch.object(app.peerlinks.link("plexB"), "files", lambda key: theirs))
         st = {"folder": folder, "library": "9", "step": "verify", "title": "Books"}
         lib = {"key": "3", "folders": [{"name": "Books"}]}
         got = mig._compare_with_mirror(st, lib)
@@ -11620,14 +11758,14 @@ class MirrorMigrationTests(unittest.TestCase):
         self.assertIn("Pick Up This Conversion", html)
         self.assertIn("<th scope=\"col\">Cabin</th>", html)
         mig.plan("9", folder)
-        mig.state.update(step="switch", compare={"same": True}, compare_at=time.time())
+        some(mig.state).update(step="switch", compare={"same": True}, compare_at=time.time())
         self.facts["v"] = self._facts(converting={"step": "switch", "folder": "Books", "since": time.time()})
         mig.refresh()
         html = PageStructureTests()._render(app.state(), "dataset")["html"]
         self.assertIn('class="badge b-fail">Error', html)
         self.assertIn("I’ve Paused the Folder Sync Here", html)
         self.assertRegex(html, r'data-mig="pass_then_move" disabled')
-        mig.state["step"] = "create"
+        some(mig.state)["step"] = "create"
         mig.refresh()
         html = PageStructureTests()._render(app.state(), "dataset")["html"]
         self.assertIn('class="badge b-warn">Warning', html)
@@ -11639,7 +11777,7 @@ class OptimizerSetupTests(unittest.TestCase):
 
     def test_optimizer_check(self):
         from plexcache import checks
-        from plexcache.optimizing import DEFAULT_URL, OptimizerClient
+        from plexcache.optimizing import DEFAULT_URL
         app = _new_app()
         app.scan_library()
         app.run_checks()
@@ -11818,7 +11956,7 @@ class OptimizerSetupTests(unittest.TestCase):
             self.assertIsNone(op._cover_todo(p, "1", "/library/metadata/1/thumb/1", True))
         # a season's episodes share a poster: kept for the run, but only a few at a time
         got = []
-        app.plex = lambda timeout=None: types.SimpleNamespace(image=lambda path: got.append(path) or path.encode())
+        self.enterContext(mock.patch.object(app, "plex", lambda timeout=None: types.SimpleNamespace(image=lambda path: got.append(path) or path.encode())))
         for i in range(12):
             op._poster(f"/library/metadata/{i}/thumb/1")
         self.assertLessEqual(len(op._posters), 9)
@@ -11855,10 +11993,12 @@ class OptimizerSetupTests(unittest.TestCase):
                                 {"id": cid, "service_name": "plex-cache-dev", "state": "running"},
                                 {"id": "e" * 64, "service_name": "plex-cache-optimizer", "state": "exited"}]}},
                                 **({"config": yaml} if config else {}))]
-            app.truenas = lambda: TN()
+            self.enterContext(mock.patch.object(app, "truenas", lambda: TN()))
             got = op._containers()
+        assert got is not None
         self.assertEqual((got["app"], got["me"], got["optimizer"]["state"]), ("plex-cache-dev", "plex-cache-dev", "exited"))
         # the optimizer's volumes and health check from the YAML — nothing else is kept from it
+        assert got is not None
         self.assertEqual((got["optimizer"]["targets"], got["optimizer"]["healthcheck"]), (["/config", "/app/plexcache", "/data"], False))
         self.assertNotIn("secret", json.dumps(got))
 
@@ -12020,12 +12160,12 @@ class CoverArtTests(unittest.TestCase):
                             poster="/library/metadata/5/thumb/100", matched=False)
         app.files = [f]
         app.library_records = lambda: {"1": {"rs": None, "dataset": "tank/movies", "compression": "lz4"}}
-        app.map_path = lambda p: p
+        self.enterContext(mock.patch.object(app, "map_path", lambda p: p))
         app.libraries = [{"key": "1", "title": "Movies", "locations": [d]}]
         poster = {"data": b"\x89PNG poster one"}
-        app.plex = lambda timeout=None: SimpleNamespace(image=lambda p: poster["data"])
+        self.enterContext(mock.patch.object(app, "plex", lambda timeout=None: SimpleNamespace(image=lambda p: poster["data"])))
         client = FakeOptimizer()
-        op = app.optimizing = Optimizing(app, client)
+        op = app.optimizing = Optimizing(app, cast(OptimizerClient, client))
         lib = lambda: op.snapshot()["libraries"]["1"]
         optimized = lambda: [x for x in client.sent if x["action"] == "optimize"]
         app.settings.update({"optimizer": {"libraries": {"1": {"mkv": True, "sync": False}}}})
@@ -12131,9 +12271,9 @@ class HealthBranchTests(unittest.TestCase):
         self.assertEqual((r["compression"]["status"], r["compression"]["badge"], en(r["compression"]["text"])), ("pass", "zstd", "Recommended"))
         # ZSTD 3–19 pass (the user's call); 1–2, LZ4, ZSTD-FAST and anything else warn
         from plexcache.checks import compression_cell
-        self.assertEqual([compression_cell(v)["status"] for v in ("zstd-19", "zstd-6", "zstd-2", "zstd-fast-1", "lz4", "gzip", "off")],
+        self.assertEqual([some(compression_cell(v))["status"] for v in ("zstd-19", "zstd-6", "zstd-2", "zstd-fast-1", "lz4", "gzip", "off")],
                          ["pass", "pass", "warn", "warn", "warn", "warn", "warn"])
-        self.assertEqual(en(compression_cell("zstd-19")["text"]), "Marginally smaller files than ZSTD-3, more CPU when writing")
+        self.assertEqual(en(some(compression_cell("zstd-19"))["text"]), "Marginally smaller files than ZSTD-3, more CPU when writing")
         r = self.row(self.ds(dataset=None, fstype="nfs"))
         self.assertEqual(r["cache"]["text"], "Not ZFS (nfs)")
         self.assertIn("not on ZFS here", r["fixes"][0]["title"])
@@ -12189,9 +12329,10 @@ class HealthBranchTests(unittest.TestCase):
         base = {"result": "ok", "started": 1, "l2_growth": 5e9}
         self.app.activity.runs = [dict(base), dict(base, hit_rate=0.05)]
         g = self.checks.check_effectiveness(self.app)
+        assert g is not None
         self.assertEqual(g["items"][0]["title"], "Warm-up reads aren’t staying cached")
         self.app.activity.runs = [dict(base), dict(base, hit_rate=0.8)]
-        self.assertEqual(self.checks.check_effectiveness(self.app)["items"][0]["status"], "pass")
+        self.assertEqual(some(some(some(self.checks.check_effectiveness(self.app))["items"])[0])["status"], "pass")
         self.app.activity.runs = [dict(base), dict(base, hit_rate=None)]
         self.assertIsNone(self.checks.check_effectiveness(self.app))
 
@@ -12782,6 +12923,9 @@ class ErrorPathTests(unittest.TestCase):
 
 
 class UpdateCheckTests(unittest.TestCase):
+    agent: str | None = None   # what the last request said it was (its User-Agent)
+    paths: list[str] = []      # what it asked for, in order (a new list each time one's added)
+
     def setUp(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         test = self
@@ -12790,13 +12934,13 @@ class UpdateCheckTests(unittest.TestCase):
             def do_GET(self):
                 test.agent = self.headers.get("User-Agent")
                 body = (test.runs_json if "/actions/runs" in self.path else test.body).encode()  # (the branch's newest finished build is asked too)
-                test.paths = getattr(test, "paths", []) + [self.path]
+                test.paths = test.paths + [self.path]
                 self.send_response(test.code)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
 
-            def log_message(self, *a):
+            def log_message(self, format, *args):  # noqa: A002 — (http.server's own name for it)
                 pass
         self.body, self.code = '"""x"""\n\n__version__ = "9.0.0"\n', 200
         self.runs_json = json.dumps({"workflow_runs": [{"head_sha": "0000000"}]})
@@ -12845,7 +12989,7 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertTrue(u.check())
         self.assertEqual(u.status()["latest"], "9.0.0")
         self.assertTrue(u.status()["available"])
-        self.assertIn("plex-cache/", self.agent)
+        self.assertIn("plex-cache/", self.agent or "")
         self.assertTrue(any("9.0.0 is available" in e["message"] for e in app.activity.snapshot()["events"]))
         info = update_info(app)
         self.assertEqual((info["installed_version"], info["latest_version"]), (app.version, "9.0.0"))
@@ -12993,7 +13137,7 @@ class MQTTTests(unittest.TestCase):
                          "1 problem to fix and 2 warnings — open Health in Dionysus for the details.")
         self.assertEqual(_health_text({"summary": {"status": "ok", "text": "Everything is OK."}}), "Everything is OK.")
         for text in (_verdict(rep), _health_text({"summary": {"status": "warn"}, "counts": {"warn": 1}})):
-            self.assertNotIn("below", text)
+            self.assertNotIn("below", some(text))
 
     def test_helpers(self):
         from plexcache.mqttclient import _packet, topic_matches
@@ -13082,10 +13226,15 @@ class MQTTTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.state() is not None), self.app.ha.status)
         st = self.state()
         self.assertEqual(self.broker.state("plexcache/availability"), b"online")
+        assert st is not None
         self.assertEqual(st["version"], self.app.version)
+        assert st is not None
         self.assertIn(st["health"], ("ok", "warning", "problem", "checking"))
+        assert st is not None
         self.assertEqual(st["plex_connected"], "ON")
+        assert st is not None
         self.assertEqual(st["nowplaying_enabled"], "ON")
+        assert st is not None
         self.assertEqual(st["streams"], 0)
         self.assertIn("total_streams", st)
         disc = {t: json.loads(v) for t, v in self.broker.retained.items() if t.startswith("homeassistant/")}
@@ -13113,14 +13262,14 @@ class MQTTTests(unittest.TestCase):
         self.assertEqual(next(v for t, v in disc.items() if "/health_passed/" in t)["entity_category"], "diagnostic")
         # Every entity has a description, read from one retained message as its "description" attribute
         self.assertTrue(wait_for(lambda: self.broker.state("plexcache/info") is not None))
-        info = json.loads(self.broker.state("plexcache/info"))
+        info = json.loads(some(self.broker.state("plexcache/info")))
         for t, v in disc.items():
             oid = t.split("/")[3]
             self.assertEqual(v["json_attributes_topic"], "plexcache/info", t)
             self.assertEqual(v["json_attributes_template"], "{{ {'description': value_json['%s']} | tojson }}" % oid)
             self.assertTrue(info.get(oid), f"{oid} has no description")
             self.assertNotIn("<", info[oid])  # plain text: Home Assistant shows attributes as-is
-        self.assertLess(len(self.broker.state("plexcache/info")), 20000)
+        self.assertLess(len(some(self.broker.state("plexcache/info"))), 20000)
         # Number controls show their value and unit (a slider wouldn't, on the device page)
         numbers = [v for t, v in disc.items() if t.startswith("homeassistant/number/")]
         self.assertEqual(len(numbers), 4)                                               # (pacing's share: unavailable while automatic)
@@ -13132,17 +13281,19 @@ class MQTTTests(unittest.TestCase):
         self.assertFalse(any("/arc_max/" in t or "/l2arc_needed/" in t for t in disc))
         self.assertNotIn("l2arc_needed", st)
         # The update entity
+        assert st is not None
         self.assertEqual(st["update"]["installed_version"], self.app.version)
         upd = next(v for t, v in disc.items() if t.startswith("homeassistant/update/"))
         self.assertEqual(upd["release_url"], "https://github.com/drsassafras/TrueNAS-Plex-Caching")
         # ...installable from Home Assistant when Dionysus can do the update (here: TrueNAS, its key accepted, control allowed)
+        assert st is not None
         self.assertTrue(st["update_installable"])
         self.assertEqual((upd["command_topic"], upd["payload_install"]), ("plexcache/set/update", "install"))
         # Home Assistant reads the versions straight from their own topic (no template)
         self.assertEqual(upd["state_topic"], "plexcache/update")
         self.assertNotIn("value_template", upd)
         self.assertTrue(wait_for(lambda: self.broker.state("plexcache/update") is not None))
-        versions = json.loads(self.broker.state("plexcache/update"))
+        versions = json.loads(some(self.broker.state("plexcache/update")))
         self.assertEqual((versions["installed_version"], versions["latest_version"]), (self.app.version, self.app.version))
         # Per library, the two Prefetch choices in the library's own words, Default first
         libs = {v["name"]: v for t, v in disc.items() if "/library_" in t}
@@ -13202,7 +13353,7 @@ class MQTTTests(unittest.TestCase):
         everything.start()                                                              # (whatever the NAS: L2ARC, warm-up running)
         self.addCleanup(everything.stop)
         saved = {n: getattr(self.app, n) for n in ("start_warmup", "stop_warmup", "run_checks_async", "run_benchmark")}
-        self.app.start_warmup = lambda manual: calls.append("run")
+        self.enterContext(mock.patch.object(self.app, "start_warmup", lambda manual: calls.append("run")))
         self.app.stop_warmup = lambda: calls.append("stop")
         self.app.run_checks_async = lambda rescan=False: calls.append("recheck")
         self.app.run_benchmark = lambda: calls.append("benchmark")
@@ -13234,7 +13385,7 @@ class MQTTTests(unittest.TestCase):
                                  and self.app.settings.section("general")["ram_reserve_gb"] == 6))
         # Switching on a feature that can't work here is refused, with the reason
         saved_fa = self.app.feature_available
-        self.app.feature_available = lambda feat: (False, "no L2ARC on this pool")
+        self.enterContext(mock.patch.object(self.app, "feature_available", lambda feat: (False, "no L2ARC on this pool")))
         try:
             self.app.settings.update({"nowplaying": {"enabled": False}})
             self.broker.inject("plexcache/set/nowplaying_enabled", "ON")
@@ -13276,7 +13427,7 @@ class MQTTTests(unittest.TestCase):
         self.assertEqual(en(ha._health_text({"summary": {"status": "fail"}, "counts": {"fail": 2}})),
                          "2 problems to fix — open Health in Dionysus for the details.")
         self.assertIsNone(ha._iso("not a time"))
-        self.assertTrue(ha._iso("2026-10-14T03:00").startswith("2026-10-14T03:00"))
+        self.assertTrue(some(ha._iso("2026-10-14T03:00")).startswith("2026-10-14T03:00"))
         self.assertEqual(ha.describe("no_such_entity"), "")
 
     def test_watch_only(self):
@@ -13312,7 +13463,7 @@ class MQTTTests(unittest.TestCase):
         self.app.ha = type(self.app.ha)(self.app)
         self.app.ha.start()
         self.assertTrue(wait_for(lambda: not any(t in self.broker.retained for t in stale)), [t for t in stale if t in self.broker.retained])
-        saved = self.app._load_json("mqtt-entities.json")["topics"]
+        saved = some(self.app._load_json("mqtt-entities.json"))["topics"]
         self.assertIn(health, saved)
 
     def test_discovery_follows_home_assistant_rules(self):
@@ -13334,6 +13485,7 @@ class MQTTTests(unittest.TestCase):
                 # <prefix>/<component>/<node_id>/<object_id>/config, ids from [a-zA-Z0-9_-]
                 m = re.fullmatch(r"homeassistant/([a-z_]+)/([a-zA-Z0-9_-]+)/([a-zA-Z0-9_-]+)/config", topic)
                 self.assertIsNotNone(m)
+                assert m is not None
                 comp = m.group(1)
                 self.assertIn(comp, components)
                 conf = json.loads(raw)                                                    # a JSON dictionary
@@ -13351,6 +13503,7 @@ class MQTTTests(unittest.TestCase):
                 # availability: a topic or a list, not both; the payloads as published. A control that applies only
                 # sometimes: Dionysus online AND its condition, read from the state message
                 self.assertFalse("availability_topic" in conf and "availability" in conf)
+                assert m is not None
                 oid = m.group(3)
                 if oid in ha.AVAILABLE_WHEN:
                     self.assertEqual(conf["availability_mode"], "all")
@@ -13400,8 +13553,8 @@ class MQTTTests(unittest.TestCase):
                     node = state
                     for part in re.findall(r"\.([a-zA-Z0-9_]+)|\['([^']+)'\]", path):
                         key = part[0] or part[1]
-                        self.assertIn(key, node, f"{vt} reads a value the state doesn't have")
-                        node = node[key]
+                        self.assertIn(key, some(node), f"{vt} reads a value the state doesn't have")
+                        node = some(node)[key]
                 if conf.get("json_attributes_topic"):
                     self.assertIsNotNone(self.broker.state(conf["json_attributes_topic"]))
         # It listens for Home Assistant's birth message, to announce everything again
@@ -13466,7 +13619,7 @@ class MQTTTests(unittest.TestCase):
         self.assertTrue(avail["run_warmup"])
         self.assertFalse(avail["stop_warmup"])
         self.assertFalse(avail["nextepisode_ram_percent"])                              # no library prefetches anything
-        self.assertTrue(ha.control_availability(fake(rate=None), s, {})["warmup_pacing_percent"])   # automatic can't work
+        self.assertTrue(ha.control_availability(fake(rate=cast(float, None)), s, {})["warmup_pacing_percent"])   # automatic can't work
         s["warmup"]["pacing_auto"] = False
         self.assertTrue(ha.control_availability(fake(), s, {})["warmup_pacing_percent"])
         running = ha.control_availability(fake(), s, {"running": True})
@@ -13688,31 +13841,32 @@ class MQTTTests(unittest.TestCase):
         srv.listen(4)
         port = srv.getsockname()[1]
 
+        said = types.SimpleNamespace(http=True, open=[])   # (whether it answers as a web server; what it keeps open)
+
         def answer():
             while True:
                 try:
                     conn, _ = srv.accept()
                 except OSError:
                     return
-                if answer.http:
+                if said.http:
                     conn.recv(1024)
                     conn.sendall(b"\x40\x02\x00\x01")  # a well-formed packet, but not the login's answer
-                answer.open.append(conn)  # (a silent one is kept open: no answer at all)
-        answer.http, answer.open = True, []
+                said.open.append(conn)  # (a silent one is kept open: no answer at all)
         threading.Thread(target=answer, daemon=True).start()
         try:
             with self.assertRaises(MQTTError) as cm:
                 MQTTClient("127.0.0.1", port, timeout=3).connect()
             self.assertEqual(cm.exception.step, "login")
             self.assertIn("wasn’t from an MQTT broker — check the port", str(cm.exception))
-            answer.http = False
+            said.http = False
             with self.assertRaises(MQTTError) as cm:
                 MQTTClient("127.0.0.1", port, timeout=1, tls=True).connect()
             self.assertEqual(cm.exception.step, "tls")
             self.assertIn("no TLS answer on port", str(cm.exception))
         finally:
             srv.close()
-            for c in answer.open:
+            for c in said.open:
                 c.close()
         with mock.patch.object(mqttclient, "MAX_LENGTH", 10):
             with self.assertRaises(ValueError):
@@ -14072,12 +14226,8 @@ class SyncthingTests(unittest.TestCase):
         self.assertEqual(set(st_cells("GAEALE5-IUWJBCI-C7KNKOW-UXWTUAW-TXK7N5T-HNSRXRJ-LBHZHF3-XSEEAAA")), {(0, 2), (1, 2), (4, 0), (4, 4)})  # (as Syncthing's GUI draws it)
         # held to Syncthing's own source (a copy, tests/syncthing_identicon.js; the weekly check reads the live one): node runs it
         if shutil.which("node"):
-            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            sys.path.insert(0, os.path.join(root, "dev"))
-            try:
-                import syncthing_api
-            finally:
-                sys.path.pop(0)
+            root = ROOT
+            from dev import syncthing_api
             theirs = syncthing_api.identicon_cells(os.path.join(root, "tests", "syncthing_identicon.js"))
             for i in syncthing_api.SAMPLE_IDS:
                 self.assertEqual(set(st_cells(i)), theirs[i], i)
@@ -14145,6 +14295,7 @@ class SyncthingTests(unittest.TestCase):
         self.assertIn('data-act="syncthing-test"', html)
         mark = re.search(r'<div class="fpmark own"><div class="fpstack"><svg class="identicon"[^>]*><g fill="currentColor">(.*?)</g></svg><span class="fpcode" title="[^"]+">AAAAAAA</span><span class="fpname">Starlit NAS</span>', html)
         self.assertIsNotNone(mark)
+        assert mark is not None
         drawn = {(int(m.group(2)), int(m.group(1))) for m in re.finditer(r'<rect x="(\d)" y="(\d)"', mark.group(1))}
         self.assertEqual(drawn, set(st_cells(fakes.ST_MY_ID)))  # (the page draws Syncthing's picture cell for cell as st_cells says)
         app.settings.update({"syncthing": {"api_key": "wrong"}})
@@ -14194,7 +14345,7 @@ class SyncthingTests(unittest.TestCase):
                 return [{"name": "syncthing", "active_workloads": {"used_ports": [{"container_port": 8384, "host_ports": [{"host_port": 20910}]}, {"container_port": 22000, "host_ports": [{"host_port": 22000}]}]}},
                         {"name": "plex", "active_workloads": {"used_ports": [{"container_port": 8384, "host_ports": [{"host_port": 1}]}]}}]
         del sy.candidates
-        app.truenas = lambda: TN()
+        self.enterContext(mock.patch.object(app, "truenas", lambda: TN()))
         app.settings.update({"truenas": {"url": "https://192.168.50.222", "api_key": "k"}, "plex": {"url": "http://192.168.50.10:32400"}})
         self.assertEqual(sy.candidates(), ["http://192.168.50.222:20910", "http://192.168.50.222:8384", "http://192.168.50.10:8384"])
         del SimpleNamespace
@@ -14287,20 +14438,20 @@ class SyncthingTests(unittest.TestCase):
         sy.throttle_tick()
         self.assertIsNone(sy.throttled)  # (not yet: half a minute over the mark first)
         self.assertEqual(en(light()["text"]), "Watching: 1 playing (0 remote), disks 85% busy")
-        sy._hot_since -= 31
+        sy._hot_since = some(sy._hot_since) - 31
         sy.throttle_tick()
-        self.assertEqual((sy.throttled["kbps"], sorted(sy.throttled["devices"])), (2000, [fakes.ST_OTHER_ID]))
+        self.assertEqual((some(sy.throttled)["kbps"], sorted(some(sy.throttled)["devices"])), (2000, [fakes.ST_OTHER_ID]))
         self.assertEqual((st.devices[1]["maxRecvKbps"], st.devices[1]["maxSendKbps"]), (2000, 2000))
         self.assertEqual((light()["status"], en(light()["text"])), ("warn", "Syncthing held to 2000 KB/s"))
         self.assertIn("1 stream playing and the disks 85% busy", en(light()["detail"]))
-        self.assertEqual(app._load_json("syncthing-throttle.json")["kbps"], 2000)
+        self.assertEqual(some(app._load_json("syncthing-throttle.json"))["kbps"], 2000)
         app.monitor.disk_busy = 55.0  # (between the marks: held)
         sy.throttle_tick()
         self.assertIsNotNone(sy.throttled)
         app.monitor.disk_busy = 20.0
         sy.throttle_tick()
         self.assertIsNotNone(sy.throttled)  # (a minute under the mark first)
-        sy._calm_since -= 61
+        sy._calm_since = some(sy._calm_since) - 61
         sy.throttle_tick()
         self.assertIsNone(sy.throttled)
         self.assertEqual((st.devices[1]["maxRecvKbps"], st.devices[1]["maxSendKbps"]), (50000, 0))  # (its own limits back)
@@ -14320,7 +14471,7 @@ class SyncthingTests(unittest.TestCase):
         sy.throttle_tick()
         self.assertIsNotNone(sy.throttled)
         again = Syncthing(app)
-        self.assertEqual(again.throttled["kbps"], 2000)  # (read back from disk)
+        self.assertEqual(some(again.throttled)["kbps"], 2000)  # (read back from disk)
         app.settings.update({"syncthing": {"throttle": False}})
         again.throttle_tick()
         self.assertIsNone(again.throttled)
@@ -14343,7 +14494,7 @@ class SyncthingTests(unittest.TestCase):
         self.assertTrue(sy.is_lan("192.168.50.101:22000") and not sy.is_lan("192.168.60.222:22000") and not sy.is_lan("100.101.102.103:22000"))
         app.monitor.sessions = {"r": {"jobs": [], "local": False, "kbps": 4000}, "l": {"jobs": [], "local": True, "kbps": 20000}}
         sy.throttle_tick()
-        self.assertEqual(sorted(sy.throttled["devices"]), [fakes.ST_OTHER_ID])
+        self.assertEqual(sorted(some(sy.throttled)["devices"]), [fakes.ST_OTHER_ID])
         self.assertEqual((st.devices[1]["maxSendKbps"], st.devices[1]["maxRecvKbps"]), (500, 50000))  # (sending held; receiving its own)
         self.assertIn("1 remote stream at 4.0 Mbit/s", en(light()["detail"]))
         app.settings.update({"syncthing": {"giveway_up_mbps": 20, "giveway_both": True}})
@@ -14353,7 +14504,7 @@ class SyncthingTests(unittest.TestCase):
         app.monitor.sessions = {"l": {"jobs": [], "local": True, "kbps": 20000}}
         sy.throttle_tick()
         self.assertIsNotNone(sy.throttled)  # (a minute's grace)
-        sy._net_last -= 61
+        sy._net_last = some(sy._net_last) - 61
         sy.throttle_tick()
         self.assertIsNone(sy.throttled)
         self.assertEqual((st.devices[1]["maxSendKbps"], st.devices[1]["maxRecvKbps"]), (0, 50000))  # (its own limits back)
@@ -14436,7 +14587,7 @@ class SyncthingTests(unittest.TestCase):
         link = app.peerlinks.link("xyz")
         self.assertIsNone(link.other_identity())
         link.found = {"url": "http://127.0.0.1:1", "hello": {"identity": {"id": fakes.ST_OTHER_ID, "short": "ZZZZZZZ", "source": "syncthing", "name": "Cottage NAS"}}, "at": time.time()}
-        self.assertEqual(link.other_identity()["short"], "ZZZZZZZ")
+        self.assertEqual(some(link.other_identity())["short"], "ZZZZZZZ")
         self.assertEqual(link.snapshot()["identity"]["short"], "ZZZZZZZ")
         ids = {f["result"]["id"] for f in app.syncthing.findings("1")}
         self.assertNotIn("mirror_syncthing_other_device", ids)  # (the mirror's device is one the folder is shared with)
@@ -14596,7 +14747,7 @@ class SyncthingTests(unittest.TestCase):
         self.assertTrue(mm._by_id(mig.refresh())["sync_ignore"]["ok"])
         mig.confirm("sync_ignore")                                                       # (again: nothing added twice)
         self.assertEqual(st.ignores["media"], ["/Books-new", "/.Books.plexcache-old"])
-        mig.state.update(step="switch", compare={"same": True}, compare_at=time.time())
+        some(mig.state).update(step="switch", compare={"same": True}, compare_at=time.time())
         c = mm._by_id(mig.refresh())["sync_paused"]
         self.assertEqual((c["ok"], c["action"], c["gate"]), (False, "sync_pause", "aside"))
         with self.assertRaises(ValueError):
@@ -14606,7 +14757,7 @@ class SyncthingTests(unittest.TestCase):
         mig.confirm("sync_pause")
         self.assertTrue(st.folders[0]["paused"])
         self.assertTrue(mm._by_id(mig.refresh())["sync_paused"]["ok"])
-        mig.state["compare_at"] = time.time()
+        some(mig.state)["compare_at"] = time.time()
         mig.rename_old()
         self.assertTrue(os.path.isdir(os.path.join(d, ".Books.plexcache-old")))
         shutil.copytree(os.path.join(d, ".Books.plexcache-old"), folder + "-new", symlinks=True, dirs_exist_ok=True)
@@ -14789,7 +14940,6 @@ class IntegrationStandardTests(unittest.TestCase):
         PLEX.prefs["LanNetworksBandwidth"] = ""
         # the custom access URLs: well-formed, this server's, reachable from here; and this NAS's tailnet address to add
         import ipaddress
-        import urllib.parse
 
         from plexcache.plex import PlexClient as _PC
         self.assertEqual(en(c["plex_urls"]["text"]), "No custom access URLs")
@@ -14814,7 +14964,7 @@ class IntegrationStandardTests(unittest.TestCase):
         TRUENAS.interfaces = [{"name": "eno1", "aliases": [{"type": "INET", "address": "192.168.50.222", "netmask": 24}], "state": {"aliases": []}},
                               {"name": "tailscale0", "aliases": [], "state": {"aliases": [{"type": "INET", "address": "100.101.102.103", "netmask": 32}]}}]
         try:
-            app._host_addresses = None
+            self.enterContext(mock.patch.object(app, "_host_addresses", None))
             self.assertEqual(app.host_addresses(), {"lan": ["192.168.50.222"], "tailnet": ["100.101.102.103"]})
             self.assertIn(ipaddress.ip_network("192.168.50.0/24"), app.local_networks())
             PLEX.prefs["customConnections"] = PLEX.url
@@ -14830,7 +14980,7 @@ class IntegrationStandardTests(unittest.TestCase):
             self.assertIn('data-act="plex-urls"', html2)
         finally:
             TRUENAS.interfaces = []
-            app._host_addresses = None
+            self.enterContext(mock.patch.object(app, "_host_addresses", None))
             PLEX.prefs["customConnections"] = ""
         self.assertIn("Add Subnets to Plex LAN sets Settings → Network → LAN Networks to 100.64.0.0/10", en(app._lan_light("", "abc")["detail"]))
         self.assertIn("wasn’t checked", en(app._lan_light("", "abc")["detail"]))  # (plex.tv not reached: the tailnet not told, so offered)
@@ -14894,12 +15044,7 @@ class IntegrationStandardTests(unittest.TestCase):
     def test_syncthing_source_check(self):
         """dev/syncthing_api.py: every REST path the app calls found among the literals of Syncthing's API package, "{id}" as
         ":id" or taken after the path; a call whose path is gone reported."""
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        sys.path.insert(0, os.path.join(root, "dev"))
-        try:
-            import syncthing_api
-        finally:
-            sys.path.pop(0)
+        from dev import syncthing_api
         from plexcache.syncthing import CALLS
         d = tempfile.mkdtemp(dir=TMP)
         os.makedirs(os.path.join(d, "lib", "api"))
@@ -14930,7 +15075,7 @@ class LiveSyncthingTests(unittest.TestCase):
 
     def test_every_call_answers(self):
         from plexcache.syncthing import CALLS, SyncthingClient, cert_device_id, covering
-        c = SyncthingClient(self.url, self.key, timeout=20)
+        c = SyncthingClient(some(self.url), some(self.key), timeout=20)
         self.assertTrue(c.healthy())
         my = c.status()["myID"]
         self.assertEqual(len(my.replace("-", "")), 56)
@@ -14957,11 +15102,10 @@ class LiveSyncthingTests(unittest.TestCase):
         self.assertIsInstance(c.connections().get("connections"), dict)
         c.patch_device(my, {})
         # the sync port's certificate names the same device the API does
-        import urllib.parse
         host = urllib.parse.urlsplit(self.url).hostname or "127.0.0.1"
         port = int(os.environ.get("SYNCTHING_LIVE_SYNC_PORT") or 0)
         if port:
-            self.assertEqual(cert_device_id(host, port), my)
+            self.assertEqual(cert_device_id(str(host), port), my)
         self.assertEqual(len(CALLS), 12)
 
 class TranslationTests(unittest.TestCase):
@@ -14972,8 +15116,9 @@ class TranslationTests(unittest.TestCase):
     def setUpClass(cls):
         import importlib.util
         spec = importlib.util.spec_from_file_location("i18n_tool", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dev", "i18n.py"))
-        cls.tool = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.tool)
+        cls.tool = importlib.util.module_from_spec(some(spec))
+        assert spec is not None
+        some(spec.loader).exec_module(cls.tool)
         problems = []
         cls.keys = cls.tool.all_keys(problems)
         cls.problems = problems
@@ -15152,7 +15297,7 @@ class FutureTests(unittest.TestCase):
         df = _read(os.path.join(ROOT, "Dockerfile"), encoding="utf-8")
         self.assertIn("FROM debian:${DEBIAN_TAG} AS jpegtran", df)
         self.assertIn("FROM debian:${DEBIAN_TAG} AS ffmpeg", df)
-        self.assertEqual(re.search(r"^ARG DEBIAN_TAG=(\S+)", df, re.M).group(1), f"{upkeep.debian_of_tag()}-slim")
+        self.assertEqual(some(re.search(r"^ARG DEBIAN_TAG=(\S+)", df, re.M)).group(1), f"{upkeep.debian_of_tag()}-slim")
         ran = []
         with mock.patch.object(future, "has_buildkit", return_value=True), mock.patch.object(future, "LOG", os.path.join(TMP, "future-build.log")), \
                 mock.patch.object(future.subprocess, "run", side_effect=lambda cmd, **kw: ran.append(cmd) or mock.Mock(returncode=0)):
@@ -16229,7 +16374,9 @@ class UpkeepTests(unittest.TestCase):
             with open(upkeep.CACHE, "r+", encoding="utf-8") as fh:  # (a look from before today)
                 old = json.load(fh)
                 old["at"] -= 2 * upkeep.A_DAY
-                fh.seek(0), fh.truncate(), json.dump(old, fh)
+                fh.seek(0)
+                fh.truncate()
+                json.dump(old, fh)
             self.assertEqual(upkeep.lookup(), ({"quick": ["1.0.0", "1.0.0"], "slow": ["2.0.0", "2.1.0"]}, True))
         # IPv4 first, a short wait for each address; the answer then waited on for TIMEOUT
         tried = []
@@ -16279,14 +16426,13 @@ class HomeAssistantRulesTests(unittest.TestCase):
         self.assertEqual(gone, {"via_hub", "object_id"})
 
     def test_a_key_it_no_longer_takes_is_a_prompt(self):
-        import urllib.error
 
         from dev import upkeep
         def get(url):
             for path, text in self.SOURCES.items():
                 if url.endswith("/homeassistant/" + path):
                     return text
-            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            raise urllib.error.HTTPError(url, 404, "Not Found", email.message.Message(), None)
         keys = {"entity": {"name", "state_topic"}, "device": {"identifiers", "via_device"}}
         with mock.patch.object(upkeep, "_get", side_effect=get), mock.patch.object(upkeep, "discovery_keys", return_value=keys):
             self.assertEqual(upkeep.ha_check("2099.1.0"), [])
@@ -16328,7 +16474,9 @@ class TypeCheckTests(unittest.TestCase):
         tools = _read(upkeep.TOOLS, encoding="utf-8")
         written = {}
         with mock.patch.object(upkeep, "_read", return_value=tools), mock.patch.object(upkeep, "_write", side_effect=written.__setitem__):
-            self.assertEqual(deps["Ruff"].bump("9.9.9"), f"dev/tools.toml: Ruff {checks.version('ruff')} → 9.9.9")
+            bump = deps["Ruff"].bump
+            assert bump is not None
+            self.assertEqual(bump("9.9.9"), f"dev/tools.toml: Ruff {checks.version('ruff')} → 9.9.9")
         self.assertIn('version = "9.9.9"', written[upkeep.TOOLS])
         self.assertEqual(written[upkeep.TOOLS].count('version = "9.9.9"'), 1)   # (Ruff's alone)
         # Ruff reads the code as the Python pyright and the image do
@@ -16387,7 +16535,7 @@ class CoverageTests(unittest.TestCase):
         units = [coverage.Unit("function", "one", 5, {8}), coverage.Unit("function", "two", 10, {11, 12}),
                  coverage.Unit("route", "/api/x", 12, {13})]
         got = coverage.fresh_check([self.file({8, 11, 12, 13}, {11}, fresh={8, 12, 13}, units=units)])
-        self.assertEqual([(f.line, f.message) for f in got.findings], [(5, "no test reaches the fresh function one"),
+        self.assertEqual([(f.line, f.message) for f in some(got.findings)], [(5, "no test reaches the fresh function one"),
                                                                        (12, "no test reaches the fresh route /api/x")])
         self.assertEqual(got.said(), ["2 fresh functions no test reaches"])   # (two: reached by one line of its, no line target)
         self.assertEqual(coverage.fresh_check([self.file({8}, {8}, fresh={8}, units=units[:1])]).said(), ["1 fresh function reached"])
@@ -16400,7 +16548,7 @@ class CoverageTests(unittest.TestCase):
         fresh_gaps = coverage.settled_check([self.file(code, code - set(range(1, 30)), fresh=set(range(1, 30)))])
         self.assertEqual(fresh_gaps.findings, [])   # (what fresh code lacks isn't settled code's)
         short = coverage.settled_check([self.file(code, code - {5, 6, 7})])
-        self.assertEqual([f.message for f in short.findings], ["3 settled lines no test runs: 5-7"])
+        self.assertEqual([f.message for f in some(short.findings)], ["3 settled lines no test runs: 5-7"])
         self.assertTrue(short.bad())
 
     def test_the_release_bar(self):
@@ -16408,9 +16556,9 @@ class CoverageTests(unittest.TestCase):
         code = set(range(1, 101))
         self.assertEqual(coverage.release_check([self.file(code, code - {1, 2})]).findings, [])
         got = coverage.release_check([self.file(code, set(range(1, 90)))])
-        self.assertEqual([f.message for f in got.findings], ["89.0% of every line run, under the release's 98%",
+        self.assertEqual([f.message for f in some(got.findings)], ["89.0% of every line run, under the release's 98%",
                                                              "89.0% of its lines run, under the release's 90% for each file"])
-        self.assertEqual(got.findings[0].severity, "error")
+        self.assertEqual(some(got.findings)[0].severity, "error")
 
     @unittest.skipUnless(shutil.which("git"), "no git here")
     def test_fresh_and_settled_from_git(self):
@@ -16433,7 +16581,7 @@ class CoverageTests(unittest.TestCase):
             fh.write("e = 5\n")
         got = coverage.blame("f.py", (repo, ""))
         self.assertEqual(got[1], 978307200.0)   # (settled: 2001)
-        self.assertGreater(got[2], time.time() - 3600)   # (committed just now: fresh)
+        self.assertGreater(some(got[2]), time.time() - 3600)   # (committed just now: fresh)
         self.assertIsNone(got[5])   # (not committed: fresh)
         head = run("rev-parse", "HEAD").stdout.decode().strip()
         self.assertEqual(set(coverage.blame("f.py", (repo, head))), {1, 2, 3, 4})   # (a copy tnsync made: the commit it is)
@@ -16445,6 +16593,7 @@ class CoverageTests(unittest.TestCase):
             self.assertIn("no coverage saved yet", coverage.load()[1])
             coverage.save(coverage.merge([{"plexcache/a.py": [1, 2]}, {"plexcache/a.py": [2, 3], "plexcache/b.py": [1]}]), "passed")
             got, why = coverage.load()
+            assert got is not None
             self.assertEqual((got["hit"], why), ({"plexcache/a.py": [1, 2, 3], "plexcache/b.py": [1]}, ""))
             with mock.patch.object(coverage, "code_signature", return_value="other code"):
                 self.assertIn("has changed since", coverage.load()[1])
@@ -16598,6 +16747,7 @@ class CVETests(unittest.TestCase):
 
         def answer(url, body=None, headers=None):
             if url.endswith("querybatch"):
+                assert body is not None
                 return {"results": [{"vulns": [{"id": "GHSA-x"}]} if q["package"]["name"] == "esquery" else {} for q in body["queries"]]}
             return adv
         d = tempfile.mkdtemp(dir=TMP)
@@ -16998,8 +17148,10 @@ class CheckToolTests(unittest.TestCase):
             with mock.patch.object(checks, "tools", return_value={"t": good}):
                 cmd, why = checks.command("t")
                 bar.show.assert_called_once_with("fetching T 1.0 (the first run only)", ticking=True)
+                assert cmd is not None
                 with open(cmd[0], "rb") as fh:
                     self.assertEqual((why, fh.read()), ("", data))
+                assert cmd is not None
                 self.assertTrue(os.access(cmd[0], os.X_OK))
                 self.assertEqual(fetched.call_args[0][0], "https://example.invalid/1.0/t")
                 self.assertEqual(checks.command("t")[0], cmd)   # (the second time: the cached copy)
@@ -17496,7 +17648,7 @@ class AuditTests(unittest.TestCase):
             auditrun.person("<script>")
         run = auditrun.Runner()
         r = run.start("uncommitted", [], auditrun.person("Dr Sass"), 2)
-        got = auditrun.load_run(r.id)
+        got = some(auditrun.load_run(r.id))
         self.assertEqual((got.state, got.plugin, got.kind, got.scope, got.uncommitted), ("open", "", "partial", ["a.py:login"], True))
         self.assertTrue(os.path.exists(os.path.join(private, "runs", r.id, "prints.json")))
         run.write_finding(r.id, {"title": "Login trusts its input", "severity": "high", "lines": ["a.py:1-2"], "detail": "No check.", "main": "affected"})
@@ -17504,7 +17656,7 @@ class AuditTests(unittest.TestCase):
         run.write_finding(r.id, None, remove=1)
         with self.assertRaises(ValueError):
             run.write_finding(r.id, {"title": " "})   # (a finding needs its title)
-        self.assertEqual([f["title"] for f in auditrun.load_run(r.id).draft], ["Login trusts its input"])
+        self.assertEqual([f["title"] for f in some(auditrun.load_run(r.id)).draft], ["Login trusts its input"])
         self.assertEqual(auditrun.load_runs()[0].state, "open")   # (a person's stays open: nothing runs it)
         with open(os.path.join(repo, "a.py"), "w") as fh:
             fh.write("def login(user):\n    return user.lower()\n\n\ndef other():\n    return 2\n")   # (changed while it was audited)
@@ -17531,7 +17683,7 @@ class AuditTests(unittest.TestCase):
         self.assertEqual((marked.state, marked.findings, marked.kind), ("done", 0, "partial"), marked.error)   # (a review already done)
         c = auditrun.Runner().start("full", [], auditrun.person("Sam"), 5)
         self.assertTrue(run.cancel(c.id))
-        self.assertEqual(auditrun.load_run(c.id).state, "cancelled")
+        self.assertEqual(some(auditrun.load_run(c.id)).state, "cancelled")
         with self.assertRaises(ValueError):
             run.start("full", [], auditrun.person("Sam"), 6)
 
@@ -17679,7 +17831,7 @@ class AuditTests(unittest.TestCase):
         import sys as _sys
         _sys.path.insert(0, os.path.join(ROOT, "dev"))
         try:
-            import devpage
+            import devpage  # pyright: ignore[reportMissingImports] — dev/ on the path just above, as dev/auditgui.py has it
         finally:
             _sys.path.remove(os.path.join(ROOT, "dev"))
 
@@ -17764,7 +17916,7 @@ class AuditTests(unittest.TestCase):
                 self.assertNotIn(b"/*THEME*/", page)
                 csp = box["headers"]["Content-Security-Policy"]
                 self.assertNotIn("unsafe-inline", csp)   # (only the page's own script and style: this response's nonce)
-                nonce = re.search(r"script-src 'nonce-([^']+)'", csp).group(1)
+                nonce = some(re.search(r"script-src 'nonce-([^']+)'", csp)).group(1)
                 self.assertIn(f'<script nonce="{nonce}">'.encode(), page)
                 self.assertIn(f'<style nonce="{nonce}">'.encode(), page)
                 self.assertNotIn(b"<script>", page)
@@ -18011,7 +18163,7 @@ class AuditTests(unittest.TestCase):
         asked = self.fake_claude("```toml\n[[recheck]]\nid = \"%s\"\nworking = \"fixed\"\npushed = \"fixed\"\nmain = \"affected\"\n"
                                  "detail = \"login checks now\"\n\n[[recheck]]\nid = \"%s\"\nworking = \"present\"\npushed = \"present\"\ncvss = \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"\n```\n" % tuple(ids))
         got = run.start("open", [], "opus-5.5", 3, wait=True)
-        got = auditrun.load_run(got.id)
+        got = some(auditrun.load_run(got.id))
         self.assertEqual(got.state, "done", got.error)
         self.assertEqual(got.recheck, ids)
         with open(asked) as fh:
@@ -18032,7 +18184,7 @@ class AuditTests(unittest.TestCase):
         self.write(os.path.join(repo, "tests"), "test_b.py", "import unittest\n\n\nclass BTests(unittest.TestCase):\n    def test_x4(self):\n        pass\n")
         self.fake_claude("```toml\n[[recheck]]\nid = \"%s\"\nworking = \"fixed\"\npushed = \"present\"\nmain = \"affected\"\n"
                          "tests = [\"BTests.test_x4\", \"BTests.test_made_up\"]\n```\n" % ids[1])
-        again = auditrun.load_run(run.start("open", [], "opus-5.5", 3, wait=True).id)
+        again = some(auditrun.load_run(run.start("open", [], "opus-5.5", 3, wait=True).id))
         self.assertEqual(again.state, "done", again.error)
         self.assertEqual(again.recheck, [ids[1]])
         with open(os.path.join(private, "audits", f"{audit.load()[0][0].id}.toml"), "rb") as fh:
@@ -18066,7 +18218,7 @@ class ToolsTests(unittest.TestCase):
         self.addCleanup(plex.close)
         app = _new_app(plex={"url": plex.url, "token": "good-token"}, plex2={"libraries": {"*": {"state": "none"}}})
         client = FakeOptimizer()
-        app.optimizing = Optimizing(app, client)
+        app.optimizing = Optimizing(app, cast(OptimizerClient, client))
         other = None
         if mirror:
             cat2 = {"movies": [dict(m) for m in cat["movies"]], "episodes": [], "tracks": [], "tracks_b": [], "root": d}
@@ -18157,7 +18309,7 @@ class ToolsTests(unittest.TestCase):
         self._run(tool, tool.apply_async([next(r["id"] for r in tool.snapshot()["scan"]["rows"] if r["kind"] == "avi")]))
         plex.cat["movies"][4]["more"] = [mkv]
         app.conversions.act(avi, "check")
-        self.assertEqual(app.conversions.get(avi)["state"], "deleted")
+        self.assertEqual(some(app.conversions.get(avi))["state"], "deleted")
         self.assertTrue(os.path.exists(mkv) and not os.path.exists(avi))
         jid = app.jobs.log.jobs()[0]["job"]
         self.assertEqual(revert_job(app, jid), {"reverted": 0, "failed": 1})                        # (you back up yourself here: the original can't come back)
@@ -18179,7 +18331,7 @@ class ToolsTests(unittest.TestCase):
         plex.changed_at = "2"
         app.scan_library()
         app.conversions.act(mp4, "check")
-        self.assertEqual(app.conversions.get(mp4)["state"], "separate")
+        self.assertEqual(some(app.conversions.get(mp4))["state"], "separate")
         self.assertTrue(os.path.exists(mp4) and os.path.exists(home_mkv))
         app.conversions.act(mp4, "keep")
         self.assertIsNone(app.conversions.get(mp4))
@@ -18245,6 +18397,7 @@ class ToolsTests(unittest.TestCase):
             new = os.path.join(root, r["new_name"])
             self.assertTrue(os.path.exists(new), r["new_name"])
             e = app.conversions.get(r["local"])
+            assert e is not None
             self.assertEqual((e["new"], os.path.basename(e["plex_new"])), (new, r["new_name"]))
         with open(taken, "rb") as fh:
             self.assertEqual(fh.read(), b"someone else's")                                         # (left alone)
@@ -18266,7 +18419,7 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual((o.state_of("1"), o.state_of("4")), ("mirror", "mirror"))
         app.settings.update({"plex2": {"libraries": {"1": {"state": "mirror", "server": "xyz", "key": ""}, "2": {"state": "none"}}}})  # (3 and 4: not decided)
         self.assertEqual((o.state_of("1"), o.state_of("2"), o.state_of("3"), o.undecided(), o.any_mirror()), ("mirror", "none", "unset", ["3", "4"], True))
-        self.assertEqual((o.mirror_for("1").title, o.mirror_for("2"), o.mirror_for("3")), ("Movies", None, None))
+        self.assertEqual((some(o.mirror_for("1")).title, o.mirror_for("2"), o.mirror_for("3")), ("Movies", None, None))
         self.assertEqual({k: (v.title if v else None) for k, v in o.pairs().items()}, {"1": "Movies", "2": None, "3": None, "4": None, "5": None})
         st = o.states()
         self.assertEqual((st["1"]["state"], st["1"]["there"], st["2"]["state"], st["3"]["state"]), ("mirror", "Movies", "none", "unset"))
@@ -18278,7 +18431,7 @@ class ToolsTests(unittest.TestCase):
                                   "rating_key": "r", "checked": 0, "scanned": 0, "converted": 0} for k in ("2", "3")]
         app.conversions.tick()
         notes = {e["library"]: e.get("note") for e in app.conversions.items}
-        self.assertIn("isn’t chosen yet", notes["3"])
+        self.assertIn("isn’t chosen yet", some(notes["3"]))
         self.assertIsNone(notes["2"])
         # Health asks about the libraries not decided, by name
         (ask,) = [x for x in checks._sync_items(app) if en(x["title"]).startswith("Is ")]
@@ -18302,7 +18455,7 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual((by["1"]["name"], by["1"]["their_title"], by["1"]["rate"], by["2"]["rate"]), ("Cabin", "Films", 1.0, 0.0))
         self.assertIsNone(app.sync.suspected("1"))                                                  # (decided already: nothing to suggest)
         app.settings.update({"plex2": {"libraries": {"1": {"state": "unset"}, "2": {"state": "none"}}}})
-        self.assertEqual((app.sync.suspected("1")["their_key"], app.sync.suspected("2")), ("7", None))
+        self.assertEqual((some(app.sync.suspected("1"))["their_key"], app.sync.suspected("2")), ("7", None))
         self.assertEqual(mirrored(app, "1"), {"name": "Cabin", "how": "suspected", "id": "zzz", "their_key": "7", "their_title": "Films"})
         (seen,) = [x for x in checks._sync_items(app) if "looks mirrored" in en(x["title"])]
         self.assertIn("Movies (Cabin: Films)", en(seen["title"]))
@@ -18338,15 +18491,22 @@ class ToolsTests(unittest.TestCase):
         o.choose("3", "none")
         self.assertEqual((o.state_of("2"), o.state_of("3")), ("unset", "none"))
         movies = o.mirror_for("1")
+        assert movies is not None
         self.assertEqual(en(o.choose("1", "mirror", "xyz", movies.key)), "Movies: mirrored by Starlit: Movies")
+        assert movies is not None
         self.assertEqual(o.entry("1"), {"state": "mirror", "server": "xyz", "key": movies.key})
         self.assertEqual(o.states()["1"]["there"], "Movies")
         # a second server, reached when a library of it is chosen: both in use, each library by its own
+        assert other is not None
         found = [{"id": "zzz", "name": "Cabin", "owned": True, "token": "other-token", "connections": [{"uri": other.url, "local": True, "relay": False}]}]
+        assert other is not None
         with mock.patch.object(plex2mod, "servers", lambda cid, tok: found), mock.patch.object(plex2mod, "reachable", lambda sv: other.url), \
                 mock.patch.object(o, "_main_id", lambda: "me"):
+            assert movies is not None
             o.choose("3", "mirror", "zzz", movies.key)
         s2 = app.settings.section("plex2")
+        assert other is not None
+        assert movies is not None
         self.assertEqual((s2["servers"]["zzz"]["name"], s2["servers"]["zzz"]["url"], o.entry("3")), ("Cabin", other.url, {"state": "mirror", "server": "zzz", "key": movies.key}))
         self.assertEqual((o.used(), o.entry("1")["server"], o.name_of("zzz"), o.states()["3"]["name"]), (["xyz", "zzz"], "xyz", "Cabin", "Cabin"))
         self.assertEqual([s["id"] for s in o.snapshot()["servers"]], ["xyz", "zzz"])
@@ -18374,6 +18534,7 @@ class ToolsTests(unittest.TestCase):
         # a second record of Film 1, with its own file; Film 1's first record has edits (kept)
         copy = os.path.join(cat["root"], "Movies", "Film 1 (2011) [copy].mkv")
         fakes.make_mkv(copy, 1024 * 1024)
+        assert other is not None
         for c in (plex.cat, other.cat):
             c["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 1", "year": 2011, "guid": "plex://movie/1", "duration": 5401000})
         plex.cat["movies"][1]["locked"] = ["title"]
@@ -18562,6 +18723,7 @@ class ToolsTests(unittest.TestCase):
         loose = os.path.join(cat["root"], "Movies", "Film 0 (2010).mkv")
         shutil.copy(m["path"], loose)
         m["more"] = [loose]  # (here: one record, the copy a second version of it)
+        assert other is not None
         other.cat["movies"].append({"path": loose, "size": 1, "kbps": 1, "key": "800", "title": "Film 0", "year": 2010})  # (there: a record of its own)
         app.scan_library()
         snap = self._run(tool, tool.scan_async("1"))
@@ -18569,7 +18731,7 @@ class ToolsTests(unittest.TestCase):
         (x,) = row["extras"]
         self.assertEqual((x["there"], x["ends_record_there"], x["ends_record"], row["blocked"]), (True, True, False, False))  # (there: grey, not blocking)
         # the page: the two cards, which is which said; the record there said in grey, the row tickable
-        got = PageStructureTests._render(self, app.state(), "versions")
+        got = PageStructureTests._render(cast(PageStructureTests, self), app.state(), "versions")
         html = got["html"]
         self.assertIn('<div class="mgkeep"><div class="mgkeeplbl">This file kept</div>', html)
         self.assertIn('<div class="mgdrop"><div class="mgdroplbl">This file deleted</div>', html)
@@ -18588,18 +18750,20 @@ class ToolsTests(unittest.TestCase):
         self.assertIn(">File 2<", html)
         self.assertIn('<span class="ssfn">2</span>', html)                                         # (the files listed under the cards)
         js = _read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plexcache", "web", "app.js"), encoding="utf-8")
-        self.assertIn("can’t be ticked until Merge Duplicates", re.search(r"var VERSIONS_HELP = N\((.*?)\);\n", js).group(1))  # (said in How it works)
+        self.assertIn("can’t be ticked until Merge Duplicates", some(re.search(r"var VERSIONS_HELP = N\((.*?)\);\n", js)).group(1))  # (said in How it works)
         # merged there: both files versions of one record — nothing said of a record there
+        assert other is not None
         other.cat["movies"].pop()
         other.cat["movies"][0]["more"] = [loose]
         app.mirrors.indexes.clear()
         snap = self._run(tool, tool.scan_async("1"))
         (row,) = snap["scan"]["rows"]
         self.assertEqual((row["extras"][0]["there"], row["extras"][0]["ends_record_there"], row["blocked"]), (True, False, False))
-        html = PageStructureTests._render(self, app.state(), "versions")["html"]
+        html = PageStructureTests._render(cast(PageStructureTests, self), app.state(), "versions")["html"]
         self.assertNotIn("Record destroyed", html)
         # a copy on disk Plex doesn't list here: no record, so a grey poster on its card
         m.pop("more")
+        assert other is not None
         other.cat["movies"][0].pop("more")
         app.mirrors.indexes.clear()
         app.scan_library()
@@ -18608,7 +18772,7 @@ class ToolsTests(unittest.TestCase):
         self.assertTrue(row["unlisted"])
         self.assertFalse(row["blocked"])
         st = app.state()
-        html = PageStructureTests._render(self, st, "versions")["html"]
+        html = PageStructureTests._render(cast(PageStructureTests, self), st, "versions")["html"]
         deleted = html[html.index("This file deleted"):]
         self.assertIn('<div class="ssposter none"', deleted[:deleted.index("</div></div></div>")])
         self.assertIn("No Plex record", deleted)
@@ -18628,7 +18792,7 @@ class ToolsTests(unittest.TestCase):
         st = copy.deepcopy(st)
         r = st["tools"]["versions"]["scan"]["rows"][0]
         r["keep"], r["extras"] = chosen["keep"], chosen["extras"]
-        html = PageStructureTests._render(self, st, "versions")["html"]
+        html = PageStructureTests._render(cast(PageStructureTests, self), st, "versions")["html"]
         self.assertRegex(html, r'class="badge b-fail sschip[^"]*"[^>]*>Record destroyed<')        # (red)
         self.assertIn('class="note badbox vsblocked"', html)
         self.assertRegex(html, r'<input type="checkbox" data-act="tool-sel" data-tool="versions" data-id="' + re.escape(row["id"]) + '" disabled')
@@ -18650,6 +18814,7 @@ class ToolsTests(unittest.TestCase):
         loose = os.path.join(cat["root"], "Movies", "Film 0 (2010).mkv")
         shutil.copy(m["path"], loose)
         m["more"] = [loose]
+        assert other is not None
         other.cat["movies"].append({"path": loose, "size": 1, "kbps": 1, "key": "800", "title": "Film 0", "year": 2010})
         app.scan_library()
         snap = self._run(tool, tool.scan_async("1"))
@@ -18741,14 +18906,17 @@ class ToolsTests(unittest.TestCase):
         one there. Not picked up for days: Health says so."""
         from plexcache import checks
         from plexcache.tools import folders as fo
+        from plexcache.tools.folders import OrganizeFolders
         app, plex, client, cat, other = self._app(mirror=True)
         tool = app.tools["folders"]
+        assert isinstance(tool, OrganizeFolders)
         root = os.path.join(cat["root"], "Movies")
         m = cat["movies"][0]
         loose = os.path.join(root, "Film 0 (2010).mkv")
         os.rename(m["path"], loose)
         shutil.rmtree(os.path.dirname(m["path"]))
         m["path"] = loose
+        assert other is not None
         other.cat["movies"][0]["path"] = loose
         app.scan_library()
         snap = self._run(tool, tool.scan_async("1"))
@@ -18764,14 +18932,18 @@ class ToolsTests(unittest.TestCase):
         self.assertTrue(tool.waiting())
         # not there yet: its folder scanned there, and waited for
         tool.tick()
+        assert other is not None
         self.assertEqual(other.scanned, [os.path.dirname(new)])
         self.assertEqual(len(tool.extra["pending"]), 1)
         # the mirror's Plex lists the new path as a record of its own, the old one still there: merged
+        assert other is not None
         other.cat["movies"].append({"path": new, "size": 1, "kbps": 1, "key": "777", "title": "Film 0"})
         tool.tick()
+        assert other is not None
         self.assertEqual(other.merged, [("100", "777")])
         self.assertEqual(len(tool.extra["pending"]), 1)                                               # (the old path still listed there)
         other.cat["movies"][0]["path"] = new
+        assert other is not None
         other.cat["movies"][0].pop("more", None)
         tool.tick()
         self.assertEqual((tool.extra["pending"], tool.results[-1]["mirror"], tool.waiting()), ([], True, False))
@@ -18958,7 +19130,7 @@ class ToolsTests(unittest.TestCase):
         self.assertTrue(job["revertable"])
         # the snapshots are pruned after the backup days; both TrueNAS APIs are spoken
         self.assertEqual(safety.prune_snapshots(app), 0)
-        app._snapshots[0]["at"] -= safety.life(app) + 1
+        safety.taken(app)[0]["at"] -= safety.life(app) + 1
         self.assertEqual(safety.prune_snapshots(app), 1)
         self.assertEqual((safety.taken(app), TRUENAS.snapshots.get("tank/media")), ([], []))
         TRUENAS.snapshot_api, TRUENAS.snapshot_calls, app._snapshot_api = "zfs.snapshot", [], None
@@ -19034,7 +19206,9 @@ class ToolsTests(unittest.TestCase):
         job = app.jobs.log.jobs()[0]
         self.assertEqual((job["status"], job["backup"]["kind"], job["backup"]["plex"]["records"], job["revertable"]), ("finished", "records", 2, True))
         b = plexbackup.find(app, job["backup"]["plex"]["id"])
+        assert b is not None
         self.assertEqual((sorted(b["items"]), b["items"]["190"]["tags"]["collection"], b["items"]["190"]["tags"]["label"], b["ops"][0]["keep"]), (["101", "190"], ["Favourites"], ["kids"], "101"))
+        assert b is not None
         self.assertAlmostEqual(b["until"] - b["at"], 9 * 86400, delta=5)                              # (the same days as every backup)
         self.assertEqual([x["records"] for x in plexbackup.listing(app)], [2])
         # Revert on the run: split apart, the folded record's own collections and labels back on the record its file is on now
@@ -19043,9 +19217,11 @@ class ToolsTests(unittest.TestCase):
         back = next(m for m in plex.cat["movies"] if m.get("path") == copy)
         self.assertEqual((back["collections"], back["labels"]), (["Favourites"], ["kids"]))
         self.assertEqual(next(m for m in plex.cat["movies"] if m["key"] == "101")["locked"], ["title"])
-        self.assertTrue(plexbackup.find(app, b["id"])["reverted"])
+        assert b is not None
+        self.assertTrue(some(plexbackup.find(app, b["id"]))["reverted"])
         self.assertEqual(len(plexbackup.backups(app)), 1)                                             # (the revert's own changes aren't backed up again)
         with self.assertRaises(ValueError):
+            assert b is not None
             plexbackup.revert(app, b["id"])                                                           # (once)
         # a change outside any process: backed up all the same, and put back from it
         app.plex().edit("1", 1, "100", {"title.value": "Renamed", "title.locked": 1})
@@ -19232,11 +19408,13 @@ class ToolsTests(unittest.TestCase):
         # this server: Film 1's title edited and in a collection; Film 2 matched to another entry on the mirror; Film 3's
         # poster chosen by hand; Film 0 one record here, two on the mirror; Film 4 here only, its file on the disk they share
         cat["movies"][1].update(title="Film One", locked=["title"], collections=["Best"])
+        assert other is not None
         other.cat["movies"][2]["guid"] = "plex://movie/other"
         cat["movies"][3]["locked"] = ["thumb"]
         copy = os.path.join(cat["root"], "Movies", "Film 0 (2010) [copy].mkv")
         fakes.make_mkv(copy, 1024 * 1024)
         cat["movies"][0]["more"] = [copy]
+        assert other is not None
         other.cat["movies"].append({"path": copy, "size": 1, "kbps": 1, "key": "190", "title": "Film 0", "year": 2010, "guid": "plex://movie/0", "duration": 5400000})
         new = os.path.join(cat["root"], "Movies", "Film 4 (2014)", "Film 4.mkv")
         os.makedirs(os.path.dirname(new))
@@ -19266,14 +19444,19 @@ class ToolsTests(unittest.TestCase):
                          {"Film 0 (2010)": ("done", "Starlit", "versions grouped"), "Film 2 (2012)": ("done", "Starlit", "the match"),
                           "Film 3 (2013)": ("done", "Starlit", "posters chosen by hand"), "Film 4 (2014)": ("done", "Starlit", "files not listed"),
                           "Film One (2011)": ("done", "Starlit", "edited fields, collections")})
+        assert other is not None
         puts = [(p, q) for p, q in other.puts]
         self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "title.value": "Film One", "title.locked": "1"}), puts)
         self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "collection[0].tag.tag": "Best"}), puts)
         self.assertIn(("/library/metadata/102/match", {"guid": "plex://movie/2", "name": "Film 2 (2012)"}), puts)
+        assert other is not None
         self.assertEqual(other.posts, [("/library/metadata/103/posters", b"IMG")])
+        assert other is not None
         self.assertEqual(other.merged, [("100", "190")])
+        assert other is not None
         self.assertEqual(other.scanned, [os.path.join(cat["root"], "Movies", "Film 4 (2014)")])
         self.assertEqual((getattr(plex, "puts", []), getattr(plex, "merged", [])), ([], []))         # (this server: untouched)
+        assert other is not None
         self.assertEqual((other.cat["movies"][1]["title"], other.cat["movies"][1]["locked"], other.cat["movies"][2]["guid"]), ("Film One", ["title"], "plex://movie/2"))
         # scanned again after the run: in step (Film 0 merged there; Film 4 there once its Plex has scanned — not in the fake)
         for _ in range(400):
@@ -19285,11 +19468,13 @@ class ToolsTests(unittest.TestCase):
         # poster chosen before chosen again; the merge can't be, nor need the scan
         other.puts = []
         self.assertEqual(revert_job(app, job["job"]), {"reverted": 5, "failed": 0})
+        assert other is not None
         puts = [(p, q) for p, q in other.puts]
         self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "title.value": "Film 1", "title.locked": "0"}), puts)
         self.assertIn(("/library/sections/1/all", {"type": "1", "id": "101", "collection[].tag.tag-": "Best"}), puts)
         self.assertIn(("/library/metadata/102/match", {"guid": "plex://movie/other", "name": "Film 2 (2012)"}), puts)
         self.assertIn(("/library/metadata/103/poster", {"url": "upload://posters/old"}), puts)
+        assert other is not None
         self.assertEqual((other.cat["movies"][1]["title"], other.cat["movies"][1]["locked"]), ("Film 1", []))
         for _ in range(400):
             if not tool.running:
@@ -19305,9 +19490,14 @@ class ToolsTests(unittest.TestCase):
         self.assertIn(("/library/metadata/102/match", {"guid": "plex://movie/other", "name": "Film 2 (2012)"}), [(p, q) for p, q in getattr(plex, "puts", [])])
         job = app.jobs.log.jobs()[0]
         self.assertEqual((job["status"], job["backup"]["kind"], job["backup"]["plex"]["records"]), ("finished", "records", 1))
-        self.assertEqual(plexbackup.find(app, job["backup"]["plex"]["id"])["server"], "here")
+        self.assertEqual(some(plexbackup.find(app, job["backup"]["plex"]["id"]))["server"], "here")
         self.assertEqual(revert_job(app, job["job"]), {"reverted": 1, "failed": 0})
         self.assertEqual(next(m for m in plex.cat["movies"] if m["key"] == "102")["guid"], "plex://movie/2")
+
+
+class _SideApp(App):
+    """A Dionysus as MirrorLinkTests use it: the link under test kept on it."""
+    mirror_link: _peerlink.PeerLink
 
 
 class MirrorLinkTests(unittest.TestCase):
@@ -19317,7 +19507,7 @@ class MirrorLinkTests(unittest.TestCase):
     def _side(self, me, mirror):
         """A Dionysus with a web server of its own, its Plex ``me``, every library mirrored by ``mirror``."""
         from plexcache.server import serve
-        app = App(tempfile.mkdtemp(dir=TMP))
+        app = _SideApp(tempfile.mkdtemp(dir=TMP))
         httpd = serve(app, "127.0.0.1", 0)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         self.addCleanup(httpd.server_close)
@@ -19373,14 +19563,14 @@ class MirrorLinkTests(unittest.TestCase):
         from plexcache import peerlink as pl
         a, ua, b, ub = self._pair()
         a.mirror_link.tick(force=True)
-        self.assertEqual(a.mirror_link.found["url"], pl.base_url(ub))
+        self.assertEqual(some(a.mirror_link.found)["url"], pl.base_url(ub))
         self.assertIsNone(a.mirror_link.paired)
         self.assertIn("marker hasn’t reached", en(jsonable(a.mirror_link.pair_error)))
         lights = a.mirror_link.lights()
         self.assertEqual((lights["found"]["status"], lights["paired"]["status"], lights["talking"]["status"]), ("ok", "warn", "off"))
         # who may pair by itself: the mirror's Plex, at the mirror's address (or the one set), with the marker's key
         hello = b.peerlinks.hello()
-        a.mirror_link._marker_public = lambda inst: b.mirror_link.public()
+        self.enterContext(mock.patch.object(a.mirror_link, "_marker_public", lambda inst: b.mirror_link.public()))
         self.assertIsNone(a.mirror_link.may_pair(hello, ub))
         self.assertIn("isn’t an address of plexB", en(jsonable(a.mirror_link.may_pair(hello, "http://10.9.9.9:8642"))))
         self.assertIn("isn’t plexB", en(jsonable(a.mirror_link.may_pair(dict(hello, plex="plexC"), ub))))
@@ -19389,10 +19579,10 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertIn("Pairing by itself is off", en(jsonable(a.mirror_link.may_pair(hello, ub))))
         a.settings.update({"peer": {"auto_pair": True}})
         # the markers seen both ways: paired by itself, on both sides, and talking
-        b.mirror_link._marker_public = lambda inst: a.mirror_link.public()
+        self.enterContext(mock.patch.object(b.mirror_link, "_marker_public", lambda inst: a.mirror_link.public()))
         a.mirror_link.tick(force=True)
-        self.assertEqual((a.mirror_link.paired["instance"], a.mirror_link.paired["how"]), (b.mirror_link.instance(), "auto"))
-        self.assertEqual(b.mirror_link.paired["instance"], a.mirror_link.instance())
+        self.assertEqual((some(a.mirror_link.paired)["instance"], some(a.mirror_link.paired)["how"]), (b.mirror_link.instance(), "auto"))
+        self.assertEqual(some(b.mirror_link.paired)["instance"], a.mirror_link.instance())
         self.assertTrue(a.mirror_link.talking())
         # each side's own fingerprint is what the other shows for it
         self.assertEqual(a.mirror_link.snapshot()["fingerprint"], b.mirror_link.links.snapshot()["own"]["fingerprint"])
@@ -19425,8 +19615,8 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertIsNone(b.mirror_link.paired)
         self.assertEqual(os.stat(os.path.join(a.config_dir, "peer-key.json")).st_mode & 0o777, 0o600)          # (the private half: the app's alone)
         self.assertEqual((a.mirror_link.declined, b.mirror_link.declined), ([b.mirror_link.instance()], [a.mirror_link.instance()]))
-        a.mirror_link._marker_public = lambda inst: b.mirror_link.public()
-        b.mirror_link._marker_public = lambda inst: a.mirror_link.public()
+        self.enterContext(mock.patch.object(a.mirror_link, "_marker_public", lambda inst: b.mirror_link.public()))
+        self.enterContext(mock.patch.object(b.mirror_link, "_marker_public", lambda inst: a.mirror_link.public()))
         a.mirror_link.tick(force=True)
         self.assertIsNone(a.mirror_link.paired)
         self.assertIn("unpaired here by hand", en(jsonable(a.mirror_link.pair_error)))
@@ -19463,6 +19653,7 @@ class MirrorLinkTests(unittest.TestCase):
     def _mirror(self):
         app, plex, _client, cat, other = ToolsTests()._app(mirror=True)
         self.addCleanup(plex.close)
+        assert other is not None
         self.addCleanup(other.close)
         return app, plex, cat, other
 
@@ -19483,7 +19674,9 @@ class MirrorLinkTests(unittest.TestCase):
         app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}})                    # (the mirror's edits win: a file its Plex doesn't list is Mirror Checks's)
         root = os.path.join(cat["root"], "Movies")
         self.assertEqual(app.mirror_health.libraries()[0], "1")
+        assert other is not None
         gone = other.cat["movies"].pop(0)
+        assert other is not None
         other.cat["movies"].append(dict(other.cat["movies"][0], path=os.path.join(root, "Extra (2020)", "Extra.mkv"), key="999"))
         loose = os.path.join(root, "Loose (2019)", "Loose.mkv")
         os.makedirs(os.path.dirname(loose))
@@ -19521,7 +19714,7 @@ class MirrorLinkTests(unittest.TestCase):
         theirs = [[r, s + 1 if r == first else s, m] for r, s, m in theirs] + [["Only There (2001)/x.mkv", 5, old], ["New (2026)/y.mkv", 5, time.time()]]
         link = app.peerlinks.link("xyz")
         link.talking = lambda: True
-        link.files = lambda key: {"ready": True, "files": theirs}
+        self.enterContext(mock.patch.object(link, "files", lambda key: {"ready": True, "files": theirs}))
         link.folder_sync = lambda: {"1": {"status": "fail", "out": None, "in": None}}
         got = app.mirror_health.check("1")
         kinds = {}
@@ -19577,6 +19770,7 @@ class MirrorLinkTests(unittest.TestCase):
             app.mirror_health.results["1"] = dict(got, stamp=app.libdata.data("1").stamp)          # (compared over the data as it is)
         with mock.patch.object(mh, "RECHECK_AFTER", 3600):
             libhealth.act(app, "1", there["item"], "mirror_not_listed_there")
+            assert other is not None
             self.assertEqual(other.scanned, [os.path.dirname(gone["path"])])
             libhealth.act(app, "1", unl["item"], "mirror_unlisted_here")
             self.assertEqual(plex.scanned, [os.path.dirname(loose)])
@@ -19605,15 +19799,18 @@ class MirrorLinkTests(unittest.TestCase):
         from plexcache import libhealth
         app, plex, cat, other = self._mirror()
         root = os.path.join(cat["root"], "Movies")
+        assert other is not None
         gone = other.cat["movies"].pop(0)                                                           # (listed here, not by the mirror's Plex)
         loose = os.path.join(root, "Loose (2019)", "Loose.mkv")                                     # (on disk; listed by the mirror's Plex only)
         os.makedirs(os.path.dirname(loose))
         fakes.make_mkv(loose, 1024 * 1024)
+        assert other is not None
         other.cat["movies"].append(dict(other.cat["movies"][0], path=loose, key="990", title="Loose", year=2019, guid="plex://movie/990"))
         two = cat["movies"][2]
         twin = os.path.join(os.path.dirname(two["path"]), "Film 2 twin.mkv")                       # (one item's two versions here, two items there)
         shutil.copy2(two["path"], twin)
         two["more"] = [twin]
+        assert other is not None
         other.cat["movies"].append(dict(next(m for m in other.cat["movies"] if m["key"] == two["key"]), path=twin, key="991"))
         app.scan_library()
         app.libdata.gather("1", wait=True, refresh=True)
@@ -19709,7 +19906,7 @@ class MirrorLinkTests(unittest.TestCase):
         self.assertEqual(post("/api/library/health/scan", {"library": "99", "category": "mirror"})[0], 400)
         self.assertEqual(post("/api/library/health/action", {"library": "1", "item": "nope", "check": "mirror_unlisted_here"})[0], 400)
         self.assertEqual(post("/api/library/health/action", {"library": "1"})[0], 400)
-        link.files = lambda key: {"ready": True, "files": []}
+        self.enterContext(mock.patch.object(link, "files", lambda key: {"ready": True, "files": []}))
         code, got = post("/api/library/health/scan", {"library": "1", "category": "mirror"})
         self.assertEqual((code, got["started"]), (200, True))
         for _ in range(200):
@@ -19775,6 +19972,7 @@ class MirrorLinkTests(unittest.TestCase):
         from plexcache import libhealth
         app, _plex, _cat, other = self._mirror()
         app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}})                    # (the mirror's edits win: a file its Plex doesn't list is Mirror Checks's)
+        assert other is not None
         other.cat["movies"].pop(0)
         app.library_health("1")
         before = app._health_counts_now()["1"]
@@ -19812,6 +20010,7 @@ class MirrorLinkTests(unittest.TestCase):
         Scan Again, the warning while the link isn't healthy, and the findings as chips on their items with Ignore."""
         app, _plex, _cat, other = self._mirror()
         app.settings.update({"tools": {"sync": {"1": {"source": "mirror"}}}})                    # (the mirror's edits win: a file its Plex doesn't list is Mirror Checks's)
+        assert other is not None
         other.cat["movies"].pop(0)
         link = app.peerlinks.link("xyz")
         link.lights = lambda: {"found": {"status": "ok", "text": "Dionysus found on Cottage", "detail": ""}, "paired": {"status": "warn", "text": "Dionysus found, but not paired", "detail": ""},
@@ -19880,7 +20079,7 @@ class CountStandardTests(unittest.TestCase):
 
     def _tool_pages(self):
         """Every page of the Tools menu (app.js TOOLS)."""
-        block = re.search(r"\n  var TOOLS = \[(.*?)\}\];", self._js(), re.S).group(1)
+        block = some(re.search(r"\n  var TOOLS = \[(.*?)\}\];", self._js(), re.S)).group(1)
         got = re.findall(r'\{ page: "(\w+)", name: N\("', block)
         self.assertGreaterEqual(len(got), 11)
         return got
@@ -20061,14 +20260,14 @@ class CountStandardTests(unittest.TestCase):
             c = real_plex(timeout=timeout)
             items = c.library_items
 
-            def library_items(key, leaf):
-                seen.append((str(key), "records"))
-                if str(key) == "1" and not ld.urgent:
+            def library_items(section_key: str, leaf: int, limit: int | None = None) -> list[dict]:
+                seen.append((str(section_key), "records"))
+                if str(section_key) == "1" and not ld.urgent:
                     ld.fast_track("2", ("records", "files"))                                       # (the page opened, mid-read)
-                return items(key, leaf)
+                return items(section_key, leaf, limit)
             c.library_items = library_items
             return c
-        app.plex = plex_
+        self.enterContext(mock.patch.object(app, "plex", plex_))
         ld._gather_files = lambda d, lib, step: (seen.append((d.key, "files")), real_files(d, lib, step))[1]
         with ld.lock:
             ld.queue = [("1", ("records", "files"))]
@@ -20237,7 +20436,7 @@ class CountStandardTests(unittest.TestCase):
         c = ev.count("optimizer", "1")
         self.assertEqual(c["s"], "done")
         self.assertEqual(c["n"], ((app.optimizing.summary or {}).get("1") or {}).get("todo") or 0)
-        app.optimizing.options = lambda key: {"sync": False, "mkv": False}
+        self.enterContext(mock.patch.object(app.optimizing, "options", lambda key: {"sync": False, "mkv": False}))
         c = ev.count("optimizer", "1")
         self.assertEqual(c["s"], "na")
         self.assertIn("Neither rewrite", en(jsonable(c["why"])))
@@ -20356,7 +20555,7 @@ class CountStandardTests(unittest.TestCase):
 
         def down(server, timeout=30):
             raise PlexError("Connection refused")
-        app.mirrors.client = down
+        swap(self, app.mirrors, "client", down)
         unknown()
         c = ev.count("mirrorchecks", "1")
         self.assertEqual(c["s"], "failed")
@@ -20408,7 +20607,7 @@ class CountStandardTests(unittest.TestCase):
         node = shutil.which("node")
         if not node:
             self.skipTest("node isn't installed")
-        src = re.search(r"// @testable: partialTone\n(  function .*?)\n  // @end", self._js(), re.S).group(1)
+        src = some(re.search(r"// @testable: partialTone\n(  function .*?)\n  // @end", self._js(), re.S)).group(1)
         cases = [[{"s": "pending", "partial": 4118}, False, "warn"], [{"s": "pending", "partial": 4118}, True, "fail"],
                  [{"s": "pending", "partial": 0}, True, "fail"], [{"s": "pending", "partial": 0}, False, ""],
                  [{"s": "pending"}, True, ""], [{"s": "done", "n": 3}, False, ""]]
@@ -20417,8 +20616,8 @@ class CountStandardTests(unittest.TestCase):
         self.assertEqual(got.returncode, 0, got.stderr)
         self.assertEqual(json.loads(got.stdout), [k[2] for k in cases])
         js = self._js()
-        chip = re.search(r"\n  function countChip\(.*?\n  \}", js, re.S).group(0)
-        menu = re.search(r"\n  function menuCount\(.*?\n  \}", js, re.S).group(0)
+        chip = some(re.search(r"\n  function countChip\(.*?\n  \}", js, re.S)).group(0)
+        menu = some(re.search(r"\n  function menuCount\(.*?\n  \}", js, re.S)).group(0)
         self.assertIn("partialTone(c, bad)", chip)                                                  # (the one rule: the chips, the menu)
         self.assertIn("partialTone(c, bad)", menu)
         self.assertNotIn("countChip(pc)", js)                                                       # (every chip given its red)
@@ -20453,18 +20652,19 @@ class CountStandardTests(unittest.TestCase):
         self.assertEqual(libhealth.scans(app)["mirror"]["busy"], [])
         # a restart: the counts last worked out kept, shown as last known while every check page is worked out again
         saved = app._load_json("health-counts.json")
-        self.assertIn("1", saved)
+        self.assertIn("1", some(saved))
         app.health_counts.clear()
         app._health.clear()
         app._load_health_counts()
         self.assertFalse(app.health_current("1"))
         for page, cat in (("filechecks", "file"), ("plexchecks", "plex"), ("library", "flagged")):
             c = ev.count(page, "1")
+            assert saved is not None
             self.assertEqual((c["s"], c.get("partial"), c.get("last")), ("pending", int(saved["1"].get(cat) or 0), True), page)
         # the page: said to be last time's, the buttons disabled saying why
         js = self._js()
         for fn in ("countBox", "countWhy"):
-            body = re.search(r"\n  function " + fn + r"\(.*?\n  \}", js, re.S).group(0)
+            body = some(re.search(r"\n  function " + fn + r"\(.*?\n  \}", js, re.S)).group(0)
             self.assertIn("c.last ?", body, fn)
             self.assertIn("found last time", body, fn)
         self.assertEqual(js.count('data-act="lh-action"'), 1)
@@ -20482,7 +20682,7 @@ class CountStandardTests(unittest.TestCase):
 
         def down(server, timeout=30):
             raise PlexError("Connection refused")
-        app.mirrors.client = down
+        swap(self, app.mirrors, "client", down)
         with app.mirrors.lock:
             app.mirrors.libs.pop("xyz", None)
         self.assertEqual(app.libdata.mirror_of("1"), (None, None))
@@ -20494,7 +20694,7 @@ class CountStandardTests(unittest.TestCase):
         """While a check page's count is still to come — a scan running among it — the one bar is the placeholder's
         (countBox): Scan's own row draws none."""
         js = self._js()
-        body = re.search(r"\n  function lhScanBar\(.*?\n  \}", js, re.S).group(0)
+        body = some(re.search(r"\n  function lhScanBar\(.*?\n  \}", js, re.S)).group(0)
         self.assertNotIn("meter", body)
         self.assertNotIn("progressbar", body)
         mh_cur = ToolsTests()._app(mirror=True)[0].mirror_health
@@ -20577,6 +20777,19 @@ class BlockStandardTests(unittest.TestCase):
 class _FakeApp:
     """A stand-in app for the small stores and helpers (converting.py, trash.py, plexbackup.py, safety.py): its JSON kept
     in a dict, its events noted, its settings a dict of sections, its libraries and datasets whatever a test gives it."""
+    # (what a test gives it when the code under test reaches for them: unset until then, as on the real app)
+    mirrors: Any
+    truenas: Any
+    plex: Any
+    plex_fail: Any
+    plex_calls: Any
+    delete: Any
+    file_action: Any
+    item_files: Any
+    monitor: Any
+    optimizing: Any
+    playing: Any
+    _snapshot_api: Any
 
     def __init__(self, **sections):
         self.store, self.events, self.sections = {}, [], {"general": {}, "truenas": {}, "plex2": {}, **sections}
@@ -20701,12 +20914,12 @@ class ConversionTests(unittest.TestCase):
         app.plex_calls, app.plex_fail, app.item_files, app.playing, app.mirrors = [], False, [], set(), None
 
         class Client:
-            def scan(self_, library, folder):
+            def scan(_self, library, folder):
                 app.plex_calls.append(("scan", library, folder))
                 if app.plex_fail:
                     raise PlexError("Plex down")
 
-            def item_files(self_, rk):
+            def item_files(_self, rk):
                 if app.plex_fail:
                     raise PlexError("Plex down")
                 return app.item_files
@@ -20787,20 +21000,20 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(e["state"], "separate")
 
         class Other:
-            def state_of(self_, key):
+            def state_of(_self, key) -> str:
                 return "mirror"
 
-            def where(self_, e, now):
+            def where(_self, e, now):
                 raise PlexError("mirror down")
 
-            def server_of(self_, key):
+            def server_of(_self, key):
                 return "abc"
 
-            def name_of(self_, server):
+            def name_of(_self, server):
                 return "Cabin"
 
         class Unset(Other):
-            def state_of(self_, key):
+            def state_of(_self, key):
                 return "unset"
 
         app.mirrors = Other()
@@ -20879,15 +21092,15 @@ class TrashTests(unittest.TestCase):
         class Other:
             fail = False
 
-            def mirror_for(self_, key):
+            def mirror_for(_self, key):
                 return "LIB"
 
-            def index(self_, lib, fresh=False):
-                if self_.fail:
+            def index(_self, lib, fresh=False):
+                if _self.fail:
                     raise PlexError("mirror down")
                 return {"/m/A/a.mkv": "5"}
 
-            def paths_there(self_, key, path, lib):
+            def paths_there(_self, key, path, lib):
                 return ["/m/A/a.mkv"]
 
         app.mirrors = Other()
@@ -20974,7 +21187,8 @@ class _RecordClient:
     """A Plex client for the records (plexbackup.py): each answered from XML, every change noted."""
 
     def __init__(self, records):
-        self.records, self.calls, self.fail, self.fail_leaves, self.images_fail, self.chosen, self.items, self.items_fail, self.split_fail = records, [], None, False, False, {}, [], False, False
+        self.records, self.calls, self.fail_leaves, self.images_fail, self.chosen, self.items, self.items_fail, self.split_fail = records, [], False, False, {}, [], False, False
+        self.fail: str | None = None   # (every call refused, with this)
 
     def get(self, path, params=None):
         import xml.etree.ElementTree as ET
@@ -21025,10 +21239,11 @@ class PlexBackupTests(unittest.TestCase):
                            "2/leaves": ['<Video type="episode" ratingKey="21"><Media><Part file="/t/e1.mkv"/></Media></Video>']})
         c.chosen = {("1", "posters"): "upload://posters/old"}
         rec = plexbackup.read(c, "1")
+        assert rec is not None
         self.assertEqual((rec["section"], rec["locked"], rec["files"], rec["images"]), ("3", ["title"], ["/m/a.mkv"], {"thumb": "upload://posters/old", "art": ""}))
-        self.assertEqual(plexbackup.read(c, "2")["files"], ["/t/e1.mkv"])                              # (a show's files: its episodes')
+        self.assertEqual(some(plexbackup.read(c, "2"))["files"], ["/t/e1.mkv"])                              # (a show's files: its episodes')
         c.fail_leaves = True
-        self.assertEqual(plexbackup.read(c, "2")["files"], [])
+        self.assertEqual(some(plexbackup.read(c, "2"))["files"], [])
         self.assertIsNone(plexbackup.read(c, "3"))                                                    # (an empty answer)
         self.assertIsNone(plexbackup.read(c, "9"))                                                    # (no such record)
         c.fail = "HTTP 500"
@@ -21036,7 +21251,7 @@ class PlexBackupTests(unittest.TestCase):
             plexbackup.read(c, "1")
         c.fail = None
         c.images_fail = True
-        self.assertEqual(plexbackup.read(c, "1")["images"], {"thumb": "", "art": ""})
+        self.assertEqual(some(plexbackup.read(c, "1"))["images"], {"thumb": "", "art": ""})
         c.images_fail = False
         # a process's backup: the records taken first — one that can't be read stops it, and no backup is left behind
         app.plex = lambda timeout=120: c
@@ -21047,12 +21262,13 @@ class PlexBackupTests(unittest.TestCase):
         self.assertEqual(plexbackup.backups(app), [])
         c.fail = None
         with plexbackup.session(app, "x", keys=["1", "2"]) as b:
+            assert b is not None
             self.assertEqual(b["library"], "3")                                                       # (the library: the first record's)
         self.assertEqual(len(plexbackup.backups(app)), 1)
         # put back: no record now; unmatched again; the edition; the poster chosen
         with self.assertRaisesRegex(ValueError, "no record 9"):
             plexbackup.put_back(c, "3", {"key": "9"}, "9")
-        rec = dict(plexbackup.read(c, "1"), guid="", matched=False, edition="Cut", images={"thumb": "upload://posters/new", "art": ""})
+        rec = dict(some(plexbackup.read(c, "1")), guid="", matched=False, edition="Cut", images={"thumb": "upload://posters/new", "art": ""})
         self.assertEqual(plexbackup.put_back(c, "3", rec, "1"), ["match", "fields", "thumb"])
         self.assertEqual([x[0] for x in c.calls], ["unmatch", "edit", "set_image"])
         self.assertEqual(c.calls[1][4], {"editionTitle.value": "Cut", "editionTitle.locked": 1})
@@ -21071,20 +21287,26 @@ class PlexBackupTests(unittest.TestCase):
             plexbackup.revert(app, "nope")
         b["until"] = time.time() - 1
         with self.assertRaisesRegex(ValueError, "expired"):
+            assert b is not None
             plexbackup.revert(app, b["id"])
         b["until"] = time.time() + 100
         b["ops"] = [{"op": "merge", "keep": "1", "others": ["8"]}]
         b["items"]["1"]["files"] = ["/m/gone.mkv"]
         c.split_fail, c.items = True, []
         with mock.patch.object(plexbackup, "FIND_WAIT", 0):
+            assert b is not None
             got = plexbackup.revert(app, b["id"], keys=["8"])
         self.assertEqual((got["restored"], got["failed"], [en(x) for x in got["left"]]), (0, 1, ["A wasn’t split apart: can’t split", "A: no record holds its files now"]))
+        assert b is not None
         self.assertEqual((b.get("reverted"), b["reverted_keys"]), (False, ["1", "8"]))               # (some of its records: open still)
         self.assertEqual(app.events[-1][1], {"level": "warn"})
         b["ops"], b["items"]["1"]["files"] = [], ["/m/a.mkv"]
+        assert b is not None
         self.assertEqual(plexbackup.revert(app, b["id"])["restored"], 2)
+        assert b is not None
         self.assertTrue(b["reverted"])
         with self.assertRaisesRegex(ValueError, "Reverted already"):
+            assert b is not None
             plexbackup.revert(app, b["id"])
         self.assertEqual(plexbackup.prune(app), 0)
 
@@ -21216,7 +21438,7 @@ class ServerRouteTests(unittest.TestCase):
         cls.httpd.shutdown()
         cls.httpd.server_close()
 
-    def req(self, method, path, body=None):
+    def req(self, method, path, body=None) -> tuple[int, Any, Any]:
         """(status, the JSON answer — or the bytes when it isn't JSON, headers)."""
         data = json.dumps(body).encode() if body is not None else None
         r = urllib.request.Request(self.base + path, data=data, method=method)
@@ -21394,7 +21616,7 @@ class PeerLinkEdgeTests(unittest.TestCase):
 
     def _side(self, me, mirror):
         from plexcache.server import serve
-        app = App(tempfile.mkdtemp(dir=TMP))
+        app = _SideApp(tempfile.mkdtemp(dir=TMP))
         httpd = serve(app, "127.0.0.1", 0)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         self.addCleanup(httpd.server_close)
@@ -21412,8 +21634,8 @@ class PeerLinkEdgeTests(unittest.TestCase):
         b, ub = self._side("plexB", "plexA")
         a.settings.update({"peer": {"servers": {"plexB": {"url": ub}}}})
         b.settings.update({"peer": {"servers": {"plexA": {"url": ua}}}})
-        a.mirror_link._marker_public = lambda inst: b.mirror_link.public()
-        b.mirror_link._marker_public = lambda inst: a.mirror_link.public()
+        self.enterContext(mock.patch.object(a.mirror_link, "_marker_public", lambda inst: b.mirror_link.public()))
+        self.enterContext(mock.patch.object(b.mirror_link, "_marker_public", lambda inst: a.mirror_link.public()))
         a.mirror_link.tick(force=True)
         self.assertTrue(a.mirror_link.talking())
         for _ in range(200):  # (b, asked for its status before talking, looks at a in the background: settled before the test goes on)
@@ -21577,19 +21799,19 @@ class PeerLinkEdgeTests(unittest.TestCase):
         self.assertEqual(b.peerlinks.asks(), {})                                                        # (paired since: nothing to ask)
         b.settings.update({"peer": {"auto_pair": True}})
         # the other side's name followed; not answering where it was, then found again at its new address
-        link.paired["name"] = "Old"
+        some(link.paired)["name"] = "Old"
         self.assertTrue(link.talk())
-        self.assertEqual(link.paired["name"], "plexB")
-        link.paired["url"] = "http://127.0.0.1:1"
+        self.assertEqual(some(link.paired)["name"], "plexB")
+        some(link.paired)["url"] = "http://127.0.0.1:1"
         self.assertFalse(link.talk())
         self.assertIn("refused", str(link.last_error).lower() + " refused")
         link.tick(force=True)
-        self.assertEqual((link.paired["url"], link.talking()), (pl.base_url(ub), True))
-        link.paired["url"] = "http://127.0.0.1:1"
+        self.assertEqual((some(link.paired)["url"], link.talking()), (pl.base_url(ub), True))
+        some(link.paired)["url"] = "http://127.0.0.1:1"
         with mock.patch.object(link, "find", return_value=None):
             link.tick(force=True)                                                                     # (not found again: left as it is)
-        self.assertEqual(link.paired["url"], "http://127.0.0.1:1")
-        link.paired["url"] = pl.base_url(ub)
+        self.assertEqual(some(link.paired)["url"], "http://127.0.0.1:1")
+        some(link.paired)["url"] = pl.base_url(ub)
         self.assertTrue(link.talk())
         # what this side tells the other: per library, the markers seen; the facts it keeps of the other
         a.libraries = [{"key": "1", "title": "Movies", "kind": "movie", "locations": ["/plex/Movies"]}]
@@ -21601,11 +21823,11 @@ class PeerLinkEdgeTests(unittest.TestCase):
             self.assertEqual(a.peerlinks.local_status()["libraries"]["1"]["seen"], {})
             self.assertIsNone(link._facts_marker())
         with mock.patch.object(a.mirrors, "pairs", side_effect=RuntimeError("no")):
-            self.assertEqual(link._facts_link()["libraries"], {})
-        link.paired["instance"] = "other"
+            self.assertEqual(some(link._facts_link())["libraries"], {})
+        some(link.paired)["instance"] = "other"
         with mock.patch("plexcache.peers.read", return_value={"only": {"marker": {"name": "Only", "at": 3, "plex": "plexB"}, "by_library": {"1": {"folders": None}}}}):
-            self.assertEqual(link._facts_marker()["name"], "Only")                                   # (the marker of the one whose Plex is this mirror)
-        link.paired["instance"] = b.mirror_link.instance()
+            self.assertEqual(some(link._facts_marker())["name"], "Only")                                   # (the marker of the one whose Plex is this mirror)
+        some(link.paired)["instance"] = b.mirror_link.instance()
         # this side's files of a library, for the other; not ready yet: asked for first (not read here: a read in the background
         # would land on the data set below)
         with mock.patch.object(a.libdata, "fast_track") as ft:
@@ -21625,7 +21847,8 @@ class PeerLinkEdgeTests(unittest.TestCase):
         da, db = tempfile.mkdtemp(dir=TMP), tempfile.mkdtemp(dir=TMP)
         a.libraries = [{"key": "1", "title": "Movies", "kind": "movie", "locations": [da]}]
         b.libraries = [{"key": "7", "title": "Films", "kind": "movie", "locations": [db]}]
-        a.optimizing.client, b.optimizing.client = FakeOptimizer(), FakeOptimizer()
+        fa, fb = FakeOptimizer(), FakeOptimizer()
+        a.optimizing.client, b.optimizing.client = cast(OptimizerClient, fa), cast(OptimizerClient, fb)
         there_a = types.SimpleNamespace(key="7", title="Films", locations=[db], server="plexB")
         there_b = types.SimpleNamespace(key="1", title="Movies", locations=[da], server="plexA")
         me = a.peerlinks.instance()
@@ -21643,15 +21866,15 @@ class PeerLinkEdgeTests(unittest.TestCase):
             k = "k" * 24
             got = a.mirror_link.carry("1", claims=[{"key": k, "at": 5.0}])
             self.assertEqual(got, {"carried": True, "claims": {k: [{"instance": me, "at": 5.0}]}})
-            self.assertEqual(b.optimizing.client.claims[k], {me: 5.0})
+            self.assertEqual(fb.claims[k], {me: 5.0})
             a.mirror_link.carry("1", claims=[{"key": k, "at": 5.0, "release": True}])
-            self.assertEqual(b.optimizing.client.claims[k], {})
+            self.assertEqual(fb.claims[k], {})
             # refused: a library of theirs no library here is paired with; a side with no optimizer service to write it
             for body in ({"library": "9", "mirrors": "1"}, {"library": "7", "mirrors": "2"}, {"library": "7"}):
                 self.assertFalse(a.mirror_link.request("POST", "/peer/v1/carry", dict(body, marker={"at": 1.0}))["carried"], body)
-            b.optimizing.client.configured = False
+            self.enterContext(mock.patch.object(b.optimizing.client, "configured", False))
             self.assertIsNone(a.mirror_link.carry("1", marker={"at": 1.0}))
-            b.optimizing.client.configured = True
+            self.enterContext(mock.patch.object(b.optimizing.client, "configured", True))
         self.assertEqual(b.peerlinks.handle("POST", "/peer/v1/carry", {}, b"{}", "127.0.0.1")[0], 403)  # (not signed: refused)
         self.assertIsNone(a.mirror_link.carry("9", marker={"at": 1.0}))                                   # (a library of ours not mirrored there)
 
@@ -21679,8 +21902,8 @@ class PeerLinkEdgeTests(unittest.TestCase):
         a.settings.update({"peer": {"servers": {"plexB": {"url": ub}}}})
         b.settings.update({"peer": {"servers": {"plexA": {"url": ua}}, "remote_update": False}})
         b.libraries = [{"key": "7", "title": "Films", "kind": "movie", "locations": ["/m"]}]
-        a.mirror_link._marker_public = lambda inst: b.mirror_link.public()
-        b.mirror_link._marker_public = lambda inst: a.mirror_link.public()
+        self.enterContext(mock.patch.object(a.mirror_link, "_marker_public", lambda inst: b.mirror_link.public()))
+        self.enterContext(mock.patch.object(b.mirror_link, "_marker_public", lambda inst: a.mirror_link.public()))
         sent, got = {}, {}
         real_req, real_post = a.mirror_link.request, a.mirror_link._post_open
 
@@ -21788,9 +22011,9 @@ class PeerLinkEdgeTests(unittest.TestCase):
         a.migration.state = {"step": "copy"}
         self.assertEqual(link.tick_every(), pl.TICK_FAST)                                            # (a conversion under way here)
         a.migration.state = None
-        link.status["libraries"] = {"7": {"converting": {"step": "switch"}}}
+        some(link.status)["libraries"] = {"7": {"converting": {"step": "switch"}}}
         self.assertEqual(link.tick_every(), pl.TICK_FAST)                                            # (or there)
-        link.status["libraries"] = {}
+        some(link.status)["libraries"] = {}
         self.assertEqual(link.tick_every(), pl.TICK_EVERY)
         b.mirror_link.last_ok = 0.0
         self.assertFalse(b.mirror_link.talking())
@@ -21814,7 +22037,7 @@ class PeerLinkEdgeTests(unittest.TestCase):
         a.published_markers, a.first_published = {"1": now}, {"1": now - 4 * 3600}
         with mock.patch.object(a.mirrors, "pairs", return_value={"1": there, "2": None}), mock.patch("plexcache.peers.read", side_effect=RuntimeError("no")):
             self.assertEqual(link.folder_sync(), {"1": {"status": "fail", "out": None, "in": None, "link": False}})   # (neither side's markers ever reach the other)
-        mine, theirs = link.instance(), link.paired["instance"]
+        mine, theirs = link.instance(), some(link.paired)["instance"]
         rows = {"1": {"seen": {mine: now - 3 * 3600}, "published": now, "first": now - 4 * 3600}}
         link.status["libraries"] = {"7": rows["1"]}
         with mock.patch.object(a.mirrors, "pairs", return_value={"1": there}), mock.patch("plexcache.peers.read", return_value={theirs: {"by_library": {"1": {"at": now - 3 * 3600}}}}):
@@ -21929,16 +22152,16 @@ class AppEdgeTests2(unittest.TestCase):
 
             def call(method, params):
                 calls.append(method)
-                if method == "app.pull_images" or app.fail_all:
+                if method == "app.pull_images" or failing:
                     raise TrueNASError("older")
                 return None
 
-            app.fail_all = False
+            failing = False
             tn = types.SimpleNamespace(call=call)
             with mock.patch.object(app.optimizing, "_containers", return_value={"app": "plex-cache"}), mock.patch.object(app, "truenas", lambda: contextlib.nullcontext(tn)):
                 self.assertEqual(app.update_now(), {"updating": True, "app": "plex-cache"})           # (an older TrueNAS: a redeploy pulls the tag)
                 self.assertEqual(calls, ["app.pull_images", "app.redeploy"])
-                app.fail_all = True
+                failing = True
                 with self.assertRaisesRegex(ValueError, "didn’t update plex-cache: older"):
                     app.update_now()
 
@@ -22248,7 +22471,7 @@ class Plex2EdgeTests(unittest.TestCase):
             other.refresh_async()
             wait_for(lambda: rf.called)
         # where the MKV is on the other server: the paths don't line up; its rating key gone there
-        e = {"library": "1", "plex_original": "/elsewhere/a.avi", "plex_new": "/elsewhere/a MKV-AVI.mkv"}
+        e: dict[str, Any] = {"library": "1", "plex_original": "/elsewhere/a.avi", "plex_new": "/elsewhere/a MKV-AVI.mkv"}
         with mock.patch.object(other, "mirror_for", return_value=there):
             self.assertEqual(other.where(e, time.time()), "unpaired")
             app.libraries = [{"key": "1", "title": "Movies", "kind": "movie", "locations": ["/elsewhere"]}]
@@ -22596,7 +22819,7 @@ class MirrorHealthEdgeTests(unittest.TestCase):
         self.addCleanup(other.close)
         app = _new_app(plex={"url": plex.url, "token": "good-token"},
                        plex2={"servers": {"xyz": {"name": "Starlit", "url": other.url, "token": "other-token"}}, "libraries": {"*": {"state": "mirror", "server": "xyz", "key": ""}}})
-        app.optimizing = Optimizing(app, FakeOptimizer())
+        app.optimizing = Optimizing(app, cast(OptimizerClient, FakeOptimizer()))
         app.scan_library()
         return app
 
@@ -22607,16 +22830,16 @@ class MirrorHealthEdgeTests(unittest.TestCase):
         self.assertEqual(en(mirrorhealth._said({"kind": "sync_files", "behind": 600})), "What this side writes in .plexcache reaches the other site 10 minutes late.")
         app = self._app()
         mh = app.mirror_health
-        mh._libs = None
+        self.enterContext(mock.patch.object(mh, "_libs", None))
         with mock.patch.object(app.mirrors, "pairs", side_effect=RuntimeError("no pairs")):
             self.assertEqual(mh.paired(), ([], ("failed", "no pairs")))
         with mock.patch.object(app.evaluator, "started", True):
             with app.mirrors.lock:
                 app.mirrors.libs.pop("xyz", None)
-            mh._libs = None
+            self.enterContext(mock.patch.object(mh, "_libs", None))
             self.assertEqual(mh.paired()[1], ("pending", None))                                       # (read in the background: waited for)
             wait_for(lambda: not mh.reading and app.mirrors.known("xyz"))
-            mh._libs = None
+            self.enterContext(mock.patch.object(mh, "_libs", None))
             self.assertEqual(mh.paired()[1], None)
             self.assertTrue(mh.check_async("1"))                                                      # (the evaluator's turn)
             self.assertIn("1", mh.wanted)
@@ -22662,7 +22885,7 @@ class PlaybackEdgeTests(unittest.TestCase):
         self.assertIsNone(playback.PlaybackMonitor._byte_pos(types.SimpleNamespace(files=[], progress=0.5)))
         self.assertIsNone(playback.PlaybackMonitor._byte_pos(types.SimpleNamespace(files=[("/a", 0)], progress=0.5)))
         mon._observe("never", types.SimpleNamespace(state="playing", view_offset_ms=0), app.settings.get())
-        mon._probe(types.SimpleNamespace(length=0))
+        mon._probe(cast(Any, types.SimpleNamespace(length=0)))
         job = playback.Job(feature="nextepisode", target="A", path="/a", ranges=[], state="cancelled")
         mon._run_job("k", job, 0, 100, 1)
         self.assertEqual(job.state, "cancelled")
@@ -22711,7 +22934,7 @@ def _mirror_app(test):
     test.addCleanup(other.close)
     app = _new_app(plex={"url": plex.url, "token": "good-token"},
                    plex2={"servers": {"xyz": {"name": "Starlit", "url": other.url, "token": "other-token"}}, "libraries": {"*": {"state": "mirror", "server": "xyz", "key": ""}}})
-    app.optimizing = Optimizing(app, FakeOptimizer())
+    app.optimizing = Optimizing(app, cast(OptimizerClient, FakeOptimizer()))
     app.scan_library()
     return app, cat
 
@@ -22926,14 +23149,14 @@ class LibDataEdgeTests2(unittest.TestCase):
         data, lib = ld.data("1"), app.library_info("1")
         with mock.patch.object(app.peerlinks.link("xyz"), "talking", return_value=True):
             with mock.patch.object(app.peerlinks.link("xyz"), "files", return_value={"ready": False}):
-                ld._gather_mirror(data, lib, lambda *a: None)
-            self.assertEqual((data.mirror["disk"], data.mirror["disk_why"]), (None, "reading"))
+                ld._gather_mirror(data, some(lib), lambda *a: None)
+            self.assertEqual((some(data.mirror)["disk"], some(data.mirror)["disk_why"]), (None, "reading"))
             with mock.patch.object(app.peerlinks.link("xyz"), "files", side_effect=RuntimeError("quiet")):
-                ld._gather_mirror(data, lib, lambda *a: None)
-            self.assertEqual(data.mirror["disk_why"], "quiet")
+                ld._gather_mirror(data, some(lib), lambda *a: None)
+            self.assertEqual(some(data.mirror)["disk_why"], "quiet")
             with mock.patch.object(app.peerlinks.link("xyz"), "files", return_value={"ready": True, "files": [["a.mkv", 1, 2]]}):
-                ld._gather_mirror(data, lib, lambda *a: None)
-            self.assertEqual((data.mirror["disk"], data.mirror["disk_why"]), ([["a.mkv", 1, 2.0]], None))
+                ld._gather_mirror(data, some(lib), lambda *a: None)
+            self.assertEqual((some(data.mirror)["disk"], some(data.mirror)["disk_why"]), ([["a.mkv", 1, 2.0]], None))
 
 
 class AppEdgeTests3(unittest.TestCase):
@@ -22950,10 +23173,10 @@ class AppEdgeTests3(unittest.TestCase):
             pc.return_value.identity.side_effect = PlexError("refused")
             app._autodetect_inner("127.0.0.1")
         self.assertEqual(app.settings.section("plex")["url"], "")
-        app._matches = {f"plex://movie/{i:012x}": {"thumb": ""} for i in range(500)}
+        self.enterContext(mock.patch.object(app, "_matches", {f"plex://movie/{i:012x}": {"thumb": ""} for i in range(500)}))
         md = {"MediaContainer": {"Metadata": [{"type": "movie", "title": "A"}]}}
         with mock.patch("urllib.request.urlopen", return_value=_Resp(json.dumps(md).encode())):
-            self.assertEqual(app.match_info("plex://movie/ffffffffffff")["url"], "https://watch.plex.tv/search?q=A")
+            self.assertEqual(some(app.match_info("plex://movie/ffffffffffff"))["url"], "https://watch.plex.tv/search?q=A")
         self.assertEqual(len(app._matches), 500)                                                      # (the oldest dropped)
         app.activity.add_run({"started": 2000.0, "finished": 2100.0, "sample": [{"path": "/x", "offset": 0}]})
         with mock.patch("plexcache.app.next_day_check", side_effect=RuntimeError("boom")), mock.patch.object(app.activity, "update_run") as ur, mock.patch("plexcache.app.NEXT_DAY", 0):

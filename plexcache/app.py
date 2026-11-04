@@ -223,6 +223,9 @@ class App:
         self.files: list = []
         self._posters: tuple | None = None  # (files, {path: (poster, title)}) for poster_of() and title_of()
         self._thumbs: dict[str, bytes] = {}  # poster thumbnails, oldest first
+        self._matches: dict[str, dict] = {}  # match_info()'s answers from Plex's metadata, oldest first
+        self._snapshots: list[dict] | None = None  # the snapshots taken before a change (safety.taken: read once)
+        self._snapshot_api: str | None = None  # the snapshot API this TrueNAS has (safety.snap_call: found once)
         self.libraries: list = []
         self.libraries_read = False  # (Plex's libraries read once: until then no count says a page doesn't apply)
         self.stats = LibraryStats()
@@ -972,7 +975,7 @@ class App:
         m = re.fullmatch(r"plex://(movie|show|season|episode|artist|album|track)/([0-9a-f]{12,40})", guid or "")
         if not m:
             return None
-        cache = self.__dict__.setdefault("_matches", {})
+        cache = self._matches
         got = cache.get(guid)
         if got is None:
             req = urllib.request.Request("https://metadata.provider.plex.tv/library/metadata/" + m.group(2) + "?includeGuids=1")

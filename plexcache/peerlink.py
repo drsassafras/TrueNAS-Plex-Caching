@@ -638,6 +638,7 @@ class PeerLink:
         self.last_ms = 0
         self.status: dict | None = None  # the other side's last status (its version, clock, markers)
         self.skew = 0.0             # their clock minus ours, from the last status
+        self._facts: tuple | None = None  # facts()'s answer: (what it was for, when, the facts)
         self.found_at = 0.0
         self.find_at = 0.0          # when find() last ran from tick()
         self.ticked = 0.0
@@ -1002,7 +1003,7 @@ class PeerLink:
         {"via": "link" | "marker", "at", "name", "platform" (None: an older Dionysus that doesn't say), "truenas_api",
         "migration", "libraries": {our library key: {"key": its own, "folders", "converting", "holding"}}} — kept a few
         seconds (asked for every library, every few seconds)."""
-        cached = getattr(self, "_facts", None)
+        cached = self._facts
         sig = (self.last_ok, self.ticked)
         if cached and cached[0] == sig and time.time() - cached[1] < 15:
             return cached[2]

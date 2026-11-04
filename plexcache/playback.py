@@ -103,7 +103,7 @@ class Job:
     player: str = ""  # the Plex session it was queued for
     library_key: str = ""  # the Plex library the file is in (for the cache log's per-library counts)
     paused: object = None  # why it's waiting, while it is
-    stop_event: object = None  # set to stop it at once (while it reads, or waits between reads)
+    stop_event: threading.Event | None = None  # set to stop it at once (while it reads, or waits between reads)
 
     def loaded(self, pos: int) -> bool:
         """Has the byte at ``pos`` been read (so it's in cache)?"""
