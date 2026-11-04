@@ -542,7 +542,8 @@ def coverage_check(m: Map, audits: list[Audit], now: float, sensitive: list[str]
     oldest = min((ln.when for *_, ln in waiting if ln.when), default=None)
     late = oldest is not None and now - oldest > grace_days * DAY
     big = _pct(len(waiting), total) > grace_share
-    touchy = [(rel, n) for rel, n, ln in waiting if ln.sha and _sensitive(rel, sensitive)]
+    touchy_files = {rel: _sensitive(rel, sensitive) for rel in {rel for rel, _, _ in waiting}}   # (once a file, not once a line)
+    touchy = [(rel, n) for rel, n, ln in waiting if ln.sha and touchy_files[rel]]
     found = []
     if late or big:
         why = []
@@ -1103,18 +1104,36 @@ def test_ids(base: str | None = None) -> dict[str, str]:
     out: dict[str, str] = {}
     top = base or ROOT
     for path in sorted(glob.glob(os.path.join(top, "tests", "**", "test*.py"), recursive=True)):
-        mod = os.path.relpath(path, top)[:-3].replace(os.sep, ".")
+        for name, full in _tests_in(path, os.path.relpath(path, top)[:-3].replace(os.sep, ".")).items():
+            out.setdefault(name, full)
+    return out
+
+
+_TESTS: dict[tuple, dict[str, str]] = {}   # (each test file's tests, by its path, size and mtime: read once until it changes)
+
+
+def _tests_in(path: str, mod: str) -> dict[str, str]:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    key = (path, mod, st.st_size, st.st_mtime_ns)
+    if key not in _TESTS:
+        got: dict[str, str] = {}
         try:
             with open(path, encoding="utf-8") as fh:
                 tree = ast.parse(fh.read())
         except (OSError, SyntaxError, ValueError):
-            continue
-        for node in tree.body:
+            tree = None
+        for node in tree.body if tree else []:
             if isinstance(node, ast.ClassDef):
                 for m in node.body:
                     if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test"):
-                        out.setdefault(f"{node.name}.{m.name}", f"{mod}.{node.name}.{m.name}")
-    return out
+                        got.setdefault(f"{node.name}.{m.name}", f"{mod}.{node.name}.{m.name}")
+        for old in [k for k in _TESTS if k[0] == path]:   # (only the latest of each: a file changed is read again)
+            del _TESTS[old]
+        _TESTS[key] = got
+    return _TESTS[key]
 
 
 def answers(text: str, key: str) -> list[dict]:

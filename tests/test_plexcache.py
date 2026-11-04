@@ -3169,8 +3169,9 @@ class ServerTests(unittest.TestCase):
             got = json.loads(body)
             self.assertEqual((got["total"], len(got["files"]), len(got["paths"])), (3, 2, 3))
             self.assertEqual(self.req("GET", "/api/optimizer/files?key=9")[0], 404)
+            survey.reset_mock()
             self.assertEqual(json.loads(self.req("POST", "/api/optimizer/survey", {})[1]), {"started": True})
-            survey.assert_called_once()
+            survey.assert_called()   # (at least once: the app's own health check calls it too, in the background, on a busy machine)
 
     def test_export_has_no_secrets(self):
         self.app.settings.update({"plex": {"token": "secret-token"}})
@@ -15533,7 +15534,7 @@ class WebBuildTests(unittest.TestCase):
     VENDOR = re.compile(r"(?<![\w-])-(?:webkit|moz|ms|o)-[a-z]")
     SCRIPTS = ("app.js", "decor.js", "i18n.js", "login.js")
 
-    def _web_js(self, *args):
+    def _web_js(self, *args, timeout=180, env=None):
         node = shutil.which("node")
         if not node:
             self.skipTest("node isn't installed")
@@ -15541,10 +15542,19 @@ class WebBuildTests(unittest.TestCase):
         for package in [*self._settings()["devDependencies"], *self._settings()["dependencies"]]:
             self.assertTrue(os.path.isdir(os.path.join(dev, "node_modules", package)), f"{package} isn't installed: npm ci --prefix dev")
         import subprocess
-        return subprocess.run([node, os.path.join(dev, "web.js"), *args], capture_output=True, text=True, timeout=180)
+        return subprocess.run([node, os.path.join(dev, "web.js"), *args], capture_output=True, text=True, timeout=timeout,
+                              env=dict(os.environ, **(env or {})))
 
     def _settings(self):
         return json.loads(_read(os.path.join(ROOT, "dev", "package.json"), encoding="utf-8"))
+
+    def test_pages_pass_the_accessibility_check(self):
+        """dev/web.js a11y: axe-core's standard rules, none turned off, on every page of the app as the two demos draw it
+        (the showcase and the one with problems), in Classic and Dionysus, light and dark. A finding is fixed in the code;
+        a colour's contrast is a look, so its fix goes through the style sample and the maintainer's OK."""
+        got = self._web_js("a11y", timeout=900, env={"PYTHON": sys.executable})
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertRegex(got.stderr, r"\d+ page\(s\) pass axe-core")
 
     def test_web_has_no_browser_prefixes(self):
         """Not in the stylesheets, not in the pages' or scripts' own styles, not in the themes' CSS (served at /theme.css)."""
@@ -15731,7 +15741,7 @@ class IconTests(unittest.TestCase):
         spec.loader.exec_module(style)
         env = dict(os.environ, NODE_PATH=style._node_path())
         if subprocess.run([node, "-e", "require.resolve('playwright')"], env=env, capture_output=True).returncode:
-            self.skipTest("Playwright isn't installed (npm i -g playwright && npx playwright install chromium)")
+            self.skipTest("Playwright isn't installed (npm ci --prefix dev && npx --prefix dev playwright install chromium)")
         r = subprocess.run([node, os.path.join(ROOT, "dev", "icons.js"), "check"], env=env, capture_output=True, text=True, timeout=180)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 

@@ -8,7 +8,7 @@
 // go to the Before demo (plan.before), everything else to the After one, so both sides draw the same data. Both sides
 // see the same moment (plan.time), so "3 min ago" reads alike.
 //
-// Needs Playwright, as dev/screenshots.js does (npm i -g playwright && npx playwright install chromium; style.py passes
+// Needs Playwright, as dev/screenshots.js does (npm ci --prefix dev && npx --prefix dev playwright install chromium; style.py passes
 // NODE_PATH). It says how it's going on stdout, a line of JSON each, for style.py's progress bar (dev/progress.py):
 // {"total": n} first, {"page": "<what was looked at>"} after each page, and last
 // {"shots": {"<id>": [{"label", "before", "after", "same", "diff"}, ...]}}: the pictures of each look, two by two.

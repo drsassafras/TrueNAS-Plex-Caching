@@ -115,17 +115,35 @@ async function copyText(text, btn) {
   catch (e) { const t = h("input", {type: "text", value: text, class: "mono", size: 60}); btn.after(t); t.select(); btn.textContent = "Select and copy"; }
   setTimeout(() => { btn.textContent = was; }, 2500);
 }
-let flash = "", stamp = "", keepY = null;   // (what the last button did, said at the top once; the records as last shown)
+let flash = "", stamp = "";   // (what the last button did, said at the top once; the records as last shown)
 const CODE = {there: ["", "code still there"], changed: ["warn", "code changed"], gone: ["", "code gone"], unknown: ["", "code: can't tell"]};
 const plural = (n, one, many) => n + " " + (n === 1 ? one : (many || one + "s"));
 
+let gen = 0;   // (each show's number: a slower one that's been overtaken never paints)
+const openKey = d => ((d.closest("[data-key]") || {dataset: {}}).dataset.key || "") + "|" + (d.querySelector("summary") || {textContent: ""}).textContent.replace(/\s*\(\d+\)/, "");
 function show(name) {
+  // Another tab: it says Loading… if it takes a moment. The same tab again (a button's result, a change to the records):
+  // drawn out of sight, then put in place at once, where you were, with the same sections open.
+  const again = name === tab;
   tab = name; clearTimeout(timer);
+  const g = ++gen;
   const nav = document.getElementById("tabs"); put(nav);
   for (const [id, label] of TABS) nav.append(h("button", {"aria-selected": String(id === name), onclick: () => show(id)}, label));
   const view = document.getElementById("view");
-  put(view, h("p", {class: "empty"}, "Loading…"));
-  ({overview, start, runs, findings, explorer, rules})[name](view).catch(e => put(view, h("p", {class: "empty"}, "Couldn't load it: " + e.message)));
+  if (!again) put(view);
+  const slot = h("div", {hidden: true});   // (first: its ids are the ones found while it's drawn)
+  view.prepend(slot);
+  const wait = again ? 0 : setTimeout(() => { if (g === gen) view.append(h("p", {class: "empty", "data-loading": "1"}, "Loading…")); }, 250);
+  const done = () => {
+    clearTimeout(wait);
+    if (g !== gen) { slot.remove(); return; }
+    const y = window.scrollY, open = new Set([...view.querySelectorAll("details[open]")].filter(d => !slot.contains(d)).map(openKey));
+    for (const el of [...view.children]) if (el !== slot) el.remove();
+    slot.hidden = false;
+    for (const d of slot.querySelectorAll("details")) if (open.has(openKey(d))) d.open = true;
+    if (again) window.scrollTo(0, y);
+  };
+  ({overview, start, runs, findings, explorer, rules})[name](slot).then(done, e => { put(slot, h("p", {class: "empty"}, "Couldn't load it: " + e.message)); done(); });
 }
 
 // ---------------------------------------------------------------- Overview
@@ -431,7 +449,7 @@ async function findings(view) {
         flash = f.id + ": saved."; show("findings");
       } catch (e) { said.textContent = e.message; }
     }}, "Save");
-    return h("div", {class: "card"},
+    return h("div", {class: "card", "data-key": f.id},
       h("div", {class: "row"}, h("b", {}, f.id), f.type === "hardening" ? h("span", {class: "badge"}, "hardening · " + f.severity)
         : h("span", {class: "badge " + (SEV[f.severity] || "")}, f.severity + (f.score != null ? " " + f.score.toFixed(1) : "")),
         h("span", {}, f.title), f.cve ? h("code", {class: "badge"}, f.cve) : null, f.status === "open" ? h("span", {class: "badge " + (CODE[f.code] || ["", ""])[0]}, (CODE[f.code] || ["", f.code])[1]) : null,
@@ -495,12 +513,13 @@ async function findings(view) {
       ": it reads your working copy, the branch as pushed and main, and closes each one it finds fixed (one fixed only in your working copy is listed as fixed, not pushed yet, until you push it)."),
     sorted);
   flash = "";
-  if (keepY != null) { window.scrollTo(0, keepY); keepY = null; }
-  const poll = async () => {   // (a fixer's report, or Confirm's progress: shown as it happens)
-    if (tab !== "findings") return;
+  const mine = gen;
+  const poll = async () => {   // (a fixer's report, or Confirm's progress: shown as it happens, in place)
+    if (tab !== "findings" || gen !== mine) return;
     const now = await api("/api/stamp").catch(() => null);
+    if (tab !== "findings" || gen !== mine) return;   // (you've moved on meanwhile: never pulled back)
     const typing = ["INPUT", "TEXTAREA", "SELECT"].includes((document.activeElement || {}).tagName || "");   // (never under your hands)
-    if (now && !typing && (now.stamp !== stamp || JSON.stringify(now.confirming) !== JSON.stringify(c))) { keepY = window.scrollY; show("findings"); return; }
+    if (now && !typing && (now.stamp !== stamp || JSON.stringify(now.confirming) !== JSON.stringify(c))) { show("findings"); return; }
     timer = setTimeout(poll, 4000);
   };
   timer = setTimeout(poll, 4000);

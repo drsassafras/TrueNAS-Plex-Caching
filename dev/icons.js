@@ -9,7 +9,7 @@
 //
 // Run it after changing either logo, then show the maintainer the style sample (dev/style.py sample): the icons are
 // in the style guide like every image the app ships. Needs Playwright, as dev/screenshots.js does
-// (npm i -g playwright && npx playwright install chromium).
+// (npm ci --prefix dev && npx --prefix dev playwright install chromium).
 //
 //   favicon.ico            the tab icon at 16, 32 and 48px, light colours, see-through: browsers without SVG favicons
 //                          ask for /favicon.ico

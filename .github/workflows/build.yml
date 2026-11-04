@@ -23,9 +23,12 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.15"
-      # what checks and builds the web app's CSS, scripts and pages (dev/web.js: Stylelint, ESLint, html-validate, postcss-preset-env, Autoprefixer,
+      # what checks and builds the web app's CSS, scripts and pages (dev/web.js: Stylelint, ESLint, TypeScript, html-validate, axe-core, postcss-preset-env, Autoprefixer,
       # cssnano, Terser, html-minifier-terser), for the suite's WebBuildTests
       - run: npm ci --prefix dev --no-audit --no-fund
+      # the browser the accessibility check draws the pages in (dev/web.js a11y: axe-core, through Playwright at
+      # dev/package.json's version), with the libraries it needs
+      - run: npx --prefix dev playwright install --with-deps chromium
       # the suite (tests/run.py: its classes shared out among workers), but for the style guide, a step of its own
       - name: Tests
         run: python -W error::DeprecationWarning -W error::PendingDeprecationWarning tests/run.py --exclude StyleGuideTests

@@ -627,7 +627,7 @@ PCI18N.ready.then(function () {
       { video: w.padding_video, audio: w.padding_audio, how: ST.index_avg ? T("measured by warm-up") : T("estimated until warm-up has measured yours") });
     // each heading a word to a line, so the columns stay narrow
     const wordy = function (t) { return String(t).split(/\s+/).join("<br>"); };
-    let table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"></th><th scope="col">' + H("Titles") + '</th><th scope="col">' + wordy(H("Avg bitrate")) + "</th>" +
+    let table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col"><span class="sr-only">' + H("Library") + '</span></th><th scope="col">' + H("Titles") + '</th><th scope="col">' + wordy(H("Avg bitrate")) + "</th>" +
       '<th scope="col">' + wordy(H("Avg file")) + "</th>" + head4.map(function (h, i) { return '<th scope="col"' + (i === 2 ? ' class="estc"' : "") + ">" + wordy(h[0]) + info(h[1], h[0]) + "</th>"; }).join("") + "</tr></thead><tbody>";
     rows.forEach(function (r) {
       const kind = KIND_NAME[r.kind], z = libSizes(r);
@@ -786,7 +786,7 @@ PCI18N.ready.then(function () {
         (p.paused ? badge("warn", T("Paused")) : badge("running", wu.phase === "scanning" ? T("Preparing") : T("Running"))) + " " +
         (p.total ? H("{done} of {total} files · {size} read", { done: p.done, total: p.total, size: fmtBytes(p.bytes) }) : H("Reading library list…")) +
         (p.paused ? '<div class="help" style="margin:4px 0 0">' + H("Paused: {why}.", { why: p.paused }) + "</div>" : "") +
-        '</div><button class="btn danger" data-act="warmup-stop">' + H("Stop") + '</button></div><div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div></div>';
+        '</div><button class="btn danger" data-act="warmup-stop">' + H("Stop") + '</button></div><div class="meter" role="progressbar" aria-label="' + esc(T("Progress")) + '" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div></div>';
     }
     return "";
   }
@@ -1060,14 +1060,14 @@ PCI18N.ready.then(function () {
         : H("{done} of {total} files · {pct}%", { done: fmtNum(n || 0), total: fmtNum(total || 0), pct: pct })) + "</div>" +
       (!checking && job.current ? '<div class="det">' + fileTitle(job.current_title, job.current) + (job.step ? ' <span class="muted">(' + esc(job.step) + ")</span>" : "") + "</div>" : "") +
       // the file in hand: how far through it is (remuxing, then checking both copies)
-      (!checking && job.current && job.file_pct != null ? '<div class="filebar"><div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
+      (!checking && job.current && job.file_pct != null ? '<div class="filebar"><div class="meter thin" role="progressbar" aria-label="' + esc(T("Progress")) + '" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
         Math.round(job.file_pct) + '" aria-label="' + esc(T("This file")) + '"><div style="width:' + Math.min(100, job.file_pct) + '%"></div></div></div>' : "") +
       (job.paused_by ? '<div class="det">' + badge("info", job.paused_by === "resilver" ? T("Paused: {why}", { why: job.paused_why || "" }) : T("Paused")) +
         (job.paused_by === "resilver" ? " " + H("It carries on when the resilver is done.") : "") + "</div>" : "") +
       (!checking ? '<div class="det">' + jobEta(job) + "</div>" : "") + (extra || "");
     // the poster as tall as everything beside it
     const poster = !checking && job.current && job.kind === "optimize";
-    return '<div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>' +
+    return '<div class="meter" role="progressbar" aria-label="' + esc(T("Progress")) + '" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>' +
       (poster ? '<div class="withposter tall">' + '<div class="posterbig">' + (job.poster ? '<img alt="" src="/api/poster?path=' + encodeURIComponent(job.poster) +
         '" data-hide-broken>' : "") + '</div><div class="grow">' + lines + "</div></div>" : lines);
   }
@@ -1524,7 +1524,7 @@ PCI18N.ready.then(function () {
     };
     return '<section class="card" id="conversions">' + heading(esc(T("Converted Files in Plex")),
       H("Each converted file, and where Plex is with it: the original is deleted only once Plex has the MKV as a version of the same item — on the library’s mirror too, where it has one. <strong>Check Again</strong> asks Plex now; <strong>Keep Both</strong> stops following the file, both staying; <strong>Delete Original Now</strong> is there when Plex has the MKV but the original couldn’t go yet (it was playing, say).")) +
-      '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Converted") + '</th><th scope="col">' + H("Now") + '</th><th scope="col"></th></tr></thead><tbody>' +
+      '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Converted") + '</th><th scope="col">' + H("Now") + '</th><th scope="col"><span class="sr-only">' + H("Actions") + '</span></th></tr></thead><tbody>' +
       items.map(function (e) {
         return "<tr><td>" + esc(e.title) + '<div class="det mono">' + esc(e.original.split("/").pop()) + " → " + esc(e.new.split("/").pop()) + "</div></td><td>" + state(e) +
           (e.error ? '<div class="det bad">' + esc(e.error) + "</div>" : "") + (e.note ? '<div class="det muted">' + esc(e.note) + "</div>" : "") + "</td><td>" +
@@ -1567,7 +1567,7 @@ PCI18N.ready.then(function () {
       if (!cands.length) return out + '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No library folders yet.")) + "</p></section>";
       const mv = mg.mirror && mg.mirror.watched ? mg.mirror : null;  // with a mirror watched: each folder as it is there (migrating.py mirror_view)
       out += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("Library folder") + '</th><th scope="col">' + H("Would become") +
-        '</th><th scope="col">' + H("Size") + "</th>" + (mv ? '<th scope="col">' + esc(mv.name) + "</th>" : "") + '<th scope="col"></th></tr></thead><tbody>';
+        '</th><th scope="col">' + H("Size") + "</th>" + (mv ? '<th scope="col">' + esc(mv.name) + "</th>" : "") + '<th scope="col"><span class="sr-only">' + H("Actions") + '</span></th></tr></thead><tbody>';
       cands.forEach(function (c) {
         const advice = { ideal: badge("pass", T("Ideal already")), sufficient: badge("pass", T("Sufficient")), split: badge("warn", T("Split dataset")) }[c.advice];
         out += "<tr><td>" + libIcon(c.library) + esc(c.title) + '<div class="det mono">' + esc(c.folder) + "</div>" +
@@ -1804,7 +1804,7 @@ PCI18N.ready.then(function () {
     if (now && live.running) {  // the run under way: its step and progress, on the card
       progress = '<div class="migprog"><div class="what">' + (live.stopping ? H("Cancelling… (after the file in hand)") : live.phase === "backup" ? H("Backing up…") : H("Applying…")) + "</div>" +
         (live.step ? '<div class="det">' + esc(live.step) + "</div>" : "") + (live.phase !== "backup" ? '<div class="det">' + H("{done} of {total}", { done: fmtNum(live.done || 0), total: fmtNum(live.total || 0) }) + (live.current ? " · " + esc(live.current) : "") + "</div>" : "") +
-        '<div class="meter thin' + (live.phase === "backup" ? " busy" : "") + '" role="progressbar"><div' + (live.phase === "backup" ? "" : ' style="width:' + (live.total ? Math.round(100 * (live.done || 0) / live.total) : 0) + '%"') + "></div></div></div>";
+        '<div class="meter thin' + (live.phase === "backup" ? " busy" : "") + '" role="progressbar" aria-label="' + esc(T("Progress")) + '"><div' + (live.phase === "backup" ? "" : ' style="width:' + (live.total ? Math.round(100 * (live.done || 0) / live.total) : 0) + '%"') + "></div></div></div>";
     }
     let backupLine = !bk ? "" : bk.kind === "snapshot" ? '<div class="det">' + badge("pass", T("Backup created")) + " " + esc(T("Snapshot {names}, kept until {until}.", { names: (bk.names || []).join(", "), until: fmtWhen(bk.until) })) + "</div>"
       : bk.kind === "copies" ? '<div class="det">' + badge("pass", T("Backup")) + " " + esc(T("The copies this tool keeps, until {until}.", { until: fmtWhen(bk.until) })) + "</div>"
@@ -1963,7 +1963,7 @@ PCI18N.ready.then(function () {
       if (now) {
         res = badge("info", T("Optimizing"));
         tried = false;
-        if (job.file_pct != null) retry = '<div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
+        if (job.file_pct != null) retry = '<div class="meter thin" role="progressbar" aria-label="' + esc(T("Progress")) + '" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
           Math.round(job.file_pct) + '" aria-label="' + esc(T("This file")) + '"><div style="width:' + Math.min(100, job.file_pct) + '%"></div></div>';
       }
       // each column: the file as it was on the first line, as written on the second (and a third: what changed)
@@ -2883,7 +2883,7 @@ PCI18N.ready.then(function () {
     // while inspecting (or waiting to): a progress bar
     if (job) {
       const pct = job.total ? Math.round(100 * (job.done || 0) / job.total) : 0;
-      out += '<div class="linspect"><div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>' +
+      out += '<div class="linspect"><div class="meter" role="progressbar" aria-label="' + esc(T("Progress")) + '" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>' +
         '<div class="det">' + (job.paused ? H("Inspecting paused: {done} of {total} files", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) })
           : H("Inspecting files: {done} of {total}", { done: fmtNum(job.done || 0), total: fmtNum(job.total || 0) })) + "</div></div>";
     }
@@ -2894,7 +2894,7 @@ PCI18N.ready.then(function () {
     out = out.replace("<!--lsummary-->", libSummary(d.summary));
     if (!d.files.length) return out + '<p class="muted">' + H("No files.") + "</p></section></div>";
     const key = function (x) { return x.label; };
-    out += '<div class="tbl-wrap lfwrap"><table class="tbl lfiles"><thead><tr><th scope="col"></th><th scope="col">' + H("File") + '</th><th scope="col">' + H("Size") +
+    out += '<div class="tbl-wrap lfwrap"><table class="tbl lfiles"><thead><tr><th scope="col"><span class="sr-only">' + H("Status") + '</span></th><th scope="col">' + H("File") + '</th><th scope="col">' + H("Size") +
       '</th><th scope="col" style="width:60%">' + H("Blocks always cached: the start · the end") + "</th></tr></thead><tbody>";
     let openHere = null;
     d.files.forEach(function (f, i) {
@@ -3538,7 +3538,7 @@ PCI18N.ready.then(function () {
     out += coverageCard();
 
     // events
-    out += '<section class="card"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center"><h2>' + H("Recent Events") + '</h2></div><div class="log" style="margin-top:12px">';
+    out += '<section class="card"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center"><h2>' + H("Recent Events") + '</h2></div><div class="log" tabindex="0" role="log" aria-label="' + esc(T("Recent Events")) + '" style="margin-top:12px">';
     if (!a.events.length) out += '<div class="muted">' + H("Nothing yet.") + "</div>";
     a.events.forEach(function (e) {
       const t = new Date(e.t * 1000).toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -3693,9 +3693,10 @@ PCI18N.ready.then(function () {
     if (!r) return "";
     const t = r.tiles; let out = banner(r.verdict, false);
     function rtile(title, big, sub, status, why, goTo) {
-      // go: the detailed view this tile opens (a card further down the page)
-      return '<div class="card tile rtile r-' + status + (goTo ? ' rgo" data-goto="' + goTo + '" role="button" tabindex="0" title="' + esc(T("Show the details")) : "") + '"><div class="muted" style="font-size:13px">' + esc(title) + info(esc(why), title) + '</div><div class="big">' + big +
-        '</div><div class="muted" style="font-size:13px">' + sub + (goTo ? ' <span class="rmore" aria-hidden="true">›</span>' : "") + "</div></div>";
+      // go: the detailed view this tile opens (a card further down the page): a click anywhere on it, or its › (the
+      // button the keyboard reaches: the tile holds the ⓘ, and a button can't hold another)
+      return '<div class="card tile rtile r-' + status + (goTo ? ' rgo" data-goto="' + goTo + '" title="' + esc(T("Show the details")) : "") + '"><div class="muted" style="font-size:13px">' + esc(title) + info(esc(why), title) + '</div><div class="big">' + big +
+        '</div><div class="muted" style="font-size:13px">' + sub + (goTo ? ' <span class="rmore" data-goto="' + goTo + '" role="button" tabindex="0" aria-label="' + esc(T("Show the details")) + '">›</span>' : "") + "</div></div>";
     }
     out += '<div class="tiles rtiles">';
     // Weighted by how likely each one really came from cache: how long ago that part was cached,
@@ -4053,7 +4054,7 @@ PCI18N.ready.then(function () {
     });
     if (!libs.length) return out + '<p class="muted">' + (librariesPending() ? H("Reading your libraries from Plex…") : H("No libraries yet.")) + "</p></section>";
     const states = p2.states || {}, found = sy.libraries || {}, pairs = p2.pairs || {};
-    out += '<div class="tbl-wrap"><table class="tbl mid"><thead><tr><th scope="col">' + H("Library here") + '</th><th scope="col">' + H("Mirrored by") + '</th><th scope="col"></th></tr></thead><tbody>' +
+    out += '<div class="tbl-wrap"><table class="tbl mid"><thead><tr><th scope="col">' + H("Library here") + '</th><th scope="col">' + H("Mirrored by") + '</th><th scope="col"><span class="sr-only">' + H("Actions") + '</span></th></tr></thead><tbody>' +
       libs.map(function (l) {
         const key = String(l.key), st = states[key] || { state: "unset", server: "", key: "", there: "", there_key: "", name: "" }, f = found[key], rate = f ? Math.round(100 * f.rate) : null;
         const sel = '<select data-p2lib="' + esc(key) + '" aria-label="' + esc(T("The mirror of {library}", { library: l.title })) + '">' + mirrorOptions(l, st, p2, sy) + "</select>" +
@@ -4661,8 +4662,8 @@ PCI18N.ready.then(function () {
       : PH(c.partial, "{n} found so far — still counting", "{n} found so far — still counting", { n: fmtNum(c.partial) }))
       : H("Not in yet")) + '</div><div class="det">' + why +
       (pct != null ? " " + H("{done} of {total} · {pct}%", { done: fmtNum(p.done || 0), total: fmtNum(p.total), pct: pct }) : "") + "</div>" +
-      (pct != null ? '<div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>'
-        : '<div class="meter thin busy" role="progressbar" aria-busy="true"><div></div></div>') + "</div>";
+      (pct != null ? '<div class="meter thin" role="progressbar" aria-label="' + esc(T("Progress")) + '" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><div style="width:' + pct + '%"></div></div>'
+        : '<div class="meter thin busy" role="progressbar" aria-label="' + esc(T("Progress")) + '" aria-busy="true"><div></div></div>') + "</div>";
   }
   // whether something red on a tool's page stops part of it (or a check page's checks couldn't all run), in library ``key``
   // or in any: the server's word for every tool alike (the state's tools_red, App._tools_red), so the red on a page reaches
@@ -4716,8 +4717,8 @@ PCI18N.ready.then(function () {
       const spct = pg.total ? Math.round(100 * (pg.done || 0) / pg.total) : null;
       return '<div class="migprog"><div class="what">' + H("Scanning…") + '</div><div class="det">' + H("Reading the library from Plex (and its mirror’s, if it has one).") +
         (spct != null ? " " + H("{done} of {total} · {pct}%", { done: fmtNum(pg.done || 0), total: fmtNum(pg.total), pct: spct }) : "") + "</div>" +
-        (spct != null ? '<div class="meter thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + spct + '"><div style="width:' + spct + '%"></div></div>'
-          : '<div class="meter thin busy" role="progressbar" aria-busy="true"><div></div></div>') + "</div>";
+        (spct != null ? '<div class="meter thin" role="progressbar" aria-label="' + esc(T("Progress")) + '" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + spct + '"><div style="width:' + spct + '%"></div></div>'
+          : '<div class="meter thin busy" role="progressbar" aria-label="' + esc(T("Progress")) + '" aria-busy="true"><div></div></div>') + "</div>";
     }
     if (pg.queued && !(ST.job && ST.job.kind === "tool" && ST.job.running)) return '<div class="migprog"><div class="what">' + H("Queued") + '</div><div class="det">' + H("Starts once the file job before it is done (<a href=\"/processes\" data-nav>Processes</a>).") + "</div></div>";
     return "";  // (the process's own progress is shown with Apply: toolApply)
@@ -5079,7 +5080,7 @@ PCI18N.ready.then(function () {
     return '<div class="row" style="align-items:center;gap:12px;flex-wrap:wrap">' +
       '<button class="btn" type="button" data-act="tool-scan" data-tool="' + name + '"' + (t.running || scanning ? " disabled" : "") + ">" + (scanning ? H("Scanning…") : mine ? H("Scan Again") : H("Scan")) + "</button>" +
       (mine && !scanning ? '<span class="det">' + H("Scanned {when}", { when: ago(sc.at) }) + "</span>" : "") + "</div>" +
-      (scanning && !(t.running && t.progress) ? '<div class="migprog"><div class="meter thin busy" role="progressbar" aria-busy="true"><div></div></div></div>' : "") +
+      (scanning && !(t.running && t.progress) ? '<div class="migprog"><div class="meter thin busy" role="progressbar" aria-label="' + esc(T("Progress")) + '" aria-busy="true"><div></div></div></div>' : "") +
       (t.error && !scanning ? '<p class="bad">' + esc(msg(t.error)) + "</p>" : "");
   }
   // a tool scans the library opened by itself, once (Scan Again for more): what toolAutoPlan says
@@ -5349,7 +5350,7 @@ PCI18N.ready.then(function () {
     const act = function (e, a, label, pri) { return '<button class="btn sm' + (pri ? " pri" : "") + '" type="button" data-act="trash" data-trash="' + a + '" data-path="' + esc(e.path) + '">' + label + "</button> "; };
     return '<section class="card">' + heading(esc(T("Set Aside")), N("Files the tools set aside, in the library’s .plexcache-trash folder, waiting until Plex no longer lists them (and the mirror’s Plex, where the library has one), then the hold. A file that never gets there is held and said so on Health: delete it now, put it back, or keep it set aside and stop following it.")) +
       '<p class="help">' + H("Kept {n} days once every Plex has let go of them (the backup length in <a href=\"/system#prefs\" data-nav>System → Preferences</a>).", { n: tr.hold_days }) + "</p>" +
-      '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("File") + '</th><th scope="col">' + H("Now") + '</th><th scope="col"></th></tr></thead><tbody>' +
+      '<div class="tbl-wrap"><table class="tbl"><thead><tr><th scope="col">' + H("File") + '</th><th scope="col">' + H("Now") + '</th><th scope="col"><span class="sr-only">' + H("Actions") + '</span></th></tr></thead><tbody>' +
       items.map(function (e) {
         return "<tr><td>" + esc(e.title) + '<div class="det mono">' + esc(e.path.split("/").pop()) + '</div><div class="det">' + esc(msg(e.why)) + " · " + fmtWhen(e.at) + "</div></td><td>" + state(e) + "</td><td>" +
           act(e, "purge", H("Delete Now")) + act(e, "restore", H("Put Back")) + act(e, "keep", H("Keep Set Aside")) + "</td></tr>";

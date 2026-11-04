@@ -6,6 +6,7 @@
 //
 //     npm ci --prefix dev                                  # once, and again when dev/package-lock.json changes
 //     node dev/web.js lint [<file>...]                     # plexcache/web's .css, .js and .html (or the files named), each by its kind
+//     node dev/web.js a11y                                 # axe-core on every page as the demos draw it, in each look
 //     node dev/web.js build <in> [<out>]                   # a .css, .js or .html built (to stdout, or out; out may be in)
 //     node dev/web.js build --no-minify <in> [<out>]       # the CSS prefixed only, a script or page as it is: not minified
 //
@@ -331,11 +332,101 @@ async function lint(args) {
   return total ? 1 : 0;
 }
 
-const COMMANDS = { build, lint };
+// The accessibility check (axe-core, its standard rules, none turned off): every page of the app (app.js's PAGES) in each
+// look (Classic and Dionysus, light and dark), on the two demos (tests/demo.py: the showcase, mostly set up well, and the
+// one with problems to show), drawn in Chromium by Playwright. A finding is the rule, the element and the pages and looks
+// it's on; the colour contrast it finds is a look, so its fix goes through the style sample and the maintainer's OK.
+// Chromium is Playwright's (npx --prefix dev playwright install chromium), or the one PLEXCACHE_CHROMIUM names.
+const LOOKS = [["classic", "light"], ["classic", "dark"], ["dionysus", "light"], ["dionysus", "dark"]];
+const DEMOS = { showcase: { DEMO_SHOWCASE: "1" }, problems: { DEMO_PROBLEMS: "1" } };
+const DRAWN = 1500;   // the page's first draw and its decorations (decor.js paints on the next frames)
+
+function appPages() {
+  const m = fs.readFileSync(path.join(WEB, "app.js"), "utf8").match(/(?:var|let|const) PAGES = \{([\s\S]*?)\};/);
+  if (!m) throw new Error("a11y: app.js has no PAGES");
+  return [...m[1].matchAll(/([a-z]+):\s*page[A-Z]/g)].map((x) => x[1]);
+}
+
+// A demo on a port of its own, once it answers: { url, stop }.
+async function startDemo(env) {
+  const net = require("net"), { spawn } = require("child_process");
+  const port = await new Promise((ok) => { const srv = net.createServer().listen(0, "127.0.0.1", () => { const p = srv.address().port; srv.close(() => ok(p)); }); });
+  const proc = spawn(process.env.PYTHON || "python3", [path.join(ROOT, "tests", "demo.py"), String(port)], { cwd: ROOT, env: { ...process.env, ...env }, stdio: "ignore" });
+  const url = `http://127.0.0.1:${port}`;
+  const stop = () => { try { proc.kill(); } catch { /* gone */ } };
+  for (let i = 0; i < 120; i++) {
+    if (proc.exitCode !== null) break;
+    const up = await new Promise((ok) => {
+      require("http").get(url + "/api/state", (res) => { res.resume(); ok(res.statusCode === 200); }).on("error", () => ok(false));
+    });
+    if (up) return { url, stop };
+    await new Promise((ok) => setTimeout(ok, 500));
+  }
+  stop();
+  throw new Error("a11y: the demo didn't start within a minute (to see why: python3 tests/demo.py)");
+}
+
+async function a11y() {
+  const { chromium } = need("playwright");
+  const axe = fs.readFileSync(require.resolve("axe-core/axe.min.js"), "utf8");
+  let browser;
+  try {
+    browser = await chromium.launch(process.env.PLEXCACHE_CHROMIUM ? { executablePath: process.env.PLEXCACHE_CHROMIUM } : {});
+  } catch (e) {
+    console.error(`Chromium won't start for Playwright: npx --prefix dev playwright install chromium (${String(e.message || e).split("\n")[0]})`);
+    return 2;
+  }
+  const demos = {};
+  const found = new Map();   // rule + element -> { impact, help, where: [] }
+  let pages = 0;
+  try {
+    for (const [name, env] of Object.entries(DEMOS)) demos[name] = await startDemo(env);
+    const jobs = [];
+    for (const name of Object.keys(DEMOS)) for (const page of appPages()) for (const [theme, mode] of LOOKS) jobs.push({ name, page, theme, mode });
+    const one = async (job) => {
+      // bypassCSP: the pages forbid inline scripts, and axe-core is put in the page as one
+      const ctx = await browser.newContext({ colorScheme: job.mode, bypassCSP: true, viewport: { width: 1280, height: 900 } });
+      try {
+        await ctx.addInitScript((o) => { try { localStorage.setItem("pc-theme", JSON.stringify(o)); } catch { /* none */ } }, { theme: job.theme, mode: job.mode });
+        const p = await ctx.newPage();
+        await p.goto(`${demos[job.name].url}/${job.page}`);
+        // the page drawn (its title, once its data came: slower on a busy machine), then its decorations; a page with no
+        // title at all is axe-core's to say, so it's checked all the same
+        await p.waitForSelector("h1", { timeout: 30000 }).catch(() => {});
+        await p.waitForTimeout(DRAWN);
+        await p.addScriptTag({ content: axe });
+        const got = await p.evaluate(async () => (await window.axe.run(document)).violations
+          .map((v) => ({ id: v.id, impact: v.impact, help: v.help, nodes: v.nodes.map((n) => n.target.join(" ")) })));
+        for (const v of got) for (const el of v.nodes) {
+          const key = `${v.id}\t${el}`;
+          if (!found.has(key)) found.set(key, { id: v.id, el, impact: v.impact, help: v.help, where: [] });
+          found.get(key).where.push(`/${job.page} (${job.name}) ${job.theme === "classic" ? "Classic" : "Dionysus"} ${job.mode}`);
+        }
+        pages++;
+      } finally {
+        await ctx.close();
+      }
+    };
+    let next = 0;
+    await Promise.all([0, 1, 2, 3].map(async () => { while (next < jobs.length) await one(jobs[next++]); }));
+  } finally {
+    await browser.close();
+    for (const d of Object.values(demos)) d.stop();
+  }
+  const list = [...found.values()].sort((a, b) => a.id.localeCompare(b.id) || a.el.localeCompare(b.el));
+  for (const f of list) {
+    const shown = f.where.slice(0, 3).join(", ") + (f.where.length > 3 ? ` and ${f.where.length - 3} more` : "");
+    console.error(`${f.el}: ${f.help} (${f.id}, ${f.impact}) on ${shown}`);
+  }
+  console.error(list.length ? `${list.length} found by axe-core` : `${pages} page(s) pass axe-core`);
+  return list.length ? 1 : 0;
+}
+
+const COMMANDS = { build, lint, a11y };
 if (require.main === module) {
   const [cmd, ...args] = process.argv.slice(2);
   if (!COMMANDS[cmd]) {
-    console.error("usage: node dev/web.js lint [<file.css|.js|.html>...] | build [--no-minify] <in.css|.js|.html> [<out>]");
+    console.error("usage: node dev/web.js lint [<file.css|.js|.html>...] | a11y | build [--no-minify] <in.css|.js|.html> [<out>]");
     process.exitCode = 2;
   } else {
     COMMANDS[cmd](args).then((code) => { process.exitCode = code; }, (e) => { console.error(e.message || e); process.exitCode = 1; });

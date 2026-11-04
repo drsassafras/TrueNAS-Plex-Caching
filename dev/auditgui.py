@@ -51,6 +51,40 @@ class Data:
         self.runner = auditrun.Runner(private)
         self.lock = threading.Lock()
         self.confirming: dict = {}   # (Confirm now's run: the fixes, how far it's got, what came of each)
+        self._kept: dict[str, tuple] = {}   # (the Overview's and Findings' answers, until the code or the records change)
+
+    def _sig(self) -> tuple:
+        """What the Overview and Findings depend on, cheaply: the records' files, the commits, and the files changed
+        since (each one's mtime, so an edit to a file already changed counts too)."""
+        def stamp(folder: str) -> tuple:
+            try:
+                return tuple(sorted((n, os.stat(os.path.join(folder, n)).st_mtime_ns) for n in os.listdir(folder)))
+            except OSError:
+                return ()
+        got = subprocess.run(["git", "-C", audit.ROOT, "status", "--porcelain", "-z", "--untracked-files=all"],
+                             capture_output=True, text=True, timeout=60)
+        dirty = []
+        for row in got.stdout.split("\0"):
+            rel = row[3:]
+            try:
+                dirty.append((rel, os.stat(os.path.join(audit.ROOT, rel)).st_mtime_ns))
+            except OSError:
+                dirty.append((rel, 0))
+        heads = subprocess.run(["git", "-C", audit.ROOT, "rev-parse", "HEAD", "@{upstream}"], capture_output=True, text=True, timeout=60)
+        return (stamp(os.path.join(self.root(), "audits")), stamp(audit.PUBLIC), stamp(self.root()), heads.stdout, tuple(dirty),
+                int(time.time() // 600))
+
+    def _keep(self, name: str, make):
+        """``make()``'s answer, made again only once what it depends on has changed (switching tabs: at once)."""
+        sig = self._sig()
+        with self.lock:
+            had = self._kept.get(name)
+        if had and had[0] == sig:
+            return had[1]
+        got = make()
+        with self.lock:
+            self._kept[name] = (sig, got)
+        return got
 
     def root(self) -> str:
         return audit.private_root() if self.private is None else self.private
@@ -61,6 +95,9 @@ class Data:
         return [row[3:] for row in got.stdout.splitlines()] if got.returncode == 0 else []
 
     def overview(self) -> dict:
+        return self._keep("overview", self._overview)
+
+    def _overview(self) -> dict:
         audits, have_private, bad = audit.load(self.private)
         rule = audit.rules(self.private) if have_private else {}
         sensitive = list(rule.get("sensitive", {}).get("paths", []))
@@ -167,6 +204,9 @@ class Data:
 
     # ------------------------------------------------------------ findings
     def findings(self) -> list[dict]:
+        return self._keep("findings", self._findings)
+
+    def _findings(self) -> list[dict]:
         out, cache, known = [], {}, audit.test_names()
         led: dict[str, list[str]] = {}   # (the new cases each fix's test found)
         for a in audit.load(self.private)[0]:

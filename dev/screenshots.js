@@ -4,7 +4,7 @@
 //   DEMO_SHOWCASE=1 DEMO_ROOT=/mnt/tank/plexfiles python3 tests/demo.py 8650
 //   DEMO_SHOWCASE=1 DEMO_NO_L2ARC=1 python3 tests/demo.py 8651     # a pool without an SSD cache
 // then:
-//   NODE_PATH=$(npm root -g) node dev/screenshots.js      # needs: npm i -g playwright
+//   NODE_PATH=$(npm root -g) node dev/screenshots.js      # needs: npm ci --prefix dev && npx --prefix dev playwright install chromium
 //
 // The demo runs its fake Plex and TrueNAS on 127.0.0.1; the pictures show a typical home
 // address instead (192.168.1.10), like a real install would.

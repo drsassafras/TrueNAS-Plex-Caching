@@ -134,7 +134,7 @@
         (code !== "auto" ? ' lang="' + code + '"' : "") + ">" + label + (extra || "") + "</button></li>";
     };
     const html = '<button type="button" class="langbtn" aria-haspopup="true" aria-expanded="false" title="' + esc(T("Language")) +
-      '" aria-label="' + esc(T("Language: {name}", { name: nameOf(lang) })) + '">' + GLOBE + '<span class="code">' + short + "</span></button>" +
+      '" aria-label="' + esc(short + " · " + T("Language: {name}", { name: nameOf(lang) })) + '">' + GLOBE + '<span class="code">' + short + "</span></button>" +
       '<div class="langmenu" hidden><ul role="menu" aria-label="' + esc(T("Language")) + '">' +
       item("auto", esc(T("Automatic (browser)")), ' <span class="muted">· ' + esc(nameOf(browserLang())) + "</span>") +
       '<li role="none" class="orig"><div class="orig-head">' + esc(T("Original")) + "</div><ul role=\"group\">" +

@@ -407,7 +407,7 @@ h2 .mode-ic{vertical-align:-3px}
 .fcnt{font-size:12px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums}
 .fhalf.L .fbar,.fhalf.L .fcnt{flex-direction:row-reverse}
 .fcnt div{text-align:center;white-space:nowrap;min-width:0}
-.fhit{background:#1F8A5B}.fmiss{background:#C8562B}
+.fhit{background:#1B7A50}.fmiss{background:#B84E27}
 .fkey{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:-1px}
 .frows .lname{padding-top:0}
 /* On a phone each library's name goes above its bar, so the two halves get the full width */
@@ -750,7 +750,7 @@ h2 .mode-ic{vertical-align:-3px}
 .fbar>div span:last-child{font-size:11px;font-weight:500;opacity:.92}
 /* Merge Duplicates: the record kept framed and labelled, the ones folded in greyed; the arrow a button that swaps them */
 .mgkeep{position:relative;border:2px solid var(--accent);border-radius:10px;padding:4px;--edge:var(--accent)}
-.mgkeeplbl{position:absolute;top:-11px;left:10px;background:var(--panel);border:2px solid var(--accent);border-radius:999px;padding:1px 9px;font-size:11px;line-height:14px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:.4px;--edge:var(--accent)}
+.mgkeeplbl{position:absolute;top:-11px;left:10px;background:var(--panel);border:2px solid var(--accent);border-radius:999px;padding:1px 9px;font-size:11px;line-height:14px;font-weight:600;color:var(--ink);text-transform:uppercase;letter-spacing:.4px;--edge:var(--accent)}
 /* the one that goes: its own colour (themes.py "lost"), its title in an oval as the kept one's */
 .mgdrop{position:relative;border:2px solid var(--lost);border-radius:10px;padding:4px;--edge:var(--lost)}
 .mgdroplbl{position:absolute;top:-11px;left:10px;z-index:1;background:var(--panel);border:2px solid var(--lost);border-radius:999px;padding:1px 9px;font-size:11px;line-height:14px;font-weight:600;color:var(--lost);text-transform:uppercase;letter-spacing:.4px;--edge:var(--lost)}
@@ -811,7 +811,7 @@ fieldset.greyed *{cursor:not-allowed}
 .optgate{margin-top:12px}
 .optgate>.what{display:flex;align-items:center;gap:6px;font-weight:600;margin-bottom:-6px}
 /* the side that goes, greyed — but not its yellow and red tags: they count */
-.mgdim .ssposter,.mgdim .ssinfo>.what,.mgdim .ssinfo>.det,.mgdim .ssval,.mgdim .sschip:not(.b-warn):not(.b-fail){opacity:.6}
+.mgdim .ssposter,.mgdim .ssinfo>.what,.mgdim .ssinfo>.det,.mgdim .ssval{opacity:.8}
 .note.warnbox{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn)}
 .note.warnbox a{color:inherit}
 .note.badbox{background:var(--bad-bg);color:var(--bad);border:1px solid var(--bad)}

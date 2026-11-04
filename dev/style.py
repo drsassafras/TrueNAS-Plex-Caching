@@ -28,7 +28,7 @@ terminal and won't run without one. Nobody else runs it or edits the guide (CLAU
 
 ``sample`` starts two demos (tests/demo.py, ports of their own): today's app, and the app as approved (today's with the
 approved look files over it: the copies approve keeps in git, their blob ids the guide's ``files``, or --before). It takes the pictures with Playwright (dev/style-sample.js,
-like dev/screenshots.js: ``npm i -g playwright && npx playwright install chromium``), with the progress bar the dev
+like dev/screenshots.js: ``npm ci --prefix dev && npx --prefix dev playwright install chromium``), with the progress bar the dev
 tools share (dev/progress.py): each look Before and After, cropped alike and compared pixel for pixel. It writes
 dev/style-sample/index.html (open it in a browser): what changed on screen side by side, what's judged by its code, and,
 folded away, what drew the same; and sample.json.
@@ -814,7 +814,7 @@ def _sample(out: str, before: str | None, shown: str) -> int:
     missing = _no_playwright()
     if missing:
         steps.clear()
-        print(f"Playwright isn't installed for node ({missing}). Install it: npm i -g playwright && npx playwright install chromium",
+        print(f"Playwright isn't installed for node ({missing}). Install it: npm ci --prefix dev && npx --prefix dev playwright install chromium",
               file=sys.stderr)
         return 1
     steps.draw("Playwright found")
@@ -954,7 +954,7 @@ def _pictures(out: str, waiting: Progress | None = None, workers: list | None = 
     for b in {id(b): b for b in (bar, waiting) if b}.values():
         b.clear()
     if code:
-        print("Playwright couldn't take the pictures (see above). It needs: npm i -g playwright && npx playwright install chromium",
+        print("Playwright couldn't take the pictures (see above). It needs: npm ci --prefix dev && npx --prefix dev playwright install chromium",
               file=sys.stderr)
         return None
     return shots
