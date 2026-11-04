@@ -1,4 +1,4 @@
-# The public security audit (dev/audit.py record).
+# Public security audits (dev/audit.py record).
 id = "2026-11-03-5"
 date = 2026-11-03
 commit = "1dde75023a95353fba73b4bbb52572786638e79c"

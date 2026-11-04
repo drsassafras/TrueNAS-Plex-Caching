@@ -138,6 +138,7 @@ async function overview(view) {
   const o = await api("/api/overview");
   document.getElementById("where").textContent = o.private ? "with the private records" : "public records only";
   const tiles = h("div", {class: "tiles"},
+    o.open != null ? h("div", {class: "tile"}, h("b", {}, o.open), h("span", {}, o.open === 1 ? "open finding" : "open findings")) : null,
     h("div", {class: "tile"}, h("b", {}, pct(o.seen, o.lines)), h("span", {}, "audited")),
     h("div", {class: "tile"}, h("b", {}, pct(o.full, o.lines)), h("span", {}, "by a full audit")),
     h("div", {class: "tile"}, h("b", {}, o.lines - o.seen), h("span", {}, "lines no audit has seen")),
@@ -430,8 +431,10 @@ async function findings(view) {
         : h("span", {class: "badge " + (SEV[f.severity] || "")}, f.severity + (f.score != null ? " " + f.score.toFixed(1) : "")),
         h("span", {}, f.title), f.cve ? h("code", {class: "badge"}, f.cve) : null, f.status === "open" ? h("span", {class: "badge " + (CODE[f.code] || ["", ""])[0]}, (CODE[f.code] || ["", f.code])[1]) : null,
         unpushed(f) ? h("span", {class: "badge warn"}, f.fix === "committed" ? "fixed, committed, not pushed" : "fixed, not pushed yet") : null,
-        f.status === "open" && f.reported ? h("span", {class: "badge"}, "fix reported: " + f.reported) : null),
-      h("div", {class: "note"}, (f.now && f.now.length && [...f.now].sort().join() !== [...(f.lines || [])].sort().join() ? "now at " + f.now.join(", ") + " · found at " : "") + (f.lines || []).join(", ") + " · audit " + f.audit + " (" + String(f.auditor || "").replace(/^human:/, "") + " at " + f.thoroughness + (f.author ? ", the author's own" : "") + ")"),
+        f.status === "open" && f.reported ? h("span", {class: "badge"}, "fix reported: " + f.reported) : null,
+        f.by_audit === false ? h("span", {class: "badge", title: "Found by a test written for " + f.via + "'s fix, not by an audit: it counts for no auditor"}, "found by a fix's test") : null),
+      h("div", {class: "note"}, (f.now && f.now.length && [...f.now].sort().join() !== [...(f.lines || [])].sort().join() ? "now at " + f.now.join(", ") + " · found at " : "") + (f.lines || []).join(", ") + (f.by_audit === false ? " · found by a test written for " + f.via + "'s fix" + (f.found ? ", " + f.found : "") + ", not by an audit (kept in audit " + f.audit + "'s record)"
+        : " · audit " + f.audit + " (" + String(f.auditor || "").replace(/^human:/, "") + " at " + f.thoroughness + (f.author ? ", the author's own" : "") + ")")),
       f.status === "open" && f.code === "gone" ? h("p", {class: "note"}, "None of its lines are in the code any more. If that change is the fix, Mark as fixed (or have an AI auditor re-check it); the next audit of the change says whether it's right.") : null,
       f.status === "open" && f.code === "changed" ? h("p", {class: "note"}, "Some of its lines have changed since it was found.") : null,
       f.status === "fixed" && FIX[f.fix] ? h("p", {class: "note"}, unpushed(f) && f.fix === "not fixed" ? "Fixed, but not pushed yet: commit and push the fix. (Its lines look as they did, so the fix is elsewhere in the code.)" : FIX[f.fix]) : null,
@@ -479,13 +482,14 @@ function reportBox() {   // (Copy issue asks whoever fixes it for a report: past
     try {
       const got = await api("/api/report", {text: text.value});
       said.textContent = "Kept with " + plural(got.done.length, "finding") + (got.done.length ? " (" + got.done.join(", ") + ")" : "") +
+        (got.added.length ? ". New, found by a fix's test: " + got.added.join(", ") : "") +
         (got.unknown.length ? ". No such finding: " + got.unknown.join(", ") : "") + (got.missing.length ? ". Not in tests/: " + got.missing.join(", ") : "") +
         ". Their status is as it was: Mark as fixed, or re-check them.";
-      if (got.done.length) setTimeout(() => show("findings"), 2500);
+      if (got.done.length || got.added.length) setTimeout(() => show("findings"), 2500);
     } catch (e) { said.textContent = e.message; }
   }}, "Keep the report");
   return h("details", {}, h("summary", {}, "Paste a fix report"),
-    h("p", {class: "note"}, "Copy issue asks whoever fixes it to end with a report: what it did, and the tests that would fail if it came back. Paste it here and each finding keeps its tests; a re-check then reads them, and tnsync's block says if one is ever removed."),
+    h("p", {class: "note"}, "Copy issue asks whoever fixes it to end with a report: what it did, and the tests that would fail if it came back. Paste it here and each finding keeps its tests; a re-check then reads them, and tnsync's block says if one is ever removed. Another case a fix's test found comes in as a new finding, found by that test, not by an audit or its auditor."),
     text, h("div", {class: "row"}, go), said);
 }
 

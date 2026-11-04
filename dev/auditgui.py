@@ -31,7 +31,6 @@ import threading
 import time
 import tomllib
 import urllib.parse
-import webbrowser
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -84,6 +83,7 @@ class Data:
             "audits": len(audits),
             "last": audits[-1].id if audits else "",
             "private": have_private,
+            "open": sum(1 for a in audits for f in a.findings if f.get("status") == "open") if have_private else None,
             "private_root": self.root(),
             "problems": bad + m.notes,
             "commit": {"app": self._status(audit.ROOT, os.path.relpath(audit.PUBLIC, audit.ROOT)),
@@ -177,7 +177,7 @@ class Data:
                             "date": a.date.isoformat(), "auditor": a.auditor, "thoroughness": a.thoroughness, "author": a.author,
                             "score": score, "code": audit.code_state(f, a, cache), "now": audit.locate(f, a, cache),
                             "fix": audit.fix_where(f, a)[0] if f.get("status") == "fixed" else "",
-                            "lost": [t for t in f.get("tests", []) if t not in known]})
+                            "lost": [t for t in f.get("tests", []) if t not in known], "by_audit": audit.by_audit(f)})
         return sorted(out, key=lambda f: (f.get("status") != "open", -audit.SEVERITIES.index(f.get("severity", "info"))
                                           if f.get("severity") in audit.SEVERITIES else 0, f.get("id", "")))
 
@@ -208,9 +208,9 @@ class Data:
         """A fix report pasted in (Copy issue asks whoever fixes it for one): each finding's tests that guard it, and what
         was said, kept with it. Its status is left as it is: the fixer's word isn't the audit's (Mark as fixed, or have
         it re-checked)."""
-        fixes = audit.answers(str(q.get("text", "")), "fix")
-        if not fixes:
-            raise ValueError("no [[fix]] blocks in it: paste the report's TOML")
+        fixes, new = audit.answers(str(q.get("text", "")), "fix"), audit.answers(str(q.get("text", "")), "new")
+        if not fixes and not new:
+            raise ValueError("no [[fix]] or [[new]] blocks in it: paste the report's TOML")
         known, ids = audit.test_names(), {f.get("id"): a.id for a in audit.load(self.private)[0] for f in a.findings}
         done, unknown, missing = [], [], []
         for x in fixes:
@@ -228,7 +228,44 @@ class Data:
             said = f"fix reported ({status})" + (f", guarded by {', '.join(guard)}" if guard else ", no test named") + (f": {detail[:500]}" if detail else "")
             self.finding({"audit": a.id, "id": fid, "tests": sorted({*f.get("tests", []), *guard}), "reported": status, "_check": said})
             done.append(fid)
-        return {"done": done, "unknown": unknown, "missing": missing}
+        added = self._found_by_tests(new, ids, known, unknown, missing)
+        return {"done": done, "added": added, "unknown": unknown, "missing": missing}
+
+    def _found_by_tests(self, new: list[dict], ids: dict, known: set[str], unknown: list[str], missing: list[str]) -> list[str]:
+        """A fix report's new findings (``[[new]]``: another case a fix's test found), each kept in the record of the
+        finding whose fix it was, as found by that test: never by that record's audit, nor counted for its auditor."""
+        if not new:
+            return []
+        day = datetime.date.today()
+        _, first = audit.next_ids(day, self.root())
+        added = []
+        for x in new:
+            via = str(x.get("via", "")).strip()
+            if via not in ids:
+                unknown.append(f"{via or '(no via)'} (a new finding's via)")
+                continue
+            f = auditrun.tidy([x], day.year, first + len(added), [])[0]
+            guard, lost = audit.guards(x.get("tests", []), known)
+            missing += [f"{f['id']}: {t}" for t in lost]
+            f.update(source="fix-test", via=via, found=day.isoformat(), main_by="fix report",
+                     prints=audit.spot_prints(f["lines"], audit.ROOT),
+                     checks=[f"{day.isoformat()}: found by a test written for {via}'s fix" + (f" ({', '.join(guard)})" if guard else "")])
+            if guard:
+                f["tests"] = guard
+            audit.scored(f)
+            path = os.path.join(self.root(), "audits", f"{ids[via]}.toml")
+            with self.lock:
+                with open(path, "rb") as fh:
+                    rec = tomllib.load(fh)
+                rec.setdefault("finding", []).append(f)
+                wrong = audit.problems(rec, "private")
+                if wrong:
+                    raise ValueError("; ".join(wrong))
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(audit.dump(rec, audit.PRIVATE_KEYS, "finding"))
+            ids[f["id"]] = ids[via]
+            added.append(f["id"])
+        return added
 
     def refresh(self, q: dict) -> dict:
         """Re-check: a fixed finding whose fix has been committed since gets that commit."""
@@ -420,7 +457,7 @@ def serve(data: Data, open_browser: bool = True, port: int = 0, ready=None) -> i
 
         def do_GET(self):
             where, _, query = self.path.partition("?")
-            if where == "/" and devpage.entry(self, session, server.server_port, query):
+            if devpage.entry(self, session, server.server_port, where, query):
                 return None
             if not self._host_ok():
                 return self._send(403, devpage.REFUSED, "text/plain; charset=utf-8")
@@ -454,9 +491,9 @@ def serve(data: Data, open_browser: bool = True, port: int = 0, ready=None) -> i
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = session.url(server.server_port)
-    print(f"The audits page: {url}  (Ctrl-C to stop; it stops by itself once the page is closed and no audit is running)")
-    if open_browser:
-        webbrowser.open(url)
+    opened = devpage.show(session, server.server_port, open_browser)   # (its code: in that file only, yours to read)
+    print(f"The audits page: {session.address(server.server_port)}  (Ctrl-C to stop; it stops by itself once the page is closed "
+          f"and no audit is running). If no browser opened it: open {opened}")
 
     def watch():
         seen = False
@@ -478,6 +515,7 @@ def serve(data: Data, open_browser: bool = True, port: int = 0, ready=None) -> i
     finally:
         ended.set()
         server.server_close()
+        session.close()
     live = list(data.runner.live)
     for rid in live:
         data.runner.cancel(rid)

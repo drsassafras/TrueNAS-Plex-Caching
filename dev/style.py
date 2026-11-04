@@ -263,29 +263,59 @@ def drawn_looks(path: str, name: str) -> dict:
 # ------------------------------------------------------------------ themes and files
 def theme_looks(root: str | None = None) -> dict:
     """The built-in themes: plexcache/themes.py's colours, fonts and decorations, and how its css() and script() are
-    written. Another tree's themes.py is read in a Python of its own (it's a module of that tree's plexcache)."""
+    written. Read from its source as data (_themes_read), never run: another tree's (the Before's, out of git) too."""
     root = os.path.abspath(root or ROOT)
     path = own_file(root, "plexcache/themes.py")
-    if root == ROOT:
-        from plexcache import themes
-        found = _theme_data(themes)
-    else:
-        code = ("import importlib.util, json, sys\n"
-                "sys.path.insert(0, sys.argv[1])\n"
-                "from plexcache import themes\n"   # (that tree's, before this tool's own imports could bring this one's)
-                "spec = importlib.util.spec_from_file_location('style_tool', sys.argv[2])\n"
-                "tool = importlib.util.module_from_spec(spec)\n"
-                "spec.loader.exec_module(tool)\n"
-                "print(json.dumps(tool._theme_data(themes)))\n")
-        # (-I: isolated, so nothing in the folder it's started from, nor PYTHONPATH, comes before the standard library)
-        run = subprocess.run([sys.executable, "-I", "-c", code, root, os.path.abspath(__file__)], capture_output=True, text=True, timeout=120)
-        if run.returncode:
-            raise RuntimeError(f"couldn't read the themes of {root}: {run.stderr.strip()}")
-        found = json.loads(run.stdout)
     with open(path, encoding="utf-8") as f:
         src = f.read()
+    try:
+        found = _theme_data(_themes_read(src))
+    except (AttributeError, KeyError, TypeError, ValueError, SyntaxError) as e:
+        raise RuntimeError(f"couldn't read the themes of {root}: {e}") from e
     found.update(py_marks(src, "themes.py", ("css", "script")))
     return found
+
+
+def _themes_read(src: str):
+    """themes.py's data — its names set to plain values (BUILT_IN, _FONT_STACK and what they're made of: literals, the
+    names before them, dict(name, **{…})) — worked out from the source alone; what isn't plain data is left out."""
+    import types
+    from typing import Any
+    env: dict = {}
+
+    def value(node: ast.AST) -> Any:
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            return env[node.id]
+        if isinstance(node, (ast.List, ast.Tuple)):
+            items = [value(e) for e in node.elts]
+            return items if isinstance(node, ast.List) else tuple(items)
+        if isinstance(node, ast.Dict):
+            out: dict = {}
+            for k, v in zip(node.keys, node.values, strict=True):
+                if k is None:
+                    out.update(value(v))
+                else:
+                    out[value(k)] = value(v)
+            return out
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict" and len(node.args) <= 1:
+            out: dict = dict(value(node.args[0])) if node.args else {}
+            for kw in node.keywords:
+                if kw.arg is None:
+                    out.update(value(kw.value))
+                else:
+                    out[kw.arg] = value(kw.value)
+            return out
+        raise ValueError("not plain data")
+
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            try:
+                env[node.targets[0].id] = value(node.value)
+            except (ValueError, KeyError, TypeError):
+                env.pop(node.targets[0].id, None)
+    return types.SimpleNamespace(**env)
 
 
 def _theme_data(themes) -> dict:
@@ -383,8 +413,11 @@ def looks(root: str | None = None) -> dict:
 
 
 # ------------------------------------------------------------------ the guide
-def seal(items: dict) -> str:
-    return hashlib.sha256(json.dumps(items, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+def seal(items: dict, files: dict | None = None) -> str:
+    """The guide's seal: its looks and, once it keeps them, the approved look files' ids (``files``). An unkeyed hash:
+    it catches a hand edit, not one made on purpose (files_problems holds ``files`` to git's history for that)."""
+    what = {"files": files, "looks": items} if files else items
+    return hashlib.sha256(json.dumps(what, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def load_guide(path: str = GUIDE) -> dict:
@@ -444,11 +477,15 @@ def made_by(diff: dict, out: str = SAMPLE) -> dict | None:
 
 def problems(guide: dict | None = None, now: dict | None = None) -> list[str]:
     """Each look that differs from the guide, in words, and a guide that wasn't written by approve. [] when all agree."""
+    history = guide is None   # (the guide here, held to git's history: one given isn't)
     guide = load_guide() if guide is None else guide
     out = []
-    if guide.get("format") != FORMAT or seal(guide.get("looks", {})) != guide.get("seal"):
+    looks_, files = guide.get("looks", {}), guide.get("files") or None
+    # (a guide sealed before the seal took in its files: its looks' alone, until the next approval writes it again)
+    if guide.get("format") != FORMAT or guide.get("seal") not in (seal(looks_, files), *([seal(looks_)] if files else [])):
         out.append("dev/style-guide.json wasn't written by dev/style.py approve (its seal doesn't match its looks): "
                    "put it back as it was (git checkout dev/style-guide.json)")
+    out += files_problems(guide, history=history)
     diff = pending(guide, now)
     out += [f"new: {_short(k)}" for k in diff["new"]]
     out += [f"changed: {_short(k)}" for k in diff["changed"]]
@@ -468,7 +505,7 @@ def write_guide(items: dict, approval: dict, path: str = GUIDE, before: dict | N
                  "(dev/style.py; StyleGuideTests). Written by dev/style.py approve only: never edit it by hand.",
         "format": FORMAT,
         "approvals": old.get("approvals", []) + [approval],
-        "seal": seal(items),
+        "seal": seal(items, old.get("files")),
         **({"files": old["files"]} if "files" in old else {}),   # (the approved app's look files: keep_approved's)
         "looks": dict(sorted(items.items())),
     }
@@ -556,8 +593,67 @@ def keep_approved(root: str = ROOT, guide_path: str = GUIDE, repo: str = ROOT) -
         files[rel] = got.stdout.strip()
     guide = load_guide(guide_path)
     guide["files"] = dict(sorted(files.items()))
+    guide["seal"] = seal(guide.get("looks", {}), guide["files"])
     _dump_guide({k: guide[k] for k in ("about", "format", "approvals", "seal", "files", "looks") if k in guide} | guide, guide_path)
     return files
+
+
+def look_file(rel) -> bool:
+    """Whether a path is one look_files names, in any tree: themes.py, app.css, the scripts and pages, an image or font
+    of plexcache/web. What the guide's ``files`` may hold, so a Before puts nothing else of plexcache in (its __init__.py,
+    say, which the demo would run)."""
+    rel = str(rel)
+    parts = rel.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return False
+    if rel in ("plexcache/themes.py", "plexcache/web/app.css") or rel in {f"plexcache/web/{n}" for n in SCRIPTS + PAGES}:
+        return True
+    return parts[:2] == ["plexcache", "web"] and len(parts) > 2 and rel.endswith(IMAGES) and parts[-2] != "i18n"
+
+
+def files_problems(guide: dict, path: str = GUIDE, repo: str = ROOT, history: bool = True) -> list[str]:
+    """What's wrong with the guide's ``files``, the code a sample's Before runs (tests/demo.py imports its themes.py,
+    dev/decor-draws.js runs its decor.js): an entry that isn't a look file's blob id; and, held to git's history (a
+    full clone: a copy from git archive or a shallow one has none to hold it to), ``files`` changed with no new approval
+    (only approve writes them, with one), or a blob that isn't that file as committed with them."""
+    files = guide.get("files") or {}
+    out = [f"dev/style-guide.json's files has {rel!r}: {blob!r}, which isn't a look file's blob id"
+           for rel, blob in sorted(files.items()) if not look_file(rel) or not _BLOB.match(str(blob))]
+    if not files or not history or out:
+        return out
+
+    def git(*args):
+        return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=60)
+    top = git("rev-parse", "--show-toplevel")
+    if (top.returncode or os.path.realpath(top.stdout.strip()) != os.path.realpath(repo)
+            or git("rev-parse", "--is-shallow-repository").stdout.strip() != "false"):
+        return out
+    rel_guide = os.path.relpath(path, repo).replace(os.sep, "/")
+    versions: list[tuple[str | None, dict]] = [(None, guide)]   # (newest first: the guide here, then each commit's)
+    for c in git("log", "--format=%H", "--", rel_guide).stdout.split():
+        try:
+            versions.append((c, json.loads(git("show", f"{c}:{rel_guide}").stdout)))
+        except ValueError:
+            break
+    k = 0   # (versions[k]: where these files came in)
+    while k + 1 < len(versions) and (versions[k + 1][1].get("files") or {}) == files:
+        k += 1
+    older = versions[k + 1][1] if k + 1 < len(versions) else None
+    # (the first files ever kept may come in on their own; after that, only with an approval)
+    if older is not None and older.get("approvals") == versions[k][1].get("approvals") and any(v.get("files") for _, v in versions[k + 1:]):
+        out.append("dev/style-guide.json's files changed with no approval (only dev/style.py approve writes them): "
+                   "put it back as it was (git checkout dev/style-guide.json)")
+    commit = versions[k][0]
+    if commit is None:   # (approved here, not committed yet)
+        return out
+    for rel, blob in sorted(files.items()):
+        if git("rev-parse", "--verify", "--quiet", f"{commit}:{rel}").stdout.strip() == blob:
+            continue
+        later = git("rev-list", f"{commit}..HEAD", "--", rel).stdout.split()   # (the files committed after the guide)
+        if not any(git("rev-parse", "--verify", "--quiet", f"{c}:{rel}").stdout.strip() == blob for c in later):
+            out.append(f"dev/style-guide.json's files has {rel} as {blob[:12]}, which isn't that file as committed with them "
+                       f"({commit[:12]}) or since: put it back as it was (git checkout dev/style-guide.json)")
+    return out
 
 
 def approved_files(files: dict, into: str, repo: str = ROOT) -> list[str]:
@@ -566,7 +662,7 @@ def approved_files(files: dict, into: str, repo: str = ROOT) -> list[str]:
     missing = []
     for rel, blob in sorted(files.items()):
         parts = str(rel).split("/")
-        if not _BLOB.match(str(blob)) or parts[0] != "plexcache" or any(p in ("", ".", "..") for p in parts):
+        if not _BLOB.match(str(blob)) or not look_file(rel):
             raise RuntimeError(f"the guide's files has {rel!r}: {blob!r}, which isn't a look file's blob id")
         got = subprocess.run(["git", "-C", repo, "cat-file", "blob", blob], capture_output=True, timeout=60)
         if got.returncode:
@@ -723,6 +819,10 @@ def _sample(out: str, before: str | None, shown: str) -> int:
         return 1
     steps.draw("Playwright found")
     kept = (load_guide().get("files") if os.path.exists(GUIDE) else None) or None
+    held = files_problems(load_guide()) if kept and not before else []
+    if held:   # (code the Before would run that isn't as approved: none of it)
+        print(f"  No Before: {held[0]}", file=sys.stderr)
+        kept = None
     src = before or kept
     if not before and kept:   # (all of them out of git, or no Before: one missing would make a Before that isn't the approved app)
         with tempfile.TemporaryDirectory() as probe:
@@ -957,7 +1057,13 @@ _REVIEW_BAR = ('<div class="bar"><p class="offline">To approve on this page, run
 
 
 def _swatch(v) -> str:
-    return f'<span class="sw" style="background:{_esc(v)}"></span>' if v and re.fullmatch(r"#[0-9A-Fa-f]{3,8}", str(v)) else ""
+    # (its colour by a rule of the page's own <style>, _swatches': the page has no style="...", so its policy needs none)
+    return f'<span class="sw" data-c="{_esc(v)}"></span>' if v and re.fullmatch(r"#[0-9A-Fa-f]{3,8}", str(v)) else ""
+
+
+def _swatches(html: str) -> str:
+    """The rules that colour the page's swatches (_swatch), one for each colour on it."""
+    return "".join(f'.sw[data-c="{c}"]{{background:{c}}}' for c in sorted(set(re.findall(r'<span class="sw" data-c="(#[0-9A-Fa-f]{3,8})">', html))))
 
 
 def _code(it) -> str:
@@ -997,8 +1103,8 @@ def _page(out: str, items: list, shots: dict, fp: str, off: dict | None, compare
             slider = (f'<div class="slider" hidden><div class="sl" tabindex="0" role="slider" aria-label="Before ← → After (drag, or the arrow keys)" '
                       f'aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><img src="{_esc(p["after"])}" alt="After">'
                       # (not lazy: hidden until Slider is pressed, a lazy one never loads, and these are the side by side's own files)
-                      f'<img class="slb" src="{_esc(p["before"])}" alt="Before" style="clip-path:inset(0 50% 0 0)">'
-                      '<span class="sll side">Before</span><span class="slr side after">After</span><span class="slx" style="left:50%"></span></div></div>') if both else ""
+                      f'<img class="slb" src="{_esc(p["before"])}" alt="Before">'
+                      '<span class="sll side">Before</span><span class="slr side after">After</span><span class="slx"></span></div></div>') if both else ""
             px = (f'<span class="px">{p["px"]:,} px differ, in {p["areas"]} area{"s" if p.get("areas") != 1 else ""} '
                   '(boxed when highlighted)</span>') if p.get("px") else ""
             rows.append(f'<div class="pair"><div class="where">{_esc(p["label"])}{px}{tools}</div>'
@@ -1035,9 +1141,7 @@ def _page(out: str, items: list, shots: dict, fp: str, off: dict | None, compare
                f'{pics}</div>'
                f'<div><b>{len(s["code"])}</b> aren\'t drawn on the demo pages: judge by the code</div>'
                f'<div><b>{len(s["same"])}</b> drew exactly the same before and after</div></div>') if compared else ""
-    html = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-            "<title>Style review</title><style>" + _CSS + "</style></head><body><main>"
-            "<h1>Style review</h1>"
+    body = ("<h1>Style review</h1>"
             f"<p class=\"lead\">{total} look{'s' if total != 1 else ''} differ from the style guide. Each change is shown "
             "<b>Before</b> (as approved) and <b>After</b> (now), side by side, in Classic and Dionysus, light and dark, "
             "only where it looks different.</p>" + summary + note + _REVIEW_BAR +
@@ -1050,7 +1154,10 @@ def _page(out: str, items: list, shots: dict, fp: str, off: dict | None, compare
              "whose code changed but which drew exactly the same, pixel for pixel, everywhere they're seen: nothing to "
              f"look at, so no pictures.</summary>{same}</details></div></div>" if same else "") +
             "<p class=\"foot\">If it's all right, the maintainer runs <code>python3 dev/style.py approve</code> at a terminal. "
-            f"Fingerprint {fp}</p></main><script>" + _JS + "</script></body></html>")
+            f"Fingerprint {fp}</p>")
+    html = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>Style review</title><style>" + _CSS + _swatches(body) + "</style></head><body><main>" + body +
+            "</main><script>" + _JS + "</script></body></html>")
     with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
     return {"seen": seen_looks, "code": len(s["code"]), "same": len(s["same"])}
@@ -1080,8 +1187,8 @@ _CSS = (devpage.THEME + devpage.BASE +   # (the dev tools' pages' colours: dev/d
         "padding:2px 10px;cursor:pointer}.sv[aria-pressed=true]{background:var(--ink);color:var(--card)}"
         ".sl{position:relative;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:#fff;cursor:ew-resize;"
         "touch-action:pan-y;user-select:none;-webkit-user-select:none}"
-        ".sl img{display:block;width:100%;height:auto;pointer-events:none}.sl .slb{position:absolute;inset:0}"
-        ".slx{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--ink);box-shadow:0 0 0 1px var(--card);pointer-events:none}"
+        ".sl img{display:block;width:100%;height:auto;pointer-events:none}.sl .slb{position:absolute;inset:0;clip-path:inset(0 50% 0 0)}"
+        ".slx{position:absolute;top:0;bottom:0;left:50%;width:2px;margin-left:-1px;background:var(--ink);box-shadow:0 0 0 1px var(--card);pointer-events:none}"
         ".sll,.slr{position:absolute;top:8px;margin:0;pointer-events:none}.sll{left:8px}.slr{right:8px}"
         ".stalenote{background:var(--before-bg);color:var(--ink);border-radius:8px;padding:8px 12px;margin:0 0 10px}"
         ".ok{font:inherit;font-size:13px;font-weight:600;border:0;border-radius:99px;padding:4px 14px;cursor:pointer;"
@@ -1265,7 +1372,6 @@ def review(out: str = SAMPLE, terminal: bool | None = None, open_browser: bool =
     import http.server
     import secrets
     import threading
-    import webbrowser
     terminal = (sys.stdin.isatty() and sys.stdout.isatty()) if terminal is None else terminal
     if not terminal:
         print("review is the maintainer's, at a terminal, and won't run without one.", file=sys.stderr)
@@ -1287,8 +1393,8 @@ def review(out: str = SAMPLE, terminal: bool | None = None, open_browser: bool =
         if f.endswith(".png"):
             shutil.copy2(os.path.join(out, f), pictures)
     saved = sys.stdout, sys.stderr
-    if log is not None:   # (the terminal is the board's: say it to the file)
-        sys.stdout = sys.stderr = open(log, "w", encoding="utf-8", buffering=1)  # noqa: SIM115 — (until it ends)
+    if log is not None:   # (the terminal is the board's: say it to the file, yours alone to read)
+        sys.stdout = sys.stderr = devpage.private(log)
     token = secrets.token_urlsafe(24)
     session = devpage.Session("review")   # (the page, and its token, for the browser that opened its address only)
     lock = threading.Lock()
@@ -1305,13 +1411,13 @@ def review(out: str = SAMPLE, terminal: bool | None = None, open_browser: bool =
             return session.ok(self, port)
 
         def _send(self, code, body: bytes, ctype, nonce: str = ""):
-            # (the sample's markup has style="..." of its own: its styles inline, its script only by this response's nonce)
-            devpage.send(self, code, body, ctype, nonce, img="'self'", inline_styles=True)
+            # (its script and styles only by this response's nonce: the sample has no style="..." of its own)
+            devpage.send(self, code, body, ctype, nonce, img="'self'")
 
         def do_GET(self):
             used[0] = time.time()
             where, _, query = self.path.partition("?")
-            if where == "/" and devpage.entry(self, session, port, query):
+            if devpage.entry(self, session, port, where, query):
                 return None
             if not self._host_ok():
                 return self._send(403, devpage.REFUSED, "text/plain; charset=utf-8")
@@ -1371,18 +1477,17 @@ def review(out: str = SAMPLE, terminal: bool | None = None, open_browser: bool =
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_port
-    url = session.url(port)
-    print(f"The review page: {url}  (Ctrl-C to stop)")
+    url = session.url(port)   # (its one-time code: never printed, nor on a command line; the browser gets it from opener's file)
+    opened = devpage.show(session, port, open_browser)
+    print(f"The review page: {session.address(port)}  (Ctrl-C to stop). If no browser opened it: open {opened}")
     if step:   # (a step of tnsync's board, its Style Approval block: the page's address its last line; Enter there
         # skips it, ending it as Ctrl-C would — its pictures' copy removed all the same)
-        said(f"{url} · close the page when done")
+        said(f"{session.address(port)} · close the page when done")
         import signal
 
         def skipped(*_):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, skipped)
-    if open_browser:
-        webbrowser.open(url)
     def watch():   # (closes it once everything is approved, its page is closed, or after an hour unused)
         while not ended.wait(min(1.0, idle, gone[0] / 2, gone[1] / 4)):   # (often enough for the times it keeps to)
             now = time.time()
@@ -1405,6 +1510,7 @@ def review(out: str = SAMPLE, terminal: bool | None = None, open_browser: bool =
     finally:
         ended.set()
         server.server_close()
+        session.close()
         shutil.rmtree(pictures, ignore_errors=True)
     left = sum(len(v) for v in compare(load_guide(guide_path)["looks"], looks()).values())
     print("Every look is in the style guide. Commit dev/style-guide.json, and the files as they are now." if not left else
@@ -1477,7 +1583,8 @@ def main(argv: list[str]) -> int:
         if any(diff.values()) and not sample_shows(diff, SAMPLE):   # (what check flags, the page shows: a sample made before it, again)
             import contextlib
             os.makedirs(SAMPLE, exist_ok=True)
-            with open(log or os.devnull, "w", encoding="utf-8") as fh, contextlib.redirect_stdout(fh if log else sys.stdout):
+            with (devpage.private(log) if log else open(os.devnull, "w", encoding="utf-8")) as fh, \
+                    contextlib.redirect_stdout(fh if log else sys.stdout):
                 print("The sample doesn't show every look the check flags: making it again.", flush=True)
                 if sample():
                     print("The sample couldn't be made: see above.", file=sys.stderr)

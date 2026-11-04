@@ -71,6 +71,7 @@ FINDING_ID = re.compile(r"^F-\d{4}-\d{3,}$")
 CVE = re.compile(r"^CVE-\d{4}-\d{4,}$")   # (a finding's CVE id, once one is assigned)
 TEST = re.compile(r"^[A-Za-z_]\w*\.test\w*$")   # (a test that guards a finding: Class.test_name, in tests/)
 REPORTS = ("fixed", "attempted", "not-real")   # (what whoever fixed a finding says of it)
+SOURCES = ("audit", "fix-test")   # (who found a finding: its audit, or a test written for another one's fix)
 PRINT = re.compile(r"^[0-9a-f]{12}$")   # (a line's fingerprint: see fingerprints)
 TOP = 10   # files named on the board when lines wait for an audit
 
@@ -241,6 +242,10 @@ def problems(rec: dict, half: str) -> list[str]:
             tests = f.get("tests", [])
             if not isinstance(tests, list) or not all(isinstance(t, str) and TEST.match(t) for t in tests):
                 out.append(f"{name}: tests aren't a list of Class.test_name")
+            if f.get("source", "audit") not in SOURCES:
+                out.append(f"{name}: source {f.get('source')!r} isn't one of {', '.join(SOURCES)}")
+            elif f.get("source") == "fix-test" and not FINDING_ID.match(str(f.get("via", ""))):
+                out.append(f"{name}: a finding a fix's test found names the finding whose fix it was (via = \"F-YYYY-NNN\")")
             if f.get("reported") and f["reported"] not in REPORTS:
                 out.append(f"{name}: reported {f['reported']!r} isn't one of {', '.join(REPORTS)}")
             fp = f.get("prints", [])
@@ -585,7 +590,7 @@ def findings_check(audits: list[Audit]) -> Outcome:
         facts.append(f"{gone} to confirm fixed (their code is gone)")
         found.append(Finding("Audit", "findings", 0, 0, "warning", f"{counted(gone, 'finding')} whose code is gone: confirm they're fixed, "
                              "or have them re-checked, on the audits page's Findings", "finding"))
-    known = test_names()
+    known, unpushed = test_names(), 0
     for a in audits:
         for f in a.findings:
             lost = [t for t in f.get("tests", []) if t not in known]
@@ -598,8 +603,11 @@ def findings_check(audits: list[Audit]) -> Outcome:
                 said = {"working copy": "is fixed only in your working copy: commit and push the fix",
                         "committed": "is fixed in a commit that isn't pushed yet"}.get(at)
                 if said:
+                    unpushed += 1
                     rel, n = _spot((f.get("lines") or ["?:0"])[0])
                     found.append(Finding("Audit", rel, n, 0, "warning", f"{f.get('id')} {said}", "finding"))
+    if unpushed:
+        facts.append(f"{unpushed} fixed, not pushed yet")
     return Outcome("Findings", "", found, facts=facts)
 
 
@@ -1114,6 +1122,18 @@ def guards(tests: object, known: set[str]) -> tuple[list[str], list[str]]:
     return [t for t in names if TEST.match(t) and t in known], [t for t in names if not (TEST.match(t) and t in known)]
 
 
+def by_audit(f: dict) -> bool:
+    """Whether its audit found it (and so counts for that audit's auditor), not a test written for another one's fix."""
+    return f.get("source", "audit") == "audit"
+
+
+def found_by(f: dict, a: Audit) -> str:
+    """Who found a finding, in words."""
+    if not by_audit(f):
+        return f"a test written for {f.get('via')}'s fix" + (f", on {f['found']}" if f.get("found") else "") + " (not an audit)"
+    return f"audit {a.id}, at commit {a.commit[:12]}" + (" (with uncommitted changes)" if a.uncommitted else "")
+
+
 REPORT = """When you're done, end your answer with a report of each finding, in TOML:
 
 ```toml
@@ -1126,6 +1146,21 @@ What you changed, and why it fixes it (or why it isn't real).
 \"\"\"
 ```
 
+If a test you wrote finds the same kind of problem somewhere else, don't fix it: add it to the report as a new finding,
+
+```toml
+[[new]]
+via = "F-YYYY-NNN"   # the finding whose fix's test found it
+title = "What's wrong, in a line"
+type = "vulnerability | hardening"
+cvss = "CVSS:3.1/..."   # a vulnerability's; a hardening finding has a severity of low, medium or high instead
+lines = ["path:start-end"]
+tests = ["TestClass.test_name"]   # the test that found it
+detail = \"\"\"
+What is wrong, and how it could be used; and what to put back in the test once it's fixed.
+\"\"\"
+```
+
 The report is pasted into the project's security records, where each finding keeps the tests that guard it."""
 
 
@@ -1134,8 +1169,12 @@ def brief(items: list[tuple[Audit, dict]]) -> str:
     bad, and what to do."""
     out = ["# Security findings to fix", "",
            "Fix each finding below in this repository. Keep each fix to what the finding needs, and don't change unrelated "
-           "code. Keep the tests passing, and add a test that would have caught it where you can. If a finding turns out not "
-           "to be real, say why instead of changing the code.", "", REPORT, ""]
+           "code. Keep the tests passing. Add a test that would have caught it. Where it fits, make the test catch the same "
+           "kind of problem anywhere in the code, not just here. If that test finds another case, don't fix it. List it in "
+           "the report as a new finding. (So the tests still pass, leave that case out of the test for now, without saying "
+           "why in the code, and say in the new finding what to put back once it's fixed.) If a finding turns out not to be "
+           "real, say why instead of changing the code.", "",
+           REPORT, ""]
     cache: dict = {}
     for a, f in items:
         if f.get("type") == "hardening":
@@ -1153,7 +1192,7 @@ def brief(items: list[tuple[Audit, dict]]) -> str:
         where = (", ".join(now) + (f" (it was at {was} when it was found)" if now != list(f.get("lines", [])) else "")
                  if now else f"its lines have changed since it was found at {was}: look for it there")
         out += [f"## {f.get('id')}: {f.get('title')}", "", f"- Kind: {how}" + (f", {f['cve']}" if f.get("cve") else ""), f"- Where it is now: {where}",
-                f"- Found by audit {a.id}, at commit {a.commit[:12]}" + (" (with uncommitted changes)" if a.uncommitted else ""),
+                f"- Found by {found_by(f, a)}",
                 f"- On main: {f.get('main', 'affected')}"]
         if f.get("tests"):
             out.append(f"- Tests that guard it: {', '.join(f['tests'])}")
@@ -1250,7 +1289,7 @@ def save(rec: dict, private: str | None = None, force: bool = False, snapshot: s
             f["missed_by"] = missed(rec, f, audits, where[0])
     os.makedirs(PUBLIC, exist_ok=True)
     with open(pub, "w", encoding="utf-8") as fh:
-        fh.write("# The public half of a security audit (dev/audit.py record). Who did it, and what it found, are private.\n")
+        fh.write("# Public security audits (dev/audit.py record).\n")
         fh.write(dump(rec, PUBLIC_KEYS))
     with open(sec, "w", encoding="utf-8") as fh:
         fh.write(dump(rec, PRIVATE_KEYS, "finding"))
@@ -1300,8 +1339,8 @@ def main(argv: list[str] | None = None) -> int:
     for note in m.notes:
         print(f"  ({note})")
     outcomes = [coverage_check(m, audits, now, sensitive), config_check(have_private, rule, release)]
-    if have_private:
-        outcomes.append(findings_check(audits))
+    if have_private:   # (first: how many are open leads the block's line, never the fact left off when it's too long)
+        outcomes.insert(0, findings_check(audits))
         tag, _ = _rc(_repo())
         if release or tag:
             outcomes.append(release_check(m, audits, have_private, rule.get("release", {}), now, release))

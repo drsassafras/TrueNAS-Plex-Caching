@@ -5,6 +5,7 @@
     python3 tests/run.py -j 1             # one test at a time, in this process (also PLEXCACHE_TEST_JOBS=1)
     python3 tests/run.py -j 4             # four workers (the default: two per core)
     python3 tests/run.py --exclude WebBuildTests   # all but that class (tnsync runs it in a section of its own)
+    python3 tests/run.py --coverage       # and what of plexcache/ it ran, every worker's, saved for dev/coverage.py
 
 The tests are shared out among worker processes: a test at a time, except that a class set up once for all its tests
 (setUpClass) goes as a whole, its tests together and in order in one worker. Each worker imports the module itself (its
@@ -51,6 +52,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
+from dev import coverage  # noqa: E402 — (--coverage: what the tests ran, for dev/coverage.py)
 from dev.progress import FEED as FEED_MARK  # noqa: E402 — (a record's mark: run's FEED says whether there's a board)
 from dev.progress import OFF, RED, Progress, drawn, feeding, short_version, tested, timed  # noqa: E402 — the bar the dev tools share (dev/upkeep.py's too)
 from dev.progress import result as result_line  # noqa: E402 — (``result`` is run's: the result line every dev tool says)
@@ -431,8 +433,11 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
 
 
 def worker(module: str) -> int:
-    """A worker: runs the classes it's sent, one at a time, saying how each test went (run_parallel)."""
+    """A worker: runs the classes it's sent, one at a time, saying how each test went (run_parallel); with --coverage,
+    what of plexcache/ it ran, into the run's folder (PLEXCACHE_COVERAGE) once it's done."""
     to_r, from_w = (int(x) for x in os.environ.pop("PLEXCACHE_TEST_WORKER").split(","))
+    into = os.environ.pop("PLEXCACHE_COVERAGE", "")
+    tracer = coverage.Tracer().start() if into else None
     jobs = os.fdopen(to_r, "rb", buffering=0)
     out = os.fdopen(from_w, "wb", buffering=0)
 
@@ -511,6 +516,9 @@ def worker(module: str) -> int:
 
     result = Result()
     Asked()(result)
+    if tracer is not None:
+        with open(os.path.join(into, f"worker-{os.getpid()}.json"), "w", encoding="utf-8") as fh:
+            json.dump(tracer.stop(), fh)
     say(t="end")   # (the warnings printed after its last test: the module's teardown's)
     jobs.close()
     out.close()
@@ -523,10 +531,12 @@ def main() -> int:
     if args[:1] == ["--worker"]:
         return worker(args[1])
     jobs = os.environ.get("PLEXCACHE_TEST_JOBS") or ""
-    rest, excluded = [], set()
+    rest, excluded, measure = [], set(), False
     while args:
         a = args.pop(0)
-        if a in ("-j", "--jobs") and args:
+        if a == "--coverage":
+            measure = True
+        elif a in ("-j", "--jobs") and args:
             jobs = args.pop(0)
         elif a == "--exclude" and args:
             excluded.add(args.pop(0))
@@ -541,6 +551,31 @@ def main() -> int:
         print(f"    -j takes a number of workers, not {jobs!r}")
         return 2
     started = time.time()
+    if measure:   # (the workers' each into this folder; this process's own, for a run here)
+        import tempfile
+        into = tempfile.mkdtemp(prefix="plexcache-coverage-")
+        os.environ["PLEXCACHE_COVERAGE"] = into
+        tracer = coverage.Tracer().start()
+        try:
+            code = _run(module, jobs_n, excluded, started)
+        finally:
+            here = tracer.stop()
+            os.environ.pop("PLEXCACHE_COVERAGE", None)
+        parts = [here]
+        for name in os.listdir(into):
+            try:
+                with open(os.path.join(into, name), encoding="utf-8") as fh:
+                    parts.append(json.load(fh))
+            except (OSError, ValueError):
+                continue
+        shutil.rmtree(into, ignore_errors=True)
+        if code != 130:   # (a run stopped part way says nothing of what the tests reach)
+            coverage.save(coverage.merge(parts), "passed" if code == 0 else "failed")
+        return code
+    return _run(module, jobs_n, excluded, started)
+
+
+def _run(module: str, jobs_n: int, excluded: set[str], started: float) -> int:
     suite = unittest.defaultTestLoader.loadTestsFromName(module)
     if excluded:
         suite = _without(suite, excluded)

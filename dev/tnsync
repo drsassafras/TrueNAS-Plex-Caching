@@ -14,7 +14,7 @@
 #   -y, --yes        restart the app once the files are copied (without it, it isn't)
 #   -N, --no-restart don't restart (the default)
 #   --tests-first    copy nothing until the checks have passed
-#   --skip-tests     don't run the project's tests and checks at all
+#   --skip-tests     don't run the project's tests and checks at all (nor install the packages they use)
 #   --skip-future    run the current tests only, not the future ones (TN_FUTURE)
 #   --release        the release checks too (TN_RELEASE), and the tests as for a release: for dev before it's released
 #   --no-sample      Style Approval only checks: no sample made of the looks waiting, and no review opened once the
@@ -27,6 +27,8 @@
 # next Python, say: stopped if the current tests fail), TN_VALIDATE (the HTML,
 # scripts and CSS checked), TN_TYPES (the Python validation: the type check),
 # TN_BUILD (the build validation: the shell script, the workflows, the Dockerfile),
+# TN_COVERAGE (what of the code the current tests reach, once they've passed: orange when there's a test to add, never red
+# but on a --release run, where its release bar is a check like the others),
 # TN_AUDIT (the security audits: which code no audit has seen, past its grace window: orange; red only on a --release
 # run, where the release rules are a check like the others),
 # TN_STYLE (the looks waiting for your approval: orange, a line that says how many and where to see them;
@@ -57,7 +59,7 @@
 # Settings come from two files (KEY=value lines):
 #   ~/.config/tnsync/config   shared:      TN_HOST, TN_USER, TN_PORT
 #   <project>/.tnsync         per project: TN_APP, TN_DEST, TN_PATHS, TN_EXCLUDE, TN_TEST, TN_VALIDATE, TN_TYPES,
-#                              TN_BUILD, TN_AUDIT, TN_FUTURE, TN_STYLE, TN_RELEASE, TN_UPKEEP (and may override any shared setting)
+#                              TN_BUILD, TN_COVERAGE, TN_AUDIT, TN_FUTURE, TN_STYLE, TN_RELEASE, TN_UPKEEP (and may override any shared setting)
 #
 # Written for the bash 3.2 that ships with macOS.
 
@@ -143,7 +145,7 @@ esac
 
 # ----------------------------------------------------------------- config
 TN_HOST=""; TN_USER="truenas_admin"; TN_PORT="22"
-TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""; TN_VALIDATE=""; TN_TYPES=""; TN_BUILD=""; TN_AUDIT=""; TN_FUTURE=""; TN_STYLE=""; TN_RELEASE=""; TN_UPKEEP=""
+TN_APP=""; TN_DEST=""; TN_PATHS="."; TN_EXCLUDE=".git .DS_Store __pycache__ *.pyc"; TN_TEST=""; TN_VALIDATE=""; TN_TYPES=""; TN_BUILD=""; TN_COVERAGE=""; TN_AUDIT=""; TN_FUTURE=""; TN_STYLE=""; TN_RELEASE=""; TN_UPKEEP=""
 
 # Read KEY=value lines. The file is parsed, never executed.
 load_conf() {
@@ -164,19 +166,34 @@ load_conf() {
             \'*\') val="${val#\'}"; val="${val%\'}" ;;
         esac
         case "$key" in
-            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST|TN_VALIDATE|TN_TYPES|TN_BUILD|TN_AUDIT|TN_FUTURE|TN_STYLE|TN_RELEASE|TN_UPKEEP) printf -v "$key" '%s' "$val" ;;
+            TN_HOST|TN_USER|TN_PORT|TN_APP|TN_DEST|TN_PATHS|TN_EXCLUDE|TN_TEST|TN_VALIDATE|TN_TYPES|TN_BUILD|TN_COVERAGE|TN_AUDIT|TN_FUTURE|TN_STYLE|TN_RELEASE|TN_UPKEEP) printf -v "$key" '%s' "$val" ;;
             *) warn "$file line $n: unknown setting $key" ;;
         esac
     done < "$file"
 }
 
+# The project's .tnsync: in this folder or one above it, but no higher than the repository's top (or your home folder,
+# outside a repository), so one someone else left in a folder above (/tmp, say) is never taken; and only one that's
+# your own file, that nobody else may change (what it sets runs as you: TN_TEST, …).
 find_project_root() {
-    local dir="$PWD"
-    while [ "$dir" != "/" ] && [ -n "$dir" ]; do
-        if [ -f "$dir/.tnsync" ]; then printf '%s' "$dir"; return 0; fi
+    local dir="$PWD" top here perms
+    top="$(git rev-parse --show-toplevel 2>/dev/null)" || top="$HOME"
+    top="$(cd "$top" 2>/dev/null && pwd -P)" || top=""
+    here="$(pwd -P)"
+    [ -n "$top" ] || top="$here"
+    case "$here/" in "$top"/*) ;; *) top="$here" ;; esac   # (not under it: this folder alone)
+    while [ -n "$dir" ]; do
+        if [ -f "$dir/.tnsync" ]; then
+            perms="$(ls -ld "$dir/.tnsync")"
+            { [ -O "$dir/.tnsync" ] && [ "${perms:5:1}" != w ] && [ "${perms:8:1}" != w ]; } \
+                || die "$dir/.tnsync isn't used: it has to be your own file, that nobody else may change (chmod go-w)"
+            printf '%s' "$dir"
+            return 0
+        fi
+        [ "$(cd "$dir" && pwd -P)" != "$top" ] && [ "$dir" != "/" ] || break
         dir="$(dirname "$dir")"
     done
-    return 1
+    die "no .tnsync file here or in a folder above it in this project. In your project, run: tnsync init"
 }
 
 # ----------------------------------------------------------------- init
@@ -221,6 +238,9 @@ TN_TEST=
 TN_VALIDATE=
 TN_TYPES=
 TN_BUILD=
+# What of the code the tests reach, once they've passed (the coverage TN_TEST saved): exit 0 enough, 1 a test to add
+# (orange; red only with --release). e.g. TN_COVERAGE=python3 dev/coverage.py --tnsync
+TN_COVERAGE=
 # The security audits: which code no audit has seen past its grace window (orange; with --release, the release rules: red).
 # e.g. TN_AUDIT=python3 dev/audit.py
 TN_AUDIT=
@@ -246,36 +266,50 @@ if [ "$MODE" = "init" ]; then
     exit 0
 fi
 
-ROOT="$(find_project_root)" || die "no .tnsync file here or in any parent folder. In your project, run: tnsync init"
+ROOT="$(find_project_root)" || exit 1
+[ -n "${TNSYNC_STEP:-}" ] || [ "$ROOT" = "$PWD" ] || info "Settings from $ROOT/.tnsync"
 load_conf "$GLOBAL_CONF"
 load_conf "$ROOT/.tnsync"
 
 [ -n "$TN_HOST" ] || die "TN_HOST isn't set: put it in $GLOBAL_CONF, or run: tnsync init"
 [ -n "$TN_APP" ]  || die "TN_APP isn't set in $ROOT/.tnsync"
 [ -n "$TN_DEST" ] || die "TN_DEST isn't set in $ROOT/.tnsync"
+# (TN_HOST and TN_USER: plain names, never one ssh would read as an option, -oProxyCommand=… say)
+[[ "$TN_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "TN_HOST '$TN_HOST' doesn't look like a host name or address (letters, digits, . _ -)"
+[[ "$TN_USER" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || die "TN_USER '$TN_USER' doesn't look like a user name (letters, digits, . _ -)"
 [[ "$TN_APP" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "TN_APP '$TN_APP' doesn't look like a TrueNAS app name"
 [[ "$TN_DEST" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "TN_DEST must be an absolute path without spaces: '$TN_DEST'"
-[ "$TN_DEST" != "/" ] || die "TN_DEST can't be /"
+# (rsync --delete works on it: never the NAS's root, however it's written — //, /., /mnt/..)
+TN_DEST="$(printf '%s' "$TN_DEST" | tr -s /)"
+TN_DEST="${TN_DEST%/}"
+[ -n "$TN_DEST" ] || die "TN_DEST can't be /"
+case "$TN_DEST/" in */./*|*/../*) die "TN_DEST can't have . or .. in it: '$TN_DEST'" ;; esac
+check_path() {   # check_path <TN_PATHS entry> — inside the project and TN_DEST: TN_DEST's letters, no .., no quotes
+    [[ "$1" =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ ]] || die "TN_PATHS entries must be paths in the project, without spaces or quotes: $1"
+    case "/$1/" in */../*) die "TN_PATHS entries must be inside the project (no ..): $1" ;; esac
+}
+set -f
+for p in $TN_PATHS; do check_path "${p%/}"; done
+set +f
 [[ "$TN_PORT" =~ ^[0-9]+$ ]] || die "TN_PORT must be a number"
 
 # ----------------------------------------------------------------- packages
-# The packages the tests use, installed where each package-lock.json is (dev/, say): npm ci when there's none yet or the
-# lock has changed since (node_modules/.package-lock.json is npm's note of what it installed). Without npm, a warning; the
-# tests then say what's missing.
+# The packages the tests use, the dev tools' (dev/package-lock.json): npm ci when there are none yet or the lock has
+# changed since (node_modules/.package-lock.json is npm's note of what it installed), with no package's install scripts
+# run (none of them needs one). Without npm, a warning; the tests then say what's missing. Not with --skip-tests: no tests.
 ensure_packages() {
-    local lock dir
-    while IFS= read -r lock; do
-        dir="$(dirname "$lock")"
-        if [ -f "$dir/node_modules/.package-lock.json" ] && [ ! "$lock" -nt "$dir/node_modules/.package-lock.json" ]; then continue; fi
-        if ! command -v npm >/dev/null 2>&1; then
-            warn "npm isn't installed, so the packages in ${dir#"$ROOT"/} can't be: install Node (nodejs.org) for the tests that use them"
-            continue
-        fi
-        info "Installing the packages in ${dir#"$ROOT"/} (npm ci: its package-lock.json has changed)…"
-        npm ci --prefix "$dir" --no-audit --no-fund >/dev/null || die "npm ci --prefix ${dir#"$ROOT"/} failed (see the error above)"
-    done < <(find "$ROOT" -maxdepth 3 -name node_modules -prune -o -name package-lock.json -type f -print 2>/dev/null)
+    local dir="$ROOT/dev" lock="$ROOT/dev/package-lock.json"
+    [ -f "$lock" ] || return 0
+    if [ -f "$dir/node_modules/.package-lock.json" ] && [ ! "$lock" -nt "$dir/node_modules/.package-lock.json" ]; then return 0; fi
+    if ! command -v npm >/dev/null 2>&1; then
+        warn "npm isn't installed, so the packages in dev can't be: install Node (nodejs.org) for the tests that use them"
+        return 0
+    fi
+    info "Installing the packages in dev (npm ci: its package-lock.json has changed)…"
+    npm ci --prefix "$dir" --ignore-scripts --no-audit --no-fund >/dev/null || die "npm ci --prefix dev failed (see the error above)"
 }
-[ -n "${TNSYNC_STEP:-}" ] || ensure_packages   # (the copy's section: the run that started it has seen to them)
+# (the copy's section: the run that started it has seen to them)
+[ -n "${TNSYNC_STEP:-}" ] || [ "$SKIP_TESTS" = 1 ] || ensure_packages
 
 # ----------------------------------------------------------------- source
 TMP=""
@@ -320,7 +354,7 @@ cleanup() {
     if [ "$rc" -lt 128 ]; then upkeep_banner || true; fi
     if [ -n "$TMP" ]; then rm -rf "$TMP"; fi
     if [ -n "$BOARD_DIR" ]; then rm -rf "$BOARD_DIR"; fi
-    ssh -o ControlPath="$SSH_CTL" -O exit -p "$TN_PORT" "$TN_USER@$TN_HOST" >/dev/null 2>&1 || true
+    ssh -o ControlPath="$SSH_CTL" -O exit -p "$TN_PORT" -- "$TN_USER@$TN_HOST" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -331,7 +365,7 @@ SRC_COMMIT=""   # (the commit checked, on the board's header after the label: "a
 export_ref() {   # export_ref <ref> <label> — the label the board's header shows
     local ref="$1"
     git -C "$ROOT" rev-parse --verify --quiet "$ref^{commit}" >/dev/null || die "can't find $ref in this repository"
-    SRC_SHA="$(git -C "$ROOT" rev-parse "$ref^{commit}")"   # (the copy's lines, as git knows them: TN_AUDIT's blame)
+    SRC_SHA="$(git -C "$ROOT" rev-parse "$ref^{commit}")"   # (the copy's lines, as git knows them: TN_AUDIT's blame, TN_COVERAGE's fresh and settled)
     TMP="$(mktemp -d "${TMPDIR:-/tmp}/tnsync.XXXXXX")"
     git -C "$ROOT" archive "$ref" | tar -x -C "$TMP"
     # The packages installed in your folder (npm ci: node_modules, never in git) linked in, so the tests that use them
@@ -408,7 +442,7 @@ REMOTE="$TN_USER@$TN_HOST"
 SSH_ARGS=(-o ControlMaster=auto -o "ControlPath=$SSH_CTL" -o ControlPersist=120 -p "$TN_PORT")
 SSH_OPTS="${SSH_ARGS[*]}"   # (the same, as one string: rsync's -e)
 # shellcheck disable=SC2029 # (the commands are put together here on purpose: each is run as written on the NAS)
-ssh_run() { ssh "${SSH_ARGS[@]}" "$REMOTE" "$@"; }
+ssh_run() { ssh "${SSH_ARGS[@]}" -- "$REMOTE" "$@"; }
 
 if [ -z "${TNSYNC_STEP:-}" ]; then
     UPKEEP_READY=1   # (from here on a run ends with the dependencies' box)
@@ -459,6 +493,7 @@ CODE_SIG="$(code_sig)"
 TEST_SIG="$TN_TEST"
 [ -z "$TN_VALIDATE$TN_TYPES$TN_BUILD" ] || TEST_SIG="$TN_TEST | $TN_VALIDATE | $TN_TYPES"
 [ -z "$TN_BUILD" ] || TEST_SIG="$TEST_SIG | $TN_BUILD"   # (as it was without it: a .tnsync without TN_BUILD isn't tested again)
+[ -z "$TN_COVERAGE" ] || TEST_SIG="$TEST_SIG | coverage: $TN_COVERAGE"
 [ "$RELEASE" != 1 ] || TEST_SIG="$TEST_SIG | release: $TN_RELEASE"   # (a release run's checks: those, the release checks too)
 # The future tests asked for this run: TN_FUTURE, or nothing with --skip-future (or no tests at all).
 FUTURE_CMD=""
@@ -476,7 +511,7 @@ last_tests_not_passed() {
     elif [ "$RELEASE" = 1 ] && [ "$(state_get release)" != 1 ]; then
         say "The last tests weren't a release run (--release)."
     elif [ "$(state_get test)" != "$TEST_SIG" ]; then
-        say "TN_TEST, TN_VALIDATE, TN_TYPES or TN_BUILD has changed since the last test run."
+        say "TN_TEST, TN_VALIDATE, TN_TYPES, TN_BUILD or TN_COVERAGE has changed since the last test run."
     elif [ -n "$CODE_SIG" ] && [ "$(state_get code)" != "$CODE_SIG" ]; then
         say "The code has changed since the last test run (the tests or the dev tools, if not the app)."
     elif [ "$(state_get mode)" != "$MODE" ]; then
@@ -507,7 +542,7 @@ set +f
 
 resolve_path() {   # resolve_path <TN_PATHS entry> — sets from, to, parent
     local p="$1"
-    case "$p" in ..*|/*) die "TN_PATHS entries must be inside the project: $p" ;; esac
+    check_path "$p"
     if [ "$p" = "." ]; then
         from="$SRC/"; to="$TN_DEST/"; parent="$TN_DEST"
     elif [ -d "$SRC/$p" ]; then
@@ -542,7 +577,7 @@ sync_step() {
     for p in $PATHS_LIST; do
         p="${p%/}"
         resolve_path "$p"
-        if [ "$DRY_RUN" != 1 ] && ! ssh_run "mkdir -p '$parent'" 2>&1; then
+        if [ "$DRY_RUN" != 1 ] && ! ssh_run "mkdir -p -- $(printf '%q' "$parent")" 2>&1; then
             say "Can't create $parent on TrueNAS (does $TN_USER own it?)"
             rm -f "$counts"; return 1
         fi
@@ -689,6 +724,15 @@ passed_section() {
     [ -n "$3" ] || return 0
     plan_add "{\"id\": \"$1\", \"title\": $(json_str "$2"), \"cmd\": $(json_str "printf '%s\\n' $(printf '%q' "$4")"), \"info\": \"already passed\"}"
 }
+# The Coverage block: once the current tests have passed (they saved what they reached), what's still to add — a warning
+# (orange) that neither blocks the copy nor fails the run; but on a --release run its release bar is a check like the
+# others (red when it isn't met). coverage_section <the sections it waits for, as JSON>
+coverage_section() {
+    [ -n "$TN_COVERAGE" ] || return 0
+    local warn=", \"warn\": {\"rc\": 1, \"note\": \"tests to add\"}"
+    if [ "$RELEASE" = 1 ]; then warn=""; CHECK_IDS+=("coverage"); fi
+    plan_add "{\"id\": \"coverage\", \"title\": \"Coverage\", \"cmd\": $(json_str "$TN_COVERAGE"), \"cwd\": $(json_str "$SRC"), \"stoppable\": true, \"after\": $1, \"env\": {$CHECK_ENV}$warn}"
+}
 run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES (the results file)
     local want_copy="$1" after="[]" cmd
     command -v python3 >/dev/null 2>&1 || die "python3 isn't installed: tnsync's board (dev/board.py) needs it"
@@ -708,6 +752,7 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
         passed_section types "Python Validation" "$TN_TYPES" "$(was types)"
         passed_section build "Build Validation" "$TN_BUILD" "$(was build)"
         [ "$RELEASE" != 1 ] || passed_section release "Release checks" "$TN_RELEASE" "$(was release)"
+        coverage_section "[]"   # (from the coverage the tests that passed saved: quick, and it says what's still to add)
         audit_section
     elif [ "$SKIP_TESTS" != 1 ] && [ "$want_copy" != "nothing" ]; then
         check_section current "Current Tests" "$TN_TEST"
@@ -720,8 +765,9 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
         [ "$RELEASE" != 1 ] || check_section release "Release checks" "$TN_RELEASE"
         audit_section
         [ "$RELEASE" != 1 ] || [ -n "$TN_RELEASE" ] || told_section release "Release checks" "not set up" "No TN_RELEASE in .tnsync, so no release checks were run."
+        [ -z "$TN_TEST" ] || coverage_section "[\"current\"]"
     elif [ "$SKIP_TESTS" = 1 ]; then
-        told_section checks "Tests and checks" "skipped" "None of TN_TEST, TN_VALIDATE, TN_TYPES, TN_BUILD, TN_AUDIT or TN_FUTURE was run (--skip-tests)."
+        told_section checks "Tests and checks" "skipped" "None of TN_TEST, TN_VALIDATE, TN_TYPES, TN_BUILD, TN_COVERAGE, TN_AUDIT or TN_FUTURE was run (--skip-tests)."
     fi
     local checks="[]"
     [ "${#CHECK_IDS[@]}" = 0 ] || checks="$(json_ids "${CHECK_IDS[@]}")"

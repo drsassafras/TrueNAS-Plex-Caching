@@ -17,11 +17,12 @@ section's output is kept beside the results (their folder's logs/, which tnsync 
      "not_run_rc": 3,       # (optional) the exit code that means "couldn't be set up" (yellow: nothing is known)
      "upkeep": true,        # (optional) the dependencies: its output's first line says current / behind / cves / else
      "key": {"key": "r", "cmd": "…", "cwd": "…", "does": "Review Style Changes", "opens": "the review page",
-             "line": "press r to review them"},   # (optional) once it has warned and while the board runs, that
-                            # key starts cmd (the style guide's review page), on the terminal but in a session of its
-                            # own, so it outlives the board; it says what it has to say to a file of its own. Its
-                            # last line says "line" in place of what follows its last ": " while the key works (the
-                            # command to run instead, once the board is done)
+             "line": "press r to review them"},   # (optional) while the board runs, whatever the section's state
+                            # (waiting, running or done), that key starts cmd (the style guide's review page), on the
+                            # terminal but in a session of its own, so it outlives the board; it says what it has to
+                            # say to a file of its own. Once it has warned, its last line says "line" in place of what
+                            # follows its last ": " while the key works (the command to run instead, once the board
+                            # is done)
      "finale": {"cmd": "…", "check": "…", "doing": "…", "label": "…", "enter": "…", "pass_note": "…"},   # (optional,
                             # Section's: its last step, once the rest is done, on a terminal)
      "then": {"cmd": "…", "after": ["…"],   # (optional) a second command, once those are done, however they went (after
@@ -31,8 +32,8 @@ section's output is kept beside the results (their folder's logs/, which tnsync 
 Each section is a block — blue while it runs (or waits), then green, orange, red or grey (COLOUR) — with the bars its command sends
 (dev/progress.py's, PLEXCACHE_PROGRESS=feed: drawn here with the same code) and the last line it printed. Its full
 output is kept; a section that fails has it printed under the board at the end, as it came. Enter stops the sections
-that can be stopped (the results say ``aborted=1``); a section's key, pressed once it has warned and while the board
-runs, starts its command. Without a terminal, a line as each section starts and ends.
+that can be stopped (the results say ``aborted=1``); a section's key, pressed at any time while the board runs (the
+section still waiting or running, or done), starts its command. Without a terminal, a line as each section starts and ends.
 
 The results, per section: ``<id>=pass|fail|warn|notrun|stopped|skipped`` (warn: the dependencies behind, or not
 checked), ``<id>_rc=<exit code>``, ``<id>_log=<its output, a file>``, ``<id>_last=<its last line>``.
@@ -120,11 +121,12 @@ class Section:
         self.doing = spec.get("doing")   # (what its header says while it's under way, for "running")
         self.info = spec.get("info")   # (a section that only tells: grey when it's done, this its header)
         self.then: dict = dict(spec.get("then") or {})
-        self.key = dict(spec.get("key") or {})   # (its key, once it has warned: {"key", "cmd", "cwd", "does", "opens"})
+        self.key = dict(spec.get("key") or {})   # (its key, while the board runs: {"key", "cmd", "cwd", "does", "opens"})
         self.helper: subprocess.Popen | None = None   # (what its key started)
         self.live = False   # (the board is running and reads keys: its key works)
         self.why = ""       # (its key's command's errors, a file)
         self.key_said = ""  # (why its key's command didn't start: its last line)
+        self.opened = ""    # (how its key's page stands, in its header: "is open", "has closed", "didn't open")
         self.state = "waiting"
         self.note = ""                # (why it's waiting, stopped or not run)
         self.rc: int | None = None
@@ -183,8 +185,9 @@ class Section:
 
     @property
     def keyed(self) -> bool:
-        """Whether its key does something now: it has warned (the looks waiting for approval)."""
-        return bool(self.key) and self.state == "warn" and self.live
+        """Whether its key does something now: while the board runs, however the section stands — still waiting or
+        running (the board loading), or done — so its page opens at any time, not only once it has warned."""
+        return bool(self.key) and self.live
 
     def press(self, tty: int):
         """Its key: its command, on the terminal (the board's stdin and stdout: the review page won't open without
@@ -196,8 +199,7 @@ class Section:
         with open(self.why, "w", encoding="utf-8") as why:
             self.helper = subprocess.Popen(["bash", "-c", self.key["cmd"]], cwd=self.key.get("cwd") or self.cwd, env=env,
                                            stdin=tty, stdout=tty, stderr=why, start_new_session=True)
-        self.note = f"{self.warn_note}: {self.key.get('opens', 'it')} is open"
-        self.key_said = ""
+        self.opened, self.key_said = "is open", ""
 
     def helped(self):
         """Its key's command, once it has ended: said in its header."""
@@ -210,7 +212,7 @@ class Section:
                 said = next((plain(x) for x in reversed(fh.read().splitlines()) if plain(x)), "")
         except OSError:
             pass
-        self.note = f"{self.warn_note}: {self.key.get('opens', 'it')} " + ("has closed" if rc == 0 else "didn't open")
+        self.opened = "has closed" if rc == 0 else "didn't open"
         self.key_said = "" if rc == 0 else said or f"(exit {rc})"   # (why, in its last line)
 
     def start(self, cmd: str, cwd: str | None = None, more: dict | None = None):
@@ -357,6 +359,8 @@ class Section:
         between = self.state == "waiting" and self.phase == 1 and bool(self.then.get("after"))   # (the second waits for the checks)
         if between:
             said = status("waiting: checks")
+        if self.opened:   # (its key's page, however the section stands: "running: the audits page is open")
+            said += status(f": {self.key.get('opens', 'it')} {self.opened}")
         left = f"  {self.title:<{TITLE}}{said}"
         room = width - len(took) - 3
         left = left[:room] if len(left) > room else left
@@ -380,7 +384,7 @@ class Section:
         # no stray line, a warning on stderr say — that's kept for the failure printout); once done, what it printed last
         # (stopped or skipped part way, likewise: what it printed last is where it was, not a result)
         last = self.said if self.said is not None else "" if self.upkeep or (self.bars and (not self.done or self.state in ("stopped", "skipped"))) else self.last
-        if self.keyed and self.key.get("line") and ": " in last:   # (while its key works: the key, not the command)
+        if self.keyed and self.state == "warn" and self.key.get("line") and ": " in last:   # (warned, its key working: the key, not the command)
             last = last.rsplit(": ", 1)[0] + ": " + self.key["line"]
         last = self.key_said or last
         while len(last) > width - 6 and " · " in last:   # (a result line's facts: the last, the least, left off first)
@@ -662,8 +666,8 @@ class Board:
         self.ended = max((s.ended for s in self.sections if s.ended), default=None) or time.time()   # (the timer stops)
         for s in self.sections:   # (the board done: no key works now, and its block says the command to run instead)
             s.live = False
-            if s.helper is None and s.key and s.state == "warn":
-                s.note = s.warn_note
+            if s.helper is None:
+                s.opened = ""
         self.frame()
         if self.tty:
             sys.stdout.write("\033[?25h")
