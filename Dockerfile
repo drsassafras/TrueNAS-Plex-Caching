@@ -25,16 +25,18 @@ ARG FFMPEG_STAMP=""
 # it; the image has none.
 ARG NODE_TAG=26-slim
 
-# jpegtran built from libjpeg-turbo's release: the one tool of it the optimizer uses, linked statically against it.
+# jpegtran built from libjpeg-turbo's release: the one tool of it the optimizer uses, linked statically against it. Its
+# compiles (and ffmpeg's) go through ccache, its cache kept by BuildKit between builds (a cache mount, never in the image): a
+# build of the same code again, or of ffmpeg's next weekly snapshot, compiles only what changed.
 FROM debian:${DEBIAN_TAG} AS jpegtran
 ARG LIBJPEG_TURBO
 # (bash, with a pipe's failure the step's: a download that fails can't pass by its tar)
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-RUN set -eux; \
+RUN --mount=type=cache,id=jpegtran-ccache,target=/root/.ccache set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl build-essential cmake nasm; \
+    apt-get install -y --no-install-recommends ca-certificates curl build-essential cmake nasm ccache; \
     curl -fsSL "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${LIBJPEG_TURBO}/libjpeg-turbo-${LIBJPEG_TURBO}.tar.gz" | tar xz; \
-    cmake -S "libjpeg-turbo-${LIBJPEG_TURBO}" -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_SHARED=0 -DWITH_TURBOJPEG=0 -DWITH_JAVA=0 >/dev/null; \
+    cmake -S "libjpeg-turbo-${LIBJPEG_TURBO}" -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_SHARED=0 -DWITH_TURBOJPEG=0 -DWITH_JAVA=0 -DCMAKE_C_COMPILER_LAUNCHER=ccache >/dev/null; \
     cmake --build build -j "$(nproc)" >/dev/null; \
     install -m 755 "$(test -x build/jpegtran-static && echo build/jpegtran-static || echo build/jpegtran)" /usr/local/bin/jpegtran; \
     /usr/local/bin/jpegtran -version
@@ -49,7 +51,7 @@ ARG FFMPEG_STAMP
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl xz-utils bzip2 build-essential nasm pkg-config zlib1g-dev; \
+    apt-get install -y --no-install-recommends ca-certificates curl xz-utils bzip2 build-essential nasm pkg-config zlib1g-dev ccache; \
     fetch() { curl -fsSL --connect-timeout 30 --retry 3 --retry-delay 10 --retry-all-errors "$1" -o "${1##*/}"; }; \
     src="${FFMPEG_SOURCE:-https://ffmpeg.org/releases/ffmpeg-${FFMPEG}.tar.xz}"; echo "ffmpeg from $src ${FFMPEG_STAMP}"; \
     if ! fetch "$src"; then \
@@ -59,8 +61,8 @@ RUN set -eux; \
     fi; \
     mkdir /ffmpeg-src; tar xaf "${src##*/}" -C /ffmpeg-src --strip-components=1
 WORKDIR /ffmpeg-src
-RUN set -eux; \
-    ./configure --disable-doc --disable-debug --disable-ffplay --disable-autodetect --enable-zlib --disable-shared --enable-static >/dev/null; \
+RUN --mount=type=cache,id=ffmpeg-ccache,target=/root/.ccache set -eux; \
+    ./configure --cc="ccache gcc" --disable-doc --disable-debug --disable-ffplay --disable-autodetect --enable-zlib --disable-shared --enable-static >/dev/null; \
     make -j "$(nproc)" >/dev/null; \
     install -m 755 ffmpeg ffprobe /usr/local/bin/; \
     ffmpeg -version | head -1
@@ -132,8 +134,11 @@ COPY --from=web /web/plexcache/web/ /app/plexcache/web/
 COPY dev/codecs.py /app/dev/codecs.py
 RUN python /app/dev/codecs.py --installed && rm -r /app/dev
 
+# pip out of the image: the app is Python's standard library only and installs nothing, so the base image's pip is never
+# run. It carries its own copies of certifi, urllib3, msgpack and setuptools (pkg_resources), each with CVEs of its own
+# now and then (dev/cves.py); with pip gone, so are they.
 # 568 is the "apps" user on TrueNAS.
-RUN mkdir -p /config && chown 568:568 /config
+RUN python -m pip uninstall --yes --root-user-action=ignore pip && mkdir -p /config && chown 568:568 /config
 USER 568:568
 VOLUME ["/config"]
 EXPOSE 8642

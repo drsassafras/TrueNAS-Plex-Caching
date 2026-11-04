@@ -87,3 +87,25 @@ url = "https://github.com/hadolint/hadolint/releases/download/v{version}/hadolin
 "darwin-x86_64" = "ffe9bb18b23d5ed1eae50237aecdbb523d016e96da0bd4e7aa432040acfc3fde"
 "linux-x86_64" = "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507"
 "linux-arm64" = "f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d"
+
+# The dependency check's image scan (dev/cves.py, in tnsync's Dependency Versions block): the CVEs in what the published
+# images carry (Debian's packages, the Python and pip of the base image).
+[trivy]
+name = "Trivy"
+version = "0.76.1"
+get = "release"
+upstream = "github:aquasecurity/trivy"
+url = "https://github.com/aquasecurity/trivy/releases/download/v{version}/trivy_{version}_{asset}.tar.gz"
+binary = "trivy"
+
+[trivy.assets]
+"darwin-arm64" = "macOS-ARM64"
+"darwin-x86_64" = "macOS-64bit"
+"linux-x86_64" = "Linux-64bit"
+"linux-arm64" = "Linux-ARM64"
+
+[trivy.sha256]
+"darwin-arm64" = "11a9b6cd2752011b54f01ea4bd0dbfa9f0c41dc6538d5a3f9d23955f471bf4e5"
+"darwin-x86_64" = "7aa762eacd582052d053b62dcf972a1ab058abe39a57ccae234ed8894945b6b7"
+"linux-x86_64" = "c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0"
+"linux-arm64" = "e174dff2a6dba5e3ae41f8d0537a6324405bd08132497340304c6b20e0f16a1f"

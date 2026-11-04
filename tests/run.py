@@ -326,7 +326,13 @@ def run_parallel(module: str, units: list, total: int, jobs: int, tty: bool, sta
         it comes, not once the run is over), so it isn't printed again at the end there."""
         failures.append(text)
         if FEED:
-            sys.stdout.write(FEED_MARK + json.dumps({"tell": text}) + "\n")
+            # (and in the board's Issues: the test, and the command that runs it alone)
+            head = next((x for x in text.split("\n") if x.startswith(("FAIL: ", "ERROR: "))), "")
+            m = re.match(r"(FAIL|ERROR): (\S+)(?: \(([\w.]+)\))?", head)
+            name = (m.group(3) or m.group(2)) if m else ""
+            issue = {"level": "error", "text": f"{m.group(1)}: {name}" if m else "a test failed",
+                     "fix": f"python3 -m unittest {name}" if name.startswith("tests.") else ""}
+            sys.stdout.write(FEED_MARK + json.dumps({"tell": text}) + "\n" + FEED_MARK + json.dumps({"issue": issue}) + "\n")
             sys.stdout.flush()
     workers: list[Worker] = []
     sel = selectors.DefaultSelector()

@@ -91,6 +91,16 @@ jobs:
           docker run --rm -v "$PWD:/src:ro" -w /src --entrypoint python plex-cache:test
           -W ignore -m unittest -v tests.test_plexcache.FixtureTests tests.test_plexcache.OptimizerTests
           tests.test_plexcache.CoverArtTests
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.15"
+      # the CVEs to act on (dev/cves.py, as tnsync's Dependencies block says them): in this image (Trivy), the
+      # web's npm packages (OSV) and the tools the image is built with (NVD). Each one a warning on the run, never a
+      # failure: what someone else is already fixing isn't said
+      - name: CVEs to act on
+        if: ${{ !cancelled() }}
+        continue-on-error: true   # (whatever happens here, the image is still pushed)
+        run: python dev/upkeep.py --cves plex-cache:test
       - name: Push
         env:
           TAGS: ${{ steps.meta.outputs.tags }}

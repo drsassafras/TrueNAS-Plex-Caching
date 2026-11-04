@@ -4446,6 +4446,42 @@ class TestRunnerTests(unittest.TestCase):
                              capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
         self.assertNotIn("Issues", got.stdout)   # (none: nothing said)
 
+    def test_nothing_is_written_under_the_board_on_a_terminal(self):
+        """On a terminal, everything the board says (what a section printed, its Issues) goes above it, through Board.above:
+        the board is the last thing on the screen, nothing printed under it."""
+        import pty
+        import re
+        import subprocess
+
+        from dev import board
+        folder = tempfile.mkdtemp(dir=TMP)
+        plan = [{"id": "bad", "title": "Current Tests", "cmd": "echo boom; echo 3/550 tests failed; exit 1"},
+                {"id": "fine", "title": "Python Validation", "cmd": "echo 0 errors"}]
+        with open(os.path.join(folder, "plan.json"), "w", encoding="utf-8") as fh:
+            json.dump(plan, fh)
+        main, sub = pty.openpty()
+        proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "dev", "board.py"), os.path.join(folder, "plan.json"), os.path.join(folder, "res")],
+                                stdout=sub, stderr=sub, stdin=subprocess.DEVNULL, env={**os.environ, "COLUMNS": "100", "LINES": "40"})
+        os.close(sub)
+        got = b""
+        while True:
+            try:
+                chunk = os.read(main, 65536)
+            except OSError:   # (the board done: the terminal closed)
+                break
+            if not chunk:
+                break
+            got += chunk
+        os.close(main)
+        self.assertEqual(proc.wait(timeout=60), 0)
+        text = got.decode("utf-8", "replace")
+        last = text.rindex("Python Validation")                             # (the last frame's last block)
+        self.assertLess(text.rindex("Issues: "), last)                     # (the Issues above it)
+        self.assertLess(text.rindex("boom"), last)                          # (what the failed section printed too)
+        tail = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text[last:])        # (after it: its own lines, then only the cursor)
+        self.assertNotIn("Issues", tail)
+        self.assertLessEqual(len([line for line in tail.split("\n") if line.strip()]), board.ROWS, tail)
+
     def test_run_py_sends_its_bar_to_the_board_and_can_leave_a_class_out(self):
         """tests/run.py on the board (PLEXCACHE_PROGRESS=feed): its bar as records (bar "tests"), its summary as text;
         --exclude <Class> leaves that class out (tnsync runs WebBuildTests in a section of its own), in this process or
@@ -4618,6 +4654,24 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn(" 26 / 26 ", drawn[1])
         self.assertIn("26 dependencies up to date", drawn[2])
 
+    def test_a_failure_is_told_as_it_comes_and_named_in_the_issues(self):
+        """On tnsync's board tests/run.py says each failure as it comes (a "tell" record, put above the board) and names
+        it in the board's Issues (an "issue" record: the test, and the command that runs it alone) — not the run's result
+        line — and doesn't print it again at its end."""
+        import subprocess
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "tmod.py"), "w", encoding="utf-8") as fh:
+            fh.write("import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(1, 2)\n"
+                     "    def test_b(self):\n        pass\n")
+        env = dict(os.environ, PYTHONPATH=d, PLEXCACHE_PROGRESS="feed")
+        got = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "run.py"), "tmod", "-j2"], env=env, capture_output=True,
+                             text=True, timeout=120)
+        recs = [json.loads(x[1:]) for x in got.stdout.split("\n") if x.startswith("\036")]
+        (told,) = [r["tell"] for r in recs if "tell" in r]
+        self.assertIn("AssertionError: 1 != 2", told)
+        self.assertEqual([r["issue"] for r in recs if "issue" in r], [{"level": "error", "text": "FAIL: tmod.T.test_a", "fix": ""}])
+        self.assertEqual(got.stdout.count("AssertionError: 1 != 2"), 1)      # (said once: not again at the end)
+
     def test_a_failure_goes_above_the_board_as_it_comes(self):
         """tests/run.py on the board says each failure as it comes (a "tell" record): on a terminal the board puts it above
         itself at its next frame, once, and the failed section doesn't print it again at its end; with no terminal it's
@@ -4690,12 +4744,14 @@ class TestRunnerTests(unittest.TestCase):
         s.finished(1)
         self.assertEqual((s.state, s.lines(60)[0].startswith(board.MEH)), ("warn", True))
         self.assertIn("LOOKS WAITING FOR YOUR APPROVAL", s.lines(60)[0])
-        for first, colour in (("current", board.GOOD), ("behind", board.MEH), ("unknown", board.GREY)):
+        for first, colour, note in (("current", board.GOOD, "UP TO DATE"), ("behind", board.MEH, "NEW VERSIONS UPSTREAM"),
+                                    ("cves", board.MEH, "UP TO DATE · CVES TO ACT ON"), ("unknown", board.GREY, "NOT CHECKED")):
             s = section(upkeep=True)
             s.state = "running"
             s.line(first)
             s.finished(0)
             self.assertTrue(s.lines(60)[0].startswith(colour), first)
+            self.assertIn(note, s.lines(60)[0])   # (every one current but CVEs to act on: never "new versions upstream")
         # a run of tests: red from its first failure and orange from its first warning, while it runs; passed with
         # warnings, orange, its result a pass; the counts in their capsule (failed │ warnings │ passed / total)
         for bad, warned, colour in ((0, 0, board.BLUE), (1, 0, board.BAD), (0, 2, board.MEH), (1, 2, board.BAD)):
@@ -10542,9 +10598,8 @@ class MigrateTests(unittest.TestCase):
             mig.state = fresh()
             job = migrating.CopyJob(mig)
             self.assertTrue(app.jobs.start(job))
-            for _ in range(300):
-                if not app.jobs.busy():
-                    break
+            deadline = time.time() + 30   # (its end waited for, however loaded the machine: not a count of naps)
+            while app.jobs.busy() and time.time() < deadline:
                 time.sleep(0.02)
         self.assertNotIn("copy", calls)                                             # still running: followed, not started again
         self.assertEqual(calls[:2], ["pause", "resume"])                            # while something played
@@ -10558,17 +10613,19 @@ class MigrateTests(unittest.TestCase):
         with mock.patch.object(migrating.CopyJob, "__init__", init):
             mig.state = fresh()
             app.jobs.start(migrating.CopyJob(mig))
-            for _ in range(300):
-                if not app.jobs.busy():
-                    break
+            deadline = time.time() + 30   # (its end waited for, however loaded the machine: not a count of naps)
+            while app.jobs.busy() and time.time() < deadline:
                 time.sleep(0.02)
         self.assertEqual(mig.state["copy"], {"result": "failed", "reason": "no space"})
         # queued, then taken off the queue (or cancelled): back to where it was
         with mock.patch.object(app.jobs, "start_next", lambda: False):
             mig.state = dict(fresh(), step="create", copying=False)
             mig.state.update(queued=True, copying=True)
-            app.jobs.enqueue("copy", {"folder": folder, "mirror": False})
-            self.assertTrue(app.jobs.remove(kind="copy", args={"folder": folder, "mirror": False}))
+            queued = app.jobs.enqueue("copy", {"folder": folder, "mirror": False})
+            # (when it isn't queued, why: the job before it still running, or one waiting from a restart)
+            why = (queued, app.jobs.queue, app.jobs.job and {k: app.jobs.job.state.get(k) for k in ("kind", "running", "id")}, app.jobs.waiting)
+            self.assertIsNotNone(queued, why)
+            self.assertTrue(app.jobs.remove(kind="copy", args={"folder": folder, "mirror": False}), why)
             self.assertEqual((mig.state["queued"], mig.state["copying"], mig.state["copy"]["result"]), (False, False, "cancelled"))
             mig.state.update(queued=True)
             app.jobs.enqueue("copy", {"folder": folder, "mirror": False})
@@ -14869,6 +14926,90 @@ class FutureTests(unittest.TestCase):
                 mock.patch.object(future.subprocess, "run", side_effect=lambda cmd, **kw: ran.append(cmd) or mock.Mock(returncode=0)):
             future.build_image("3.16.0a1-slim-trixie", [], verbose=True)
         self.assertIn("DEBIAN_TAG=trixie-slim", ran[0])
+        # their compiles through ccache, its cache BuildKit's (never in the image): the same code again compiles nothing
+        for stage, compiler in (("jpegtran", "-DCMAKE_C_COMPILER_LAUNCHER=ccache"), ("ffmpeg", '--cc="ccache gcc"')):
+            part = df[df.index(f"AS {stage}"):]
+            part = part[:part.index("\nFROM ")]
+            self.assertIn(f"--mount=type=cache,id={stage}-ccache,target=/root/.ccache", part)
+            self.assertIn(compiler, part)
+        # Docker's cores: half the machine's asked for when it has fewer (how, said), nothing when it has them
+        self.assertIn("colima start --cpu 8", future.cores_hint(2, 16))
+        self.assertEqual((future.cores_hint(8, 16), future.cores_hint(0, 16), future.cores_hint(2, 0)), ("", "", ""))
+
+    def test_the_tests_that_need_no_tools_run_while_the_image_builds(self):
+        """On tnsync's board the suite runs in two parts: every test but the ones that need the image's tools
+        (IMAGE_CLASSES) on the plain Python image while the image builds, then those in the image. One bar for the build
+        and both (their counts added up, its total the build's steps and every test from the start), each failure passed on
+        as it comes, the result line the image's run's."""
+        import io
+
+        from dev import future
+        runs, out = [], io.StringIO()
+
+        class Proc:
+            def __init__(self, cmd, **kw):
+                image = cmd[cmd.index("--entrypoint") + 2]
+                runs.append((image, cmd[-1]))
+                n = 500 if image.startswith("python:") else 20
+                recs = [{"bar": "tests", "done": n, "total": n, "bad": 1 if n == 20 else 0, "tests": True, "label": "x", "workers": 4}]
+                self.stdout = [f"\036{json.dumps(r)}\n" for r in recs] + [f"\036{json.dumps({'tell': 'FAIL: y'})}\n", f"ran on {image}\n"]
+                self.returncode = 1 if n == 20 else 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def build(tag, args, verbose):
+            line = future.Line("Building")
+            line.show("#3 RUN x", 3, None)
+            line.end("image built")
+            return True
+        with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": "feed"}), mock.patch.object(sys, "stdout", out), \
+                mock.patch.object(future, "TESTS", [520]), mock.patch.object(future, "build_image", side_effect=build), \
+                mock.patch.object(future, "docker_cpus", return_value=4), mock.patch.object(future, "fetch_node", return_value=None), \
+                mock.patch.object(future, "install_web", return_value=None), mock.patch.object(future, "test_classes", return_value=["AppTests", "OptimizerTests", "StyleGuideTests"]), \
+                mock.patch.object(future.subprocess, "Popen", Proc), mock.patch.object(future.subprocess, "run", return_value=mock.Mock(returncode=0)):
+            rc = future.parallel_route("3.16.0a1-slim-trixie", [], [], None, ["StyleGuideTests"])
+        self.assertEqual(rc, 1)
+        (plain, plain_cmd), (image, image_cmd) = runs
+        self.assertEqual((plain, image), ("python:3.16.0a1-slim-trixie", future.IMAGE))
+        self.assertIn("--exclude StyleGuideTests --exclude OptimizerTests -j8", plain_cmd)   # (the tools' tests left for the image)
+        self.assertIn("--exclude AppTests -j8", image_cmd)                                    # (only those, in it)
+        self.assertNotIn("OptimizerTests", image_cmd)
+        recs = [json.loads(x[1:]) for x in out.getvalue().split("\n") if x.startswith("\036")]
+        bars = [(r["done"], r["total"]) for r in recs if r.get("bar") == "tests"]
+        self.assertTrue(all(total >= 520 for _, total in bars), bars)     # (every test in its total from the start, never "-")
+        self.assertEqual(bars[-1], (523, 523))                            # (3 steps, 500 there, 20 in the image: one bar)
+        self.assertEqual([r for r in recs if r.get("bar") == "tests"][-1]["bad"], 1)
+        self.assertEqual(sum(1 for r in recs if "tell" in r), 2)          # (each part's failures, passed on)
+        self.assertEqual([r["said"] for r in recs if "said" in r][-1], f"Ran on {future.IMAGE}")
+
+    def test_the_container_gets_a_node_that_starts(self):
+        """The suite's containers get the channel's node — and on the plain Python image (the tests that need no tools,
+        while the image builds) the libatomic it needs, which only the project's image has: a node that doesn't start is
+        given it, tried again, and said when it still doesn't (the page tests would all fail)."""
+        import subprocess
+
+        from dev import future
+        setup = future.NODE_SETUP
+        self.assertLess(setup.index("export PATH"), setup.index("libatomic1"))   # (the fetched node on the path first)
+        self.assertIn("! node -v", setup)
+        with tempfile.TemporaryDirectory() as d:   # (run as it is, with a node that won't start and an apt-get that fixes it)
+            node, apt = os.path.join(d, "node"), os.path.join(d, "apt-get")
+            with open(node, "w", encoding="utf-8") as fh:
+                fh.write(f"#!/bin/sh\n[ -f {d}/fixed ]\n")
+            with open(apt, "w", encoding="utf-8") as fh:
+                fh.write(f"#!/bin/sh\necho \"$@\" >> {d}/apt; case \"$*\" in *libatomic1*) touch {d}/fixed;; esac\n")
+            for f in (node, apt):
+                os.chmod(f, 0o755)
+            for tool in ("rsync", "git"):
+                os.symlink("/bin/true", os.path.join(d, tool))
+            got = subprocess.run(["sh", "-c", setup], env=dict(os.environ, PATH=f"{d}:/usr/bin:/bin"), capture_output=True, text=True, timeout=30)
+            self.assertNotIn("does not start", got.stdout)
+            self.assertIn("libatomic1", _read(os.path.join(d, "apt"), encoding="utf-8"))
+            self.assertTrue(os.path.exists(os.path.join(d, "fixed")))
 
     def test_the_bar_counts_the_tests_before_the_build(self):
         """The one bar's total from its start (the build's steps and the tests): the tests counted in the checkout, as the
@@ -15606,7 +15747,7 @@ class UpkeepTests(unittest.TestCase):
             self.assertEqual(upkeep.box(upkeep.check(apply=False, where="main"), "main")[0], "current")   # (only a major behind: nothing to do on main)
         # tnsync shows it last, from your folder, coloured by that first line; this project's .tnsync names it
         tool = _read(os.path.join(ROOT, "dev", "tnsync"), encoding="utf-8")
-        for word in ("TN_UPKEEP", 'current) green_banner "${lines[@]}" ;;', 'behind)  yellow_banner "${lines[@]}" ;;',
+        for word in ("TN_UPKEEP", 'current) green_banner "${lines[@]}" ;;', 'behind|cves) yellow_banner "${lines[@]}" ;;',
                      'out="$( cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 bash -c "$TN_UPKEEP"'):
             self.assertIn(word, tool)
 
@@ -15842,11 +15983,392 @@ class TypeCheckTests(unittest.TestCase):
         self.assertEqual(ruff["target-version"], "py" + pyright["pythonVersion"].replace(".", ""))
 
 
+class CVETests(unittest.TestCase):
+    """dev/cves.py, the dependency check's CVEs: each rule of what's shown (only what needs doing, always a warning) and
+    what's left alone, from made-up answers of OSV, NVD and Trivy; never upstream."""
+
+    NOW = 2_000_000_000.0
+    DAY = 24 * 3600
+
+    def vuln(self, **kw):
+        from dev import cves
+        base = {"id": "CVE-1", "package": "pkg", "version": "1.0.0", "kind": "npm", "dep": "pkg", "published": self.NOW - 5 * self.DAY}
+        return cves.Vuln(**{**base, **kw})
+
+    def judged(self, *vulns, plan=None, released=None):
+        from dev import cves
+        return cves.judge(list(vulns), plan or {}, released, now=self.NOW)
+
+    def test_a_fix_upkeep_moves_itself_is_only_noted(self):
+        j = self.judged(self.vuln(fixed="1.0.1"), plan={"pkg": ("1.0.0", "1.0.2", "move")})
+        self.assertEqual((j.act, j.handled), ([], {"pkg": ["CVE-1"]}))
+        j = self.judged(self.vuln(fixed="1.0.1"), plan={"pkg": ("1.0.0", "1.0.2", "report")})   # (moves on dev by itself)
+        self.assertEqual(j.handled, {"pkg": ["CVE-1"]})
+
+    def test_a_fix_only_in_a_major_or_a_held_version_is_shown(self):
+        j = self.judged(self.vuln(fixed="2.0.0"), plan={"pkg": ("1.0.0", "2.0.0", "behind")})
+        self.assertEqual(len(j.act), 1)
+        self.assertIn("a major release, yours to move", j.act[0][1])
+        j = self.judged(self.vuln(fixed="1.1.0"), plan={"pkg": ("1.0.0", "1.1.0", "held")})
+        self.assertIn("held at 1.0.0 by choice", j.act[0][1])
+
+    def test_a_fix_a_parent_package_doesnt_take_is_quiet_then_shown(self):
+        via = {"kind": "npm-via", "dep": "eslint", "fixed": "1.0.1"}
+        self.assertEqual(self.judged(self.vuln(**via)).quiet, 1)
+        j = self.judged(self.vuln(**via, published=self.NOW - 91 * self.DAY))
+        self.assertIn("eslint still asks for 1.0.0", j.act[0][1])
+        self.assertIn("overrides", j.act[0][1])
+
+    def test_no_fix_is_quiet_until_none_is_coming(self):
+        self.assertEqual(self.judged(self.vuln()).quiet, 1)   # (new: upstream is at it)
+        j = self.judged(self.vuln(published=self.NOW - 90 * self.DAY))
+        self.assertIn("No fix coming (no fix after 90 days)", j.act[0][1])
+        self.assertIn("replace it, patch it ourselves, or move to a maintained fork", j.act[0][1])
+        j = self.judged(self.vuln(), released={"pkg": self.NOW - 400 * self.DAY})   # (new, but upstream's gone quiet)
+        self.assertIn("no release of pkg in 400 days", j.act[0][1])
+
+    def test_a_debian_cve_with_no_fix_is_counted_not_shown(self):
+        j = self.judged(self.vuln(kind="debian", image="img"), self.vuln(id="CVE-2", kind="debian", image="img"))
+        self.assertEqual((j.act, j.debian, j.quiet), ([], 2, 0))
+
+    def test_an_image_fix_is_shown_only_when_the_image_still_lacks_it_days_on(self):
+        new = self.vuln(kind="debian", package="libc6", fixed="2.41-2", image="img", seen=self.NOW - 3 * self.DAY, built=self.NOW - self.DAY)
+        self.assertEqual(self.judged(new).quiet, 1)
+        old = self.vuln(kind="debian", package="libc6", fixed="2.41-2", image="img", seen=self.NOW - 9 * self.DAY, built=self.NOW - 20 * self.DAY)
+        j = self.judged(old)
+        self.assertIn("last built 20 days ago, so rebuild it", j.act[0][1])
+        self.assertIn("apt-get install --only-upgrade libc6", j.act[0][1])
+
+    def test_an_image_packages_cves_are_one_line(self):
+        a = self.vuln(kind="base", package="urllib3", version="2.7.0", fixed="2.8.0", image="img", seen=self.NOW - 30 * self.DAY)
+        b = self.vuln(id="CVE-2", kind="base", package="urllib3", version="2.7.0", fixed="2.8.1", image="img", seen=self.NOW - 30 * self.DAY)
+        from dev import cves
+        with mock.patch.object(cves, "drops_pip", return_value=False):   # (a Dockerfile that keeps pip: to act on)
+            j = self.judged(a, b)
+        self.assertEqual((len(j.act), j.shown), (1, 2))
+        self.assertTrue(j.act[0][0].startswith("CVE-1, CVE-2 in urllib3 2.7.0"))
+        self.assertIn("Fixed in 2.8.1", j.act[0][1])
+
+    def test_a_decision_quiets_a_cve_until_a_fix_or_the_review(self):
+        from dev import cves
+        when = "2033-05-01"   # (NOW is 2033-05-18)
+        with mock.patch.dict(cves.DECISIONS, {"CVE-1": ("patch", when, "patched in our fork")}):
+            self.assertEqual(self.judged(self.vuln(published=self.NOW - 100 * self.DAY)).decided, 1)
+            self.assertEqual(len(self.judged(self.vuln(published=self.NOW - 100 * self.DAY, fixed="2.0.0"),
+                                             plan={"pkg": ("1.0.0", "2.0.0", "behind")}).act), 1)   # (a fix since: shown)
+        with mock.patch.dict(cves.DECISIONS, {"CVE-1": ("not reachable", when, "only in a dev tool's tests")}):
+            self.assertEqual(self.judged(self.vuln(kind="npm-via", fixed="1.0.1", published=self.NOW - 100 * self.DAY)).decided, 1)
+        with mock.patch.dict(cves.DECISIONS, {"CVE-1": ("patch", "2032-01-01", "old")}):
+            self.assertEqual(len(self.judged(self.vuln(published=self.NOW - 600 * self.DAY)).act), 1)   # (past the review)
+
+    def test_the_same_cve_twice_is_one(self):
+        v = self.vuln(published=self.NOW - 100 * self.DAY)
+        self.assertEqual(len(self.judged(v, v).act), 1)
+
+    def test_what_pulls_a_package_in(self):
+        from dev import cves
+        lock = {"packages": {"": {}, "node_modules/eslint": {"version": "9.0.0", "dependencies": {"esquery": "^1"}},
+                             "node_modules/esquery": {"version": "1.5.0", "dependencies": {"estraverse": "^5"}},
+                             "node_modules/estraverse": {"version": "5.3.0"}}}
+        self.assertEqual(sorted(cves.lock_packages(lock, {"eslint"})),
+                         [("eslint", "9.0.0", ""), ("esquery", "1.5.0", "eslint"), ("estraverse", "5.3.0", "eslint")])
+
+    def test_osv_nvd_and_trivy_answers(self):
+        from dev import cves
+        adv = {"id": "GHSA-x", "aliases": ["CVE-2026-1"], "published": "2026-10-01T00:00:00Z", "summary": "bad",
+               "database_specific": {"severity": "high"},
+               "affected": [{"package": {"ecosystem": "npm", "name": "esquery"}, "ranges": [{"events": [{"introduced": "0"}, {"fixed": "1.6.0"}]}]}]}
+
+        def answer(url, body=None, headers=None):
+            if url.endswith("querybatch"):
+                return {"results": [{"vulns": [{"id": "GHSA-x"}]} if q["package"]["name"] == "esquery" else {} for q in body["queries"]]}
+            return adv
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "lock.json"), "w") as fh:
+            json.dump({"packages": {"node_modules/eslint": {"version": "9.0.0", "dependencies": {"esquery": "1"}},
+                                    "node_modules/esquery": {"version": "1.5.0"}}}, fh)
+        with open(os.path.join(d, "package.json"), "w") as fh:
+            json.dump({"devDependencies": {"eslint": "9.0.0"}}, fh)
+        with mock.patch.object(cves, "get_json", answer):
+            got = cves.npm_vulns(os.path.join(d, "lock.json"), os.path.join(d, "package.json"))
+        self.assertEqual([(v.id, v.package, v.kind, v.fixed, v.dep, v.severity) for v in got],
+                         [("CVE-2026-1", "esquery", "npm-via", "1.6.0", "eslint", "HIGH")])
+        nvd = {"vulnerabilities": [{"cve": {"id": "CVE-2026-2", "published": "2026-09-01T00:00:00.000",
+                                            "descriptions": [{"lang": "en", "value": "overflow"}],
+                                            "metrics": {"cvssMetricV31": [{"cvssData": {"baseSeverity": "CRITICAL"}}]},
+                                            "configurations": [{"nodes": [{"cpeMatch": [{"vulnerable": True, "criteria": "cpe:2.3:a:ffmpeg:ffmpeg:*:*",
+                                                                                         "versionEndExcluding": "8.0.1"}]}]}]}},
+                                   {"cve": {"id": "CVE-2026-3", "vulnStatus": "Rejected"}}]}
+        with mock.patch.object(cves, "get_json", return_value=nvd):
+            got = cves.nvd_vulns({"ffmpeg": "8.0"}, pause=0)
+        self.assertEqual([(v.id, v.dep, v.fixed, v.severity) for v in got], [("CVE-2026-2", "ffmpeg", "8.0.1", "CRITICAL")])
+        trivy = {"Metadata": {"ImageConfig": {"created": "2026-10-30T00:00:00Z"}},
+                 "Results": [{"Class": "os-pkgs", "Vulnerabilities": [
+                     {"VulnerabilityID": "CVE-2026-4", "PkgName": "libc6", "InstalledVersion": "2.41-1", "FixedVersion": "2.41-2, 2.42-1"},
+                     {"VulnerabilityID": "CVE-2026-5", "PkgName": "libc6", "InstalledVersion": "2.41-1", "Status": "not_affected"}]},
+                     {"Class": "lang-pkgs", "Vulnerabilities": [{"VulnerabilityID": "CVE-2026-6", "PkgName": "urllib3", "InstalledVersion": "2.7.0"}]}]}
+        got = cves.trivy_vulns(trivy, "img")
+        self.assertEqual([(v.id, v.kind, v.fixed) for v in got], [("CVE-2026-4", "debian", "2.41-2"), ("CVE-2026-6", "base", "")])
+        self.assertTrue(got[0].built)
+
+    def test_a_fix_nvd_dates_in_upstreams_git_is_checked_against_our_release(self):
+        """NVD gives some fixes only as a date in upstream's git (git-master before a commit): a release made after it
+        has the fix, so it's left out; one older, or that can't be dated, is shown as that, never as "no fix coming"."""
+        from dev import cves
+        nvd = {"vulnerabilities": [{"cve": {"id": "CVE-2025-25468", "published": "2025-02-18T00:00:00.000",
+                                            "configurations": [{"nodes": [{"cpeMatch": [{"vulnerable": True, "criteria": "cpe:2.3:a:ffmpeg:ffmpeg:*:*",
+                                                                                         "versionEndExcluding": "2025-01-13"}]}]}]}}]}
+        asked = []
+
+        def answer(made):
+            def get(url, body=None, headers=None):
+                if "api.github.com" in url:
+                    asked.append(url)
+                    if made is None:
+                        raise OSError("not reached")
+                    return {"commit": {"committer": {"date": made}}}
+                return nvd
+            return get
+        with mock.patch.object(cves, "get_json", answer("2026-06-01T00:00:00Z")):
+            self.assertEqual(cves.nvd_vulns({"ffmpeg": "9.0.2"}, pause=0), [])   # (made after the fix: it has it)
+        self.assertEqual(asked, ["https://api.github.com/repos/FFmpeg/FFmpeg/commits/n9.0.2"])
+        with mock.patch.object(cves, "get_json", answer("2024-12-01T00:00:00Z")):
+            older = cves.nvd_vulns({"ffmpeg": "7.1"}, pause=0)
+        with mock.patch.object(cves, "get_json", answer(None)):
+            undated = cves.nvd_vulns({"ffmpeg": "9.0.2"}, pause=0)
+        for got in (older, undated):
+            self.assertEqual([(v.id, v.fixed) for v in got], [("CVE-2025-25468", "2025-01-13")])
+            j = self.judged(*got, plan={"ffmpeg": (got[0].version, got[0].version, "current")})
+            self.assertEqual(len(j.act), 1)
+            self.assertIn("Fixed in ffmpeg's git on 2025-01-13 (NVD names no release)", j.act[0][1])
+            self.assertNotIn("No fix coming", j.act[0][1])
+        with mock.patch.dict(cves.DECISIONS, {"CVE-2025-25468": ("not reachable", "2033-05-01", "checked: has the fix")}):
+            self.assertEqual(self.judged(*older).decided, 1)   # (a decision holds for one: there's no release to move to)
+
+    def test_an_image_on_another_os_is_not_told_to_apt_get(self):
+        """latest built from an older Dockerfile (Alpine): its package's fix comes with the next build from this one."""
+        from dev import cves
+        trivy = {"Metadata": {"OS": {"Family": "alpine"}, "ImageConfig": {"created": "2026-10-16T00:00:00Z"}},
+                 "Results": [{"Class": "os-pkgs", "Vulnerabilities": [
+                     {"VulnerabilityID": "CVE-2026-85091", "PkgName": "zlib", "InstalledVersion": "1.3.2-r0", "FixedVersion": "1.3.2-r1"}]}]}
+        v = cves.trivy_vulns(trivy, "img")[0]
+        self.assertEqual((v.kind, v.distro), ("debian", "alpine"))
+        v.seen, v.built = self.NOW - 60 * self.DAY, self.NOW - 18 * self.DAY
+        j = self.judged(v)
+        self.assertEqual((j.act, j.shown, j.waited), ([], 0, 1))   # (fixed by the next build: waiting, not counted)
+        self.assertEqual(j.waiting[0][0], "CVE-2026-85091 in zlib 1.3.2-r0 (Alpine, in img)")
+        self.assertIn("built from an older Dockerfile", j.waiting[0][1])
+        self.assertNotIn("apt-get", j.waiting[0][1])
+        j = self.judged(self.vuln(kind="debian", package="libc6", fixed="2.41-2", image="img", distro="debian",
+                                  seen=self.NOW - 9 * self.DAY, built=self.NOW - 20 * self.DAY))
+        self.assertIn("apt-get install --only-upgrade libc6", j.act[0][1])   # (a Debian image: as before)
+
+    def test_pips_own_packages_once_the_dockerfile_drops_pip(self):
+        from dev import cves
+        v = self.vuln(kind="base", package="urllib3", version="2.7.0", fixed="2.8.0", image="img", seen=self.NOW - 30 * self.DAY)
+        with mock.patch.object(cves, "drops_pip", return_value=True):
+            j = self.judged(v)
+            self.assertEqual((j.act, j.shown, j.waited), ([], 0, 1))
+            self.assertIn("the Dockerfile now takes pip out", j.waiting[0][1])
+        with mock.patch.object(cves, "drops_pip", return_value=False):
+            j = self.judged(v)
+            self.assertEqual((j.shown, j.waiting), (1, []))
+            self.assertIn("remove pip from the Dockerfile's final stage", j.act[0][1])
+        self.assertTrue(cves.drops_pip())   # (this Dockerfile does: the app installs nothing with pip)
+
+    def test_each_branch_looks_at_its_own_image(self):
+        from dev import cves
+        self.assertEqual(cves.images("dev"), ["ghcr.io/drsassafras/plex-cache:dev"])
+        self.assertEqual(cves.images("main"), ["ghcr.io/drsassafras/plex-cache:latest"])
+        self.assertEqual(cves.images(""), ["ghcr.io/drsassafras/plex-cache:latest", "ghcr.io/drsassafras/plex-cache:dev"])   # (not a checkout: both)
+
+    def test_the_look_is_of_the_copy_tnsync_checks(self):
+        """tnsync main looks at main's copy, tnsync dev at dev's, tnsync local at the folder on its branch: that copy's pins,
+        its npm lock, and its own image built here; the published image of its branch only when it can't be built."""
+        from dev import cves, upkeep
+        d = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(d, "Dockerfile"), "w") as fh:
+            fh.write("FROM python:3.13-alpine\nARG FFMPEG=7.1.1\nARG OXIPNG=9.0.0\n")
+        with mock.patch.dict(os.environ, {"TNSYNC_COPY": d, "TNSYNC_MODE": "main"}):
+            self.assertEqual(cves.source(), d)
+            self.assertEqual(cves.source_branch(), "main")
+            self.assertEqual(cves.images(), ["ghcr.io/drsassafras/plex-cache:latest"])
+            self.assertEqual(upkeep.cve_pins(cves.source()), {"ffmpeg": "7.1.1", "oxipng": "9.0.0"})
+            self.assertEqual(cves.copy_os(), "alpine")
+        with mock.patch.dict(os.environ, {"TNSYNC_MODE": "beta"}):
+            self.assertEqual(cves.source_branch(), "dev")
+        with mock.patch.dict(os.environ, {"TNSYNC_MODE": "local"}), mock.patch.object(upkeep, "branch", return_value="main"):
+            self.assertEqual(cves.source_branch(), "main")   # (the folder: the branch it's on)
+        for name, arg in upkeep.CVE_ARGS.items():   # (each the ARG its Dep reads)
+            self.assertEqual(next(dep.where for dep in upkeep.DEPS if dep.name == name), f"ARG {arg} in the Dockerfile")
+        tnsync = _read(os.path.join(ROOT, "dev", "tnsync"), encoding="utf-8")
+        self.assertRegex(tnsync, r'"id\\": \\"upkeep\\".*TNSYNC_COPY\\": \$\(json_str "\$SRC"\)')
+
+    def test_the_copys_image_is_built_and_looked_at(self):
+        from dev import cves
+        d = tempfile.mkdtemp(dir=TMP)
+        lock = os.path.join(d, "missing-lock.json")   # (a copy with no npm lock: nothing of npm's to look at)
+        found = [self.vuln(kind="debian", package="zlib1g", fixed="2", image=cves.LOCAL_IMAGE)]
+        steps: list[str] = []
+        with mock.patch.object(cves, "CACHE", os.path.join(d, "cves.json")), mock.patch.object(cves, "SEEN", os.path.join(d, "seen.json")), \
+                mock.patch.object(cves, "crate_vulns", return_value=[]), mock.patch.object(cves, "nvd_vulns", return_value=[]), \
+                mock.patch.object(cves, "released_at", return_value={}), mock.patch.object(cves, "osv", return_value={}):
+            with mock.patch.object(cves, "build_local", return_value=("sha256:abc", "")), \
+                    mock.patch.object(cves, "scan", return_value=found) as scan:
+                got, _, notes = cves.look({}, lock, lock, step=steps.append)
+            scan.assert_called_once_with(cves.LOCAL_IMAGE, True)
+            self.assertEqual(([v.image for v in got], notes), ([cves.LOCAL_LABEL], []))
+            self.assertEqual(len(steps), cves.parts())
+            steps.clear()
+            with mock.patch.object(cves, "build_local", return_value=("", "no docker here")), \
+                    mock.patch.object(cves, "images", return_value=["ghcr.io/o/plex-cache:dev"]), \
+                    mock.patch.object(cves, "scan", return_value=[]) as scan:
+                _, _, notes = cves.look({}, lock, lock, step=steps.append)
+            scan.assert_called_once_with("ghcr.io/o/plex-cache:dev", False)
+            self.assertEqual(notes, [f"{cves.LOCAL_LABEL} not built (no docker here): the published ghcr.io/o/plex-cache:dev looked at instead"])
+            self.assertEqual(len(steps), cves.parts())
+            self.assertTrue(os.path.exists(os.path.join(d, "cves.json")))   # (kept for the day all the same: nothing missing)
+
+    def test_the_copys_build_is_seen_going(self):
+        """A long build (the first compiles ffmpeg) says each step as it starts, not a bar that looks stuck."""
+        from dev import cves
+        out = ["#5 [ffmpeg 3/4] RUN set -eux; ./configure", "#9 [stage-3 2/9] RUN set -eux; arch=amd64", "done"]
+
+        class Proc:
+            stdout = iter(line + "\n" for line in out)
+
+            def wait(self, timeout=None):
+                return 0
+        said: list[str] = []
+        d = tempfile.mkdtemp(dir=TMP)
+        with mock.patch.object(cves, "BUILD_LOG", os.path.join(d, "build.log")), mock.patch("subprocess.Popen", return_value=Proc()), \
+                mock.patch("subprocess.run", return_value=cves.subprocess.CompletedProcess([], 0, "sha256:abc\n", "")):
+            self.assertEqual(cves.build_local(d, said.append), ("sha256:abc", ""))
+        self.assertEqual(said, [f"building {cves.LOCAL_LABEL}", f"building {cves.LOCAL_LABEL} · ffmpeg 3/4: RUN set -eux; ./configure",
+                                f"building {cves.LOCAL_LABEL} · stage-3 2/9: RUN set -eux; arch=amd64"])
+        with open(os.path.join(d, "build.log")) as fh:
+            self.assertEqual(fh.read().splitlines(), out)   # (the whole build kept: a failure's note names it)
+
+    def test_a_copy_on_alpine_is_told_apk(self):
+        from dev import cves
+        v = self.vuln(kind="debian", package="zlib", version="1.3.2-r0", fixed="1.3.2-r1", image=cves.LOCAL_LABEL, distro="alpine",
+                      seen=self.NOW - 9 * self.DAY, built=self.NOW - self.DAY)
+        with mock.patch.object(cves, "copy_os", return_value="alpine"):
+            j = self.judged(v)
+        self.assertEqual(j.act[0][0], f"CVE-1 in zlib 1.3.2-r0 (Alpine, in {cves.LOCAL_LABEL})")
+        self.assertIn("an apk upgrade zlib in the Dockerfile's final stage", j.act[0][1])
+
+    def test_an_image_fix_is_dated_from_when_it_was_first_seen(self):
+        from dev import cves
+        seen = os.path.join(tempfile.mkdtemp(dir=TMP), "seen.json")
+        v = self.vuln(kind="debian", fixed="2", published=1000.0)
+        with mock.patch.object(cves, "SEEN", seen):
+            cves.mark_seen([v], now=5000.0)   # (no record yet: from when the CVE came out)
+            self.assertEqual(v.seen, 1000.0)
+            w = self.vuln(id="CVE-2", kind="debian", fixed="3", published=1000.0)
+            cves.mark_seen([v, w], now=6000.0)   # (a record: a new one from now, the old one as it was)
+            self.assertEqual((v.seen, w.seen), (1000.0, 6000.0))
+
+    def test_the_days_look_is_kept_and_saved_answers_ask_nothing(self):
+        from dev import cves
+        d = tempfile.mkdtemp(dir=TMP)
+        lock = os.path.join(d, "lock.json")
+        with open(lock, "w") as fh:
+            fh.write("{}")
+        found = [self.vuln()]
+        with mock.patch.object(cves, "CACHE", os.path.join(d, "cves.json")), mock.patch.object(cves, "SEEN", os.path.join(d, "seen.json")), \
+                mock.patch.object(cves, "npm_vulns", return_value=found) as npm, mock.patch.object(cves, "crate_vulns", return_value=[]), \
+                mock.patch.object(cves, "nvd_vulns", return_value=[]), mock.patch.object(cves, "released_at", return_value={}):
+            self.assertEqual(cves.look({}, lock, lock, scan_images=[], saved=True)[2], ["CVEs not looked up yet (python3 dev/upkeep.py does it)"])
+            self.assertEqual(cves.look({}, lock, lock, scan_images=[])[0], found)
+            self.assertEqual(cves.look({}, lock, lock, scan_images=[])[0], found)
+            self.assertEqual(npm.call_count, 1)   # (the day's answers)
+            cves.look({}, lock, lock, scan_images=[], fresh=True)
+            self.assertEqual(npm.call_count, 2)
+            with mock.patch.object(cves, "code_sig", return_value="changed"):   # (the asking code changed: asked again today)
+                cves.look({}, lock, lock, scan_images=[])
+            self.assertEqual(npm.call_count, 3)
+            npm.side_effect = OSError("offline")
+            got, _, notes = cves.look({"x": "1"}, lock, lock, scan_images=[])
+            self.assertEqual(notes, ["the npm packages (OSV) not checked: offline"])
+
+    def test_the_cves_are_on_the_dependencies_bar(self):
+        """The CVEs looked up alongside the dependencies are steps on the same bar (and a worker more): it fills once, at
+        the real end, never full while the CVEs are still being looked up — the day's answers counted too."""
+        from dev import cves, upkeep
+        from dev.progress import Progress
+        d = tempfile.mkdtemp(dir=TMP)
+        deps = [upkeep.Dep("quick", lambda: "1.0.0", lambda: "1.0.0", "ARG QUICK")]
+        sent = []
+        with mock.patch.object(upkeep, "CACHE", os.path.join(d, "upkeep.json")), mock.patch.object(upkeep, "DEPS", deps), \
+                mock.patch.object(cves, "CACHE", os.path.join(d, "cves.json")), mock.patch.object(cves, "SEEN", os.path.join(d, "seen.json")), \
+                mock.patch.object(cves, "npm_vulns", return_value=[]), mock.patch.object(cves, "crate_vulns", return_value=[]), \
+                mock.patch.object(cves, "nvd_vulns", return_value=[]), mock.patch.object(cves, "scan", return_value=[]), \
+                mock.patch("dev.progress.Progress._feed", lambda self: sent.append((self.done, self.total, self.workers))):
+            for fresh in (True, False):   # (asked, then the day's answers)
+                sent.clear()
+                upkeep.check(apply=False, fresh=fresh, progress=Progress(1, stream=io.StringIO(), feed=True), cves=True, images=["img"])
+                total = 1 + len(cves.PARTS) + 1
+                self.assertTrue(all(t == total for _, t, _ in sent[1:]), sent)
+                self.assertEqual(max(done for done, _, _ in sent), total)
+                self.assertNotIn((total, total), [(dn, t) for dn, t, _ in sent[:-len(cves.PARTS) - 1]])   # (full only once the CVEs are)
+                self.assertEqual(sent[-1][2], 2)   # (the dependency's thread, and the CVEs')
+
+    def test_the_box_and_the_board_say_them_as_a_warning(self):
+        from dev import cves, upkeep
+        j = cves.Judged(act=[("CVE-9 in pkg 1.0.0", "No fix coming: replace it.")], shown=1, quiet=2, debian=3)
+        r = upkeep.Report(cves=j)
+        got = upkeep.box(r, "dev")
+        self.assertEqual(got[0], "cves")   # (orange: a warning, the test never fails on one; not "behind": nothing is)
+        self.assertEqual(got[1], "DEPENDENCIES  -  ALL UP TO DATE, 1 CVE TO ACT ON")
+        self.assertIn("1 CVE to act on (a warning: nothing fails):", got)
+        self.assertIn("Left alone: 2 CVEs being fixed upstream, 3 Debian CVEs with no fix (Debian's call).", " ".join(got))
+        self.assertTrue(all(len(line) <= upkeep.WIDTH for line in got))
+        self.assertEqual(upkeep.summary(r), f"1 warning · {len(upkeep.DEPS)} dependencies up to date · 1 CVE to act on")
+        self.assertTrue(any(f[0] == "warning" and "CVE" in f[1] for f in upkeep.found(r)), upkeep.found(r))   # (in the board's Issues: a warning)
+        r = upkeep.Report(bumped=["Node: Dockerfile: 24.1.0 → 24.2.0"], moved=["Node 24.1.0 → 24.2.0"],
+                          cves=cves.Judged(handled={"Node": ["CVE-8"]}))
+        self.assertIn("  Node: Dockerfile: 24.1.0 → 24.2.0 (fixes CVE-8)", upkeep.box(r, "dev"))
+        self.assertEqual(upkeep.box(upkeep.Report(cves=cves.Judged()), "dev")[0], "current")
+
+    def test_cves_fixed_in_dev_are_said_apart_and_not_counted(self):
+        from dev import cves, upkeep
+        j = cves.Judged(waiting=[("CVE-7 in urllib3 2.7.0 (the base image's Python packages, in img)", "Fixed in 2.8.0.")], waited=3)
+        r = upkeep.Report(cves=j)
+        got = upkeep.box(r, "dev")
+        self.assertEqual(got[:2], ["current", "DEPENDENCIES  -  ALL UP TO DATE"])   # (green: nothing to act on)
+        self.assertIn("Fixed in dev, waiting on the release (3 CVEs, not counted):", got)
+        self.assertTrue(all(len(line) <= upkeep.WIDTH for line in got))
+        self.assertEqual(upkeep.summary(r), f"1 notice · {len(upkeep.DEPS)} dependencies up to date")
+        self.assertEqual([f[0] for f in upkeep.found(r)], ["notice"])
+        out = io.StringIO()
+        with mock.patch.object(upkeep, "check", return_value=r), contextlib.redirect_stdout(out):
+            upkeep.github_cves("plex-cache:test")
+        self.assertTrue(out.getvalue().startswith("::notice title=CVE fixed, waiting on the release: CVE-7"), out.getvalue())
+
+    def test_githubs_look_warns_and_never_fails(self):
+        from dev import cves, upkeep
+        j = cves.Judged(act=[("CVE-9 in pkg 1.0.0", "Replace it.")], shown=1, notes=["oxipng (OSV) not checked: x"])
+        out = io.StringIO()
+        with mock.patch.object(upkeep, "check", return_value=upkeep.Report(cves=j)) as check, contextlib.redirect_stdout(out):
+            self.assertEqual(upkeep.github_cves("plex-cache:test"), 0)
+        self.assertEqual(check.call_args.kwargs["images"], ["plex-cache:test"])
+        self.assertTrue(check.call_args.kwargs["local"])
+        self.assertEqual(out.getvalue().splitlines(), ["::warning title=CVE to act on: CVE-9 in pkg 1.0.0::Replace it.",
+                                                       "::warning title=CVEs not checked::oxipng (OSV) not checked: x",
+                                                       "1 CVE to act on"])
+        with mock.patch.object(upkeep, "check", side_effect=upkeep.Offline("x")), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(upkeep.github_cves("plex-cache:test"), 0)
+        build = _read(os.path.join(ROOT, ".github", "workflows", "build.yml"), encoding="utf-8")
+        self.assertIn("run: python dev/upkeep.py --cves plex-cache:test", build)
+
+
 class CheckToolTests(unittest.TestCase):
     """The check tools' shared code (dev/checks.py): every check tool at its version in dev/tools.toml, fetched by it, its
     findings said one way, the board's bar and the result line its; no check tool of its own beside it."""
 
     WRAPPERS = ("typecheck.py", "buildcheck.py")   # (each check tool's section on tnsync's board, run through dev/checks.py)
+    USERS = ("cves.py",)   # (a tool run as a part of another section: Trivy, in the dependency check's — fetched the same way)
 
     def test_every_check_tool_runs_through_the_shared_code(self):
         from dev import checks
@@ -15857,6 +16379,11 @@ class CheckToolTests(unittest.TestCase):
             self.assertIn("from dev import checks", text, f"dev/{name} isn't on dev/checks.py")
             self.assertIn("checks.run(", text, f"dev/{name} doesn't report through checks.run")
             self.assertNotRegex(text, r'"npx"|"pip"|urlopen\(|Progress\(', f"dev/{name} fetches or reports a tool its own way")
+            used |= set(re.findall(r'checks\.command\("([\w-]+)"\)', text))
+        for name in self.USERS:
+            text = _read(os.path.join(ROOT, "dev", name), encoding="utf-8")
+            self.assertIn("from dev import checks", text, f"dev/{name} isn't on dev/checks.py")
+            self.assertNotRegex(text, r'"npx"|"pip"|Progress\(', f"dev/{name} fetches or reports a tool its own way")
             used |= set(re.findall(r'checks\.command\("([\w-]+)"\)', text))
         self.assertEqual(used, set(table), "every tool in dev/tools.toml is run by a check, and only those")
         for key, tool in table.items():

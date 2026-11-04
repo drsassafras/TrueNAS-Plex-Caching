@@ -46,7 +46,8 @@
 # The dependencies: TN_UPKEEP looks while the rest runs (TNSYNC_UPKEEP=look:
 # nothing moved), then again once the checks are done (TNSYNC_UPKEEP=move: a pin
 # it moves can't change the code under the tests) — its first line "current"
-# (green), "behind" (yellow) or anything else (not checked); when it isn't
+# (green), "behind" or "cves" (yellow: new versions upstream, or none but CVEs to
+# act on) or anything else (not checked); when it isn't
 # current, the rest of what it said goes above the board.
 #
 # If the NAS already has exactly these files, nothing is copied or restarted.
@@ -233,7 +234,7 @@ TN_STYLE=
 # The release checks, run only with --release (a check like the tests: red when it fails).
 # e.g. TN_RELEASE=python3 dev/release.py
 TN_RELEASE=
-# The dependencies, shown in a last box: a command whose first line is current, behind (or else: not checked),
+# The dependencies, shown in a last box: a command whose first line is current, behind, cves (or else: not checked),
 # the rest the box's lines. e.g. TN_UPKEEP=python3 dev/upkeep.py --tnsync
 TN_UPKEEP=
 EOF
@@ -300,7 +301,7 @@ upkeep_banner() {
     while IFS= read -r line; do lines+=("$line"); done < <(printf '%s\n' "$out" | tail -n +2)
     case "$status" in
         current) green_banner "${lines[@]}" ;;
-        behind)  yellow_banner "${lines[@]}" ;;
+        behind|cves) yellow_banner "${lines[@]}" ;;
         *)       banner "$C_GREY" "DEPENDENCIES NOT CHECKED" "" "$TN_UPKEEP said:" "${status:0:66}" "${lines[@]}" ;;
     esac
 }
@@ -723,7 +724,8 @@ run_board() {   # run_board copy|insync|passed|nothing|unreachable — sets RES 
         [ -z "$checks_plan" ] || plan_add "$checks_plan"
     fi
     if [ -n "$TN_UPKEEP" ]; then
-        plan_add "{\"id\": \"upkeep\", \"title\": \"Dependencies\", \"cmd\": $(json_str "export TNSYNC_UPKEEP=look; $TN_UPKEEP"), \"cwd\": $(json_str "$ROOT"), \"upkeep\": true, \"then\": {\"cmd\": $(json_str "export TNSYNC_UPKEEP=move; $TN_UPKEEP"), \"after\": $checks}}"
+        # (in your folder, where its pins move; its CVEs are of the copy being checked: TNSYNC_COPY, dev/cves.py)
+        plan_add "{\"id\": \"upkeep\", \"title\": \"Dependencies\", \"cmd\": $(json_str "export TNSYNC_UPKEEP=look; $TN_UPKEEP"), \"cwd\": $(json_str "$ROOT"), \"env\": {$CHECK_ENV, \"TNSYNC_COPY\": $(json_str "$SRC")}, \"upkeep\": true, \"then\": {\"cmd\": $(json_str "export TNSYNC_UPKEEP=move; $TN_UPKEEP"), \"after\": $checks}}"
     fi
     # the looks to approve, the last block: every time (it's quick, and approving them changes no code tested), on their own — not a
     # check the copy waits for, nor one whose warning fails the run

@@ -6,6 +6,10 @@ release upstream — looked up once a day by this script (tnsync runs it at the 
     python3 dev/upkeep.py --fresh    # asks upstream again rather than using the day's answers
     python3 dev/upkeep.py --report   # looks, changes nothing
     python3 dev/upkeep.py --tnsync   # the same, as the box tnsync shows at the end of a run (TN_UPKEEP in .tnsync)
+    python3 dev/upkeep.py --cves plex-cache:test   # GitHub's: the CVEs to act on in that image, as warnings; never fails
+
+With the versions it looks up the CVEs in what the app runs and is built with (dev/cves.py): only what needs doing is
+said, in the box (yellow), and a CVE is never a failure, nor a prompt.
 
 Pins are moved only in a checkout of the dev branch (MOVES_ON), or of main (MINORS_ON): dev carries the newest software,
 majors and all; main is kept at the newest minor and patch release of what it has, and never takes a major (those come
@@ -52,6 +56,10 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dev.cves import Judged
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCKERFILE = os.path.join(ROOT, "Dockerfile")
@@ -530,6 +538,7 @@ class Report:
     stale: bool = False  # upstream not reached: the last day's answers used
     news: list[tuple[str, str, str, str, str]] = field(default_factory=list)  # what's left to you: name, have, newest, level, what to do
     moves_on: str = MOVES_ON  # the branch its minor releases move on (where it ran, when that's main)
+    cves: Judged | None = None  # dev/cves.py's Judged: the CVEs that need doing (a warning, never a prompt); None when not looked at
 
 
 def _load_cache() -> dict:
@@ -560,27 +569,35 @@ def _pins_now(found: dict) -> dict:
     return out
 
 
-def lookup(fresh: bool = False, saved: bool = False, progress=None) -> tuple[dict, bool]:
+def lookup(fresh: bool = False, saved: bool = False, progress=None, extra: int = 0,
+           ready: threading.Event | None = None) -> tuple[dict, bool]:
     """Every dependency's (have, newest), from upstream — or, within a day, from the last look. (found, stale).
     ``saved``: the last look's answers only, however old (stale past a day), upstream never asked — Offline when there's
-    none for every dependency yet (the suite's test: tnsync's box, or this script, does the looking)."""
+    none for every dependency yet (the suite's test: tnsync's box, or this script, does the looking). ``extra``: more
+    steps on the bar, by another thread (the CVEs looked up alongside, a worker more), which waits for ``ready``: set once
+    the bar is counting."""
+    ready = ready or threading.Event()
     cache = _load_cache()
     whole = bool(cache.get("found")) and {d.name for d in DEPS} <= set(cache["found"])  # (a dependency added since: asked again)
     if saved:
         if not whole:
+            ready.set()
             raise Offline("no saved answers for every dependency yet. To look them up: python3 dev/upkeep.py")
+        ready.set()
         return _pins_now(cache["found"]), time.time() - cache.get("at", 0) >= A_DAY
     if not fresh and whole and time.time() - cache.get("at", 0) < A_DAY:
         if progress is not None:   # (its bar all the same: every one known, from the day's answers, by this process alone)
-            progress.workers = 1
+            progress.workers = 1 + bool(extra)
             progress.finished = "dependencies · the day's answers from upstream"
-            progress.at(len(DEPS), len(DEPS), progress.finished)
+            progress.at(len(DEPS), len(DEPS) + extra, progress.finished)
+        ready.set()
         return _pins_now(cache["found"]), False
     found, failed = {}, []
     if progress is not None:
-        progress.reset(len(DEPS), "looked up")
-        progress.workers = len(DEPS)   # (a thread for each, below: all asked at once)
+        progress.reset(len(DEPS) + extra, "looked up")
+        progress.workers = len(DEPS) + bool(extra)   # (a thread for each, below: all asked at once; the CVEs' one more)
         progress.finished = "dependencies · checked against upstream"
+    ready.set()
 
     # every one asked at once, each in a thread of its own: the look takes about as long as the slowest answer, and one
     # that hasn't answered by DEADLINE is left (not reached this time: its last answer is used, when there is one)
@@ -647,12 +664,73 @@ def _why(e: BaseException) -> str:
     return f"took longer than {e.timeout:.0f} s" if isinstance(e, subprocess.TimeoutExpired) else str(getattr(e, "reason", e))
 
 
-def check(apply: bool = True, fresh: bool = False, saved: bool = False, progress=None, where: str | None = MOVES_ON) -> Report:
+# The image's tools dev/cves.py looks up, by their ARG in the Dockerfile (each Dep's where: "ARG <it> in the Dockerfile")
+CVE_ARGS = {"MKVToolNix": "MKVTOOLNIX", "ffmpeg": "FFMPEG", "oxipng": "OXIPNG", "libjpeg-turbo": "LIBJPEG_TURBO"}
+
+
+def cve_pins(src: str | None = None) -> dict[str, str]:
+    """The versions dev/cves.py looks up CVEs for: the image's tools it knows by name, as the Dockerfile of the copy being
+    checked (``src``: dev/cves.py's source(); this checkout's when None) pins them."""
+    from dev import cves
+    dockerfile = os.path.join(src, "Dockerfile") if src else DOCKERFILE
+    out = {}
+    for name, arg in CVE_ARGS.items():
+        if name in cves.CPES or name in cves.CRATES:
+            try:
+                out[name] = _pin(dockerfile, rf"ARG {arg}=(\S+)")
+            except (OSError, ValueError):
+                continue
+    return out
+
+
+class _Since(threading.Event):
+    """An event that knows when it was set (the bar's seconds count from then)."""
+
+    since: float | None = None
+
+    def set(self) -> None:
+        self.since = time.time()
+        super().set()
+
+
+def check(apply: bool = True, fresh: bool = False, saved: bool = False, progress=None, where: str | None = MOVES_ON,
+          cves: bool = False, images: list[str] | None = None, local: bool = False) -> Report:
     """The report: each dependency as it stands; with ``apply``, pins a minor or patch behind moved. ``saved``: from the
     last look's answers only (see lookup). ``progress`` (dev/progress.py's bar): each dependency as it's looked up, then
     each pin as it's moved (npm's installs can take a while), so the look is seen to be going. ``where``: the branch it's
-    for — on MINORS_ON (main) a major release is no one's to do there (it comes with dev): a line, not a prompt."""
-    found, stale = lookup(fresh, saved, progress)
+    for — on MINORS_ON (main) a major release is no one's to do there (it comes with dev): a line, not a prompt.
+    ``cves``: the CVEs looked up too (dev/cves.py, alongside the versions; ``images``/``local`` what Trivy looks at), and
+    judged against what's moving — r.cves; a warning, never a prompt."""
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    from dev import cves as cve_check
+    looked: dict = {}
+    looking = None
+    deps_done = _Since()   # (the versions looked up: from then the bar says what the CVEs' look is doing)
+    ready = threading.Event()   # (the bar counting the dependencies and the CVEs' steps: the CVEs' told on it from then)
+    steps = cve_check.parts(images) if cves and progress is not None else 0
+    if cves:
+
+        def step(what: str) -> None:
+            if progress is not None:
+                ready.wait(10)
+                progress.draw(what, warned=progress.warned)
+
+        def status(what: str) -> None:   # (what the CVEs' look is doing, once it's all that's left: the image's build step…)
+            if progress is not None and deps_done.is_set():
+                progress.show(what, ticking=True, since=deps_done.since)
+
+        def cve_look():
+            try:
+                src = cve_check.source()   # (the copy tnsync is checking: its pins, its npm lock, its image)
+                looked["got"] = cve_check.look(cve_pins(src), os.path.join(src, "dev", "package-lock.json"),
+                                               os.path.join(src, "dev", "package.json"), images, local, fresh, saved, step,
+                                               status)
+            except (OSError, ValueError, KeyError) as e:
+                looked["got"] = ([], {}, [f"CVEs not checked: {getattr(e, 'reason', e)}"])
+        looking = threading.Thread(target=cve_look, name="upkeep CVEs", daemon=True)
+        looking.start()
+    found, stale = lookup(fresh, saved, progress, steps, ready)
     majors = where != MINORS_ON
     out = Report(stale=stale, moves_on=MINORS_ON if not majors else MOVES_ON)
     plan = []  # (dep, have, newest, what): what is current, held, move, report or behind
@@ -741,9 +819,32 @@ def check(apply: bool = True, fresh: bool = False, saved: bool = False, progress
             out.lines.append(f"{d.name} {have}: {newest} is out — {why}")
             out.prompts.append(f"{d.name} {have} → {newest}: {d.cant}")
             out.news.append((d.name, have, newest, level if d.bump else "new", d.cant))
+    if looking is not None:
+        if looking.is_alive() and progress is not None:
+            progress.show("looking up CVEs (OSV, NVD, Trivy)", ticking=True)
+        deps_done.set()
+        looking.join()
+        vulns, released, notes = looked["got"]
+        out.cves = cve_check.judge(vulns, {d.name: (have, newest, what) for d, have, newest, what, _ in plan}, released)
+        out.cves.notes += notes
     if progress is not None:
         progress.clear()
     return out
+
+
+def _fixes(r: Report, name: str) -> str:
+    """What a move fixes, said on its line: " (fixes CVE-…)"; "" when nothing."""
+    got = getattr(r.cves, "handled", {}).get(name) if r.cves is not None else None
+    return f" (fixes {', '.join(got)})" if got else ""
+
+
+def _cve_tally(j: Judged) -> str:
+    """The CVEs left alone, in a line: someone else's to fix, Debian's call, decided."""
+    from dev.progress import counted
+    parts = [f"{counted(j.quiet, 'CVE')} being fixed upstream" if j.quiet else "",
+             f"{counted(j.debian, 'Debian CVE')} with no fix (Debian's call)" if j.debian else "",
+             f"{j.decided} decided (DECISIONS in dev/cves.py)" if j.decided else ""]
+    return ", ".join(p for p in parts if p)
 
 
 def future_track() -> str | None:
@@ -769,35 +870,62 @@ def _wrap(text: str, indent: str = "") -> list[str]:
 
 
 def box(r: Report | None, where: str | None, error: str = "") -> list[str]:
-    """What tnsync shows: a first line it reads — current (a green box), behind (yellow), unknown (grey) — then the box's
-    lines, each fitting it. Behind: what moved here (to test and commit), then what's left to you, each with what to do."""
+    """What tnsync shows: a first line it reads — current (a green box), behind (yellow: new versions upstream), cves
+    (yellow: every one current, but CVEs to act on), unknown (grey) — then the box's
+    lines, each fitting it. Behind: what moved here (to test and commit), then what's left to you, each with what to do;
+    then the CVEs to act on (dev/cves.py: a warning, nothing fails), and what was left alone."""
     if r is None:
         return ["unknown", "DEPENDENCIES NOT CHECKED  -  UPSTREAM NOT REACHED", "", *_wrap(error or "no answer"),
                 "Nothing is known from this run; tnsync looks again next time."]
     old = ["", "(Upstream not reached now: these are the last look's answers.)"] if r.stale else []
+    j = r.cves
+    acts = list(j.act) if j is not None else []
+    shown = counted_cves(j.shown if j is not None else 0)
+    cve_lines: list[str] = []
+    if acts:
+        cve_lines += ["", f"{shown} to act on (a warning: nothing fails):"]
+        for what, todo in acts:
+            cve_lines += ["", *_wrap(what, "  "), *_wrap(todo, "    ")]
+    if j is not None and j.waiting:   # (fixed here already: said, not counted, not orange)
+        cve_lines += ["", f"Fixed in dev, waiting on the release ({counted_cves(j.waited)}, not counted):"]
+        for what, why in j.waiting:
+            cve_lines += ["", *_wrap(what, "  "), *_wrap(why, "    ")]
+    if j is not None and (tally := _cve_tally(j)):
+        cve_lines += ["", *_wrap(f"Left alone: {tally}.")]
+    for note in j.notes if j is not None else []:
+        cve_lines += ["", *_wrap(f"({note})")]
     if not r.bumped and not r.news:
-        return ["current", "DEPENDENCIES  -  ALL UP TO DATE", "",
+        head = "DEPENDENCIES  -  ALL UP TO DATE" + (f", {shown.upper()} TO ACT ON" if acts else "")
+        return ["cves" if acts else "current", head, "",
                 *_wrap(f"Each of the {len(DEPS)} dependencies dev/upkeep.py keeps (Python, Debian, the image's tools, "
-                       "pyright, Node, the web's packages and Home Assistant's MQTT rules) is at upstream's newest release."), *old]
+                       "pyright, Node, the web's packages and Home Assistant's MQTT rules) is at upstream's newest release."),
+                *cve_lines, *old]
     majors = sum(1 for n in r.news if n[3] != "minor")
     title = "NEW VERSIONS UPSTREAM  -  " + ", ".join(x for x in (f"{len(r.bumped)} MOVED" if r.bumped else "",
                                                                  f"{majors} FOR YOU" if majors else "",
-                                                                 f"{len(r.news) - majors} TO MOVE ON {r.moves_on.upper()}" if len(r.news) > majors else "") if x)
+                                                                 f"{len(r.news) - majors} TO MOVE ON {r.moves_on.upper()}" if len(r.news) > majors else "",
+                                                                 shown.upper() if acts else "") if x)
     out = ["behind", title]
     if r.bumped:
         out += ["", f"Moved here ({where}): run the tests, then commit them."]
         for b in r.bumped:
-            out += _wrap(b, "  ")
+            out += _wrap(b + _fixes(r, b.split(":")[0]), "  ")
     for name, have, newest, level, todo in r.news:
-        out += ["", f"{name} {have} → {newest}" + {"major": "  (a major release)", "minor": "", "new": ""}[level]]
+        out += ["", f"{name} {have} → {newest}" + {"major": "  (a major release)", "minor": "", "new": ""}[level] + _fixes(r, name)]
         out += _wrap(todo if level == "minor" else f"To do: {todo}", "  ")
-    return out + old
+    return out + cve_lines + old
+
+
+def counted_cves(n: int) -> str:
+    from dev.progress import counted
+    return counted(n, "CVE")
 
 
 def found(r: Report | None, error: str = "") -> list[tuple[str, str, str]]:
     """What the look found, as the board's Issues have it: (level, what, the command that fixes it, or ""). An error:
     upstream not reached; a warning: a release you move yourself (a major, or one with no pin to move); a notice: a pin
-    moved here (to test and commit), a minor release that moves by itself, or the last day's answers used."""
+    moved here (to test and commit), a minor release that moves by itself, or the last day's answers used. A CVE to act on
+    (dev/cves.py) is a warning."""
     if r is None:
         return [("error", f"upstream not reached: {error or 'no answer'}", "python3 dev/upkeep.py")]
     out = [("notice", f"moved {m}: test it, then commit", "") for m in r.moved]
@@ -809,22 +937,27 @@ def found(r: Report | None, error: str = "") -> list[tuple[str, str, str]]:
         out.append(("notice", what + ": moves by itself", fix) if level == "minor" else ("warning", what, fix))
     if r.stale:
         out.append(("notice", "upstream not reached now: the last day's answers", ""))
+    if r.cves is not None:   # (dev/cves.py: each CVE to act on a warning — never an error — and what it couldn't look at)
+        out += [("warning", f"{what}: {todo}", "") for what, todo in r.cves.act]
+        out += [("notice", f"{what}: fixed in dev, waiting on the release", "") for what, _ in r.cves.waiting]
+        out += [("notice", note, "") for note in r.cves.notes]
     return out
 
 
 def summary(r: Report | None, error: str = "") -> str:
     """The box in a line, for the board's Dependencies block (under its bar): how many errors, warnings and notices,
-    then what moved and what's new, each from → to."""
+    then what moved and what's new, each from → to, and the CVEs to act on."""
     from dev.progress import LEVELS, counted, result, tally  # (the result line every dev tool says)
     got = found(r, error)
     counts = [counted(n, lv) for lv in LEVELS if (n := sum(f[0] == lv for f in got))]
     if r is None:
         return result(*counts, "upstream not reached", error or "no answer")
+    acts = [f"{counted_cves(r.cves.shown)} to act on"] if r.cves is not None and r.cves.act else []
     if not r.bumped and not r.news:
-        return result(*counts, tally(len(DEPS), "dependency", "up to date", "dependencies"))
+        return result(*counts, tally(len(DEPS), "dependency", "up to date", "dependencies"), *acts)
     said = [f"moved {m}" for m in r.moved] + [f"{n} {have} → {newest}" + (" (major)" if level == "major" else "")
                                               for n, have, newest, level, _ in r.news]
-    return result(*counts, *said)
+    return result(*counts, *said, *acts)
 
 
 def _progress(tnsync: bool):
@@ -854,7 +987,11 @@ def main() -> int:
     ap.add_argument("--fresh", action="store_true", help="ask upstream again rather than using the day's answers")
     ap.add_argument("--report", action="store_true", help="look, but move no pin")
     ap.add_argument("--tnsync", action="store_true", help="the result as tnsync's box: a first line it reads, then the box (moves pins on dev, as without it)")
+    ap.add_argument("--cves", metavar="IMAGE", help="GitHub's look: the CVEs to act on in this image docker has (and in what it's built with), "
+                                                    "as warnings; moves nothing, and never fails")
     args = ap.parse_args()
+    if args.cves:
+        return github_cves(args.cves)
     where = branch()
     # (tnsync's board looks while the tests run, TNSYNC_UPKEEP=look, and moves pins only once they're done: =move)
     move = not args.report and where in (MOVES_ON, MINORS_ON) and os.environ.get("TNSYNC_UPKEEP") != "look"
@@ -864,7 +1001,7 @@ def main() -> int:
         said,
     )
     try:
-        r = check(apply=move, fresh=args.fresh, progress=bar, where=where)
+        r = check(apply=move, fresh=args.fresh, progress=bar, where=where, cves=True)
     except Offline as e:
         if bar is not None:
             bar.clear()
@@ -903,7 +1040,37 @@ def main() -> int:
         print("\nMoved:\n  " + "\n  ".join(r.bumped))
     if r.prompts:
         print("\nFor you:\n  " + "\n  ".join(r.prompts))
+    if r.cves is not None:
+        for what, todo in r.cves.act:
+            print(f"\nCVE to act on (a warning): {what}\n  {todo}")
+        for what, why in r.cves.waiting:
+            print(f"\nCVE fixed in dev, waiting on the release: {what}\n  {why}")
+        if tally := _cve_tally(r.cves):
+            print(f"\nCVEs left alone: {tally}")
+        for note in r.cves.notes:
+            print(f"({note})")
     return 1 if r.prompts else 0
+
+
+def github_cves(image: str) -> int:
+    """--cves: on GitHub, after the image is built (build.yml's image job): each CVE to act on, as a warning annotation
+    (::warning, on the run's summary); what was left alone in a line. Exit 0 whatever is found: a CVE is never a failure."""
+    try:
+        r = check(apply=False, fresh=True, where=branch(), cves=True, images=[image], local=True)
+    except Offline as e:
+        print(f"::warning title=CVEs not checked::Upstream not reached: {e}")
+        return 0
+    j = r.cves
+    assert j is not None   # (asked for: check looked)
+    for what, todo in j.act:
+        print(f"::warning title=CVE to act on: {what}::{todo}")
+    for what, why in j.waiting:
+        print(f"::notice title=CVE fixed, waiting on the release: {what}::{why}")
+    for note in j.notes:
+        print(f"::warning title=CVEs not checked::{note}")
+    from dev.progress import counted, result
+    print(result(f"{counted(j.shown, 'CVE')} to act on", _cve_tally(j)))
+    return 0
 
 
 if __name__ == "__main__":

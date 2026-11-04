@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -83,6 +84,26 @@ def find_python(want: str) -> list[str] | None:
     if shutil.which("uv"):
         return ["uv", "run", "--python", want, "--no-project", "python"]
     return None
+
+
+def docker_cpus() -> int:
+    """The cores Docker's builds get (its VM's, on a Mac: colima's or Docker Desktop's), 0 when it doesn't say. make in the
+    build stages runs that many compiles at once (-j nproc)."""
+    try:
+        got = subprocess.run(["docker", "info", "--format", "{{.NCPU}}"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    return int(got.stdout.strip()) if got.returncode == 0 and got.stdout.strip().isdigit() else 0
+
+
+def cores_hint(docker: int, host: int) -> str:
+    """What to say when Docker has fewer than half the machine's cores (the build's compiles are that many at once, the
+    rest of the machine keeps the other half): how to give it half; "" when it has them, or either isn't known."""
+    want = host // 2
+    if not docker or not want or docker >= want:
+        return ""
+    return (f"Docker builds on {docker} of this machine's {host} cores. Half of them builds faster and leaves the rest free: "
+            f"colima stop && colima start --cpu {want} (Docker Desktop: Settings → Resources → CPUs: {want}).")
 
 
 def has_buildkit() -> bool:
@@ -393,6 +414,45 @@ def count_tests(tests: list[str], exclude: list[str] | None = None) -> int:
     return n
 
 
+# the tests that need the tools the image builds (ffmpeg, MKVToolNix, oxipng, jpegtran): on tnsync's board they run in it
+# once it's built, and the rest of the suite on the plain Python image meanwhile (image_route)
+IMAGE_CLASSES = ("CoverArtTests", "FixtureTests", "OptimizerTests")
+OUT = threading.Lock()   # (two runs at once write the output: a line each, whole)
+
+
+class OneBar:
+    """On tnsync's board, the Future Tests block's one bar while the image builds and the suite runs in two parts at once
+    (the build's steps, the tests on the plain Python image, then the tests in the image): their counts added up, its
+    total the build's steps and every test from the start, its workers those at work now, its label what moved last.
+    Each part's own bar records (tests/run.py's) come here instead of to the board."""
+
+    def __init__(self, tests: int):
+        self.bar = Progress(0, bar="tests", tests=True)
+        self.tests, self.lock = tests, threading.Lock()
+        self.parts: dict[str, dict] = {}   # name -> done, total, bad, warned, workers, running
+
+    def update(self, name: str, label: str, ticking: bool = True, **got) -> None:
+        with self.lock:
+            part = self.parts.setdefault(name, {"done": 0, "total": 0, "bad": 0, "warned": 0, "workers": 0, "running": True})
+            part.update({k: v for k, v in got.items() if v is not None})
+            build = self.parts.get("build", {})
+            steps = max(build.get("total", 0), build.get("done", 0))   # (BuildKit never says how many: those so far)
+            tested = sum(p["done"] for n, p in self.parts.items() if n != "build")
+            self.bar.bad = sum(p["bad"] for p in self.parts.values())
+            self.bar.warned = sum(p["warned"] for p in self.parts.values())
+            self.bar.workers = sum(p["workers"] for p in self.parts.values() if p["running"]) or None
+            self.bar.at(build.get("done", 0) + tested, steps + self.tests, label, ticking=ticking)
+
+    def suite(self, name: str, rec: dict) -> None:
+        """A record of a part's run of the suite (its own bar): its counts into this bar's."""
+        self.update(name, str(rec.get("label") or ""), bool(rec.get("ticking")), done=int(rec.get("done") or 0),
+                    bad=int(rec.get("bad") or 0), warned=int(rec.get("warned") or 0),
+                    workers=rec.get("workers") if isinstance(rec.get("workers"), int) else None)
+
+
+ONE: list[OneBar | None] = [None]   # (the board's one bar, while image_route runs the parts at once)
+
+
 class Line:
     """One line of the terminal, redrawn as the build moves (a plain line now and then when the output isn't a terminal).
     On tnsync's board (PLEXCACHE_PROGRESS=feed), its Future Tests section's bar instead, the suite's own (bar "tests",
@@ -402,12 +462,16 @@ class Line:
 
     def __init__(self, what: str):
         self.what, self.tty, self.started, self.last = what, sys.stdout.isatty(), time.time(), 0.0
-        self.bar = Progress(0, bar="tests", tests=True) if feeding() else None
+        self.bar = Progress(0, bar="tests", tests=True) if feeding() and ONE[0] is None else None
         if self.bar is not None:
-            self.bar.workers = 1   # (docker's build, one at a time; the suite says its own once it starts)
+            self.bar.workers = 1   # (until it's known how many cores Docker builds with: build_image; the suite says its own)
         self.done = self.total = 0
 
     def show(self, text: str, done: int | None = None, total: int | None = None) -> None:
+        if ONE[0] is not None:   # (the build a part of the one bar: OneBar)
+            self.done, self.total = done if done is not None else self.done, total or self.total
+            ONE[0].update("build", f"build {text}", done=self.done, total=self.total)
+            return
         if self.bar is not None:
             self.done, self.total = done if done is not None else self.done, total or self.total
             # (BuildKit numbers its steps but never says how many: the steps so far stand for them, the bar's total
@@ -431,7 +495,9 @@ class Line:
 
     def end(self, text: str, ok: bool = True) -> None:
         elapsed = int(time.time() - self.started)
-        if self.bar is not None:
+        if ONE[0] is not None:
+            ONE[0].update("build", text, ticking=False, running=False)
+        elif self.bar is not None:
             BUILD_STEPS[0] = max(self.total, self.done) if ok else 0   # (the suite's count goes on from these)
             self.bar.show(text)
         if self.tty:
@@ -468,6 +534,14 @@ def build_image(tag: str, args: list[str], verbose: bool) -> bool:
     if verbose:
         return subprocess.run(cmd).returncode == 0
     line = Line(f"Building the image on python:{tag}")
+    cpus = docker_cpus()
+    hint = cores_hint(cpus, os.cpu_count() or 0)
+    if hint:
+        print(f"    {hint}", flush=True)
+    if line.bar is not None and cpus:
+        line.bar.workers = cpus   # (the compiles at once: make -j nproc in the stages, as many as Docker's cores)
+    if ONE[0] is not None:
+        ONE[0].update("build", "build starting", workers=cpus or 1)
     line.show("starting")
     env = dict(os.environ, DOCKER_BUILDKIT="1" if buildkit else "0")
     with open(LOG, "w", encoding="utf-8") as log:
@@ -503,6 +577,106 @@ def build_image(tag: str, args: list[str], verbose: bool) -> bool:
     return False
 
 
+# what the container gets before the suite runs in it (as root, for this run only): the page tests' node (the channel's
+# build, fetched here and mounted in; Debian's package when it can't be had), which the image doesn't carry (it serves no
+# pages through it), and rsync, which tnsync's tests copy with, and git, which the build check's test lists the checkout
+# with (the image has no use for either; the checkout is the host's, so git is told it's safe to read)
+NODE_SETUP = ("if [ -f /node.tar.xz ]; then python -c \"import tarfile; tarfile.open('/node.tar.xz').extractall('/opt', filter='tar')\" && "
+        "PATH=\"$(echo /opt/node-*/bin):$PATH\" && export PATH; fi; "
+        # (node's own build needs libatomic, which the plain Python image lacks — the project's image has it: a node that
+        # doesn't start gets it)
+        "if command -v node >/dev/null 2>&1 && ! node -v >/dev/null 2>&1; then (apt-get update && apt-get install -y --no-install-recommends libatomic1) >/dev/null 2>&1; "
+        "node -v >/dev/null 2>&1 || echo '    node does not start: the page tests fail'; fi; "
+        "command -v node >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends nodejs) >/dev/null 2>&1 || echo '    node not added: the page tests skip'; "
+        # and rsync, which tnsync's tests copy with, and git, which the build check's test lists the checkout with (the
+        # image has no use for either; the checkout is the host's, so git is told it's safe to read)
+        "command -v rsync >/dev/null 2>&1 && command -v git >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends rsync git) "
+        ">/dev/null 2>&1 || echo '    rsync and git not added'; git config --global --add safe.directory /src 2>/dev/null || true")
+
+
+def test_classes() -> list[str]:
+    """The suite's test classes, read from the checkout's test file (count_tests' reading), in its order."""
+    try:
+        with open(os.path.join(ROOT, "tests", "test_plexcache.py"), encoding="utf-8") as fh:
+            return re.findall(r"(?m)^class (\w+)\(", fh.read())
+    except OSError:
+        return []
+
+
+def parallel_route(tag: str, args: list[str], picks: list[Pick], node_pick: Pick | None, exclude: list[str] | None) -> int:
+    """On tnsync's board, the whole suite: the image built and, meanwhile, every test that doesn't need its tools
+    (IMAGE_CLASSES do) run on the plain Python image; those in the image once it's built. One bar for the three
+    (OneBar), each failure said as it comes (tests/run.py's), the result line the image's run's (its tools' versions)."""
+    one = ONE[0] = OneBar(TESTS[0])
+    classes = [c for c in test_classes() if c not in (exclude or [])]
+    in_image = [c for c in IMAGE_CLASSES if c in classes]
+    # each run's workers two per core Docker has (its VM's, set to half the machine's: cores_hint), not the machine's: the
+    # rest of the machine runs the other blocks' tests meanwhile, and too many workers starve them
+    jobs = 2 * (docker_cpus() or os.cpu_count() or 1)
+    pins = {"Python": upkeep._arg("PYTHON_TAG")().split("-")[0], "Node": upkeep._arg("NODE_TAG")().split("-")[0],
+            "MKVToolNix": upkeep._arg("MKVTOOLNIX")(), "ffmpeg": upkeep._arg("FFMPEG")()}
+    mount: list[str] = []
+    results: dict[str, tuple[int, str]] = {}
+
+    def part(name: str, image: str, leave: list[str]) -> None:
+        suite = f"python {' '.join(WARN)} tests/run.py" + "".join(f" --exclude {c}" for c in leave) + f" -j{jobs}"
+        cmd = ["docker", "run", "--rm", "-e", "PLEXCACHE_PROGRESS=feed", "-e", "CI=1", "-e", f"PLEXCACHE_PINS={json.dumps(pins)}", *WEB_TARGETS,
+               "--user", "0", "-v", f"{ROOT}:/src:ro", *mount, "-w", "/src", "--entrypoint", "sh", image, "-c", f"{NODE_SETUP}; exec {suite}"]
+        last = ""
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, errors="replace") as proc:
+            for line in proc.stdout or []:
+                rec = record(line)
+                if rec is not None and rec.get("bar") == "tests":   # (its bar: into the one bar)
+                    one.suite(name, rec)
+                    continue
+                with OUT:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                if rec is None and line.strip():
+                    last = line.strip()
+        one.update(name, one.bar.label, ticking=False, running=False)
+        results[name] = (proc.returncode, last)
+
+    def early() -> None:   # (node fetched and the web's packages installed, then the tests that need no tools)
+        tarball = fetch_node(node_pick) if node_pick else None
+        mount.extend(["-v", f"{tarball}:/node.tar.xz:ro"] if tarball else [])
+        modules = install_web(picks)
+        if modules and os.path.isdir(os.path.join(ROOT, "dev", "node_modules")):
+            mount.extend(["-v", f"{modules}:/src/dev/node_modules:ro"])
+        ready.set()
+        part("plain", f"python:{tag}", [*(exclude or []), *in_image])
+
+    ready = threading.Event()
+    with OUT:
+        print(f"    The tests that need no tools on python:{tag} while the image builds; then {', '.join(in_image) or 'none'} in it:", flush=True)
+    early_run = threading.Thread(target=early, name="future plain", daemon=True)
+    early_run.start()
+    try:
+        built = build_image(tag, args, False)
+    except FetchFailed as e:
+        early_run.join()
+        ONE[0] = None
+        print(f"\nNot run: a download the build needs failed ({e}). Nothing is known about python:{tag} from this — run it again.")
+        return 3
+    zstd = built and subprocess.run(["docker", "run", "--rm", "--entrypoint", "python", IMAGE, "-c", "import compression.zstd"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if zstd and in_image:
+        ready.wait()
+        part("image", IMAGE, [c for c in classes if c not in in_image])
+    early_run.join()
+    ONE[0] = None
+    said(result((results.get("image") or results.get("plain") or (1, ""))[1]))
+    if not built:
+        print(f"\nThe image doesn't build on python:{tag} (no such tag yet, or the build fails there).")
+        return 1
+    if not zstd:
+        print("\nThe image's Python lacks the stdlib zstd the block estimates use.")
+        return 1
+    bad = any(rc for rc, _ in results.values())
+    print(f"\nPython {tag}, inside the image: " + ("the suite fails — what it deprecates or removes needs a look before the image moves to it." if bad else "clean."))
+    return 1 if bad else 0
+
+
 def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, stable: bool, fresh: bool, exclude: list[str] | None = None) -> int:
     """The project's image built on the next Python and the channels' choices (the pins with --stable), its Python checked
     for the stdlib zstd, and the tests run inside it."""
@@ -524,6 +698,8 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
         print("The future stack — each dependency's newest pre-release, else its stable release — inside the project's image, every warning an error:")
         print(table(picks))
     TESTS[0] = count_tests(tests, exclude)   # (the bar's total from the start: the build's steps and these)
+    if feeding() and tests == ["tests.test_plexcache"] and not verbose:   # (on the board: the parts at once)
+        return parallel_route(tag, args, picks, node_pick, exclude)
     try:
         built = build_image(tag, args, verbose)
     except FetchFailed as e:
@@ -542,9 +718,10 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
     # suite runs through tests/run.py (its progress bar on a terminal: -t) unless particular tests are named; CI=1: the
     # dependency check, dev/upkeep.py, is for a run by hand in the checkout, not this one.
     leave = "".join(f" --exclude {c}" for c in exclude or [])   # (classes another section runs: tnsync's style guide)
-    # its workers as the host's would be (two per core): the container's own count is the docker VM's few cores, and the
-    # tests mostly wait rather than compute
-    leave += f" -j{2 * (os.cpu_count() or 1)}"
+    # its workers two per core Docker has (its VM's, set to half the machine's: cores_hint), not the machine's: the rest
+    # of the machine runs the other blocks' tests meanwhile, and too many workers starve them (a test that waits on a
+    # timer fails; memory runs short)
+    leave += f" -j{2 * (docker_cpus() or os.cpu_count() or 1)}"
     suite = f"python {' '.join(WARN)} tests/run.py{leave}" if tests == ["tests.test_plexcache"] else f"python {' '.join(WARN)} -m unittest -q {' '.join(tests)}"
     tarball = fetch_node(node_pick) if node_pick else None
     mount = ["-v", f"{tarball}:/node.tar.xz:ro"] if tarball else []
@@ -552,13 +729,7 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
     modules = install_web(picks)
     if modules and os.path.isdir(os.path.join(ROOT, "dev", "node_modules")):
         mount += ["-v", f"{modules}:/src/dev/node_modules:ro"]
-    node = ("if [ -f /node.tar.xz ]; then python -c \"import tarfile; tarfile.open('/node.tar.xz').extractall('/opt', filter='tar')\" && "
-            "PATH=\"$(echo /opt/node-*/bin):$PATH\" && export PATH; fi; "
-            "command -v node >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends nodejs) >/dev/null 2>&1 || echo '    node not added: the page tests skip'; "
-            # and rsync, which tnsync's tests copy with, and git, which the build check's test lists the checkout with (the
-            # image has no use for either; the checkout is the host's, so git is told it's safe to read)
-            "command -v rsync >/dev/null 2>&1 && command -v git >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends rsync git) "
-            ">/dev/null 2>&1 || echo '    rsync and git not added'; git config --global --add safe.directory /src 2>/dev/null || true")
+    node = NODE_SETUP
     tty = ["-t"] if sys.stdout.isatty() else []
     if feeding():  # (on tnsync's board: tests/run.py's bar sent to it, through docker's output)
         tty = ["-e", "PLEXCACHE_PROGRESS=feed"]

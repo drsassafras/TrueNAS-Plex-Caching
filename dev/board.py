@@ -15,7 +15,7 @@ section's output is kept beside the results (their folder's logs/, which tnsync 
      "stoppable": true,     # (optional) Enter stops it (the tests; a copy under way is left to finish)
      "warn": {"rc": 1, "note": "…"},   # (optional) that exit code is a warning (orange: the style guide's looks to approve), said in its block alone
      "not_run_rc": 3,       # (optional) the exit code that means "couldn't be set up" (yellow: nothing is known)
-     "upkeep": true,        # (optional) the dependencies: its output's first line says current / behind / else
+     "upkeep": true,        # (optional) the dependencies: its output's first line says current / behind / cves / else
      "key": {"key": "r", "cmd": "…", "cwd": "…", "does": "Review Style Changes", "opens": "the review page",
              "line": "press r to review them"},   # (optional) once it has warned and while the board runs, that
                             # key starts cmd (the style guide's review page), on the terminal but in a session of its
@@ -300,8 +300,9 @@ class Section:
         if self.info is not None:   # (a section that only tells: its header the same, red when its command failed)
             self.state, self.note = "info" if rc == 0 else "fail", str(self.info)
         elif self.upkeep:
-            self.state = {"current": "pass", "behind": "warn"}.get(self.first, "skipped")
-            self.note = {"current": "up to date", "behind": "new versions upstream"}.get(self.first, "not checked")   # (the box, above)
+            self.state = {"current": "pass", "behind": "warn", "cves": "warn"}.get(self.first, "skipped")
+            self.note = {"current": "up to date", "behind": "new versions upstream",
+                         "cves": "up to date · CVEs to act on"}.get(self.first, "not checked")   # (the box, above)
             self.last = ""
         elif rc == 0:
             self.state = "pass"
@@ -371,7 +372,7 @@ class Section:
             n = shown[-1].workers
             workers = f"{n} worker{'s' if n != 1 else ''}" if n else ""
             room = width - 1 - (len(workers) + 3 if workers else 0)
-            bar = shown[-1].render(room, TRACK[self.shown], FILL[self.shown], "" if self.done else RED, CAPSULE[self.shown], widths, indent=2 + TITLE).replace(DIM, "")
+            bar = shown[-1].render(room, TRACK[self.shown], FILL[self.shown], "" if self.done else RED, CAPSULE[self.shown], widths, indent=2, timer=False).replace(DIM, "")
             shown[-1].label = label
             if workers:
                 bar += " " * (width - 2 - len(workers) - len(ANSI.sub("", bar))) + workers
@@ -422,6 +423,7 @@ class Board:
         self.by_id = {s.id: s for s in self.sections}
         self.tty = tty
         self.drawn = 0           # lines on the terminal from the last frame
+        self.queued: list[str] = []   # what's to go above the board at the next frame (above)
         self.widths = (0, 0)     # (the widest capsule fields any bar has had: every bar's drawn to them, so they line up)
         self.aborted = False
         self.sel = selectors.DefaultSelector()
@@ -592,7 +594,9 @@ class Board:
         width = min(WIDTH, shutil.get_terminal_size((WIDTH, 40)).columns - 1)
         # what a section that ended has to say goes above the board, into the terminal's scrollback; the board stays the
         # last thing on the screen, where it was
-        said = "".join(self.telling(s) + self.told(s) for s in self.sections)
+        for s in self.sections:
+            self.above(self.telling(s) + self.told(s))
+        said, self.queued = "".join(self.queued), []
         lines: list[str] = []
         for b in (b for s in self.sections for b in s.bars.values()):   # (no space kept for what no bar has counted)
             self.widths = wider(self.widths, fields(b.done, b.total, b.bad, b.warned))
@@ -670,6 +674,17 @@ class Board:
             if s.proc is not None:
                 stop_group(s.proc)
 
+    def above(self, text: str) -> None:
+        """The one way anything is said beside the board: on a terminal, it goes above the board at the next frame, so
+        the board stays the last thing on the screen; without one, it's written as it comes."""
+        if not text:
+            return
+        if self.tty:
+            self.queued.append(text)
+        else:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
     def telling(self, s: Section) -> str:
         """The failures a section said as they came (tests/run.py's "tell" records), since the last frame: above the board."""
         text, s.telling = "".join(f"\n{t.rstrip()}\n" for t in s.telling), []
@@ -696,15 +711,13 @@ class Board:
         return f"\n{text}\n"   # (just what it printed: whose it is, its block says)
 
     def report(self):
-        """Without a terminal, what there is to say of each section, after the board (on one, it went above it as each
-        ended: frame); then, either way, the Issues: every section's errors, warnings and notices, under the board."""
+        """Once the board is done: what there is still to say of each section, then the Issues (every section's errors,
+        warnings and notices), all through above — on a terminal, above the board, drawn once more under them."""
         for s in self.sections:
-            text = self.told(s)
-            if text:
-                sys.stdout.write(text)
+            self.above(self.telling(s) + self.told(s))
             s.out.close()
-        sys.stdout.write(self.issues())
-        sys.stdout.flush()
+        self.above(self.issues())
+        self.frame()
 
     def found(self, s: Section) -> list[dict]:
         """A section's issues: what it said it found; or, a section that failed (or warned) and said nothing of it,

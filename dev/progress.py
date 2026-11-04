@@ -222,7 +222,7 @@ class Progress:
             return int(os.environ.get("COLUMNS") or 0) or 100  # (a log shown on a terminal later: tnsync says how wide)
 
     def render(self, width: int, track: str = TRACK, fill: str | None = None, alert: str = RED, capsule_bg: str = CAPSULE,
-               widths: tuple[int, int] | None = None, indent: int = 4) -> str:
+               widths: tuple[int, int] | None = None, indent: int = 4, timer: bool = True) -> str:
         """The bar's line, narrower than ``width`` (the board draws it in its section, on its block's ``track`` with its
         ``fill`` and ``alert`` colours; ``_line`` on the terminal)."""
         pct = min(1.0, self.done / self.total if self.total else 0 if self.tests else 1)   # (tests not counted yet: empty)
@@ -237,11 +237,11 @@ class Progress:
         if widths is None:   # (on its own: as wide as its own counts have been; on the board, the widest of every bar's)
             widths = self.widths = wider(self.widths, fields(self.done, self.total, self.bad, self.warned))
         count, plain = capsule(self.done, self.total, self.bad, self.warned, capsule_bg, widths)   # (every bar's counts, one way)
-        pad = " " * indent   # (on the board: in line with its block's status, above it)
+        pad = " " * indent   # (on the board: in line with its block's name, above it — the most room for the label)
         if len(f"{pad}[{'#' * BAR}] {plain}") + 3 > width:   # (a terminal too narrow for the capsule: the count alone)
             count = plain = f"{self.done:>3}/{self.total}"
         # (its step's seconds — not on the board, whose block has its own timer: one timer a block)
-        secs = f"  ({time.time() - self.since:.0f} s)" if self.since is not None and indent == 4 else ""
+        secs = f"  ({time.time() - self.since:.0f} s)" if self.since is not None and timer else ""
         # Keep the line narrower than the terminal: a line that wraps can't be redrawn with \r,
         # so each update would leave a broken copy of the bar behind.
         visible = len(f"{pad}[{'#' * BAR}] {plain}") + 2
