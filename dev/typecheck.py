@@ -19,7 +19,6 @@ On GitHub, the findings are annotated on their lines too. Exit 0 clean, 1 someth
 import argparse
 import json
 import os
-import subprocess
 import sys
 import tomllib
 
@@ -71,7 +70,7 @@ def ruff(fix: bool) -> Outcome:
     if not cmd:
         return Outcome("Ruff", version, None, why)
     if fix:
-        subprocess.run([*cmd, "check", "--fix", "--quiet", "--exit-zero", "."], cwd=ROOT, timeout=checks.TIMEOUT)
+        checks.call([*cmd, "check", "--fix", "--quiet", "--exit-zero", "."], cwd=ROOT, timeout=checks.TIMEOUT)
     got, run = checks.json_out([*cmd, "check", "--output-format", "json", "--exit-zero", "."])
     if run.returncode != 0 or not isinstance(got, list):
         return Outcome("Ruff", version, None, f"Ruff didn't run: {checks.last_line(run)}")

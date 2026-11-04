@@ -14,6 +14,7 @@ are given. On tnsync's board (PLEXCACHE_PROGRESS=feed) the bar is the files chec
 The exit code: 0 clean, 1 something found, 2 a tool couldn't run (not installed, no network for its download…).
 """
 
+import errno
 import hashlib
 import io
 import json
@@ -23,7 +24,9 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
+import time
 import tomllib
 import urllib.request
 import zipfile
@@ -66,6 +69,22 @@ def _whole(tmp: str, final: str, exe: str) -> None:
             raise
 
 
+def _scratch(final: str) -> str:
+    """A folder of this fetch's own beside ``final`` (on its disk, so _whole's rename is whole): not the process's id alone,
+    which two threads of one run share (actionlint fetching ShellCheck as ShellCheck's own check does)."""
+    os.makedirs(CACHE, exist_ok=True)
+    return tempfile.mkdtemp(prefix=f"{os.path.basename(final)}.", dir=CACHE)
+
+
+_FETCHING: dict[str, threading.Lock] = {}   # one lock per tool: a run's checks wait on its one fetch, then use it
+_FETCHING_LOCK = threading.Lock()
+
+
+def _one_fetch(key: str) -> threading.Lock:
+    with _FETCHING_LOCK:
+        return _FETCHING.setdefault(key, threading.Lock())
+
+
 _BAR: list[Progress] = []   # the bar run() draws, while it runs: a tool fetched the first time says so on it
 
 
@@ -80,10 +99,10 @@ def _pip(key: str, tool: dict) -> tuple[list[str] | None, str]:
     exe = os.path.join(venv, "bin", tool.get("binary") or tool["package"])
     if os.path.exists(exe):
         return [exe], ""
-    tmp = f"{venv}.{os.getpid()}"
+    tmp = ""
     _fetching(tool)
     try:
-        os.makedirs(CACHE, exist_ok=True)
+        tmp = _scratch(venv)
         subprocess.run([sys.executable, "-m", "venv", tmp], check=True, capture_output=True, text=True, timeout=TIMEOUT)
         subprocess.run([os.path.join(tmp, "bin", "python"), "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
                         f"{tool['package']}=={tool['version']}"], check=True, capture_output=True, text=True, timeout=TIMEOUT)
@@ -94,7 +113,8 @@ def _pip(key: str, tool: dict) -> tuple[list[str] | None, str]:
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"{tool['name']} {tool['version']} couldn't be installed: {e}"
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
     return [exe], ""
 
 
@@ -131,7 +151,7 @@ def _release(key: str, tool: dict) -> tuple[list[str] | None, str]:
     exe = os.path.join(folder, os.path.basename(inside) or key)
     if os.path.exists(exe):
         return [exe], ""
-    tmp = f"{folder}.{os.getpid()}"
+    tmp = ""
     _fetching(tool)
     try:
         data = fetch(asset_url(tool, plat))
@@ -139,7 +159,7 @@ def _release(key: str, tool: dict) -> tuple[list[str] | None, str]:
         want = tool.get("sha256", {}).get(plat, "")
         if got != want:
             return None, f"{tool['name']} {tool['version']}'s download for {plat} isn't the one dev/tools.toml names (sha256 {got[:12]}…)"
-        os.makedirs(tmp, exist_ok=True)
+        tmp = _scratch(folder)
         path = os.path.join(tmp, os.path.basename(exe))
         with open(path, "wb") as fh:
             fh.write(unpack(data, inside))
@@ -148,7 +168,8 @@ def _release(key: str, tool: dict) -> tuple[list[str] | None, str]:
     except (OSError, KeyError, tarfile.TarError, zipfile.BadZipFile) as e:
         return None, f"{tool['name']} {tool['version']} couldn't be fetched: {e}"
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
     return [exe], ""
 
 
@@ -159,9 +180,24 @@ def command(key: str) -> tuple[list[str] | None, str]:
         if not shutil.which("npx"):
             return None, f"{tool['name']} needs npx (Node), which isn't installed"
         return ["npx", "--yes", f"{tool['package']}@{tool['version']}"], ""
-    if tool["get"] == "pip":
-        return _pip(key, tool)
-    return _release(key, tool)
+    with _one_fetch(key):   # (two checks wanting one tool: the second waits for the first's fetch, then finds it there)
+        if tool["get"] == "pip":
+            return _pip(key, tool)
+        return _release(key, tool)
+
+
+def call(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    """subprocess.run for a check tool's command. A tool just fetched can be 'Text file busy' (ETXTBSY) for a moment: a
+    subprocess another check's thread started while the download was being written holds the file open for writing until
+    it execs its own program, and Linux won't run a file that's open for writing. That's waited out, not said as a failure."""
+    for wait in (0.05, 0.1, 0.2, 0.4, 0.8, 1.6):
+        try:
+            return subprocess.run(cmd, **kw)
+        except OSError as e:
+            if e.errno != errno.ETXTBSY:
+                raise
+            time.sleep(wait)
+    return subprocess.run(cmd, **kw)
 
 
 # ---------------------------------------------------------------- what they find, said one way
@@ -327,7 +363,7 @@ def repo_at() -> tuple[str, str] | None:
 
 def json_out(cmd: list[str], **kw) -> tuple[object | None, subprocess.CompletedProcess]:
     """A tool's JSON output (its findings), or None when it didn't give any."""
-    got = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT, **kw)
+    got = call(cmd, cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT, **kw)
     try:
         return json.loads(got.stdout), got
     except ValueError:

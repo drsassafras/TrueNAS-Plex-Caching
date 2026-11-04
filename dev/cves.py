@@ -402,7 +402,7 @@ def scan(image: str, local: bool = False) -> list[Vuln]:
     cmd, why = checks.command("trivy")
     if not cmd:
         raise OSError(why)
-    got = subprocess.run([*cmd, "image", "--quiet", "--scanners", "vuln", "--format", "json", "--image-src", "docker" if local else "remote",
+    got = checks.call([*cmd, "image", "--quiet", "--scanners", "vuln", "--format", "json", "--image-src", "docker" if local else "remote",
                           "--cache-dir", os.path.join(os.path.dirname(CACHE), "trivy"), image],
                          capture_output=True, text=True, timeout=900)
     if got.returncode != 0:

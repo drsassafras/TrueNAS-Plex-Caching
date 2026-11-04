@@ -17203,17 +17203,59 @@ class CheckToolTests(unittest.TestCase):
         clean = Check("A", lambda: Outcome("A", "1.0", []))
         found = Check("B", lambda: Outcome("B", "2.0", [Finding("B", "x.sh", 1, 2, "warning", "m", "SC1")]))
         broken = Check("C", lambda: Outcome("C", "3.0", None, "C couldn't be fetched: no network"))
-        def run(*cs):
+        def run(*cs, github=False):   # (where it runs pinned: on GitHub's runners a finding is annotated on its line too)
             out = io.StringIO()
-            with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": ""}):
+            with mock.patch.dict(os.environ, {"PLEXCACHE_PROGRESS": ""}), mock.patch.object(checks, "ON_GITHUB", github):
                 return checks.run(list(cs), stream=out), out.getvalue().splitlines()
         self.assertEqual(run(clean), (0, ["0 A findings"]))
         self.assertEqual(run(clean, found), (1, ["  x.sh:1:2 - warning: m (B SC1)", "0 A findings · 1 B finding"]))
+        self.assertEqual(run(clean, found, github=True), (1, ["  x.sh:1:2 - warning: m (B SC1)", "::warning file=x.sh,line=1,col=2,title=B SC1::m",
+                                                               "0 A findings · 1 B finding"]))
         self.assertEqual(run(found, broken), (2, ["  x.sh:1:2 - warning: m (B SC1)", "  C couldn't be fetched: no network",
                                                    "1 B finding · C didn't run"]))
         # a tool whose findings don't fail it (pyright's information notes) says its own facts
         notes = Check("D", lambda: Outcome("D", "4.0", [Finding("D", "y.py", 1, 1, "information", "n")], facts=["0 errors"], failed=False))
         self.assertEqual(run(notes), (0, ["  y.py:1:1 - information: n (D)", "0 errors"]))
+
+    def test_two_checks_wanting_one_tool_fetch_it_once(self):
+        """Build Validation's ShellCheck and actionlint (which hands ShellCheck each step's script) both want ShellCheck, in
+        threads of one run: the first fetches it, the second waits and finds it there; neither's download is the other's."""
+        from dev import checks
+        tool = {"name": "T", "version": "1.0", "get": "release", "url": "https://example.invalid/{asset}",
+                "assets": {checks.platform(): "t"}, "sha256": {checks.platform(): hashlib.sha256(b"#!/bin/sh\n").hexdigest()}}
+        gate, fetched = threading.Event(), []
+
+        def fetch(url):
+            fetched.append(url)
+            gate.wait(10)
+            return b"#!/bin/sh\n"
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(checks, "CACHE", d), \
+                mock.patch.object(checks, "tools", return_value={"t": tool}), mock.patch.object(checks, "fetch", fetch):
+            got = []
+            threads = [threading.Thread(target=lambda: got.append(checks.command("t"))) for _ in range(3)]
+            for t in threads:
+                t.start()
+            threading.Timer(0.3, gate.set).start()
+            for t in threads:
+                t.join(20)
+            exe = os.path.join(d, f"t-1.0-{checks.platform()}", "t")
+            self.assertEqual(got, [([exe], "")] * 3)
+            self.assertEqual(len(fetched), 1)
+            self.assertEqual(os.listdir(d), [os.path.basename(os.path.dirname(exe))])   # (no download left half made)
+
+    def test_a_tool_just_fetched_and_still_busy_is_waited_for(self):
+        """'Text file busy': another check's subprocess, started while the download was written, holds it open a moment."""
+        import errno
+        import subprocess
+
+        from dev import checks
+        done = subprocess.CompletedProcess(["t"], 0, "[]", "")
+        busy = OSError(errno.ETXTBSY, "Text file busy")
+        with mock.patch("subprocess.run", side_effect=[busy, busy, done]) as run, mock.patch("time.sleep"):
+            self.assertEqual(checks.json_out(["t"]), ([], done))
+        self.assertEqual(run.call_count, 3)
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError(errno.ENOENT, "gone")), mock.patch("time.sleep"):
+            self.assertRaises(FileNotFoundError, checks.call, ["t"])   # (any other failure is said as it is)
 
     def test_the_bar_counts_the_files_checked(self):
         """On tnsync's board a check tool's bar is the files its checks read, each counted once every check that reads it is
