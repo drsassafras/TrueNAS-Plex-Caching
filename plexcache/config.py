@@ -23,7 +23,7 @@ SECRET_MASK = "__unchanged__"  # noqa: S105 — (what the page shows for a secre
 SECRET_PATHS = (("plex", "token"), ("truenas", "api_key"), ("syncthing", "api_key"), ("mqtt", "password"))
 
 DEFAULTS: dict = {
-    "plex": {"url": "", "token": ""},
+    "plex": {"url": "", "token": "", "verify_tls": False, "pin_tls": True},
     # The mirrors (plex2.py): the other Plex servers with the same files (another site's, kept in step by syncing the
     # folders), one or several, chosen per library. "account_token": from signing in (lists the account's servers; "" uses
     # this server's own sign-in); "servers": the account's servers as reached — its machine id -> {"name", "url": the
@@ -42,7 +42,10 @@ DEFAULTS: dict = {
         "watched": "plex",       # watched state and ratings: "plex" (Plex's own sync carries them) | "off" | "both"
         "users": "home",         # whose: "me" | "home" (every user of the Plex Home)
     },
-    "truenas": {"url": "", "api_key": "", "verify_tls": False},
+    # verify_tls: full certificate verification (a real certificate); pin_tls: the certificate pinned on first use
+    # (tlspin.py) — the default for every keyed service, and only off while verify_tls is on (a key is never sent
+    # unverified; the pins themselves are in the "tls" section below, written by the app, never by the page)
+    "truenas": {"url": "", "api_key": "", "verify_tls": False, "pin_tls": True},
     # The folder sync on this server, read through its API (syncthing.py: System → Syncthing). "throttle": while people watch and
     # the media pool's disks are busier than "throttle_busy" %, the devices the mirrored folders are shared with are held to
     # "throttle_kbps" (Syncthing's per-device rate limits), until the disks are calmer than "throttle_calm" % or nobody plays.
@@ -52,13 +55,17 @@ DEFAULTS: dict = {
     # devices Syncthing reaches over the internet are held to what's left of your upload ("giveway_up_mbps", 0: not known, a
     # fixed "giveway_floor_kbps" then) less the streams' bandwidth, never under the floor; "giveway_both": receiving held too
     # (an ISP that pools up and down).
-    "syncthing": {"url": "", "api_key": "", "throttle": True, "throttle_kbps": 2000, "throttle_busy": 70, "throttle_calm": 40, "folders": {},
+    "syncthing": {"url": "", "api_key": "", "verify_tls": False, "pin_tls": True, "throttle": True, "throttle_kbps": 2000, "throttle_busy": 70, "throttle_calm": 40, "folders": {},
                   "giveway": True, "giveway_up_mbps": 0, "giveway_floor_kbps": 500, "giveway_both": False},
+    # The certificates pinned on first use (tlspin.py), by service — "truenas", "syncthing", "plex", or a mirrored Plex's
+    # "plex2:<machine id>" — each the SHA-256 of the certificate the service answered with. Written by the app (the first
+    # successful connection, or Trust New Certificate on the System page), never from the settings form.
+    "tls": {"pins": {}},
     # The other Dionysus, at the mirror's site (peerlink.py: System → Mirror Dionysus). "enabled": looked for (off: there's
     # none there); "auto_pair": paired by itself when it's safe; "port": the port the other side reaches this one on (0: worked
     # out); "remote_update": a paired Dionysus that's newer may start this one's update (the one its own check finds);
     # "servers": per mirrored server (its machine id) -> {"url": the Dionysus's address at its site ("": found by itself)}.
-    "peer": {"enabled": True, "auto_pair": True, "remote_update": True, "port": 0, "servers": {}},
+    "peer": {"enabled": True, "auto_pair": True, "remote_update": False, "port": 0, "servers": {}},  # (remote_update off unless turned on: F-2026-021)
     "general": {
         "poll_seconds": 5,
         "update_check": True,  # ask GitHub every few hours whether there's a newer version
@@ -377,6 +384,16 @@ def _coerce(section: str, key: str, value, current):
         return _url(section, value)
     if (section, key) in (("plex", "token"), ("truenas", "api_key"), ("syncthing", "api_key"), ("plex2", "account_token")):
         return _text(section, key, value, 255, spaces=False)
+    if (section, key) == ("tls", "pins"):  # each service's pinned certificate (tlspin.py): a SHA-256, or "" to forget it
+        if not isinstance(value, dict) or len(value) > MAX_ITEMS:
+            raise SettingsError(M("tls.pins must map each service to its certificate’s SHA-256"))
+        out = {}
+        for k, v in value.items():
+            if not re.fullmatch(r"[a-z0-9_.-]{1,80}(:[A-Za-z0-9_-]{1,64})?", str(k)) or not (v == "" or (isinstance(v, str) and re.fullmatch(r"[0-9a-fA-F]{64}", v))):
+                raise SettingsError(M("tls.pins must map each service to its certificate’s SHA-256"))
+            if v:
+                out[str(k)] = v.lower()
+        return out
     if (section, key) == ("syncthing", "folders"):  # per library: the Syncthing folder chosen for it by hand
         if not isinstance(value, dict) or len(value) > MAX_ITEMS or any(not isinstance(v, dict) or not _LIB_KEY.fullmatch(str(k)) for k, v in value.items()):
             raise SettingsError(M("{setting} must map each library to its Syncthing folder", setting="syncthing.folders"))
@@ -391,8 +408,12 @@ def _coerce(section: str, key: str, value, current):
             token = str(v.get("token") or "")
             if token == SECRET_MASK:  # (the page sends the mask back: the token kept)
                 token = str(((current or {}).get(str(k)) or {}).get("token") or "")
+            direct = str(v.get("direct") or "").strip().lower()  # the server's own *.plex.direct name (plex2.remember): what its certificate is verified against
+            if direct and not (len(direct) <= 253 and direct.endswith(".plex.direct") and re.fullmatch(r"[a-z0-9.-]+", direct)):
+                direct = ""
             out[str(k)] = {"url": url} if section == "peer" else {"name": _text(section, "name", str(v.get("name") or ""), 200), "url": url,
-                                                                 "token": _text(section, "token", token, 255, spaces=False), "relay": bool(v.get("relay"))}
+                                                                 "token": _text(section, "token", token, 255, spaces=False), "relay": bool(v.get("relay")),
+                                                                 "direct": direct}
         return out
     if (section, key) == ("library_health", "audio_quality"):
         if value not in ("poor", "fair", "good", "best"):
@@ -771,6 +792,9 @@ class Settings:
                     new[sec][key] = _coerce(sec, key, value, DEFAULTS[sec][key])
             if new["nowplaying"]["ram_percent"] + new["nextepisode"]["ram_percent"] > 100:
                 raise SettingsError(M("Now Playing Cache and Prefetch limits together can’t be more than 100%"))
+            for sec in ("plex", "truenas", "syncthing"):  # a key is never sent unverified: the pin stands until full verification does
+                if not new[sec]["pin_tls"] and not new[sec]["verify_tls"]:
+                    raise SettingsError(M("{section}: certificate pinning can only be turned off while full certificate verification is on", section=sec))
             if new != self._data:
                 self.rev += 1
             self._data = new

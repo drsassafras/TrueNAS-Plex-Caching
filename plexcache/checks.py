@@ -846,8 +846,9 @@ def optimizer_code_mount() -> str | None:
 
 def optimizer_yaml(app) -> str:
     """The optimizer's service, to paste into the app's YAML. Its volumes are filled in from this
-    app's own mounts: the settings folder (read-only: the optimizer reads the app's token there),
-    the media folders (writable: what it may rewrite) and, in a test copy, the code."""
+    app's own mounts: the optimizer folder in the settings folder (read-only: the optimizer reads the
+    app's token there, and the settings and keys beside it stay out of its container), the media
+    folders (writable: what it may rewrite) and, in a test copy, the code."""
     ml = zfs.mounts()
     config = zfs.host_path(getattr(app, "config_dir", "/config"), ml) or "/mnt/tank/apps/plex-cache"
     mounts = sorted({d.get("mountpoint") for d in (app.zfs or {}).get("datasets") or []
@@ -865,7 +866,7 @@ def optimizer_yaml(app) -> str:
             "    command: [\"python\", \"-m\", \"plexcache.optimize\", \"serve\"]\n"
             "    user: \"568:568\"\n"
             "    volumes:\n"
-            f"      - {config}:/config:ro\n"
+            f"      - {config}/optimizer:/config/optimizer:ro\n"
             f"{media}{code_line}\n"
             "    security_opt:\n"
             "      - no-new-privileges:true\n"

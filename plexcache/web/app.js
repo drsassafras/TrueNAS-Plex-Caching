@@ -435,9 +435,12 @@ PCI18N.ready.then(function () {
     const asked = (ST && ST.peer && ST.peer.asked) || {};
     return Object.keys(asked).map(function (sid) {
       const a = asked[sid], n = Math.max(1, Math.ceil((a.left || 0) / 60));
-      return '<div class="note">' + links(a.wanted
-        ? T("The Dionysus on {name} asks to pair: press Pair Now on [System → Mirror Dionysus](/system#peer) within {n} minutes.", { name: a.name, n: n })
-        : T("The Dionysus on {name} asks to pair, but no library here is mirrored by {server}: choose one on the [Mirror page](/mirrors), then press Pair Now on [System → Mirror Dionysus](/system#peer).", { name: a.name, server: a.server })) + "</div>";
+      // its picture and code first — what its own pages show as its own, so the two can be compared before anything is trusted
+      const who = (a.id ? identicon(a.id, "sm") : "") + "<strong>" + esc(T("{name} Wants to Pair with You", { name: a.name })) + "</strong>" +
+        (a.fingerprint ? ' <span class="muted">' + esc(a.fingerprint) + "</span>" : "");
+      return '<div class="note">' + who + "<br>" + links(a.wanted
+        ? T("Check that the picture matches what that Dionysus shows as its own, then press Pair Now on [System → Mirror Dionysus](/system#peer) within {n} minutes — entering the code it shows there proves the pairing.", { n: n })
+        : T("No library here is mirrored by {server} yet: choose one on the [Mirror page](/mirrors), then press Pair Now on [System → Mirror Dionysus](/system#peer).", { server: a.server })) + "</div>";
     }).join("");
   }
   function rec(feature) {
@@ -3852,15 +3855,21 @@ PCI18N.ready.then(function () {
       '<input id="s-peerurl-' + esc(sid) + '" type="text" value="' + esc(url.url || "") + '" placeholder="' + esc(lk.detected || "http://192.168.1.20:8642") + '" data-peerurl="' + esc(sid) + '">' +
       (url.url ? ' <button type="button" class="revert" data-peerurl-revert="' + esc(sid) + '" title="' + H("Back to the default ({value})", { value: T("found by itself") }) + '">↺</button>' : "") +
       '<div class="help">' + H("Found by itself. Enter it when the other one runs on another port, or is reached at another address.") + "</div></div></div>";
-    if (lk.window) {  // (open here: a link to the other one's Pair Now, where it's known)
+    if (lk.window) {  // (open here: this side's one-time code, and a link to the other one's Pair Now, where it's known)
       const there = ((lk.paired || {}).url || lk.detected || url.url || "").replace(/\/+$/, "");
-      out += '<div class="note">' + H("Pairing is open for {n} more minutes: press Pair Now on the other Dionysus too.", { n: Math.max(1, Math.ceil(lk.window / 60)) }) +
+      const code = (lk.code || "").replace(/^(.{4})(.{4})$/, "$1-$2");
+      out += '<div class="note">' + (code
+        ? H("Pairing is open for {n} more minutes. This side’s code is <strong>{code}</strong>: entering it with Pair Now on the other Dionysus proves the pairing.", { n: Math.max(1, Math.ceil(lk.window / 60)), code: code })
+        : H("Pairing is open for {n} more minutes: press Pair Now on the other Dionysus too.", { n: Math.max(1, Math.ceil(lk.window / 60)) })) +
         (there ? ' <a href="' + esc(there) + '/system#peer" target="_blank" rel="noopener">' + H("Open Pair Now on the other one ↗") + "</a>" : "") + "</div>";
     }
     const asked = !!((pe.asked || {})[sid]);
-    // one pairing per server: Pair Now while there's none (or the other side asks for a new one), Unpair while there is
-    out += '<div class="acts">' + (!lk.paired || asked ? '<button class="btn' + ((lt.found && lt.found.status === "ok" && !lk.paired) || asked ? " pri" : "") + '" type="button" data-act="peer-pair" data-server="' + esc(sid) + '"' + (lk.window ? " disabled" : "") + ">" + H("Pair Now") + "</button>" +
-      info(H("Opens pairing for 10 minutes, without waiting for the synced folder or the mirror’s address: press it on both, then compare the fingerprints: what each shows for the other is what the other shows as its own. For when pairing by itself can’t, or is off."), T("Pair Now")) : "") +
+    const unproven = !!(lk.paired && !lk.paired.proven);  // (paired, but nothing vouched for it: Pair Now with the code proves it)
+    // one pairing per server: Pair Now while there's none (or the other side asks for a new one, or it isn't proven), Unpair while there is
+    out += '<div class="acts">' + (!lk.paired || asked || unproven ? '<input type="text" class="mono" maxlength="9" data-paircode="' + esc(sid) +
+      '" placeholder="' + H("code from the other side") + '" aria-label="' + H("Pairing code shown on the other Dionysus") + '">' +
+      '<button class="btn' + ((lt.found && lt.found.status === "ok" && !lk.paired) || asked ? " pri" : "") + '" type="button" data-act="peer-pair" data-server="' + esc(sid) + '"' + (lk.window ? " disabled" : "") + ">" + H("Pair Now") + "</button>" +
+      info(H("Opens pairing for 10 minutes, without waiting for the synced folder or the mirror’s address: press it on both. Each side shows a one-time code; type one side’s code into the other before pressing, and the pairing is proven — without it the two still pair, but only read from each other. The fingerprints tell you it’s the right machine: what each shows for the other is what the other shows as its own."), T("Pair Now")) : "") +
       (lk.paired ? '<button class="btn" type="button" data-act="peer-unpair" data-server="' + esc(sid) + '" title="' + H("Forgets the pairing on both sides. Neither pairs again by itself: Pair Now on both does.") + '">' + H("Unpair") + "</button>" : "") + "</div>";
     return out + "</fieldset>";
   }
@@ -3903,7 +3912,7 @@ PCI18N.ready.then(function () {
         "<strong>If it’s orange, please report it on GitHub</strong> with your Syncthing version and the calls it names: the app then learns the new path, and the features that need it work again. A weekly check against the next Syncthing release runs on GitHub too."), T("API compatibility")) },
       { reach: Object.keys((lt.reach || {}).fix || {}).map(function (did) {
         return '<button class="btn" type="button" data-act="syncthing-address" data-device="' + esc(did) + '" title="' + H("Gives the device the mirror’s address as tcp://host:22000, keeping what it has.") + '">' + H("Add Its Address") + "</button>";
-      }).join(" ") }) + "</div>" +
+      }).join(" ") }) + certLight("syncthing", "Syncthing", testing) + "</div>" +
       '<div class="grid">' + textInput("syncthing", "url", T("Syncthing address"), "s-syurl", H("Its web UI’s address on this server, filled in by itself when one is found among TrueNAS’s apps or on port 8384. Port 8384 is used if you leave it off."), "http://192.168.1.10:8384") +
       secretInput("syncthing", "api_key", T("API key"), "s-sykey") + "</div>" +
       details("stkey", H("How to find the API key"),
@@ -3911,6 +3920,8 @@ PCI18N.ready.then(function () {
         "<li>" + H("On the <strong>General</strong> tab, copy the <strong>API Key</strong>.") + "</li>" +
         "<li>" + H("Paste it above.") + "</li></ol>",
         !!(S.syncthing || {}).url && !(lt.key && lt.key.status === "ok")) +
+      (String((S.syncthing || {}).url || "").toLowerCase().indexOf("https://") === 0 ? '<div style="margin-top:12px">' + checkbox("syncthing", "verify_tls", T("Verify the certificate against a CA"),
+        { s: H("For an https:// address with a real certificate (a reverse proxy). Off, the certificate is pinned on first use instead — Syncthing’s own is self-signed by design.") }) + "</div>" : "") +
       '<div style="margin-top:12px">' + checkbox("syncthing", "throttle", T("Hold Syncthing back while people watch and the disks are busy"),
         { s: H("A season just dropped in, someone starts watching, and Syncthing scans and sends it all at once: the disks serve three things. With this on, the devices the mirrored folders are shared with are held to a rate while something plays and the media pool’s disks are busy, and let go once they’re calm or nobody is watching."),
           more: H("Syncthing’s own per-device rate limits are what’s set, so it applies at once and the small .plexcache files still travel; pausing the folder would stop those too. The limits a device had are kept and put back. Held after half a minute over the busy mark, let go after a minute under the calm mark, or at once when the last stream ends. Each hold and release is in the Activity log.") }) + "</div>" +
@@ -3966,6 +3977,7 @@ PCI18N.ready.then(function () {
       else if (!sv.known) out += light("testing", T("{name}: reading its libraries…", { name: sv.name }), sv.url);
       else if (sv.relay) out += light("warn", sv.error ? T("{name} answered through Plex’s relay, then stopped", { name: sv.name }) : T("{name} answers through Plex’s relay", { name: sv.name }), (sv.error ? sv.error : T("{url} · {n} libraries", { url: sv.url, n: fmtNum((sv.libraries || []).length) })) + " " + relayHint);
       else out += light(sv.error ? "warn" : "ok", sv.error ? T("{name} answered, then stopped", { name: sv.name }) : T("{name} answers", { name: sv.name }), sv.error ? sv.error : T("{url} · {n} libraries", { url: sv.url, n: fmtNum((sv.libraries || []).length) }));
+      if (sv.tls && sv.tls.changed) out += certChanged("plex2:" + sv.id, sv.name, sv.tls.changed);  // (its pinned certificate changed: refused until trusted here)
       const lk = peerLinks[sv.id], lt = (lk || {}).lights || {};
       if (!ps.enabled) out += light("off", T("No Dionysus at {name}’s site", { name: sv.name }), T("Not looked for: Mirror Checks compare the two Plexes only. [System → Mirror Dionysus](/system#peer)"));
       else if (!lk) out += light("off", T("Dionysus at {name}’s site", { name: sv.name }), T("Looked for once the server is reached."));
@@ -4203,7 +4215,7 @@ PCI18N.ready.then(function () {
       '<div class="lights">' + integrationLights("plex", testing, { api: info(H("Plex publishes no list of its API, so this light tries every read the app makes — the server, its identity, the libraries, what’s playing, a library’s items and collections, an item, a show’s episodes — and is green when each one answers. The changes the tools make go to the same paths and aren’t tried."), T("API compatibility")) },
         { lan: (c.plex_lan && c.plex_lan.add && c.plex_lan.add.length ? '<button class="btn" type="button" data-act="plex-lan" title="' + H("Adds the networks Plex answers on — this NAS’s, and Tailscale’s range when Plex is on your tailnet — to Plex’s LAN Networks (Settings → Network), keeping what’s there.") + '">' + H("Add Subnets to Plex LAN") + "</button>" : "") +
             (c.plex_lan && c.plex_lan.iface ? '<button class="btn" type="button" data-act="plex-iface" title="' + H("Sets Plex’s Preferred network interface (Settings → Network) to any, so Plex answers on every network this NAS is on.") + '">' + H("Answer on All Networks") + "</button>" : ""),
-          urls: c.plex_urls && c.plex_urls.add && c.plex_urls.add.length ? '<button class="btn" type="button" data-act="plex-urls" title="' + H("Adds this NAS’s tailnet address, on Plex’s port, to Plex’s Custom server access URLs (Settings → Network), keeping what’s there.") + '">' + H("Add URLs to Plex") + "</button>" : "" }) + "</div>" +
+          urls: c.plex_urls && c.plex_urls.add && c.plex_urls.add.length ? '<button class="btn" type="button" data-act="plex-urls" title="' + H("Adds this NAS’s tailnet address, on Plex’s port, to Plex’s Custom server access URLs (Settings → Network), keeping what’s there.") + '">' + H("Add URLs to Plex") + "</button>" : "" }) + certLight("plex", "Plex", testing) + "</div>" +
       '<div class="grid">' +
       textInput("plex", "url", T("Server address"), "s-purl", H("Usually your NAS’s IP. Port 32400 is used if you leave it off."), guessPlex) +
       secretInput("plex", "token", T("Token (filled in when you sign in)"), "s-ptok") +
@@ -4215,6 +4227,8 @@ PCI18N.ready.then(function () {
           "<strong>10 seconds</strong> — fine for mostly movies and TV watched straight through.<br>" +
           "<strong>30 seconds</strong> — the fewest requests, but streams and skips can be noticed up to half a minute late; short songs may be half over, and brief buffering can be missed.<br><br>" +
           "Faster than 3 seconds gains little: Now Playing Cache waits for Plex’s own start-up buffer anyway.") }) + "</div>" +
+      (String((S.plex || {}).url || "").toLowerCase().indexOf("https://") === 0 ? '<div style="margin-top:12px">' + checkbox("plex", "verify_tls", T("Verify the certificate against a CA"),
+        { s: H("For an https:// address with a real certificate (a reverse proxy). Off, the certificate is pinned on first use instead; a plex.direct address is always fully verified.") }) + "</div>" : "") +
       '<div class="acts"><button class="btn' + (tokOk ? "" : " pri") + '" data-act="plex-signin">' + (tokOk ? H("Sign In Again") : H("Sign In with Plex")) + "</button>" +
       '<span class="muted" style="font-size:13px">' + H("Why sign in?") + info(H("Plex only shares your libraries and what’s playing with apps that hold a token for your account, so this step is required. " +
       "“Sign In with Plex” opens plex.tv; once you approve “Dionysus”, Plex gives this app a token. It’s kept only in this app’s config folder and is used to read from your server — " +
@@ -4233,12 +4247,12 @@ PCI18N.ready.then(function () {
       '<fieldset class="plain' + (pf.truenas === false ? " greyed" : "") + '"' + (pf.truenas === false ? " disabled" : "") + ">" +
       '<p class="hint">' + H("Read-only: checks cache devices and dataset settings.") + info(H("It’s also how the app sizes the L2ARC, pauses for scrubs and resilvers, and checks the optimizer’s service. It never changes anything."), "TrueNAS") + "</p>" +
       '<div class="lights">' + integrationLights("truenas", testing, { api: info(H("TrueNAS renames API methods between releases (<code>zfs.snapshot.*</code> became <code>pool.snapshot.*</code> in 25.04). This light checks every call Dionysus makes — signing in, the version, pools, disks, dataset settings, apps, updates, snapshots — against the list of methods this TrueNAS offers, and is green when each has a name there. " +
-        "<strong>If it’s orange, please report it on GitHub</strong> with your TrueNAS version and the calls it names: the app then learns the new name, and the features that need it work again. A weekly check against the next TrueNAS release runs on GitHub too, so most renames are caught before they reach you."), T("API compatibility")) }) + "</div>" +
+        "<strong>If it’s orange, please report it on GitHub</strong> with your TrueNAS version and the calls it names: the app then learns the new name, and the features that need it work again. A weekly check against the next TrueNAS release runs on GitHub too, so most renames are caught before they reach you."), T("API compatibility")) }) + certLight("truenas", "TrueNAS", testing) + "</div>" +
       '<div class="grid">' +
       textInput("truenas", "url", T("TrueNAS address"), "s-turl", H("https:// is used automatically — TrueNAS revokes API keys sent over plain http."), guessTn) +
       secretInput("truenas", "api_key", T("API key"), "s-tkey") + "</div>" +
       '<div class="chk" style="margin-top:12px">' + infoOrGap("", "") + '<label><input type="checkbox" data-check="truenas.verify_tls"' + (S.truenas.verify_tls ? " checked" : "") +
-      ">" + H("Verify the TLS certificate (leave off for TrueNAS’s self-signed certificate)") + "</label>" + revertBtn("truenas", "verify_tls", "") + "</div>" +
+      ">" + H("Verify the certificate against a CA (leave off for TrueNAS’s self-signed one: it’s pinned on first use instead)") + "</label>" + revertBtn("truenas", "verify_tls", "") + "</div>" +
       details("apikey", H("How to create an API key"),
         "<ol style=\"margin:8px 0 0;padding-left:20px\"><li>" + H("In TrueNAS, open your user menu (top right) → <strong>API Keys</strong>.") + "</li>" +
         "<li>" + H("Choose <strong>Add</strong>, name it “plex-cache”, and save.") + "</li>" +
@@ -4463,6 +4477,26 @@ PCI18N.ready.then(function () {
     const label = idn.name || title;
     return '<div class="fpmark own"><div class="fpstack">' + identicon(idn.id) + '<span class="fpcode" title="' + esc(idn.id) + '">' + esc(idn.short) + '</span><span class="fpname">' + esc(label) + "</span></div>" +
       info(H("{title}’s identity: the same picture wherever this server is shown, here and at the mirror’s site, whatever address reaches it. {source} In full: {id}", { title: title, source: identitySource(idn), id: idn.id }), T("{title} identity", { title: title })) + "</div>";
+  }
+  // how a keyed service's TLS is verified (integrations "tls", from app.tls_state): one quiet light while all is well,
+  // and a loud one with Trust New Certificate when it answers with another certificate than its pin — old and new drawn
+  // as identicons, so what's being trusted is seen before it is (tlspin.py)
+  function certLight(name, title, testing) {
+    const tls = ((ST.integrations || {})[name] || {}).tls, url = String((S[name] || {}).url || "");
+    if (!tls || url.toLowerCase().indexOf("https://") !== 0) return "";  // (no TLS in play: plain http, or nothing set)
+    if (tls.changed) return certChanged(name, title, tls.changed, testing);
+    if (tls.verify === "ca") return light("ok", T("Certificate fully verified"), T("Checked against your system’s certificate authorities on every connection, like a browser."), testing);
+    if (tls.verify === "pin") return light("ok", T("Certificate pinned ({fp})", { fp: fpShort(tls.pin) }), T("{title} must answer with this very certificate from now on: anything else is refused before the key is sent.", { title: title }), testing);
+    return light("off", T("Certificate pinned on first connection"), T("The first certificate {title} answers with is pinned, and every connection after that must show it.", { title: title }), testing);
+  }
+  function fpShort(fp) { fp = String(fp || "").toUpperCase(); return fp ? fp.slice(0, 4) + "-" + fp.slice(4, 8) + "-" + fp.slice(8, 12) : ""; }
+  // the pinned certificate and the one answering now, each its identicon and code, with the one act that changes anything
+  function certChanged(service, title, ch, testing) {
+    const act = '<button class="btn" type="button" data-act="tls-trust" data-service="' + esc(service) + '" title="' + H("Reads the certificate the service answers with now, afresh, and pins it in the old one’s place.") + '">' + H("Trust New Certificate") + "</button>";
+    return '<div class="lightrow"><span class="light l-fail" aria-hidden="true"></span><div class="grow"><div class="what">' + H("{title}’s certificate changed — refused, nothing was sent to it", { title: title }) + "</div>" +
+      '<div class="det">' + H("If you renewed or reinstalled {title}, trust the new certificate. If you didn’t, don’t: something on the network may be standing in for it.", { title: title }) + "</div>" +
+      '<div class="det fp"><span class="fpstack">' + identicon(ch.pinned, "md") + '<span class="fpcode" title="' + esc(ch.pinned) + '">' + esc(fpShort(ch.pinned)) + '</span><span class="fpname">' + H("pinned") + '</span></span><span aria-hidden="true">→</span>' +
+      '<span class="fpstack">' + identicon(ch.seen, "md") + '<span class="fpcode" title="' + esc(ch.seen) + '">' + esc(fpShort(ch.seen)) + '</span><span class="fpname">' + H("answering now") + "</span></span></div></div>" + (testing ? "" : act) + "</div>";
   }
   // acts: {step: the button for what that light found (its HTML), or ""}, shown in the light's row (light)
   // (lights: another set drawn in the same order — the link's per server, from that link's own lights)
@@ -6346,6 +6380,14 @@ PCI18N.ready.then(function () {
       el.disabled = true;
       api("/api/plex2/address", { server: el.dataset.server, url: inp ? inp.value.trim() : "" }).then(function () { load(); }).catch(function (e) { toast(e.message, true); load(); });
     }
+    else if (act === "tls-trust") {  // a service's new certificate pinned in the old one's place (tlspin.py)
+      el.disabled = true;
+      api("/api/tls/trust", { service: el.dataset.service }).then(function (got) {
+        if (got.error) { toast(msg(got.error), true); load(); return; }
+        toast(T("New certificate trusted"));
+        ST.testing = true; render(); setTimeout(load, 1500);
+      }).catch(function (e) { toast(e.message, true); load(); });
+    }
     else if (act === "syncthing-test") {  // System → Syncthing: asked again now
       el.disabled = true;
       flush().then(function () { return api("/api/syncthing/test", {}); }).then(function () { (ST.syncthing || {}).busy = true; render(); setTimeout(load, 2500); })
@@ -6353,7 +6395,8 @@ PCI18N.ready.then(function () {
     }
     else if (act === "peer-pair" || act === "peer-unpair" || act === "peer-test") {  // System → Mirror Dionysus, per mirror's server
       el.disabled = true;
-      flush().then(function () { return api("/api/peer/" + act.slice(5), { server: el.dataset.server || "" }); }).then(function (got) { ST.peer = got; render(); setTimeout(load, 2000); })
+      const codeInp = act === "peer-pair" ? document.querySelector('[data-paircode="' + (el.dataset.server || "") + '"]') : null;  // (the code read off the other side's page, if typed)
+      flush().then(function () { return api("/api/peer/" + act.slice(5), { server: el.dataset.server || "", code: codeInp ? codeInp.value.trim() : "" }); }).then(function (got) { ST.peer = got; render(); setTimeout(load, 2000); })
         .catch(function (e) { toast(e.message, true); load(); });
     }
   }

@@ -405,10 +405,13 @@ class Tool:
             want = set(ids)
             return [self.choose(r, (choices or {}).get(r["id"]) or {}) for r in (self.scan_result or {}).get("rows") or [] if r["id"] in want]
 
+    choice_keys: tuple[str, ...] = ()  # the keys a page's choice may set on a row (Merge Duplicates and Duplicate Versions: "keep_key")
+
     def choose(self, row: dict, choice: dict) -> dict:
-        """A row with your choice for it (the page's arrow: which side is kept) merged in. A tool whose choice changes what
-        the row does (Duplicate Versions: which copy goes) works the row out again; never a choice's own ``blocked``."""
-        return dict(row, **{k: v for k, v in choice.items() if k not in ("blocked", "blocks", "held", "stopped")})
+        """A row with your choice for it (the page's arrow: which side is kept) merged in — only the keys the tool
+        declares (``choice_keys``), so a request can't rewrite the row itself (its paths, its blocks). A tool whose choice
+        changes what the row does (Duplicate Versions: which copy goes) works the row out again."""
+        return dict(row, **{k: v for k, v in choice.items() if k in self.choice_keys})
 
     def merge_first(self, library: str) -> set[str]:
         """The Plex records of a film on several, as Merge Duplicates finds them in this library (its live rows: its

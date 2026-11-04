@@ -26,7 +26,7 @@ import unicodedata
 from .i18n import M
 from .optimize.claims import PEER_DAYS
 from .paging import sort_key
-from .plex import EDIT_FIELDS, PlexClient, PlexError, reachable, servers
+from .plex import EDIT_FIELDS, PlexError, reachable, servers
 
 STORE = "sync-report.json"  # (the servers found: named from when a compare's report was kept in it too)
 MAX_ITEMS = 1000  # differences listed per library by default (the counts are whole)
@@ -342,12 +342,12 @@ class Sync:
             url = reachable(sv)
             cand = {"id": sv["id"], "name": sv["name"], "url": url or "", "libraries": [], "rate": None}
             if url:
-                # a server in use is read the way everything else reads it (its kept address, reconnect), and a failure is
-                # its light's to say; one not in use, at the address plex.tv lists, its failure said under the look
+                # every server is read the way everything else reads it (mirrors.run: its kept address, the certificate
+                # checked, reconnect); a failure is its light's to say when it's in use, said under the look when not
                 used = sv["id"] in self.app.mirrors.used() and self.app.mirrors.configured(sv["id"])
                 if not used:
                     self.app.mirrors.remember(sv, url)  # (reached: its address and token kept, so choosing a library of it is instant)
-                read = (lambda fn, sid=sv["id"]: self.app.mirrors.run(sid, fn, timeout=120)) if used else (lambda fn, c=PlexClient(url, sv["token"], timeout=120): fn(c))  # noqa: B008 — (one client, made once)
+                read = lambda fn, sid=sv["id"]: self.app.mirrors.run(sid, fn, timeout=120)  # noqa: E731
                 try:
                     found = of = 0
                     for there in read(lambda c: c.libraries()):

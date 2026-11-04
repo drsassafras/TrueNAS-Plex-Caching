@@ -57,21 +57,8 @@ def ws_url(url: str) -> str:
 def cert_fingerprint(url: str, timeout: float = 5) -> str:
     """The SHA-256 of the certificate TrueNAS's web UI presents at ``url`` (hex), read with no key; "" when nothing answers.
     The host's id (host_id) is the identity to prefer: the certificate is regenerated more often."""
-    import hashlib
-    import socket
-    import ssl
-    u = urllib.parse.urlsplit(url)
-    if not u.hostname or u.scheme != "https":
-        return ""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    try:
-        with socket.create_connection((u.hostname, u.port or 443), timeout=timeout) as s, ctx.wrap_socket(s, server_hostname=u.hostname) as t:
-            der = t.getpeercert(binary_form=True)
-    except (OSError, ssl.SSLError, ValueError):
-        return ""
-    return hashlib.sha256(der).hexdigest() if der else ""
+    from .tlspin import fingerprint
+    return fingerprint(url, timeout)
 
 
 def probe(url: str, timeout: float = 5) -> bool:
@@ -91,12 +78,14 @@ def probe(url: str, timeout: float = 5) -> bool:
 
 
 class TrueNASClient:
-    def __init__(self, url: str, api_key: str, verify_tls: bool = False, timeout: float = 20):
+    def __init__(self, url: str, api_key: str, verify_tls: bool = False, timeout: float = 20, tls=None):
+        """``tls``: the context the connection is verified with (tlspin, through App.truenas: the pin, or full
+        verification); without one, ``verify_tls`` as before (False: unverified — tests and probes only)."""
         if not url or not api_key:
             raise TrueNASError(M("TrueNAS address and API key are not set"))
         self._ids = itertools.count(1)
         try:
-            self.ws = WebSocket(ws_url(url), verify_tls=verify_tls, timeout=timeout)
+            self.ws = WebSocket(ws_url(url), verify_tls=verify_tls, timeout=timeout, context=tls)
         except WebSocketError as e:
             raise TrueNASError(M("Can’t connect to TrueNAS: {why}", why=str(e))) from None
         try:

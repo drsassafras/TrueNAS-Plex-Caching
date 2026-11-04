@@ -140,17 +140,33 @@ def link(path: str, new: str) -> dict:
     return {"linked": new}
 
 
+def same_file(a: str, b: str) -> bool:
+    """Whether the two paths hold the same file: the same inode and device (a hard link), or — where a move had to copy
+    instead (link()'s other-dataset fallback) — byte for byte the same content."""
+    sa, sb = os.lstat(a), os.lstat(b)
+    if (sa.st_ino, sa.st_dev) == (sb.st_ino, sb.st_dev):
+        return True
+    if not (stat.S_ISREG(sa.st_mode) and stat.S_ISREG(sb.st_mode)) or sa.st_size != sb.st_size:
+        return False
+    with open(a, "rb") as fa, open(b, "rb") as fb:
+        while True:
+            ca = fa.read(1 << 20)
+            if ca != fb.read(1 << 20):
+                return False
+            if not ca:
+                return True
+
+
 def unlink(path: str, keep: str | None = None) -> dict:
-    """A path removed. With ``keep``, only when that path is another link to the same file (the move
-    is complete), so the file itself is never lost."""
-    st = _plain(path)
+    """A path removed. With ``keep``, only when that path holds the same file (the move is complete), so the file itself
+    is never lost."""
+    _plain(path)
     if keep is not None:
         try:
-            other = os.lstat(keep)
+            if not same_file(keep, path):
+                raise ValueError("the other path isn't the same file")
         except OSError:
             raise ValueError("the other path isn't there") from None
-        if (other.st_ino, other.st_dev) != (st.st_ino, st.st_dev) and other.st_size != st.st_size:
-            raise ValueError("the other path isn't the same file")
     os.remove(path)
     folder = os.path.dirname(path)
     try:

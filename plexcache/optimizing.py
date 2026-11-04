@@ -63,7 +63,8 @@ STATUS_TTL = 15
 
 
 DEFAULT_URL = "http://plex-cache-optimizer:8643"  # the second service in the app's YAML
-TOKEN_FILE = "optimizer-token"  # noqa: S105 — (a file's name) in the config folder, which the optimizer mounts read-only
+TOKEN_FILE = "optimizer/token"  # noqa: S105 — (a file's name) in a folder of its own in the config folder: all the optimizer needs mounted
+OLD_TOKEN_FILE = "optimizer-token"  # noqa: S105 — beside the settings and keys, where an older deployment's optimizer mounts the whole folder
 # How a missing service shows up: its name doesn't resolve (no such service in the YAML), or nothing listens
 NOT_THERE = ("name or service not known", "nodename nor servname", "name resolution", "no address associated",
              "name does not resolve", "connection refused", "not set up")
@@ -212,24 +213,40 @@ class Optimizing:
         self._diagnosing = False
 
     def token(self) -> str:
-        """The token the optimizer accepts, made once and kept in the config folder: the optimizer
-        reads it there (it mounts the folder read-only), so nobody has to copy it."""
-        path = os.path.join(self.app.config_dir, TOKEN_FILE)
+        """The token the optimizer accepts, made once and kept in a folder of its own in the config folder
+        (optimizer/token): the optimizer mounts just that folder read-only, so nobody has to copy it and the settings
+        and keys beside it stay out of its container. It's kept at the old path too (optimizer-token), which an older
+        deployment's optimizer reads from the whole folder it still mounts."""
+        paths = [os.path.join(self.app.config_dir, p) for p in (TOKEN_FILE, OLD_TOKEN_FILE)]
+        token = ""
+        for p in paths:
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    got = fh.read().strip()
+            except OSError:
+                continue
+            if len(got) >= 32:
+                token = got
+                break
+        token = token or secrets.token_hex(24)
         try:
-            with open(path, encoding="utf-8") as fh:
-                token = fh.read().strip()
-            if len(token) >= 32:
-                return token
+            # the folder and files readable by the apps group too (568): the optimizer may run as another user in it
+            os.makedirs(os.path.dirname(paths[0]), mode=0o750, exist_ok=True)
         except OSError:
             pass
-        token = secrets.token_hex(24)
-        try:
-            # readable by the apps group too (568): the optimizer may run as another user in it
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(token)
-        except OSError:
-            pass  # a new one next time, then
+        for p in paths:
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    if fh.read().strip() == token:
+                        continue
+            except OSError:
+                pass
+            try:
+                fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(token)
+            except OSError:
+                pass  # a new one next time, then
         return token
 
     # ------------------------------------------------------------ setting it up
@@ -284,9 +301,10 @@ class Optimizing:
                 step("yaml", False, M("Add the optimizer to the app’s YAML"),
                      M("{app} has no optimizer service.", app=appname),
                      M("In TrueNAS, Apps → {app} → Edit. Paste the lines below under services: (next to {service}), "
-                       "and Save. The volumes are filled in from {service}'s own: its settings folder, read-only (the "
-                       "optimizer finds the app’s token there), and your media, writable — the optimizer can only change "
-                       "what’s mounted, so leave out any folder it shouldn’t touch.", app=appname, service=tn["me"] or appname),
+                       "and Save. The volumes are filled in from {service}'s own: the optimizer folder in its settings "
+                       "folder, read-only (the optimizer finds the app’s token there, and nothing else), and your media, "
+                       "writable — the optimizer can only change what’s mounted, so leave out any folder it shouldn’t "
+                       "touch.", app=appname, service=tn["me"] or appname),
                      checks.optimizer_yaml(self.app))
                 return self._done(steps)
             step("yaml", True, M("In the app’s YAML"), M("Service {service}.", service=opt.get("service_name")))
@@ -353,17 +371,17 @@ class Optimizing:
             return self._done(steps)
         if not hz.get("token"):
             problem = hz.get("token_problem")
-            why = {"missing": M("There’s no {file} in it: the app’s settings folder isn’t mounted into it at /config.",
-                                file=hz.get("token_file") or "/config/optimizer-token"),
+            why = {"missing": M("There’s no {file} in it: the app’s token folder isn’t mounted into it.",
+                                file=hz.get("token_file") or "/config/optimizer/token"),
                    "unreadable": M("It can’t read {file}: it runs as user {uid}, which can’t read files in the app’s "
                                    "settings folder.", file=hz.get("token_file") or "", uid=hz.get("uid")),
                    }.get(problem or "", M("The token file is empty."))
             fix = (M("In Apps → {app} → Edit, run the optimizer as user 568 (apps), or add it to that group "
                      "(group_add: [\"568\"]).", app=appname) if problem == "unreadable" else
-                   M("In Apps → {app} → Edit, add the app’s settings folder to the optimizer’s volumes, read-only:", app=appname))
+                   M("In Apps → {app} → Edit, add the app’s token folder to the optimizer’s volumes, read-only:", app=appname))
             config = zfs.host_path(self.app.config_dir) or "/mnt/tank/apps/plex-cache"
             step("token", False, M("The optimizer doesn’t have the app’s token"), why, fix,
-                 "" if problem == "unreadable" else f"      - {config}:/config:ro")
+                 "" if problem == "unreadable" else f"      - {config}/optimizer:/config/optimizer:ro")
             return self._done(steps)
         st = self.client.status(fresh=True)
         if st.get("error"):

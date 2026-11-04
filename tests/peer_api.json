@@ -45,20 +45,23 @@
     "pair": {
       "answer": [
         "paired",
+        "proof",
         "public",
         "why"
       ],
       "request": [
         "addresses",
+        "identity",
         "instance",
         "manual",
         "name",
         "plex",
         "port",
+        "proof",
         "public",
         "window"
       ],
-      "version": 1
+      "version": 2
     },
     "reach": {
       "answer": [

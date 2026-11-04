@@ -55,8 +55,9 @@ services:
 
   # The optimizer (optional): rewrites media files one at a time when you press Optimize Now in
   # the web UI. It has no web page and no published port; only plex-cache talks to it, with a
-  # token the app keeps in its settings folder (mounted here read-only). It can only change
-  # files under the media folders mounted here writable.
+  # token the app keeps in a folder of its own (optimizer/, the one thing of the app's mounted
+  # here, read-only — the settings and keys beside it stay out of this container). It can only
+  # change files under the media folders mounted here writable.
   plex-cache-optimizer:
     image: ghcr.io/drsassafras/plex-cache:latest
     restart: unless-stopped
@@ -66,7 +67,7 @@ services:
     # (e.g. "1000:1000"), or as "0:0" with cap_add: [CHOWN, FOWNER, DAC_OVERRIDE] below.
     user: "568:568"
     volumes:
-      - /mnt/tank/apps/plex-cache:/config:ro     # CHANGE ME: the same settings folder as above, read-only
+      - /mnt/tank/apps/plex-cache/optimizer:/config/optimizer:ro  # CHANGE ME: the optimizer folder in the same settings folder as above, read-only
       - type: bind                               # media it may rewrite, writable:
         source: /mnt/tank/plexfiles              # CHANGE ME: the same media as above
         target: /data                            # CHANGE ME: the same path as above

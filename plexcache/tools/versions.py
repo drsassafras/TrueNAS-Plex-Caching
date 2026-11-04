@@ -47,6 +47,7 @@ def _copies(row: dict) -> list[dict]:
 
 class DuplicateVersions(Tool):
     name = "versions"
+    choice_keys = ("keep_key",)  # the arrow on the page: which copy is kept
     title = M("Duplicate Versions")
     page = "/versions"
     options = [{"id": "versions", "name": M("The same file twice on one record"), "help": M("One Plex record holds the same file as two of its versions — the same size and running time, the same bytes at both ends."), "kinds": ("movie", "tv", "audio"), "default": True},

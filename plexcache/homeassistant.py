@@ -483,6 +483,7 @@ NOT_OVER_MQTT = {
     "truenas.*": "the connection to TrueNAS: an address and a secret",
     "syncthing.*": "the connection to Syncthing and its throttling, in System",
     "peer.*": "the pairing with the other Dionysus",
+    "tls.*": "the certificates pinned on first use (tlspin.py): written by the app, never a control",
     "general.update_check": "System's update check",
     "general.page_size": "how the web UI pages its lists",
     "general.tool_page_size": "how the web UI pages its lists",

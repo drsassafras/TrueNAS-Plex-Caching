@@ -34,6 +34,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 
 from . import zfs
 from .i18n import M
@@ -91,13 +92,23 @@ class SyncthingError(Exception):
 class SyncthingClient:
     """Syncthing's REST API (https://docs.syncthing.net/dev/rest.html): the few calls the app makes."""
 
-    def __init__(self, url: str, api_key: str, timeout: float = 10):
+    def __init__(self, url: str, api_key: str, timeout: float = 10, tls: ssl.SSLContext | None = None):
+        """``tls``: the context the connection is verified with (tlspin, through Syncthing.client: the pin, or full
+        verification); without one, the certificate isn't checked — tests and keyless probes only."""
         self.url, self.key, self.timeout = url.rstrip("/"), api_key, timeout
-        self.ctx = ssl.create_default_context()  # (its own certificate is self-signed: not checked)
-        self.ctx.check_hostname = False
-        self.ctx.verify_mode = ssl.CERT_NONE
+        self.after_tls: Callable[[bool], object] | None = None  # called with whether the connection was made (app.tls_ok / tls_refused)
+        if tls is not None:
+            self.ctx = tls
+        else:
+            self.ctx = ssl.create_default_context()  # (its own certificate is self-signed: not checked)
+            self.ctx.check_hostname = False
+            self.ctx.verify_mode = ssl.CERT_NONE
 
     def _req(self, method: str, path: str, params: dict | None = None, body=None):
+        host = (urllib.parse.urlsplit(self.url).hostname or "").lower()
+        if self.key and self.url.lower().startswith("http://") and not (host == "localhost" or host == "::1" or host.startswith("127.")):
+            # the key signs every request: over the network it goes only on an encrypted connection
+            raise SyncthingError(M("Syncthing’s API key isn’t sent over plain http across the network: use an https:// address (Syncthing answers on one), or a localhost address."), "reach")
         q = ("?" + urllib.parse.urlencode(params)) if params else ""
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.url + path + q, data=data, method=method,
@@ -106,6 +117,8 @@ class SyncthingClient:
             with urllib.request.urlopen(req, timeout=self.timeout, context=self.ctx) as r:
                 raw = r.read()
         except urllib.error.HTTPError as e:
+            if self.after_tls is not None:
+                self.after_tls(True)  # (an HTTP answer: the connection, and its certificate, went through)
             try:
                 body = e.read()[:200].decode("utf-8", "replace").strip()
             except Exception:  # noqa: BLE001
@@ -117,7 +130,11 @@ class SyncthingClient:
                 raise SyncthingError(M("Syncthing on {what}: {why}", what=path, why=body), "state") from None
             raise SyncthingError(M("Syncthing answered {code} to {what}.", code=str(e.code), what=path), "missing" if e.code in (404, 405) else "answer") from None
         except (urllib.error.URLError, OSError, TimeoutError) as e:
+            if self.after_tls is not None:
+                self.after_tls(False)
             raise SyncthingError(M("Nothing answered at {url}: {why}.", url=self.url, why=str(getattr(e, "reason", None) or e)), "reach") from None
+        if self.after_tls is not None:
+            self.after_tls(True)
         if not raw:
             return {}
         try:
@@ -340,7 +357,11 @@ class Syncthing:
 
     def client(self, timeout: float = 10) -> SyncthingClient:
         s = self.settings()
-        return SyncthingClient(s.get("url") or "", s.get("api_key") or "", timeout)
+        make = getattr(self.app, "tls_context", None)  # (tests' fakes have no TLS machinery)
+        c = SyncthingClient(s.get("url") or "", s.get("api_key") or "", timeout, tls=make("syncthing", s) if make else None)
+        if make is not None:
+            c.after_tls = lambda ok, x=c.ctx: (self.app.tls_ok("syncthing", x) if ok else self.app.tls_refused("syncthing", x))
+        return c
 
     def talking(self) -> bool:
         return bool(self.status.get("ok"))

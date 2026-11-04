@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from . import __version__
+from . import __version__, tlspin
 from .i18n import M
 
 PRODUCT = "Dionysus"
@@ -219,16 +219,31 @@ class PlexClient:
     # set by App.plex() and Mirrors.client())
     before_change: Callable[..., None] | None = None
 
-    def __init__(self, url: str, token: str, timeout: float = 30):
+    def __init__(self, url: str, token: str, timeout: float = 30, tls: ssl.SSLContext | None = None, direct_name: str = ""):
+        """An https connection that carries the token is always verified (tlspin): for the server's plex.direct name
+        where one is known — ``direct_name`` when the address is the bare one that name stands for (direct_uri), or the
+        URL's own host when it is such a name — else with ``tls`` (App.plex / Mirrors.client: the pinned certificate, or
+        full verification), else fully. Only a tokenless look (an identity probe) goes unchecked: nothing is sent."""
         if not url:
             raise PlexError(M("Plex server address is not set"))
         self.url = url.rstrip("/")
         self.token = token
         self.timeout = timeout
-        # Plex's https uses plex.direct certificates that won't match a LAN IP.
-        self._ctx = ssl.create_default_context()
-        self._ctx.check_hostname = False
-        self._ctx.verify_mode = ssl.CERT_NONE
+        self.after_tls: Callable[[bool], object] | None = None  # told how each request's TLS went (App: the pin kept, or the change noted)
+        host = (urllib.parse.urlsplit(self.url).hostname or "").lower()
+        name = (direct_name or "").lower() or (host if host.endswith(".plex.direct") else "")
+        if name:
+            # Plex's certificate names the server's plex.direct names, never a bare address: checked for that name,
+            # whatever address the connection goes to (renewals keep the name, so nothing breaks when the cert turns over)
+            self._ctx: ssl.SSLContext = tlspin.context(True, name=name)
+        elif tls is not None:
+            self._ctx = tls
+        elif token:
+            self._ctx = tlspin.context(True)
+        else:
+            self._ctx = ssl.create_default_context()
+            self._ctx.check_hostname = False
+            self._ctx.verify_mode = ssl.CERT_NONE
 
     # ------------------------------------------------------------------ http
     def _request(self, path: str, params: dict | None = None, headers: dict | None = None,
@@ -245,15 +260,24 @@ class PlexClient:
             req.add_header(k, v)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout, context=self._ctx) as resp:
-                return resp.read()
+                got = resp.read()
+            if self.after_tls is not None:
+                self.after_tls(True)
+            return got
         except urllib.error.HTTPError as e:
             e.close()  # it holds the connection open
+            if self.after_tls is not None:
+                self.after_tls(True)  # (an answer: the connection itself was made and verified)
             if e.code == 401:
                 raise PlexError(M("Plex rejected the token (401 Unauthorized)"), 401) from None
             raise PlexError(M("Plex returned HTTP {code} for {path}", code=str(e.code), path=path), e.code) from None
         except urllib.error.URLError as e:
+            if self.after_tls is not None:
+                self.after_tls(False)
             raise PlexError(M("Can’t reach Plex at {url}: {why}", url=self.url, why=str(e.reason))) from None
         except (TimeoutError, OSError) as e:
+            if self.after_tls is not None:
+                self.after_tls(False)
             raise PlexError(M("Can’t reach Plex at {url}: {why}", url=self.url, why=str(e))) from None
 
     def _changing(self, op: str, keys) -> None:
@@ -717,7 +741,7 @@ def direct_address(host: str) -> str | None:
     """The address a plex.direct name stands for (192-168-1-20.<hash>.plex.direct → 192.168.1.20; an IPv6's colons as
     dashes), or None for any other name. The name is how Plex gives a server a certificate for a bare address: it resolves
     to that address and nothing else, through plex.tv's DNS — so the address itself is the same place, reached without
-    the lookup (and the certificate isn't checked either way: PlexClient)."""
+    the lookup (the certificate is still checked for the name: PlexClient's direct_name)."""
     import ipaddress
     parts = (host or "").lower().split(".")
     if len(parts) != 4 or parts[-2:] != ["plex", "direct"]:
@@ -787,8 +811,10 @@ def reachable(server: dict, timeout: float = 6) -> str | None:
     order = rank_connections(server.get("connections") or [])
     for c in order:
         uri = c["uri"] if c.get("relay") else direct_uri(c["uri"])
+        # converted to the bare address: the certificate is still checked for the plex.direct name it stands for
+        name = (urllib.parse.urlsplit(c["uri"]).hostname or "") if uri != c["uri"] else ""
         try:
-            got = PlexClient(uri, server.get("token") or "", timeout=timeout).identity()
+            got = PlexClient(uri, server.get("token") or "", timeout=timeout, direct_name=name).identity()
         except PlexError:
             continue
         if got.get("machine_id") == server.get("id"):

@@ -37,7 +37,7 @@ def encode_frame(opcode: int, payload: bytes, mask: bool = True) -> bytes:
 
 
 class WebSocket:
-    def __init__(self, url: str, verify_tls: bool = True, timeout: float = 15):
+    def __init__(self, url: str, verify_tls: bool = True, timeout: float = 15, context: ssl.SSLContext | None = None):
         u = urllib.parse.urlparse(url)
         if u.scheme not in ("ws", "wss"):
             raise WebSocketError("URL must start with ws:// or wss://")
@@ -47,15 +47,17 @@ class WebSocket:
         except OSError as e:
             raise WebSocketError(f"can't connect to {u.hostname}:{port}: {e}") from None
         if u.scheme == "wss":
-            ctx = ssl.create_default_context()
-            if not verify_tls:
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
+            ctx = context
+            if ctx is None:
+                ctx = ssl.create_default_context()
+                if not verify_tls:
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
             try:
                 raw = ctx.wrap_socket(raw, server_hostname=u.hostname)
             except ssl.SSLError as e:
                 raw.close()
-                raise WebSocketError(f"TLS failed: {e.reason or e}") from None
+                raise WebSocketError(f"TLS failed: {getattr(e, 'reason', None) or e}") from None
             except OSError as e:  # e.g. timed out: something listens there but never answers TLS
                 raw.close()
                 raise WebSocketError(f"TLS failed: {e}") from None

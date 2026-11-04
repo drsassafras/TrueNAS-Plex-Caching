@@ -27,6 +27,7 @@ from . import (
     report,
     safety,
     themes,
+    tlspin,
     version_label,
     zfs,
 )
@@ -233,6 +234,9 @@ class App:
         self.scanning = False
         # ZFS / TrueNAS
         self.zfs: dict = {}
+        # TLS pins (tlspin.py): a keyed service whose certificate changed since it was pinned, for the card's
+        # Trust New Certificate — {service: {"pinned", "seen", "at"}}; cleared when it connects again
+        self.tls_changed: dict[str, dict] = {}
         # Health
         self.health: dict | None = None
         self.checking = False
@@ -322,15 +326,78 @@ class App:
             return path
         return best["local"] + path[len(best["plex"]):]
 
+    # ------------------------------------------------------------ the keyed services' TLS (tlspin.py)
+    def tls_context(self, name: str, section: dict) -> tlspin.Context:
+        """The context a keyed service's connection is verified with: full verification when its verify_tls is on, else
+        its pinned certificate — none yet on first use, when tls_ok pins what answered."""
+        if section.get("verify_tls"):
+            return tlspin.context(True)
+        return tlspin.context(False, self.settings.section("tls")["pins"].get(name, ""))
+
+    def tls_ok(self, name: str, ctx: tlspin.Context) -> None:
+        """A keyed connection succeeded: its certificate pinned on first use, and any change note cleared."""
+        self.tls_changed.pop(name, None)
+        if getattr(ctx, "pinning", False) and ctx.seen and not ctx.pin:
+            pins = dict(self.settings.section("tls")["pins"], **{name: ctx.seen})
+            self.settings.update({"tls": {"pins": pins}})
+            self.activity.event("settings", M("{service}’s certificate pinned ({fp}): from now on it must answer with this one",
+                                              service=name, fp=tlspin.short(ctx.seen)))
+
+    def tls_refused(self, name: str, ctx: tlspin.Context) -> bool:
+        """Whether a connection's failure was the pin's refusal (the certificate changed): noted for the card's
+        Trust New Certificate, which shows both fingerprints before anything is trusted."""
+        if getattr(ctx, "pinning", False) and ctx.pin and ctx.seen and ctx.seen != ctx.pin:
+            self.tls_changed[name] = {"pinned": ctx.pin, "seen": ctx.seen, "at": time.time()}
+            return True
+        return False
+
+    def trust_certificate(self, name: str) -> dict:
+        """Trust New Certificate (the System page): the certificate the service answers with now read afresh and pinned
+        in the old one's place. {"pinned": its fingerprint} — or {"error"} when nothing answers."""
+        urls = {"truenas": self.settings.section("truenas").get("url"), "syncthing": self.settings.section("syncthing").get("url"),
+                "plex": self.settings.section("plex").get("url")}
+        if name.startswith("plex2:"):
+            urls[name] = ((self.settings.section("plex2").get("servers") or {}).get(name.partition(":")[2]) or {}).get("url")
+        url = urls.get(name) or ""
+        fp = tlspin.fingerprint(url)
+        if not fp:
+            return {"error": str(M("Nothing answered with a certificate at {url}.", url=url or "?"))}
+        pins = dict(self.settings.section("tls")["pins"], **{name: fp})
+        self.settings.update({"tls": {"pins": pins}})
+        self.tls_changed.pop(name, None)
+        self.activity.event("settings", M("{service}’s new certificate trusted ({fp}): from now on it must answer with this one",
+                                          service=name, fp=tlspin.short(fp)), "warn")
+        return {"pinned": fp}
+
+    def tls_state(self, name: str, section: dict | None = None) -> dict:
+        """How a keyed service's connection is verified, for its card: {"verify": "ca" (full verification) | "pin" (its
+        pinned certificate) | "tofu" (pinned on the next successful connection), "pin": the pin (hex, "" while none),
+        "changed": {"pinned", "seen", "at"} while it answers with another certificate than its pin (tls_refused)}."""
+        sec = section if section is not None else self.settings.section("plex" if name.startswith("plex2:") else name)  # (a mirror follows the plex section's verify_tls)
+        pin = self.settings.section("tls")["pins"].get(name, "")
+        verify = "ca" if sec.get("verify_tls") else ("pin" if pin else "tofu")
+        if name == "plex" and (urllib.parse.urlsplit(sec.get("url") or "").hostname or "").lower().endswith(".plex.direct"):
+            verify = "ca"  # a plex.direct address: its certificate is signed for that name and fully verified (plex.py)
+        return {"verify": verify, "pin": pin, "changed": self.tls_changed.get(name)}
+
     def plex(self, timeout: float = 30) -> PlexClient:
         p = self.settings.section("plex")
-        client = PlexClient(p["url"], p["token"], timeout=timeout)
+        ctx = self.tls_context("plex", p)
+        client = PlexClient(p["url"], p["token"], timeout=timeout, tls=ctx)
         client.before_change = lambda c, op, keys: plexbackup.guard(self, c, "here", op, keys)  # (each change to its records backed up first)
+        client.after_tls = lambda ok, c=ctx: (self.tls_ok("plex", c) if ok else self.tls_refused("plex", c))
         return client
 
     def truenas(self) -> TrueNASClient:
         t = self.settings.section("truenas")
-        return TrueNASClient(t["url"], t["api_key"], verify_tls=t["verify_tls"])
+        ctx = self.tls_context("truenas", t)
+        try:
+            client = TrueNASClient(t["url"], t["api_key"], tls=ctx)
+        except TrueNASError:
+            self.tls_refused("truenas", ctx)
+            raise
+        self.tls_ok("truenas", ctx)
+        return client
 
     def job_slots(self, feature: str, n: int) -> threading.BoundedSemaphore:
         with self._slots_lock:

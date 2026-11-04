@@ -162,19 +162,25 @@ class Auth:
                 return value
         return None
 
-    def request_ok(self, headers) -> bool:
-        """Is this request signed in (session cookie, or Basic auth for scripts)?"""
+    def request_ok(self, headers, address: str | None = None) -> bool:
+        """Is this request signed in (session cookie, or Basic auth for scripts)? Basic auth's password checks count
+        against the same per-address lockout as the sign-in form (``address``), so guessing is capped either way."""
         if not self.enabled:
             return True
         if self.session_ok(self.cookie_value(headers)):
             return True
         authz = headers.get("Authorization") or ""
         if authz.startswith("Basic "):
+            if address is not None and self.locked_out(address):
+                return False
             try:
                 user, _, pw = base64.b64decode(authz[6:]).decode().partition(":")
             except (ValueError, UnicodeDecodeError):
                 return False
-            return self.check_password(user, pw) and not self.default_password
+            ok = self.check_password(user, pw)
+            if address is not None:
+                self.note_attempt(address, ok)
+            return ok and not self.default_password
         return False
 
     @staticmethod

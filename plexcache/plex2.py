@@ -24,6 +24,7 @@ Cache at that site is paired with directly (peerlink.py). This is how the mirror
 
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass
 
 from . import plexbackup
@@ -62,8 +63,9 @@ class Mirrors:
         return self.app.settings.section("plex2")
 
     def servers(self) -> dict:
-        """The servers reached so far: {machine id: {"name", "url", "token", "relay" (reached through Plex's relay only)}}
-        — a plex.direct name kept for a local address read as the address itself (settings from before it was)."""
+        """The servers reached so far: {machine id: {"name", "url", "token", "relay" (reached through Plex's relay only),
+        "direct": the plex.direct name its certificate is verified against ("": none)}} — a plex.direct name kept for a
+        local address read as the address itself (settings from before it was)."""
         out = {}
         for k, v in (self.settings().get("servers") or {}).items():
             if isinstance(v, dict):
@@ -181,9 +183,21 @@ class Mirrors:
         s = self.servers().get(server) or {}
         if not (s.get("url") and s.get("token")):
             raise PlexError(M("{name} isn’t reached yet", name=self.name_of(server)))
-        client = PlexClient(s["url"], s["token"], timeout=timeout)
+        ctx, after = self._tls(server)
+        client = PlexClient(s["url"], s["token"], timeout=timeout, tls=ctx, direct_name=s.get("direct") or "")
         client.before_change = lambda c, op, keys: plexbackup.guard(self.app, c, "mirror:" + server, op, keys)  # (each change to its records backed up first)
+        client.after_tls = after
         return client
+
+    def _tls(self, server: str):
+        """The context the mirror's certificate is verified with (the pin kept under "plex2:<machine id>"), and what a
+        connection's outcome does with it — (None, None) on an app without the TLS machinery (tests' fakes)."""
+        make = getattr(self.app, "tls_context", None)
+        if make is None:
+            return None, None
+        name = f"plex2:{server}"
+        ctx = make(name, self.app.settings.section("plex"))
+        return ctx, lambda ok, c=ctx: (self.app.tls_ok(name, c) if ok else self.app.tls_refused(name, c))
 
     def run(self, server: str, fn, timeout: float = 30):
         """``fn(client)`` on the server — and, when it doesn't answer at its address, once more at another of its
@@ -236,9 +250,13 @@ class Mirrors:
 
     def remember(self, server: dict, url: str) -> None:
         """A server reached (plex.tv's entry and the address that answered): kept in the settings — with whether that
-        address is Plex's relay, for its light to say."""
+        address is Plex's relay, for its light to say, and the plex.direct name the address stands for, so its
+        certificate is checked for that name on every later connection (PlexClient's direct_name)."""
         svs = self.servers()
-        svs[server["id"]] = {"name": server.get("name") or "", "url": url, "token": server.get("token") or "", "relay": is_relay(server, url)}
+        direct = next((h for c in server.get("connections") or [] if not c.get("relay") and direct_uri(c["uri"]) == url
+                       for h in [(urllib.parse.urlsplit(c["uri"]).hostname or "").lower()] if h.endswith(".plex.direct")), "")
+        svs[server["id"]] = {"name": server.get("name") or "", "url": url, "token": server.get("token") or "", "relay": is_relay(server, url),
+                            "direct": direct}
         self.app.settings.update({"plex2": {"servers": svs}})
 
     def list_servers(self) -> list[dict]:
@@ -286,8 +304,11 @@ class Mirrors:
             entry = next((x for x in self.found if x["id"] == server), None)
         s = self.servers().get(server) or {}
         token = (entry or {}).get("token") or s.get("token") or self._token()
+        ctx, after = self._tls(server)  # hand-entered addresses rarely have a plex.direct certificate: pinned on first use
         try:
-            got = PlexClient(url, token, timeout=10).identity()
+            probe = PlexClient(url, token, timeout=10, tls=ctx)
+            probe.after_tls = after
+            got = probe.identity()
         except PlexError as e:
             raise ValueError(M("No Plex answers at {url}: {why}", url=url, why=str(e))) from None
         if got.get("machine_id") != server:
@@ -431,9 +452,12 @@ class Mirrors:
         svs = []
         for sid in self.used():
             got, _at, err = libs.get(sid, (None, 0.0, None))
+            state = getattr(self.app, "tls_state", None)
+            direct = (self.servers().get(sid) or {}).get("direct") or ""
+            tls = {"verify": "ca", "pin": "", "changed": None} if direct else (state(f"plex2:{sid}") if state else None)  # (a plex.direct name: full verification)
             svs.append({"id": sid, "name": self.name_of(sid), "url": (self.servers().get(sid) or {}).get("url") or "", "reached": self.configured(sid),
                         "relay": bool((self.servers().get(sid) or {}).get("relay")),
-                        "known": got is not None, "reading": sid in reading, "error": err,
+                        "known": got is not None, "reading": sid in reading, "error": err, "tls": tls,
                         "libraries": [{"key": t.key, "title": t.title, "kind": t.kind} for t in got or []]})
         pairs = {k: {"server": v.server, "key": v.key, "title": v.title, "name": v.server_name} if v else None for k, v in self.pairs().items()}
         return {"own_signin": bool(s.get("account_token")), "signed_in": bool(self._token()), "servers": svs, "pairs": pairs, "rates": rates,

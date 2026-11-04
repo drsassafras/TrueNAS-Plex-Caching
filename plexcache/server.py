@@ -271,7 +271,7 @@ def make_handler(app):
 
         def _signed_in(self, path: str) -> bool:
             """Let the request through, or answer it with the sign-in page / a 401."""
-            if not auth.enabled or path in OPEN_PATHS or path.startswith("/static/") or auth.request_ok(self.headers):
+            if not auth.enabled or path in OPEN_PATHS or path.startswith("/static/") or auth.request_ok(self.headers, self.client_address[0]):
                 return True
             if path in PAGES:
                 self._file(os.path.join(WEB_DIR, "login.html"))
@@ -576,6 +576,14 @@ def make_handler(app):
             if path == "/api/test":
                 app.test_connections_async(then_checks=True, rescan=True)
                 return self._json({"started": True})
+            if path == "/api/tls/trust":  # Trust New Certificate: the one the service answers with now pinned in the old one's place
+                service = str(body.get("service") or "")
+                if not re.fullmatch(r"(plex|truenas|syncthing|plex2:[A-Za-z0-9_-]{1,64})", service):
+                    raise SettingsError(M("unknown service"))
+                got = app.trust_certificate(service)
+                if "error" not in got:
+                    app.test_connections_async(then_checks=False)
+                return self._json(got)
             if path == "/api/checks":
                 rescan = body.get("rescan", True)
                 if not isinstance(rescan, bool):
@@ -631,7 +639,7 @@ def make_handler(app):
                 elif link is None:
                     raise SettingsError(M("Which mirror: name its server."))
                 elif path == "/api/peer/pair":
-                    link.pair_now()
+                    link.pair_now(str(body.get("code") or ""))  # (the code read off the other side's page, if one was typed)
                 elif path == "/api/peer/unpair":
                     link.unpair()
                 else:

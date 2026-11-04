@@ -34,7 +34,9 @@ one file at a time, and reads the result back.
                          dataset's current record size and compression, or the cover art choice
 
 Every /api call needs the header ``X-Plexcache-Token`` with the token the app made: read from
-the app's config folder, mounted here read-only (/config/optimizer-token), or set as
+the app's token folder, mounted here read-only (/config/optimizer/token — the one thing of the
+app's this container sees; an older deployment mounts the whole settings folder, and the old
+/config/optimizer-token beside the settings still works), or set as
 PLEXCACHE_OPTIMIZER_TOKEN. Only files under the folders mounted into this container read-write
 can be touched (or under PLEXCACHE_MEDIA_ROOTS, when set): the YAML's volumes decide what it may
 write. It listens on port 8643 (PLEXCACHE_OPTIMIZER_PORT).
@@ -337,13 +339,16 @@ def make_handler(svc: Service):
     return Handler
 
 
-TOKEN_FILE = "/config/optimizer-token"  # noqa: S105 — (a path) made by the app in its config folder
+TOKEN_FILE = "/config/optimizer/token"  # noqa: S105 — (a path) made by the app in a folder of its own: all this container needs mounted
+OLD_TOKEN_FILE = "/config/optimizer-token"  # noqa: S105 — beside the app's settings and keys: where a deployment that mounts the whole folder used to read it
 
 
 def serve() -> int:
     from .. import zfs
     token = os.environ.get("PLEXCACHE_OPTIMIZER_TOKEN", "")
-    token_file = os.environ.get("PLEXCACHE_OPTIMIZER_TOKEN_FILE", TOKEN_FILE)
+    # the app's token folder where it's mounted; the old path only where it's the one there (an older deployment)
+    found = OLD_TOKEN_FILE if not os.path.exists(TOKEN_FILE) and os.path.exists(OLD_TOKEN_FILE) else TOKEN_FILE
+    token_file = os.environ.get("PLEXCACHE_OPTIMIZER_TOKEN_FILE") or found
     if token and len(token) < 16:
         print("PLEXCACHE_OPTIMIZER_TOKEN is too short (at least 16 characters)", flush=True)
         return 2

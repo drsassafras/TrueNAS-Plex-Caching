@@ -72,6 +72,13 @@ class Integration:
         """{"id", "short", "source", "name"}, or None while it isn't known (not connected yet)."""
         return None
 
+    def tls(self) -> dict | None:
+        """How its connection is verified (app.tls_state), or None for a service without one (the link signs its own)."""
+        if self.name not in ("plex", "truenas", "syncthing"):
+            return None
+        state = getattr(self.app, "tls_state", None)
+        return state(self.name) if state else None
+
     def steps(self) -> list[str]:
         return [s for s in STEPS if s not in self.exceptions] + list(self.own)
 
@@ -85,7 +92,7 @@ class Integration:
 
     def snapshot(self) -> dict:
         return {"title": self.title, "steps": self.steps(), "lights": self.lights(), "labels": {s: LABELS.get(s) or s for s in STEPS},
-                "exceptions": dict(self.exceptions), "calls": len(self.calls), "identity": self.identity()}
+                "exceptions": dict(self.exceptions), "calls": len(self.calls), "identity": self.identity(), "tls": self.tls()}
 
 
 def _worst(rows: list[dict], fallback: dict) -> dict:
@@ -188,5 +195,5 @@ def snapshot(app) -> dict:
         try:
             out[cls.name] = cls(app).snapshot()
         except Exception as e:  # noqa: BLE001 — one service's trouble never hides the others' lights
-            out[cls.name] = {"title": cls.title, "steps": [], "lights": {}, "labels": {}, "exceptions": dict(cls.exceptions), "calls": 0, "identity": None, "error": str(e)}
+            out[cls.name] = {"title": cls.title, "steps": [], "lights": {}, "labels": {}, "exceptions": dict(cls.exceptions), "calls": 0, "identity": None, "tls": None, "error": str(e)}
     return out

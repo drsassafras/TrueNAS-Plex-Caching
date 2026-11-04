@@ -192,7 +192,7 @@ def python_cycles() -> list[dict]:
 
 def image_python() -> str:
     """The Python the image is built on: the major.minor of PYTHON_TAG."""
-    return ".".join(str(x) for x in parse(_pin(DOCKERFILE, r"ARG PYTHON_TAG=(\S+)"))[:2])
+    return ".".join(str(x) for x in parse(_pin(DOCKERFILE, r"ARG PYTHON_TAG=([^@\s]+)"))[:2])
 
 
 DEBIAN = {"bullseye": "11", "bookworm": "12", "trixie": "13", "forky": "14", "duke": "15"}  # (codenames as numbers, to compare)
@@ -200,7 +200,7 @@ DEBIAN = {"bullseye": "11", "bookworm": "12", "trixie": "13", "forky": "14", "du
 
 def debian_of_tag() -> str:
     """The Debian the image is built on, from PYTHON_TAG (3.15-slim-trixie → trixie)."""
-    m = re.search(r"-(\w+)$", _pin(DOCKERFILE, r"ARG PYTHON_TAG=(\S+)"))
+    m = re.search(r"-(\w+)$", _pin(DOCKERFILE, r"ARG PYTHON_TAG=([^@\s]+)"))
     if not m or m.group(1) not in DEBIAN:
         raise ValueError("PYTHON_TAG doesn't end in a Debian codename")
     return m.group(1)
@@ -234,14 +234,73 @@ def _exists(url: str) -> bool:
         return False
 
 
+def _sha256_of(url: str) -> str:
+    """The SHA-256 of what ``url`` serves, streamed: what the Dockerfile checks a download against."""
+    req = urllib.request.Request(url, headers={"User-Agent": "plex-cache-upkeep"})
+    h = hashlib.sha256()
+    with _open(req) as r:
+        while chunk := r.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# The hash each download ARG in the Dockerfile is checked against (F-2026-029), and the file it's of, by version: moved
+# with its version's ARG (bump), and worked out afresh by --hashes. FFMPEG_GH_SHA256 is the GitHub mirror's tarball of
+# the same release — another file, so a hash of its own.
+SUMS: dict[str, dict[str, Callable[[str], str]]] = {
+    "FFMPEG": {"FFMPEG_SHA256": lambda v: f"https://ffmpeg.org/releases/ffmpeg-{v}.tar.xz",
+               "FFMPEG_GH_SHA256": lambda v: f"https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n{v}.tar.gz"},
+    "OXIPNG": {"OXIPNG_SHA256_AMD64": lambda v: f"https://github.com/oxipng/oxipng/releases/download/v{v}/oxipng-{v}-x86_64-unknown-linux-gnu.tar.gz",
+               "OXIPNG_SHA256_ARM64": lambda v: f"https://github.com/oxipng/oxipng/releases/download/v{v}/oxipng-{v}-aarch64-unknown-linux-gnu.tar.gz"},
+    "LIBJPEG_TURBO": {"LIBJPEG_TURBO_SHA256": lambda v: f"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/{v}/libjpeg-turbo-{v}.tar.gz"},
+}
+
+
+def _resum(name: str, version: str) -> list[str]:
+    """ARG ``name``'s download hashes (SUMS) set to the files ``version``'s URLs serve; what changed."""
+    out = []
+    for arg, url in SUMS.get(name, {}).items():
+        got = _sha256_of(url(version))
+        if _pin(DOCKERFILE, rf'ARG {arg}="?([0-9a-f]*)"?') != got:
+            out.append(_repin(DOCKERFILE, rf'ARG {arg}="?([0-9a-f]*)"?', got))
+    return out
+
+
 def _bump_arg(name: str, built: Callable[[str], str]) -> Callable[[str], str]:
     """Moves the Dockerfile's ARG <name> to a version — once upstream has a build of it at ``built(version)``, the URL
-    the Dockerfile fetches (the release may be announced before its build is up)."""
+    the Dockerfile fetches (the release may be announced before its build is up) — and that version's download hashes
+    (SUMS) with it, so the build's checks match what it fetches."""
     def bump(new: str) -> str:
         if not _exists(built(new)):
             raise ValueError(f"{new} has no build yet at {built(new)}")
-        return _repin(DOCKERFILE, rf"ARG {name}=(\S+)", new)
+        return "; ".join([_repin(DOCKERFILE, rf"ARG {name}=(\S+)", new), *_resum(name, new)])
     return bump
+
+
+IMAGE_TAGS = {"PYTHON_TAG": "python", "DEBIAN_TAG": "debian", "NODE_TAG": "node"}  # base image ARG -> its library image on Docker Hub
+
+
+def refresh_digests() -> list[str]:
+    """Each base image ARG's digest moved to its tag's current one (Docker Hub): how Python, Debian and Node patch
+    releases reach the image now that it's built from a digest, not a tag someone could re-push (F-2026-030). What
+    changed, a line each."""
+    out = []
+    for arg, image in IMAGE_TAGS.items():
+        tag = _pin(DOCKERFILE, rf"ARG {arg}=([^@\s]+)")
+        got = str(_json(f"https://hub.docker.com/v2/repositories/library/{image}/tags/{urllib.parse.quote(tag)}").get("digest") or "")
+        if got.startswith("sha256:") and _pin(DOCKERFILE, rf"ARG {arg}=[^@\s]+@(\S+)") != got:
+            _repin(DOCKERFILE, rf"ARG {arg}=[^@\s]+@(\S+)", got)
+            out.append(f"{image}:{tag}: its digest moved to the tag's current ({got[:19]}…)")
+    return out
+
+
+def refresh_hashes() -> list[str]:
+    """Every pinned hash worked out again from the versions as they stand (--hashes): the downloads' (SUMS, fetched and
+    hashed afresh) and the base images' digests. What changed; nothing means every pin already matches."""
+    out = []
+    for name in SUMS:
+        out += _resum(name, _pin(DOCKERFILE, rf"ARG {name}=(\S+)"))
+    return out + refresh_digests()
 
 
 def _mkvtoolnix_built(version: str) -> str:
@@ -989,9 +1048,15 @@ def main() -> int:
     ap.add_argument("--tnsync", action="store_true", help="the result as tnsync's box: a first line it reads, then the box (moves pins on dev, as without it)")
     ap.add_argument("--cves", metavar="IMAGE", help="GitHub's look: the CVEs to act on in this image docker has (and in what it's built with), "
                                                     "as warnings; moves nothing, and never fails")
+    ap.add_argument("--hashes", action="store_true", help="work every pinned download hash and base-image digest out again "
+                                                          "from the versions as they stand, and move what differs (the Dockerfile's checks)")
     args = ap.parse_args()
     if args.cves:
         return github_cves(args.cves)
+    if args.hashes:
+        changed = refresh_hashes()
+        print("\n".join(changed) if changed else "every pinned hash and digest already matches")
+        return 0
     where = branch()
     # (tnsync's board looks while the tests run, TNSYNC_UPKEEP=look, and moves pins only once they're done: =move)
     move = not args.report and where in (MOVES_ON, MINORS_ON) and os.environ.get("TNSYNC_UPKEEP") != "look"
@@ -1002,6 +1067,13 @@ def main() -> int:
     )
     try:
         r = check(apply=move, fresh=args.fresh, progress=bar, where=where, cves=True)
+        if move:  # the base images' digests follow their tags (how Python's patch releases reach the pinned image)
+            try:
+                for line in refresh_digests():
+                    r.bumped.append(line)
+                    r.moved.append(line.split(":", 1)[0] + " (digest)")
+            except (OSError, ValueError) as e:
+                r.lines.append(f"base image digests: not looked at now ({_why(e)})")
     except Offline as e:
         if bar is not None:
             bar.clear()

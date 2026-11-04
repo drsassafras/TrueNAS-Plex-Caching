@@ -168,6 +168,7 @@ def clusters(recs: list[dict]) -> list[tuple[str, list[dict]]]:
 
 class MergeDuplicates(Tool):
     name = "merge"
+    choice_keys = ("keep_key",)  # the arrow on the page: which record is kept
     scan_version = 3  # (rows hold whole records now, as Sync Libraries shows them; the scan says the mirror, for the box before Apply)
     # a record whose versions are named for different films (Plex Checks: Dissimilar file naming): a file on the wrong
     # record, most likely — merged, it would be folded in for good, so the row is held until it's split apart, or ignored there

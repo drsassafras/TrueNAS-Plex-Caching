@@ -25,7 +25,7 @@ from . import cachemode, prefetch, zfs
 from .i18n import M, duration_text, join, msg, size_text
 from .layout import min_head, tail_ranges
 from .pauses import L2arcPauses, busy_percent
-from .plex import PlexClient, PlexError
+from .plex import PlexError
 from .reader import MiB, Pacer, ReadResult, Stopped, is_probe_hit, read_range
 from .warmup import align_ranges, library_seconds, preload_bytes
 
@@ -330,7 +330,7 @@ class PlaybackMonitor:
         plex_cfg = settings["plex"]
         if not plex_cfg["url"] or not plex_cfg["token"]:
             return
-        client = PlexClient(plex_cfg["url"], plex_cfg["token"], timeout=10)
+        client = self.app.plex(timeout=10)  # (through the app: the certificate checked the same way everywhere)
         current = client.sessions()
         self.last_poll = time.time()
         # What Plex reported, as read (for the exported log, to look into streams that aren't cached)

@@ -19,8 +19,8 @@ jobs:
     # removes shows up here first. The next Python is tried locally, not here: dev/future.py (dev/README.md).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
         with:
           python-version: "3.15"
       # what checks and builds the web app's CSS, scripts and pages (dev/web.js: Stylelint, ESLint, TypeScript, html-validate, axe-core, postcss-preset-env, Autoprefixer,
@@ -55,15 +55,15 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/plex-cache
           tags: |
@@ -74,7 +74,7 @@ jobs:
             type=sha,format=short
       # Built first without pushing, so the optimizer's tests can run inside it: with the image's own
       # MKVToolNix, ffmpeg, oxipng and jpegtran (the runner has none of them, so there they're skipped).
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
         with:
           context: .
           platforms: linux/amd64
@@ -84,7 +84,7 @@ jobs:
           build-args: |
             PLEXCACHE_CHANNEL=${{ github.ref == 'refs/heads/dev' && 'dev' || 'stable' }}
             PLEXCACHE_COMMIT=${{ github.sha }}
-          pull: true  # (the newest python:3.15-slim-trixie, not a cached one)
+          pull: true  # (the pinned digest of python:3.15-slim-trixie fetched afresh, not a cached one; upkeep moves the digest to the tag's newest)
       - name: The image's Python has what the code needs (ZSTD, for the block estimates)
         run: docker run --rm --entrypoint python plex-cache:test -c "import compression.zstd as z; print('zstd', z.zstd_version)"
       - name: What this image carries (dev/README.md, Python and the other dependencies)
@@ -94,7 +94,7 @@ jobs:
           docker run --rm -v "$PWD:/src:ro" -w /src --entrypoint python plex-cache:test
           -W ignore -m unittest -v tests.test_plexcache.FixtureTests tests.test_plexcache.OptimizerTests
           tests.test_plexcache.CoverArtTests
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
         with:
           python-version: "3.15"
       # the CVEs to act on (dev/cves.py, as tnsync's Dependencies block says them): in this image (Trivy), the

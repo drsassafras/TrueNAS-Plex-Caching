@@ -779,7 +779,7 @@ def image_route(python: str, tag: str | None, tests: list[str], verbose: bool, s
 def future_tag(python: str) -> str:
     """The image's tag with the next Python's prerelease in place of its version: 3.15-slim-trixie → 3.16-rc-slim-trixie."""
     with open(os.path.join(ROOT, "Dockerfile"), encoding="utf-8") as fh:
-        m = re.search(r"^ARG PYTHON_TAG=(\S+)", fh.read(), re.M)
+        m = re.search(r"^ARG PYTHON_TAG=([^@\s]+)", fh.read(), re.M)
     return re.sub(r"^\d+\.\d+", f"{python}-rc", m.group(1)) if m else f"{python}-rc-slim-trixie"
 
 

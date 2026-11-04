@@ -6360,12 +6360,16 @@ class PageStructureTests(unittest.TestCase):
         # Pair Now pressed on the Dionysus at a mirror's site: every page here says it asks and where to press — or that no
         # library here is mirrored by that server yet; and pressed here, the note links to the other one's Pair Now
         st = copy.deepcopy(app.state())
-        st["peer"]["asked"] = {"xyz": {"name": "Cabin box", "server": "Starlit", "why": "Pairing by itself is off", "left": 540, "wanted": True}}
+        st["peer"]["asked"] = {"xyz": {"name": "Cabin box", "server": "Starlit", "why": "Pairing by itself is off", "left": 540, "wanted": True,
+                                       "fingerprint": "AAAA-BBBB-CCCC", "id": "AAAA-BBBB-CCCC"}}
         got = self._render(st, "health")
-        self.assertIn("The Dionysus on Cabin box asks to pair: press Pair Now on System → Mirror Dionysus within 9 minutes.", got["text"])
+        self.assertIn("Cabin box Wants to Pair with You", got["text"])
+        self.assertIn("press Pair Now on System → Mirror Dionysus within 9 minutes", got["text"])
+        self.assertIn("AAAA-BBBB-CCCC", got["text"])  # (the asker's fingerprint, its identicon beside it)
         self.assertIn('<a href="/system#peer" data-nav>', got["html"])
+        self.assertIn('class="identicon sm"', got["html"])  # (the asker's picture, drawn like every identity)
         st["peer"]["asked"]["xyz"].update(wanted=False)
-        self.assertIn("asks to pair, but no library here is mirrored by Starlit: choose one on the Mirror page", self._render(st, "tools")["text"])
+        self.assertIn("No library here is mirrored by Starlit yet: choose one on the Mirror page", self._render(st, "tools")["text"])
         lk = app.peerlinks.link("xyz")
         lk.window, lk.found = time.time() + 600, {"url": "http://10.0.0.9:8642", "hello": {"instance": "i", "name": "Cabin box", "public": "0", "version": "1"}, "at": time.time()}
         got = self._render(app.state(), "system")
@@ -8513,9 +8517,9 @@ class OptimizerTests(unittest.TestCase):
         found = [{"id": "zzz", "name": "Cabin", "owned": True, "token": "t", "connections": [{"uri": "http://c", "local": False, "relay": False}]}]
         sample = [types.SimpleNamespace(path="/srv/Movies/A/a.mkv"), types.SimpleNamespace(path="/srv/Movies/Z/z.mkv")]
         app.libraries[0]["locations"] = ["/data/Movies"]
+        cabin = types.SimpleNamespace(libraries=lambda: [Library("7", "Movies", "movie", "movie", ["/srv/Movies"])], library_files=lambda lib, limit=None: sample)
         with mock.patch.object(sync, "servers", lambda cid, tok: found), mock.patch.object(sync, "reachable", lambda sv: "http://c"), \
-                mock.patch.object(sync, "PlexClient", lambda url, tok, timeout=30: types.SimpleNamespace(
-                    libraries=lambda: [Library("7", "Movies", "movie", "movie", ["/srv/Movies"])], library_files=lambda lib, limit=None: sample)), \
+                mock.patch.object(app.mirrors, "run", lambda sid, fn, timeout=30: fn(cabin)), \
                 mock.patch.object(app.mirrors, "_main_id", lambda: "me"):
             (c,) = app.sync.discover()
         self.assertEqual((c["name"], c["rate"], c["libraries"][0]["found"], c["libraries"][0]["of"]), ("Cabin", 1.0, 1, 1))  # (this library's one file: there)
@@ -11805,8 +11809,11 @@ class OptimizerSetupTests(unittest.TestCase):
         token = app.optimizing.token()
         self.assertEqual(len(token), 48)
         self.assertEqual(app.optimizing.token(), token)                      # the same each time
-        path = os.path.join(app.config_dir, "optimizer-token")
+        path = os.path.join(app.config_dir, "optimizer", "token")             # a folder of its own: all the optimizer mounts
         self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o640")         # the apps group can read it
+        self.assertEqual(oct(os.stat(os.path.dirname(path)).st_mode & 0o777), "0o750")
+        with open(os.path.join(app.config_dir, "optimizer-token"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), token)                                # the old path too: an older deployment mounts the whole folder
         self.assertEqual(app.optimizing.client.token, token)
         with mock.patch.dict(os.environ, {"PLEXCACHE_OPTIMIZER_URL": ""}):
             self.assertEqual(OptimizerClient(token="x" * 20).url, DEFAULT_URL)  # the second service in the YAML
@@ -11821,7 +11828,8 @@ class OptimizerSetupTests(unittest.TestCase):
         self.assertNotIn("environment", yaml)
         self.assertNotIn("container_name", yaml)                              # a test copy next to the real app can't clash
         self.assertIn('test: ["CMD", "python", "-m", "plexcache.healthcheck"]', yaml)  # its own port, whatever the image says
-        self.assertIn(":/config:ro", yaml)                                      # the settings folder, read-only
+        self.assertIn("/optimizer:/config/optimizer:ro", yaml)                  # the token's own folder, read-only — never the whole settings folder
+        self.assertNotIn(":/config:ro", yaml)                                   # (the settings and keys stay out of the optimizer's container)
         # the host path from the app's own mount: the dataset's folder under /mnt, plus where in it the mount starts
         self.assertIn(f"source: /mnt/tank/plexfiles/plexfiles\n        target: {MEDIA}\n        bind:\n          propagation: rslave", yaml)
         self.assertNotIn(f"target: {MEDIA}/TV\n", yaml)                         # TV comes with the folder it's in
@@ -11880,9 +11888,9 @@ class OptimizerSetupTests(unittest.TestCase):
             self.assertEqual(ids(), [("yaml", True), ("running", True), ("answers", False)])
             self.assertEqual(op.client.url, "http://optimizer:8643")         # a renamed service is followed
             # 4. answering, without the token: the settings folder isn't mounted
-            hz = {"service": "optimizer", "version": 1, "token": False, "token_problem": "missing", "token_file": "/config/optimizer-token"}
+            hz = {"service": "optimizer", "version": 1, "token": False, "token_problem": "missing", "token_file": "/config/optimizer/token"}
             self.assertEqual(ids()[-1], ("token", False))
-            self.assertIn(":/config:ro", op.setup["steps"][-1]["cmd"])
+            self.assertIn("/optimizer:/config/optimizer:ro", op.setup["steps"][-1]["cmd"])
             hz = dict(hz, token_problem="unreadable", uid=1000)
             self.assertIn("group_add", en(op.diagnose()["steps"][-1]["fix"]))
             # 5. a token, but not this app's
@@ -11941,8 +11949,9 @@ class OptimizerSetupTests(unittest.TestCase):
             with mock.patch.object(app, "truenas", lambda: tn):
                 self.assertIsNone(op._containers())
         # a token that can't be written is made again next time
-        from plexcache.optimizing import TOKEN_FILE
+        from plexcache.optimizing import OLD_TOKEN_FILE, TOKEN_FILE
         os.remove(os.path.join(app.config_dir, TOKEN_FILE))
+        os.remove(os.path.join(app.config_dir, OLD_TOKEN_FILE))
         with mock.patch.object(os, "open", mock.Mock(side_effect=PermissionError("read-only"))):
             self.assertEqual(len(Optimizing(app).client.token), 48)
         # a check in the background that fails just leaves it as it was
@@ -12571,11 +12580,20 @@ class LoginTests(unittest.TestCase):
 
     def test_basic_auth_for_scripts(self):
         import base64
+        auth = self.app.auth
+        auth._fails.clear()
         good = "Basic " + base64.b64encode(b"admin:hunter2").decode()
         bad = "Basic " + base64.b64encode(b"admin:wrong").decode()
         self.assertEqual(self.req("GET", "/api/state", headers={"Authorization": good})[0], 200)
         self.assertEqual(self.req("GET", "/api/state", headers={"Authorization": bad})[0], 401)
         self.assertEqual(self.req("GET", "/api/state", headers={"Authorization": "Basic !!"})[0], 401)
+        # Wrong guesses count against the same per-address lockout as the sign-in form (F-2026-031)
+        self.assertEqual(auth._fails["127.0.0.1"][0], 2)  # (the guess, and the junk header's empty credentials)
+        auth._fails["127.0.0.1"] = (self.authmod.LOCKOUT_FAILS, time.time())
+        self.assertEqual(self.req("GET", "/api/state", headers={"Authorization": good})[0], 401)  # locked out: even the right password waits
+        auth._fails.clear()
+        self.assertEqual(self.req("GET", "/api/state", headers={"Authorization": good})[0], 200)
+        self.assertNotIn("127.0.0.1", auth._fails)                                                # …and a right one clears the count
 
     def test_default_password_is_refused(self):
         import base64
@@ -14856,8 +14874,15 @@ class IntegrationStandardTests(unittest.TestCase):
                 self.assertRegex(api_text, r"^API compatibility(: (all \d+|\d+ of \d+) (calls|commands) (known|missing))?$", (cls.name, api_text))
                 if lights["api"]["status"] != "off":
                     self.assertRegex(api_text, r"(all %d|\d+ of %d) (calls|commands)" % (len(ig.calls), len(ig.calls)), (cls.name, "the api light counts this integration's own calls"))
-                self.assertEqual(set(snap[cls.name]), {"title", "steps", "lights", "labels", "exceptions", "calls", "identity"})
+                self.assertEqual(set(snap[cls.name]), {"title", "steps", "lights", "labels", "exceptions", "calls", "identity", "tls"})
                 self.assertEqual(snap[cls.name]["steps"], steps)
+                # how its connection is verified (tlspin.py), for the certificate light: the keyed services carry it
+                tls = snap[cls.name]["tls"]
+                if cls.name in ("plex", "truenas", "syncthing"):
+                    self.assertEqual(set(some(tls)), {"verify", "pin", "changed"})
+                    self.assertIn(tls["verify"], ("ca", "pin", "tofu"))
+                else:
+                    self.assertIsNone(tls, "the link verifies its own way (signed commands): no TLS row")
                 # every integration names its server by a key the service holds, never an address: an identity with its source
                 idn = snap[cls.name]["identity"]
                 if lights.get("server", {}).get("status") == "ok" or cls.name == "peer":  # (connected: it has one; the link's is this server's own)
@@ -15351,7 +15376,7 @@ class FutureTests(unittest.TestCase):
         df = _read(os.path.join(ROOT, "Dockerfile"), encoding="utf-8")
         self.assertIn("FROM debian:${DEBIAN_TAG} AS jpegtran", df)
         self.assertIn("FROM debian:${DEBIAN_TAG} AS ffmpeg", df)
-        self.assertEqual(some(re.search(r"^ARG DEBIAN_TAG=(\S+)", df, re.M)).group(1), f"{upkeep.debian_of_tag()}-slim")
+        self.assertEqual(some(re.search(r"^ARG DEBIAN_TAG=([^@\s]+)", df, re.M)).group(1), f"{upkeep.debian_of_tag()}-slim")
         ran = []
         with mock.patch.object(future, "has_buildkit", return_value=True), mock.patch.object(future, "LOG", os.path.join(TMP, "future-build.log")), \
                 mock.patch.object(future.subprocess, "run", side_effect=lambda cmd, **kw: ran.append(cmd) or mock.Mock(returncode=0)):
@@ -17170,6 +17195,36 @@ class CheckToolTests(unittest.TestCase):
                 self.assertEqual(set(tool["assets"]), set(tool["sha256"]), f"{key}: a sha256 for every platform it has")
                 self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", h) for h in tool["sha256"].values()), key)
 
+    def test_every_download_the_build_makes_is_pinned(self):
+        """What the image build and the workflows fetch is pinned (F-2026-029/030): every RUN in the Dockerfile that
+        downloads checks what it got (a SHA-256, or the signing key's fingerprint) before using it; every base image is
+        pinned to a digest, not a tag someone could re-push; and every workflow step runs an action at a full commit."""
+        df = _read(os.path.join(ROOT, "Dockerfile"), encoding="utf-8")
+        for arg in ("PYTHON_TAG", "DEBIAN_TAG", "NODE_TAG"):
+            self.assertRegex(df, rf"(?m)^ARG {arg}=[^@\s]+@sha256:[0-9a-f]{{64}}$", f"{arg} isn't pinned to a digest")
+        # each hash pin is a real SHA-256 (FFMPEG_GH_SHA256, the mirror's, may still be empty: the mirror is then refused)
+        for arg in ("LIBJPEG_TURBO_SHA256", "FFMPEG_SHA256", "OXIPNG_SHA256_AMD64", "OXIPNG_SHA256_ARM64"):
+            self.assertRegex(df, rf"(?m)^ARG {arg}=[0-9a-f]{{64}}$", f"{arg} isn't a pinned SHA-256")
+        self.assertRegex(df, r"(?m)^ARG MKVTOOLNIX_KEY_FPR=[0-9A-F]{40}$", "the signing key's fingerprint isn't pinned")
+        # a RUN that downloads checks the download in the same step, wherever in the file it is
+        for instr in re.split(r"(?m)^(?=[A-Z]+ )", df):
+            if instr.startswith("RUN") and "curl" in instr:
+                self.assertTrue("sha256sum -c" in instr or "MKVTOOLNIX_KEY_FPR" in instr,
+                                "a RUN downloads without checking what it got:\n" + instr[:200])
+        # dev/upkeep.py moves each hash with its version, so a bump can't leave the checks behind
+        from dev import upkeep
+        self.assertEqual(set(upkeep.SUMS), {"FFMPEG", "OXIPNG", "LIBJPEG_TURBO"})
+        for name, sums in upkeep.SUMS.items():
+            for arg in sums:
+                self.assertIn(f"ARG {arg}=", df, f"{name}'s hash ARG {arg} isn't in the Dockerfile")
+        # every workflow action at a full commit, its tag kept as the comment Dependabot maintains
+        flows = [os.path.join(ROOT, ".github", "workflows", f) for f in os.listdir(os.path.join(ROOT, ".github", "workflows"))]
+        for path in flows:
+            for line in _read(path, encoding="utf-8").splitlines():
+                if (m := re.search(r"uses:\s*(\S+)", line)) is not None:
+                    self.assertRegex(m.group(1), r"@[0-9a-f]{40}$", f"{os.path.basename(path)}: {m.group(1)} isn't pinned to a commit")
+                    self.assertRegex(line, r"#\s*v\d", f"{os.path.basename(path)}: the pinned commit doesn't say its version")
+
     def test_build_validation_checks_every_script_workflow_and_dockerfile(self):
         """dev/buildcheck.py (tnsync's Build Validation block, and GitHub's): ShellCheck on every shell script the project
         has, actionlint on its workflows, hadolint on its Dockerfiles; a rule hadolint passes over says why."""
@@ -18762,10 +18817,11 @@ class ToolsTests(unittest.TestCase):
         sample = [types.SimpleNamespace(path="/srv/Movies/" + os.path.relpath(m["path"], root)) for m in cat["movies"]]
         series = [types.SimpleNamespace(path="/srv/TV/Nothing/x.mkv")]
         found = [{"id": "zzz", "name": "Cabin", "owned": True, "token": "t", "connections": [{"uri": "http://c", "local": False, "relay": False}]}]
+        cabin = types.SimpleNamespace(
+            libraries=lambda: [Library("7", "Films", "movie", "movie", ["/srv/Movies"]), Library("8", "Series", "show", "tv", ["/srv/TV"])],
+            library_files=lambda lib, limit=None: sample if lib.key == "7" else series)
         with mock.patch.object(syncmod, "servers", lambda cid, tok: found), mock.patch.object(syncmod, "reachable", lambda sv: "http://c"), \
-                mock.patch.object(syncmod, "PlexClient", lambda url, tok, timeout=30: types.SimpleNamespace(
-                    libraries=lambda: [Library("7", "Films", "movie", "movie", ["/srv/Movies"]), Library("8", "Series", "show", "tv", ["/srv/TV"])],
-                    library_files=lambda lib, limit=None: sample if lib.key == "7" else series)), \
+                mock.patch.object(app.mirrors, "run", lambda sid, fn, timeout=30: fn(cabin)), \
                 mock.patch.object(app.mirrors, "_main_id", lambda: "me"):
             (c,) = app.sync.discover()
         n2 = len([f for f in app.files if str(f.library_key) == "2"])                             # (a sample of this library's files, looked for there)
@@ -21212,6 +21268,11 @@ class FileActionTests(unittest.TestCase):
         bigger = self._file("bigger.mkv", b"abcdef")
         with self.assertRaisesRegex(ValueError, "isn't the same file"):
             files.unlink(new, keep=bigger)
+        # a different file of the same size isn't "the same file" either (F-2026-027): refused, the only copy never deleted
+        same_size = self._file("same-size.mkv", b"xyz")
+        with self.assertRaisesRegex(ValueError, "isn't the same file"):
+            files.unlink(new, keep=same_size)
+        self.assertTrue(os.path.exists(new))
         with mock.patch("os.listdir", side_effect=OSError("no")):
             self.assertEqual(files.unlink(new, keep=a), {"removed": True})                             # (the same bytes elsewhere: fine; the folder's emptiness unknown)
         self.assertTrue(os.path.isdir(os.path.join(root, "new")))
@@ -22017,14 +22078,14 @@ class PeerLinkEdgeTests(unittest.TestCase):
         link = a.mirror_link
         self.assertIsNone(link.probe("http://127.0.0.1:1"))                                           # (nothing there)
         self.assertIsNone(link.probe(ua))                                                             # (ourselves)
-        with mock.patch("urllib.request.urlopen", return_value=_Resp(b"[1, 2]")), self.assertRaisesRegex(pl.PeerError, "not an object"):
+        with mock.patch.object(pl._opener, "open", return_value=_Resp(b"[1, 2]")), self.assertRaisesRegex(pl.PeerError, "not an object"):
             link._get("http://x")
-        with mock.patch("urllib.request.urlopen", side_effect=lambda *a, **k: _raise(_http_error(500, b"nope"))):
+        with mock.patch.object(pl._opener, "open", side_effect=lambda *a, **k: _raise(_http_error(500, b"nope"))):
             with self.assertRaises(urllib.error.HTTPError):
                 link._get("http://x")
             with self.assertRaisesRegex(pl.PeerError, "HTTP 500"):
                 link._post_open("http://x", {})
-        with mock.patch("urllib.request.urlopen", side_effect=lambda *a, **k: _raise(_http_error(400, b'{"paired": false, "why": "no"}'))):
+        with mock.patch.object(pl._opener, "open", side_effect=lambda *a, **k: _raise(_http_error(400, b'{"paired": false, "why": "no"}'))):
             self.assertEqual(link._post_open("http://x", {}), {"paired": False, "why": "no"})
         for call in (link._key, lambda: link.request("GET", "/peer/v1/status"), lambda: a.peerlinks.verify({}, "GET", "/x", b"")):
             with self.assertRaisesRegex(pl.PeerError, "not paired"):
@@ -22082,6 +22143,135 @@ class PeerLinkEdgeTests(unittest.TestCase):
         with mock.patch.object(link, "find") as fd:
             link.tick()
             fd.assert_not_called()                                                                    # (tried lately: not again until FIND_EVERY)
+
+    def test_a_pairing_request_cant_point_probes_or_flood_them(self):
+        """A pairing request makes this side fetch a hello back, so what it may make us probe is held down (F-2026-026):
+        only where we'd look ourselves and where the request came from — never the body's own list of addresses — the
+        refusals that need no hello come before anything is fetched, no redirect is followed, and each source address
+        gets a few asks a minute."""
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from plexcache import peerlink as pl
+        a, ua = self._side("plexA", "plexB")
+        b, ub = self._side("plexB", "plexA")
+        link = a.mirror_link
+        body = {"instance": "zzz", "public": b.mirror_link.public(), "port": 1, "addresses": ["10.9.9.9", "10.9.9.10"]}
+        probed: list = []
+        with mock.patch.object(link, "probe", side_effect=lambda url: probed.append(url)):
+            link.handle_pair(dict(body), "127.0.0.1")
+        self.assertEqual(probed, ["http://127.0.0.1:1", "http://127.0.0.1:8642"])  # the source with its ports: never 10.9.9.*
+        # the refusals that need no hello (declined, pairing by itself off) come before any probe
+        with mock.patch.object(link, "probe", side_effect=AssertionError("probed before refusing")):
+            link.declined = ["zzz"]
+            self.assertIn("unpaired here by hand", link.handle_pair(dict(body), "127.0.0.1")["why"])
+            link.declined = []
+            a.settings.update({"peer": {"auto_pair": False}})
+            self.assertIn("Pairing by itself is off", link.handle_pair(dict(body), "127.0.0.1")["why"])
+            a.settings.update({"peer": {"auto_pair": True}})
+        # a probe never follows a redirect: the hello must come from the address asked
+        class Elsewhere(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", ub + "/peer/v1/hello")
+                self.end_headers()
+
+            def log_message(self, format, *args):  # noqa: A002 — (the base class's own signature)
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Elsewhere)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        self.assertIsNotNone(link.probe(ub))                                               # (followed, the hello would answer…)
+        self.assertIsNone(link.probe(f"http://127.0.0.1:{srv.server_address[1]}"))         # (…but a redirect to it doesn't count)
+        # each source address gets a few pairing asks a minute, each its own
+        self.assertTrue(all(a.peerlinks.pair_budget("10.0.0.7") for _ in range(pl.PAIR_ASKS_MINUTE)))
+        self.assertFalse(a.peerlinks.pair_budget("10.0.0.7"))
+        self.assertTrue(a.peerlinks.pair_budget("10.0.0.8"))
+        status, got = a.peerlinks.handle("POST", "/peer/v1/pair", {}, json.dumps({"plex": "plexB"}).encode(), "10.0.0.7")
+        self.assertEqual((status, got["why"]), (200, "asked too often: wait a minute"))
+
+    def test_pairing_is_proven_by_marker_or_code(self):
+        """F-2026-021: a pairing records what vouched for its key. Pair Now alone still pairs, but such a pairing may
+        only read — carry, update and reach are refused — until the one-time code one side shows is typed into the
+        other (the code never travels: an HMAC of it over the key it vouches for does), or the marker proves it."""
+        from plexcache import peerlink as pl
+
+        def settle(*links):
+            for _ in range(200):
+                if all(lk.paired for lk in links) and not any(lk.links.busy for lk in links):
+                    return
+                time.sleep(0.05)
+            self.fail("the two didn’t pair")
+        # the code and its proof: one-time, forgiving of dashes and case, and different for the ask and the answer
+        self.assertEqual(len(pl.new_code()), 8)
+        self.assertTrue(all(c in pl.CODE_ALPHABET for c in pl.new_code()))
+        self.assertNotEqual(pl.new_code(), pl.new_code())
+        self.assertEqual(pl.norm_code(" qvh3-zk7m "), "QVH3ZK7M")
+        self.assertEqual(pl.code_proof("qvh3 zk7m", "pair", "AB"), pl.code_proof("QVH3-ZK7M", "pair", "ab"))
+        self.assertNotEqual(pl.code_proof("QVH3ZK7M", "pair", "ab"), pl.code_proof("QVH3ZK7M", "pair-answer", "ab"))
+        self.assertNotIn("QVH3", pl.code_proof("QVH3ZK7M", "pair", "ab").upper()[:8])
+        a, ua = self._side("plexA", "plexB")
+        b, ub = self._side("plexB", "plexA")
+        a.settings.update({"peer": {"servers": {"plexB": {"url": ub}}}})
+        b.settings.update({"peer": {"servers": {"plexA": {"url": ua}}}})
+        # Pair Now on one side only: the other notes the ask, with the asker's fingerprint for the "Wants to Pair" prompt
+        a.mirror_link.pair_now()
+        for _ in range(200):
+            if b.peerlinks.asks().get("plexA") or (a.mirror_link.paired and not a.peerlinks.busy):
+                break
+            time.sleep(0.05)
+        ask = b.peerlinks.asks().get("plexA") or {}
+        self.assertEqual(ask.get("fingerprint"), pl.fingerprint(a.peerlinks.public()))
+        self.assertTrue(ask.get("id"))                                 # (the picture the asker's own pages show)
+        # Pair Now on both, no code, no marker: paired, but nothing vouches for it — and the page said this side's code
+        b.mirror_link.pair_now()
+        self.assertEqual(b.mirror_link.snapshot()["code"], b.mirror_link.code)
+        self.assertTrue(b.mirror_link.code)
+        settle(a.mirror_link, b.mirror_link)
+        self.assertFalse(a.mirror_link.proven() or b.mirror_link.proven())
+        self.assertEqual(a.mirror_link.lights()["paired"]["status"], "warn")
+        # read-only until proven: status flows, but carry, update and reach are refused over the wire
+        self.assertTrue(a.mirror_link.talk())
+        with self.assertRaisesRegex(pl.PeerError, "proven"):
+            a.mirror_link.request("POST", "/peer/v1/reach", {"urls": ["http://127.0.0.1:1"], "machine": ""})
+        with self.assertRaisesRegex(pl.PeerError, "proven"):
+            a.mirror_link.request("POST", "/peer/v1/carry", {"library": "1", "mirrors": "1", "marker": {"at": 1}, "claims": []})
+        with self.assertRaisesRegex(pl.PeerError, "proven"):
+            a.mirror_link.request("POST", "/peer/v1/update", {"channel": "x", "commit": "", "version": "1"})
+        # remote update is off as shipped, even for a proven pairing
+        self.assertFalse(config.DEFAULTS["peer"]["remote_update"])
+        self.assertIn("off here", b.mirror_link.handle_update({"channel": "x"})["why"])
+        # the code b's page shows, typed into a with Pair Now: both sides mark the pairing proven, and the code is spent
+        b.mirror_link.pair_now()
+        a.mirror_link.pair_now("  " + b.mirror_link.code.lower() + " ")
+        for _ in range(200):
+            if a.mirror_link.proven() and b.mirror_link.proven():
+                break
+            time.sleep(0.05)
+        self.assertEqual(((a.mirror_link.paired or {}).get("proven"), (b.mirror_link.paired or {}).get("proven")), ("code", "code"))
+        self.assertEqual((a.mirror_link.their_code, b.mirror_link.code), ("", ""))
+        self.assertEqual(a.mirror_link.lights()["paired"]["status"], "ok")
+        self.assertIn("pairing code", en(jsonable(a.mirror_link.lights()["paired"]["detail"])))
+        self.assertTrue(a.mirror_link.talk())                           # (still talking: the key is the same)
+        # a wrong code refuses the pairing outright, before anything is kept
+        got = b.mirror_link.handle_pair({"instance": a.peerlinks.instance(), "public": a.peerlinks.public(),
+                                         "port": int(ua.rsplit(":", 1)[1]), "proof": "00" * 32, "manual": True}, "127.0.0.1")
+        self.assertIn("code doesn’t match", got["why"])
+        # the marker still proves a pairing by itself, Pair Now or not
+        a.mirror_link.unpair()
+        b.mirror_link.unpair()
+        with mock.patch.object(a.mirror_link, "_marker_public", lambda inst: b.peerlinks.public()), \
+                mock.patch.object(b.mirror_link, "_marker_public", lambda inst: a.peerlinks.public()):
+            a.mirror_link.pair_now()
+            b.mirror_link.pair_now()
+            settle(a.mirror_link, b.mirror_link)
+            self.assertEqual((a.mirror_link.paired or {}).get("proven"), "marker")
+        # pairings from before proof was recorded: one made through the marker counts as proven, a manual one doesn't
+        a._save_json("peer.json", {"paired": {"plexB": {"instance": "i", "name": "B", "url": "http://127.0.0.1:1", "public": b.peerlinks.public(), "at": 1, "how": "auto"},
+                                              "plexC": {"instance": "j", "name": "C", "url": "http://127.0.0.1:1", "public": b.peerlinks.public(), "at": 1, "how": "manual"}}})
+        fresh = pl.PeerLinks(a)
+        self.assertEqual((fresh.link("plexB").paired or {}).get("proven"), "marker")
+        self.assertFalse(fresh.link("plexC").proven())
 
     def test_paired_sides_at_their_edges(self):
         from plexcache import peerlink as pl
@@ -22653,6 +22843,22 @@ class ToolBaseTests(unittest.TestCase):
                 base.revert_row(tool, {"id": "r", "library": "1"}, {}, {"kind": "snapshot", "names": ["tank/m@s"]}, steps.append)
                 fa.assert_called_once_with("copy_from", "/l/a.mkv", to="/l/.zfs/snapshot/s/a.mkv")
         self.assertEqual(en(steps[0]), "a.mkv put back from the snapshot")
+
+    def test_a_choice_sets_only_the_keys_its_tool_declares(self):
+        """A page's choice may set only the keys its tool declares (choice_keys): nothing else about a row — its paths,
+        what it does, what holds it — can be rewritten from a request (F-2026-028). Holds for every tool there is."""
+        from plexcache import tools
+        app = _new_app()
+        row = {"id": "r", "local": "/l/a.mkv", "keep": {"path": "/l/a.mkv"}, "moves": [], "blocked": False, "held": False}
+        choice = {"keep_key": "/l/b.mkv", "local": "/etc/passwd", "path": "/etc/passwd", "moves": [{"from": "/x", "to": "/y"}],
+                  "from": "/x", "to": "/y", "blocked": True, "blocks": [], "held": True, "stopped": True}
+        for name, tool in app.tools.items():
+            got = tools.Tool.choose(tool, dict(row), dict(choice))                     # (the base merge, which every choice goes through)
+            self.assertEqual({k: got[k] for k in row}, row, name)                      # nothing of the row overwritten
+            self.assertLessEqual(set(got) - set(row), set(tool.choice_keys), name)     # nothing undeclared added
+            self.assertTrue(all(isinstance(k, str) for k in tool.choice_keys), name)
+        self.assertEqual(app.tools["merge"].choose(dict(row), dict(choice))["keep_key"], "/l/b.mkv")  # the page's arrow still lands
+        self.assertNotIn("keep_key", tools.Tool.choose(app.tools["unlink"], dict(row), dict(choice)))  # a tool without choices takes nothing
 
     def test_runs_without_a_tool_or_a_backup(self):
         from plexcache import tools
@@ -23915,3 +24121,206 @@ class PlaybackEdgeTests2(unittest.TestCase):
         job = playback.Job(feature="nextepisode", target="A", path="/nope", ranges=[], cancel=True)
         app.monitor._run_job("k", job, 0, 100, 1)
         self.assertIn(job.state, ("done", "cancelled"))
+
+
+class TlsPinTests(unittest.TestCase):
+    """Keyed connections are verified (tlspin.py, F-2026-022/023/024): the certificate pinned on first use, a changed
+    one refused and offered for trust by hand, full verification as the alternative — and never neither."""
+
+    @classmethod
+    def setUpClass(cls):
+        import ssl
+        d = tempfile.mkdtemp(dir=TMP)
+        cert, key = fakes.self_signed_cert(d)
+        with open(cert, "rb") as fh:
+            cls.fp = hashlib.sha256(ssl.PEM_cert_to_DER_cert(fh.read().decode())).hexdigest()
+        srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        srv_ctx.load_cert_chain(cert, key)
+        cls.srv = socket.socket()
+        cls.srv.bind(("127.0.0.1", 0))
+        cls.srv.listen(8)
+        cls.port = cls.srv.getsockname()[1]
+
+        def serve():  # (a TLS server with the fixture's self-signed certificate, answering any HTTP request)
+            while True:
+                try:
+                    conn, _a = cls.srv.accept()
+                except OSError:
+                    return
+                try:
+                    with srv_ctx.wrap_socket(conn, server_side=True) as t:
+                        if b"\r\n\r\n" in t.recv(65536):
+                            t.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                except Exception:  # noqa: BLE001 — (refused handshakes are part of what's tested)
+                    pass
+        threading.Thread(target=serve, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.close()
+
+    def test_pinned_on_first_use_and_a_change_refused(self):
+        import ssl
+
+        from plexcache import tlspin
+        # first use, nothing pinned: the handshake's certificate is remembered in `seen` (what tls_ok pins)
+        ctx = tlspin.context(False, "")
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as s, ctx.wrap_socket(s, server_hostname="127.0.0.1"):
+            pass
+        self.assertEqual(ctx.seen, self.fp)
+        self.assertEqual(tlspin.fingerprint(f"https://127.0.0.1:{self.port}"), self.fp)
+        self.assertEqual(tlspin.fingerprint(f"http://127.0.0.1:{self.port}"), "")  # (no TLS, no certificate)
+        # the pinned certificate answers: fine (and a pin compares case-blind)
+        ctx = tlspin.context(False, self.fp.upper())
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as s, ctx.wrap_socket(s, server_hostname="127.0.0.1"):
+            pass
+        # another certificate where one is pinned: refused, both fingerprints named, what answered kept for the card
+        other = "ab" * 32
+        ctx = tlspin.context(False, other)
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as s, self.assertRaises(tlspin.CertChanged) as got:
+            ctx.wrap_socket(s, server_hostname="127.0.0.1")
+        self.assertIn(tlspin.short(self.fp), str(got.exception))
+        self.assertIn(tlspin.short(other), str(got.exception))
+        self.assertEqual(ctx.seen, self.fp)
+        # the refusal is found however urllib wraps it (tlspin.changed: what tells "changed" from "unreachable")
+        err = None
+        try:
+            urllib.request.urlopen(f"https://127.0.0.1:{self.port}/", timeout=5, context=tlspin.context(False, other))
+        except urllib.error.URLError as e:
+            err = e
+        self.assertTrue(tlspin.changed(err))
+        self.assertFalse(tlspin.changed(urllib.error.URLError(OSError("no route"))))
+        # full verification refuses a self-signed certificate outright: no pin involved
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as s, self.assertRaises(ssl.SSLCertVerificationError):
+            tlspin.context(True).wrap_socket(s, server_hostname="127.0.0.1")
+        self.assertEqual(tlspin.short("abcd1234" + "e" * 56), "ABCD-1234-EEEE")
+
+    def test_never_unverified_and_the_pins_round_trip(self):
+        """pin_tls only comes off while verify_tls is on, for each keyed service; and the pins section takes only
+        service names and SHA-256s (never the page's)."""
+        app = _new_app()
+        for sec in ("plex", "truenas", "syncthing"):
+            with self.assertRaisesRegex(config.SettingsError, "certificate pinning"):
+                app.settings.update({sec: {"pin_tls": False, "verify_tls": False}})
+            app.settings.update({sec: {"pin_tls": False, "verify_tls": True}})  # (allowed: fully verified instead)
+            app.settings.update({sec: {"pin_tls": True, "verify_tls": False}})  # (the default again)
+        app.settings.update({"tls": {"pins": {"truenas": "AB" * 32, "plex2:m1": "cd" * 32, "syncthing": ""}}})
+        self.assertEqual(app.settings.section("tls")["pins"], {"truenas": "ab" * 32, "plex2:m1": "cd" * 32})  # (lowercased; "" forgets)
+        for bad in ({"truenas": "zz" * 32}, {"bad service!": "ab" * 32}, {"truenas": "ab"}):
+            with self.assertRaises(config.SettingsError):
+                app.settings.update({"tls": {"pins": bad}})
+
+    def test_the_app_pins_notes_a_change_and_trusts_the_new_one(self):
+        from plexcache import integrations
+        app = _new_app()
+        url = f"https://127.0.0.1:{self.port}"
+        app.settings.update({"truenas": {"url": url}})
+        self.assertEqual(app.tls_state("truenas")["verify"], "tofu")  # (nothing pinned yet: the next success pins)
+        ctx = app.tls_context("truenas", app.settings.section("truenas"))
+        self.assertTrue(ctx.pinning)
+        self.assertEqual(ctx.pin, "")
+        ctx.seen = "ab" * 32
+        app.tls_ok("truenas", ctx)
+        self.assertEqual(app.settings.section("tls")["pins"]["truenas"], "ab" * 32)
+        self.assertEqual(app.tls_state("truenas")["verify"], "pin")
+        # a changed certificate: noted for the card, and Trust New Certificate pins what answers now, read afresh
+        ctx = app.tls_context("truenas", app.settings.section("truenas"))
+        self.assertEqual(ctx.pin, "ab" * 32)
+        ctx.seen = self.fp
+        self.assertTrue(app.tls_refused("truenas", ctx))
+        self.assertEqual(some(app.tls_state("truenas")["changed"])["seen"], self.fp)
+        self.assertEqual(app.trust_certificate("truenas")["pinned"], self.fp)
+        self.assertEqual(app.settings.section("tls")["pins"]["truenas"], self.fp)
+        self.assertIsNone(app.tls_state("truenas")["changed"])
+        self.assertIn("error", app.trust_certificate("syncthing"))  # (no address set: nothing to read)
+        # with full verification on, no pin is consulted
+        app.settings.update({"truenas": {"verify_tls": True}})
+        self.assertEqual(app.tls_state("truenas")["verify"], "ca")
+        self.assertFalse(app.tls_context("truenas", app.settings.section("truenas")).pinning)
+        app.settings.update({"truenas": {"verify_tls": False}})
+        # the System cards get the state with each service's snapshot; the link verifies its own way (no TLS row)
+        snap = integrations.snapshot(app)
+        self.assertEqual((snap["truenas"]["tls"]["verify"], snap["truenas"]["tls"]["pin"]), ("pin", self.fp))
+        self.assertIsNone(snap["peer"]["tls"])
+
+    def test_plex_connections_choose_the_right_verification(self):
+        import ssl
+
+        from plexcache import tlspin
+        # a known plex.direct name — the URL's own, or the one a bare address stands for — is fully verified for that name
+        c = PlexClient("https://10.0.0.9:32400", "tok", direct_name="1-2-3-4.abcdef.plex.direct")
+        self.assertEqual((some(getattr(c._ctx, "name", None)), c._ctx.verify_mode), ("1-2-3-4.abcdef.plex.direct", ssl.CERT_REQUIRED))
+        c = PlexClient("https://1-2-3-4.abcdef.plex.direct:32400", "tok")
+        self.assertEqual(some(getattr(c._ctx, "name", None)), "1-2-3-4.abcdef.plex.direct")
+        # a token with no context handed in: full verification, never silently unchecked
+        self.assertEqual(PlexClient("https://10.0.0.9:32400", "tok")._ctx.verify_mode, ssl.CERT_REQUIRED)
+        # the app's own context (the pin) is used as given; a tokenless probe sends nothing and checks nothing
+        ctx = tlspin.context(False, "")
+        self.assertIs(PlexClient("https://10.0.0.9:32400", "tok", tls=ctx)._ctx, ctx)
+        self.assertEqual(PlexClient("https://10.0.0.9:32400", "")._ctx.verify_mode, ssl.CERT_NONE)
+
+    def test_a_mirrors_connection_is_verified_too(self):
+        app = _new_app()
+        svs = {"m1": {"name": "Cottage", "url": "https://10.0.0.9:32400", "token": "t1", "relay": False, "direct": "1-2-3-4.abcdef.plex.direct"},
+               "m2": {"name": "ByHand", "url": "https://10.0.0.10:32400", "token": "t2", "relay": False, "direct": "EVIL.example.com"}}
+        app.settings.update({"plex2": {"servers": svs}})
+        kept = app.settings.section("plex2")["servers"]
+        self.assertEqual(kept["m1"]["direct"], "1-2-3-4.abcdef.plex.direct")
+        self.assertEqual(kept["m2"]["direct"], "")  # (only a *.plex.direct name is a name to verify for)
+        c = app.mirrors.client("m1")
+        self.assertEqual(some(getattr(c._ctx, "name", None)), "1-2-3-4.abcdef.plex.direct")
+        c2 = app.mirrors.client("m2")
+        self.assertTrue(getattr(c2._ctx, "pinning", False))  # (no plex.direct name: pinned on first use, keyed by the server)
+        cast(Any, c2._ctx).seen = "cd" * 32
+        some(c2.after_tls)(True)
+        self.assertEqual(app.settings.section("tls")["pins"]["plex2:m2"], "cd" * 32)
+        with mock.patch.object(app.mirrors, "pairs", return_value={}):
+            rows = {r["id"]: r for r in app.mirrors.snapshot()["servers"]}
+        self.assertEqual(rows, {})  # (no library mirrored yet: no rows)
+        app.settings.update({"plex2": {"libraries": {"*": {"state": "mirror", "server": "m1", "key": ""}}}})
+        with mock.patch.object(app.mirrors, "pairs", return_value={}):
+            rows = {r["id"]: r for r in app.mirrors.snapshot()["servers"]}
+        self.assertEqual(rows["m1"]["tls"], {"verify": "ca", "pin": "", "changed": None})
+
+    def test_syncthings_key_only_travels_encrypted_or_to_localhost(self):
+        from plexcache.syncthing import SyncthingClient, SyncthingError
+        with self.assertRaisesRegex(SyncthingError, "plain http"):
+            SyncthingClient("http://192.168.1.50:8384", "the-key").status()
+        with self.assertRaisesRegex(SyncthingError, "Nothing answered"):  # (localhost: allowed, just nothing there)
+            SyncthingClient("http://127.0.0.1:1", "the-key", timeout=0.5).status()
+        with self.assertRaisesRegex(SyncthingError, "Nothing answered"):  # (keyless probe: allowed, nothing to take)
+            SyncthingClient("http://127.0.0.1:1", "", timeout=0.5).status()
+        # the client the app builds carries the pin context and reports how the handshake went
+        app = _new_app(syncthing={"url": f"https://127.0.0.1:{self.port}", "api_key": "k"})
+        c = app.syncthing.client()
+        self.assertTrue(getattr(c.ctx, "pinning", False))
+        c.status()  # (the TLS answer above is valid JSON: the call itself succeeds)
+        self.assertEqual(app.settings.section("tls")["pins"]["syncthing"], self.fp)  # (pinned on first use, through after_tls)
+        app.settings.update({"tls": {"pins": {"syncthing": "ab" * 32}}})
+        with self.assertRaisesRegex(SyncthingError, "Nothing answered"):
+            app.syncthing.client().status()
+        self.assertEqual(some(app.tls_state("syncthing")["changed"])["seen"], self.fp)  # (refused and noted, not sent)
+
+    def test_trust_new_certificate_endpoint(self):
+        from plexcache.server import serve
+        app = _new_app(truenas={"url": f"https://127.0.0.1:{self.port}"})
+        httpd = serve(app, "127.0.0.1", 0)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        def post(path, body):
+            req = urllib.request.Request(base + path, data=json.dumps(body).encode(), method="POST", headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.loads(e.read() or b"{}")
+        with mock.patch.object(app, "test_connections_async"):
+            code, got = post("/api/tls/trust", {"service": "truenas"})
+            self.assertEqual((code, got), (200, {"pinned": self.fp}))
+            self.assertEqual(app.settings.section("tls")["pins"]["truenas"], self.fp)
+            code, _got = post("/api/tls/trust", {"service": "../etc"})
+            self.assertEqual(code, 400)
