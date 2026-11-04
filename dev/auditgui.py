@@ -122,6 +122,7 @@ class Data:
             "last": audits[-1].id if audits else "",
             "private": have_private,
             "open": sum(1 for a in audits for f in a.findings if f.get("status") == "open") if have_private else None,
+            "scorecard": audit.scorecard(audits) if have_private else [],
             "private_root": self.root(),
             "problems": bad + m.notes,
             "commit": {"app": self._status(audit.ROOT, os.path.relpath(audit.PUBLIC, audit.ROOT)),
@@ -213,7 +214,10 @@ class Data:
             for f in a.findings:
                 if f.get("via"):
                     led.setdefault(str(f["via"]), []).append(str(f.get("id")))
-        for a in audit.load(self.private)[0]:
+        audits = audit.load(self.private)[0]
+        labels, by_id = audit.prompt_labels(audits), {a.id: a for a in audits}
+        who = lambda x: {"id": x.id, "auditor": x.auditor, "thoroughness": x.thoroughness, "prompt": audit.prompt_label(x, labels)}  # noqa: E731
+        for a in audits:
             for f in a.findings:
                 try:
                     score = audit.cvss(str(f["cvss"]))[0] if f.get("cvss") else None
@@ -225,7 +229,9 @@ class Data:
                             "fix": audit.fix_where(f, a)[0] if f.get("status") == "fixed" else "",
                             "lost": [t for t in f.get("tests", []) if t not in known], "by_audit": audit.by_audit(f),
                             "waiting": auditfix.waiting(f), "led_to": led.get(str(f.get("id")), []),
-                            "outside": f.get("status") == "fixed" and bool(f.get("reported")) and not f.get("closed_by")})
+                            "outside": f.get("status") == "fixed" and bool(f.get("reported")) and not f.get("closed_by"),
+                            "prompt": audit.prompt_label(a, labels),
+                            "missed": [who(by_id[m]) for m in f.get("missed_by", []) if m in by_id]})
         return sorted(out, key=lambda f: (f.get("status") != "open", -audit.SEVERITIES.index(f.get("severity", "info"))
                                           if f.get("severity") in audit.SEVERITIES else 0, f.get("id", "")))
 
@@ -278,8 +284,18 @@ class Data:
         return {"ids": ids}
 
     def refresh(self, q: dict) -> dict:
-        """Re-check: a fixed finding whose fix has been committed since gets that commit."""
+        """Re-check: a fixed finding whose fix has been committed since gets that commit; and each finding's "missed by"
+        worked out again (the audits before it that read its lines), for records made before it was."""
         filled = 0
+        audits = audit.load(self.private)[0]
+        where = audit._repo()
+        for a in audits if where else []:
+            for f in a.findings:
+                when = {"id": "~", "date": f.get("found")} if f.get("found") else {"id": a.id, "date": a.date}
+                got = audit.missed(when, f, audits, where[0]) if where else []
+                if sorted(got) != sorted(f.get("missed_by", [])):
+                    auditfix.edit(self.root(), a.id, lambda rec, fid=f["id"], got=got: next(
+                        x for x in rec["finding"] if x.get("id") == fid).update(missed_by=got))
         for a in audit.load(self.private)[0]:
             for f in a.findings:
                 if f.get("status") == "fixed" and not f.get("fixed_in"):

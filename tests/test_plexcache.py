@@ -18133,6 +18133,60 @@ class AuditTests(unittest.TestCase):
         said = [x.message for x in audit.findings_check(audit.load()[0]).findings or []]
         self.assertIn("F-2026-001's guarding test LoginTests.test_login_checks is gone from tests/", said)
 
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_each_audit_keeps_its_prompt_version_and_what_missed_a_finding(self):
+        """The prompt's version is the hash of its text (a copy of each kept in the private repo's prompts/), named v1, v2…
+        by first use. A finding is missed by each earlier audit that read its lines (their fingerprints), a fix's test's
+        finds too; the scorecard counts, per auditor, thoroughness and prompt, what each found and missed."""
+        from dev import audit, auditfix, auditgui
+        repo, private, git = self.project()
+        with open(os.path.join(private, "PROMPT.md"), "w") as fh:
+            fh.write("# How to audit\n\n---\nAudit it carefully.\n")
+        v1 = audit.prompt_version(private)
+        self.assertRegex(v1, r"^PROMPT\.md#[0-9a-f]{10}$")
+        with open(os.path.join(private, "prompts", v1.split("#")[1] + ".md")) as fh:
+            self.assertEqual(fh.read(), "Audit it carefully.\n")
+        with open(os.path.join(private, "PROMPT.md"), "w") as fh:
+            fh.write("# How to audit, reworded\n\n---\nAudit it carefully.\n")
+        self.assertEqual(audit.prompt_version(private), v1)   # (only the prompt's own text makes a version)
+        with open(os.path.join(private, "PROMPT.md"), "w") as fh:
+            fh.write("# How to audit\n\n---\nAudit it very carefully.\n")
+        v2 = audit.prompt_version(private)
+        self.assertNotEqual(v2, v1)
+        head = git("rev-parse", "HEAD")
+        read_a = json.dumps(audit.spot_prints(["a.py:1-6"], repo))
+        read_b = json.dumps(audit.spot_prints(["b.py:1-20"], repo))
+        for aid, date, prints, who, prompt, extra in (
+                ("2026-11-01-1", "2026-11-01", read_a, "beta-5.1", v1, ""),
+                ("2026-11-01-2", "2026-11-01", read_b, "beta-5.1", v1, ""),
+                ("2026-11-02-1", "2026-11-02", read_a, "gamma-5.5", v2 + " + re-check",
+                 '[[finding]]\nid = "F-2026-001"\ntitle = "Login trusts its input"\nseverity = "high"\nlines = ["a.py:1"]\n'
+                 f'prints = {json.dumps(audit.spot_prints(["a.py:1"], repo))}\ndetail = "d"\nstatus = "open"\nmain = "affected"\n')):
+            self.write(os.path.join(repo, "security", "audits"), f"{aid}.toml",
+                       f'id = "{aid}"\ndate = {date}\ncommit = "{head}"\nkind = "full"\nprints = {prints}\n')
+            self.write(os.path.join(private, "audits"), f"{aid}.toml",
+                       f'id = "{aid}"\nauditor = "{who}"\nthoroughness = 4\nprompt = "{prompt}"\n' + extra)
+        audits = audit.load()[0]
+        labels = audit.prompt_labels(audits)
+        self.assertEqual(labels, {v1: "v1", v2: "v2"})
+        self.assertEqual([audit.prompt_label(a, labels) for a in audits], ["v1", "v1", "v2 + re-check"])
+        data = auditgui.Data()
+        data.refresh({})   # (the re-check works out what missed each finding, for records from before it did)
+        f = next(f for f in data.findings() if f["id"] == "F-2026-001")
+        self.assertEqual((f["prompt"], [m["id"] for m in f["missed"]]), ("v2 + re-check", ["2026-11-01-1"]))   # (not the audit of b.py only)
+        self.assertEqual(f["missed"][0], {"id": "2026-11-01-1", "auditor": "beta-5.1", "thoroughness": 4, "prompt": "v1"})
+        # (a fix's test's find: missed by every audit that read its lines, the one whose finding it came from too)
+        self.write(os.path.join(repo, "tests"), "test_app.py", "import unittest\n\n\nclass LoginTests(unittest.TestCase):\n"
+                   "    def test_login_checks(self):\n        pass\n")
+        new = auditfix.found(private, "F-2026-001", {"title": "Other trusts it too", "lines": ["a.py:5"], "type": "hardening",
+                                                     "severity": "low", "detail": "d", "tests": ["LoginTests.test_login_checks"]})
+        g = next(f for f in data.findings() if f["id"] == new)
+        self.assertEqual(sorted(m["id"] for m in g["missed"]), ["2026-11-01-1", "2026-11-02-1"])
+        rows = {(r["auditor"], r["prompt"]): r for r in data.overview()["scorecard"]}
+        self.assertEqual((rows["beta-5.1", "v1"]["audits"], rows["beta-5.1", "v1"]["found"], rows["beta-5.1", "v1"]["missed"]),
+                         (["2026-11-01-1", "2026-11-01-2"], [], ["F-2026-001", new]))
+        self.assertEqual((rows["gamma-5.5", "v2 + re-check"]["found"], rows["gamma-5.5", "v2 + re-check"]["missed"]), (["F-2026-001"], [new]))
+
     def _cli(self, audit, *args):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

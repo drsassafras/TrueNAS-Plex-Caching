@@ -231,7 +231,7 @@ python3 dev/audit.py start plexcache/peerlink.py plexcache/app.py:login    # …
 python3 dev/audit.py record filled.toml     # checked, fingerprinted, split: security/audits/<id>.toml here, audits/<id>.toml there
 ```
 
-`record` also fills in each finding's `introduced_in` (the commit that brought it in, from `git blame`) and `missed_by` (the earlier audits that had those lines in scope after that, and didn't report it), so you can see, over time, what each auditor and thoroughness finds and misses. Then commit both halves, each in its own repo.
+`record` also fills in the audit's `prompt` (the standard prompt's version: a hash of its text, each version kept in the private repo's `prompts/`) and each finding's `introduced_in` (the commit that brought it in, from `git blame`) and `missed_by` (the earlier audits that read those very lines, from their fingerprints, and didn't report it; a finding a fix's test found gets one too). Each finding on the audits page says what missed it, and the Overview's "Who found what, and what they missed" counts them by auditor, thoroughness and prompt version (v1, v2…), so you can see, over time, which finds and which misses. Re-check the code works it out again for older records. Then commit both halves, each in its own repo.
 
 ## Python and the other dependencies
 

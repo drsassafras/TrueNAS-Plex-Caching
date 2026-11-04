@@ -129,6 +129,7 @@ class Run:
     recheck: list[str] = field(default_factory=list)   # (the open findings it re-checks: their ids)
     rechecked: list[str] = field(default_factory=list)   # (what came of each)
     said: list[str] = field(default_factory=list)   # (record's lines: what it wrote)
+    prompt: str = ""   # (the standard prompt's version when it started: PROMPT.md#<hash>, " + re-check" for one)
 
     def folder(self, private: str | None = None) -> str:
         return os.path.join(runs_root(private), self.id)
@@ -332,7 +333,8 @@ class Runner:
         recheck = [str(f.get("id")) for a in audits for f in a.findings if f.get("status") == "open"] if target in ("open", "open-changed") else []
         return Run(rid, target, kind, scope, auditor, thoroughness, plugin=plugin, commit=_git("rev-parse", "HEAD"),
                    main_commit=audit.main_commit(), uncommitted=_dirty(kind, scope), lines=lines, started=time.time(), author=author,
-                   recheck=recheck)
+                   recheck=recheck, prompt=(audit.prompt_version(self.private) + (" + re-check" if recheck else ""))
+                   if os.path.exists(os.path.join(self.root(), "PROMPT.md")) else "")
 
     def start(self, target: str, paths: list[str], auditor: str, thoroughness: int, author: bool = False,
               wait: bool = False) -> Run:
@@ -560,9 +562,8 @@ class Runner:
         rec = {"id": aid, "date": day, "commit": r.commit, "kind": r.kind, "scope": r.scope, "uncommitted": r.uncommitted,
                "auditor": r.auditor, "thoroughness": r.thoroughness, "author": r.author, "main_commit": r.main_commit or "unknown",
                "run": r.id, "finding": tidy(found, day.year, first, r.scope)}
-        if r.plugin:
-            at = subprocess.run(["git", "-C", self.root(), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=30)
-            rec["prompt"] = f"PROMPT.md@{at.stdout.strip() or 'uncommitted'}"
+        if r.prompt:
+            rec["prompt"] = r.prompt   # (the version it started with: a person's audit too)
         rc, said = audit.save(rec, self.private, snapshot=snapshot, prints=prints)
         r.said += said
         if rc != 0:

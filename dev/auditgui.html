@@ -171,6 +171,13 @@ async function overview(view) {
   put(view, tiles,
     o.push ? h("p", {class: "lead"}, plural(o.push, "line") + " no audit has seen aren't pushed yet. ",
       h("button", {class: "quiet", onclick: () => { pending = "unpushed"; show("start"); }}, "Audit them")) : null,
+    (o.scorecard || []).length ? h("div", {class: "card"}, h("b", {}, "Who found what, and what they missed"),
+      h("div", {class: "wrap"}, h("table", {}, h("tr", {}, ["Auditor", "Thoroughness", "Prompt", "Audits", "Found", "Missed"].map(t => h("th", {}, t))),
+        o.scorecard.map(r => h("tr", {},
+          h("td", {}, String(r.auditor || "").replace(/^human:/, "") + (r.author ? " (the author's own)" : "")), h("td", {}, String(r.thoroughness)),
+          h("td", {}, r.prompt), h("td", {}, String(r.audits.length)), h("td", {title: r.found.join(", ")}, String(r.found.length)),
+          h("td", {title: r.missed.join(", "), class: r.missed.length ? "bad" : ""}, r.missed.length ? r.missed.length + " (" + r.missed.join(", ") + ")" : "0"))))),
+      h("p", {class: "note"}, "Missed: it read a finding's lines, and a later audit or a fix's test found it. Findings a fix's test found count for no auditor.")) : null,
     h("h2", {}, "Checks"), checks, commit,
     o.problems.length ? h("div", {class: "card"}, h("b", {}, "Notes"), h("ul", {class: "plain"}, o.problems.map(p => h("li", {}, p)))) : null);
 }
@@ -458,7 +465,8 @@ async function findings(view) {
         f.outside ? h("span", {class: "badge bad", title: "Closed in the records, but not by Confirm, Mark as fixed or a re-check here"}, "closed outside the page") : null,
         f.by_audit === false ? h("span", {class: "badge", title: "Found by a test written for " + f.via + "'s fix, not by an audit: it counts for no auditor"}, "found by a fix's test") : null),
       h("div", {class: "note"}, (f.now && f.now.length && [...f.now].sort().join() !== [...(f.lines || [])].sort().join() ? "now at " + f.now.join(", ") + " · found at " : "") + (f.lines || []).join(", ") + (f.by_audit === false ? " · found by a test written for " + f.via + "'s fix" + (f.found ? ", " + f.found : "") + ", not by an audit (kept in audit " + f.audit + "'s record)"
-        : " · audit " + f.audit + " (" + String(f.auditor || "").replace(/^human:/, "") + " at " + f.thoroughness + (f.author ? ", the author's own" : "") + ")")),
+        : " · audit " + f.audit + " (" + String(f.auditor || "").replace(/^human:/, "") + " at " + f.thoroughness + (f.prompt ? ", prompt " + f.prompt : "") + (f.author ? ", the author's own" : "") + ")")),
+      (f.missed || []).length ? h("p", {class: "note"}, "Missed by: " + f.missed.map(m => "audit " + m.id + " (" + String(m.auditor || "").replace(/^human:/, "") + " at " + m.thoroughness + (m.prompt ? ", prompt " + m.prompt : "") + ")").join(", ") + ": it read these lines before this was found.") : null,
       f.status === "open" && f.code === "gone" ? h("p", {class: "note"}, "None of its lines are in the code any more. If that change is the fix, Mark as fixed (or have an AI auditor re-check it); the next audit of the change says whether it's right.") : null,
       f.status === "open" && f.code === "changed" ? h("p", {class: "note"}, "Some of its lines have changed since it was found.") : null,
       f.status === "fixed" && FIX[f.fix] ? h("p", {class: "note"}, unpushed(f) && f.fix === "not fixed" ? "Fixed, but not pushed yet: commit and push the fix. (Its lines look as they did, so the fix is elsewhere in the code.)" : FIX[f.fix]) : null,

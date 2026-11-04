@@ -724,6 +724,47 @@ def main_commit() -> str:
     return _git("rev-parse", "origin/main") or _git("rev-parse", "main")
 
 
+PROMPT_ID = re.compile(r"^PROMPT\.md#([0-9a-f]{10})( \+ re-check)?$")   # (a prompt's version: the hash of its text)
+
+
+def prompt_version(private: str | None = None) -> str:
+    """The standard prompt's version, ``PROMPT.md#<hash of its text>``: the same text is the same version however it's
+    committed. Each version's text is kept in the private repo's prompts/, so what an audit was asked can be read later."""
+    root = private_root() if private is None else private
+    try:
+        with open(os.path.join(root, "PROMPT.md"), encoding="utf-8") as fh:
+            body = fh.read().split("\n---\n", 1)[-1].strip() + "\n"
+    except OSError:
+        return ""
+    h = hashlib.sha256(body.encode()).hexdigest()[:10]
+    keep = os.path.join(root, "prompts", f"{h}.md")
+    if not os.path.exists(keep):
+        os.makedirs(os.path.dirname(keep), exist_ok=True)
+        with open(keep, "w", encoding="utf-8") as fh:
+            fh.write(body)
+    return f"PROMPT.md#{h}"
+
+
+def prompt_labels(audits: list[Audit]) -> dict[str, str]:
+    """Each prompt version the audits used, named in the order they were first used: v1, v2…"""
+    out: dict[str, str] = {}
+    for a in sorted(audits, key=lambda a: (a.date, a.id)):
+        p = str((a.private or {}).get("prompt", ""))
+        m = PROMPT_ID.match(p)
+        base = f"PROMPT.md#{m.group(1)}" if m else p
+        if m and base not in out:
+            out[base] = f"v{len(out) + 1}"
+    return out
+
+
+def prompt_label(a: Audit, labels: dict[str, str]) -> str:
+    p = str((a.private or {}).get("prompt", ""))
+    m = PROMPT_ID.match(p)
+    if not m:
+        return p or "not recorded"
+    return labels.get(f"PROMPT.md#{m.group(1)}", m.group(1)) + (" + re-check" if m.group(2) else "")
+
+
 def prompt(paths: list[str], private: str | None = None, commit: str = "", main: str = "") -> str:
     """The standard prompt (the private PROMPT.md, below its ---), filled in: a full audit, or a partial of ``paths``."""
     root = private_root() if private is None else private
@@ -943,23 +984,59 @@ def introduced(spot: str, commit: str, repo: str) -> str:
 
 
 def missed(rec: dict, f: dict, audits: list[Audit], repo: str) -> list[str]:
-    """The earlier audits that had a finding's lines in scope after the bug came in, and didn't report it."""
+    """The earlier audits that read a finding's code and didn't report it: those whose fingerprints include its lines
+    as they were found (they read those very lines), and, for records from before fingerprints, those that had its
+    files in scope after the bug came in."""
     came = f.get("introduced_in", "")
-    if not came:
-        return []
-    files = {rel: _lines(rel) for rel in code_files()}
+    mine = set(f.get("prints") or [])
+    files: dict | None = None
     out = []
     for a in audits:
         if a.id == rec["id"] or (a.date, a.id) >= (_date(rec["date"]), rec["id"]):
             continue
+        if a.prints:
+            if mine & a.prints:
+                out.append(a.id)
+            continue
+        if not came:
+            continue
         before = history(a.commit, repo)
         if not before or came not in before:
             continue
+        if files is None:
+            files = {rel: _lines(rel) for rel in code_files()}
         took, _ = scope_lines(a, files)
         rels = {_spot(s)[0] for s in f.get("lines", [])}
         if any(r in took for r in rels):
             out.append(a.id)
     return out
+
+
+def scorecard(audits: list[Audit]) -> list[dict]:
+    """Who found what, and what they missed: each auditor, how thorough and which prompt, with its audits, the findings
+    it found (a fix's test's never count for an audit), and those it missed (it read their lines, and a later audit or a
+    fix's test found them)."""
+    labels = prompt_labels(audits)
+    rows: dict[tuple, dict] = {}
+    by_id = {a.id: a for a in audits}
+
+    def row(a: Audit) -> dict:
+        key = (a.auditor, a.thoroughness, prompt_label(a, labels), a.author)
+        return rows.setdefault(key, {"auditor": a.auditor, "thoroughness": a.thoroughness, "prompt": key[2], "author": a.author,
+                                     "audits": [], "found": [], "missed": []})
+    for a in audits:
+        row(a)["audits"].append(a.id)
+        for f in a.findings:
+            if by_audit(f) and f.get("status") != "false-positive":
+                row(a)["found"].append(str(f.get("id")))
+    for a in audits:
+        for f in a.findings:
+            if f.get("status") == "false-positive":
+                continue
+            for mid in f.get("missed_by", []):
+                if mid in by_id:
+                    row(by_id[mid])["missed"].append(str(f.get("id")))
+    return sorted(rows.values(), key=lambda r: (r["auditor"], r["thoroughness"], r["prompt"]))
 
 
 def _rev(commit: str, repo: str) -> str:
@@ -1244,6 +1321,8 @@ def record(path: str, private: str | None = None, force: bool = False, author: b
         return 2, [f"{path}: {e}"]
     if author:
         rec["author"] = True
+    if str(rec.get("prompt", "")).strip() in ("", "PROMPT.md@", "PROMPT.md#"):
+        rec["prompt"] = prompt_version(private)   # (left blank in the template: the version as it is now)
     return save(rec, private, force)
 
 

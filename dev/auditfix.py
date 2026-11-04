@@ -148,6 +148,11 @@ def found(root: str, via: str, x: dict) -> str:
         f = auditrun.tidy([x], day.year, first, [])[0]
         f.update(source="fix-test", via=via, found=day.isoformat(), main_by="fix report",
                  prints=audit.spot_prints(f["lines"], audit.ROOT))
+        where = audit._repo()
+        if where:   # (what missed it: the audits that read these lines before a fix's test found them)
+            head = audit._rev("HEAD", where[0])
+            f["introduced_in"] = audit.introduced(str(f["lines"][0]), head, where[0]) if head else ""
+            f["missed_by"] = audit.missed({"id": "~", "date": day}, f, audit.load(root)[0], where[0])
         if guard:
             f["tests"] = guard
         note(f, f"found by a test written for {via}'s fix" + (f" ({', '.join(guard)})" if guard else ""))
