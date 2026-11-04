@@ -27,7 +27,7 @@ StyleGuideTests. Only ``approve`` writes the guide, and only for a sample made o
 terminal and won't run without one. Nobody else runs it or edits the guide (CLAUDE.md).
 
 ``sample`` starts two demos (tests/demo.py, ports of their own): today's app, and the app as approved (today's with the
-approved look files over it: the copy approve keeps in dev/style-approved.zip, or --before). It takes the pictures with Playwright (dev/style-sample.js,
+approved look files over it: the copies approve keeps in git, their blob ids the guide's ``files``, or --before). It takes the pictures with Playwright (dev/style-sample.js,
 like dev/screenshots.js: ``npm i -g playwright && npx playwright install chromium``), with the progress bar the dev
 tools share (dev/progress.py): each look Before and After, cropped alike and compared pixel for pixel. It writes
 dev/style-sample/index.html (open it in a browser): what changed on screen side by side, what's judged by its code, and,
@@ -60,6 +60,7 @@ SAMPLE = os.path.join(ROOT, "dev", "style-sample")
 FORMAT = 1
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import devpage  # noqa: E402  (the dev tools' pages' colours)
 from progress import Progress, feeding, result, said, tally, then  # noqa: E402  (the dev tools' shared progress bar, and tnsync's line under it)
 
 
@@ -264,7 +265,7 @@ def theme_looks(root: str | None = None) -> dict:
     """The built-in themes: plexcache/themes.py's colours, fonts and decorations, and how its css() and script() are
     written. Another tree's themes.py is read in a Python of its own (it's a module of that tree's plexcache)."""
     root = os.path.abspath(root or ROOT)
-    path = os.path.join(root, "plexcache", "themes.py")
+    path = own_file(root, "plexcache/themes.py")
     if root == ROOT:
         from plexcache import themes
         found = _theme_data(themes)
@@ -276,7 +277,8 @@ def theme_looks(root: str | None = None) -> dict:
                 "tool = importlib.util.module_from_spec(spec)\n"
                 "spec.loader.exec_module(tool)\n"
                 "print(json.dumps(tool._theme_data(themes)))\n")
-        run = subprocess.run([sys.executable, "-c", code, root, os.path.abspath(__file__)], capture_output=True, text=True, timeout=120)
+        # (-I: isolated, so nothing in the folder it's started from, nor PYTHONPATH, comes before the standard library)
+        run = subprocess.run([sys.executable, "-I", "-c", code, root, os.path.abspath(__file__)], capture_output=True, text=True, timeout=120)
         if run.returncode:
             raise RuntimeError(f"couldn't read the themes of {root}: {run.stderr.strip()}")
         found = json.loads(run.stdout)
@@ -338,10 +340,20 @@ def file_looks(root: str | None = None) -> dict:
             continue
         for f in sorted(files):
             if f.endswith(IMAGES):
-                path = os.path.join(base, f)
+                path = own_file(root, os.path.relpath(os.path.join(base, f), root))
                 with open(path, "rb") as fh:
                     found["file " + os.path.relpath(path, root).replace(os.sep, "/")] = hashlib.sha256(fh.read()).hexdigest()
     return found
+
+
+def own_file(root: str, rel: str) -> str:
+    """A look file's path in a tree, once it's sure to be a file of that tree's own: never a link, nor in a folder
+    that's a link, so no look is read from somewhere else on this computer (and kept in the guide, or the approved copy)."""
+    path = os.path.join(root, rel)
+    top = os.path.realpath(root)
+    if os.path.islink(path) or not os.path.realpath(path).startswith(top + os.sep):
+        raise RuntimeError(f"{rel} is a link (or in a folder that is): a look file has to be a file of the app's own")
+    return path
 
 
 def look_files(root: str | None = None) -> list[str]:
@@ -349,20 +361,20 @@ def look_files(root: str | None = None) -> list[str]:
     root = root or ROOT
     out = ["plexcache/themes.py", "plexcache/web/app.css"] + [f"plexcache/web/{n}" for n in SCRIPTS + PAGES]
     out += [k[len("file "):] for k in file_looks(root)]
-    return sorted(set(p for p in out if os.path.exists(os.path.join(root, p))))
+    return sorted(set(p for p in out if os.path.lexists(own_file(root, p))))
 
 
 def looks(root: str | None = None) -> dict:
     """Every look the app has now, by what it is (above) -> what it is."""
-    web = os.path.join(root or ROOT, "plexcache", "web")
+    tree = root or ROOT
 
     def read(name):
-        with open(os.path.join(web, name), encoding="utf-8") as f:
+        with open(own_file(tree, f"plexcache/web/{name}"), encoding="utf-8") as f:
             return f.read()
 
     found = css_looks(read("app.css"))
     for name in SCRIPTS:
-        found.update(drawn_looks(os.path.join(web, name), name) if name in DRAWS else script_looks(read(name)))
+        found.update(drawn_looks(own_file(tree, f"plexcache/web/{name}"), name) if name in DRAWS else script_looks(read(name)))
     for name in PAGES:
         found.update(page_looks(read(name), name))
     found.update(theme_looks(root))
@@ -457,8 +469,13 @@ def write_guide(items: dict, approval: dict, path: str = GUIDE, before: dict | N
         "format": FORMAT,
         "approvals": old.get("approvals", []) + [approval],
         "seal": seal(items),
+        **({"files": old["files"]} if "files" in old else {}),   # (the approved app's look files: keep_approved's)
         "looks": dict(sorted(items.items())),
     }
+    _dump_guide(doc, path)
+
+
+def _dump_guide(doc: dict, path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False, indent=1)
         f.write("\n")
@@ -522,28 +539,56 @@ def _node_path() -> str:
     return os.pathsep.join(x for x in (os.environ.get("NODE_PATH", ""), top) if x)
 
 
-APPROVED = os.path.join(ROOT, "dev", "style-approved.zip")   # the approved app's look files (approve keeps them): the Before
+_BLOB = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 
 
-def keep_approved(root: str = ROOT, dest: str = APPROVED):
-    """A copy of the files the approved looks are read from, which approve keeps with the guide: the sample's Before.
-    One zip (the same bytes for the same files), so no checker takes the copy for code of the app's own."""
-    tmp = dest + ".new"
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-        for rel in look_files(root):
-            info = zipfile.ZipInfo(rel, date_time=(2020, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            with open(os.path.join(root, rel), "rb") as f:
-                z.writestr(info, f.read())
-    os.replace(tmp, dest)
+def keep_approved(root: str = ROOT, guide_path: str = GUIDE, repo: str = ROOT) -> dict:
+    """The files the approved looks are read from, which approve keeps with the guide (the sample's Before): each kept
+    in git (``git hash-object -w``, in ``repo``), and its blob id in the guide's ``files``. So the Before is the app's own
+    files as git has them, readable in its history (``git show <id>``), never a copy nobody can read in a diff: once the
+    files are committed as they were approved, every clone has them."""
+    files = {}
+    for rel in look_files(root):
+        got = subprocess.run(["git", "-C", repo, "hash-object", "-w", f"--path={rel}", "--", own_file(root, rel)],
+                             capture_output=True, text=True, timeout=60)
+        if got.returncode or not _BLOB.match(got.stdout.strip()):
+            raise RuntimeError(f"git couldn't keep {rel}: {got.stderr.strip()}")
+        files[rel] = got.stdout.strip()
+    guide = load_guide(guide_path)
+    guide["files"] = dict(sorted(files.items()))
+    _dump_guide({k: guide[k] for k in ("about", "format", "approvals", "seal", "files", "looks") if k in guide} | guide, guide_path)
+    return files
 
 
-def before_tree(src: str, tmp: str, approved: dict | None = None) -> str:
-    """The app as it was approved: this tree's plexcache and tests, with the look files from ``src`` (a copy approve
-    kept, or a folder given with --before) put over theirs, and any look file ``src`` doesn't have taken out. An image
-    or font that's as the guide (``approved``) has it now stays as it is."""
+def approved_files(files: dict, into: str, repo: str = ROOT) -> list[str]:
+    """The approved look files (the guide's ``files``: path -> blob id) written out of git into ``into``; what git
+    here doesn't have (approved, never committed, and gone since) left out and named."""
+    missing = []
+    for rel, blob in sorted(files.items()):
+        parts = str(rel).split("/")
+        if not _BLOB.match(str(blob)) or parts[0] != "plexcache" or any(p in ("", ".", "..") for p in parts):
+            raise RuntimeError(f"the guide's files has {rel!r}: {blob!r}, which isn't a look file's blob id")
+        got = subprocess.run(["git", "-C", repo, "cat-file", "blob", blob], capture_output=True, timeout=60)
+        if got.returncode:
+            missing.append(rel)
+            continue
+        os.makedirs(os.path.join(into, *parts[:-1]), exist_ok=True)
+        with open(os.path.join(into, *parts), "wb") as f:
+            f.write(got.stdout)
+    return missing
+
+
+def before_tree(src: str | dict, tmp: str, approved: dict | None = None, repo: str = ROOT) -> str:
+    """The app as it was approved: this tree's plexcache and tests, with the look files from ``src`` (the guide's
+    ``files``, out of git; or a folder or zip given with --before) put over theirs, and any look file ``src`` doesn't
+    have taken out. An image or font that's as the guide (``approved``) has it now stays as it is."""
     tree = os.path.join(tmp, "before")
-    if zipfile.is_zipfile(src):
+    if isinstance(src, dict):
+        missing = approved_files(src, os.path.join(tmp, "approved"), repo)
+        if missing:
+            raise RuntimeError(f"git here doesn't have the approved {', '.join(missing)}")
+        src = os.path.join(tmp, "approved")
+    elif zipfile.is_zipfile(src):
         with zipfile.ZipFile(src) as z:
             z.extractall(os.path.join(tmp, "approved"))
         src = os.path.join(tmp, "approved")
@@ -677,7 +722,15 @@ def _sample(out: str, before: str | None, shown: str) -> int:
               file=sys.stderr)
         return 1
     steps.draw("Playwright found")
-    src = before or (APPROVED if os.path.exists(APPROVED) else None)
+    kept = (load_guide().get("files") if os.path.exists(GUIDE) else None) or None
+    src = before or kept
+    if not before and kept:   # (all of them out of git, or no Before: one missing would make a Before that isn't the approved app)
+        with tempfile.TemporaryDirectory() as probe:
+            missing = approved_files(kept, probe)
+        if missing:
+            print(f"  No Before: git here doesn't have the approved {', '.join(missing[:3])}{' …' if len(missing) > 3 else ''} "
+                  "(approved, but not committed as they were).", file=sys.stderr)
+            src = None
     if before and not (os.path.isdir(before) or zipfile.is_zipfile(before)):
         steps.clear()
         print(f"There's no folder (or zip) {before} to take the Before from.", file=sys.stderr)
@@ -730,7 +783,7 @@ def _sample(out: str, before: str | None, shown: str) -> int:
                 proc.terminate()
                 proc.wait(10)
     fp = fingerprint(diff)
-    counts = _page(out, items, shots, fp, off, bool(src), before or (os.path.relpath(APPROVED, ROOT) if src else None))
+    counts = _page(out, items, shots, fp, off, bool(src), before or ("the approved files in git (dev/style-guide.json)" if src else None))
     # (the pictures of what differs only: a pair the same before and after isn't shown, so isn't kept)
     files = {p for ps in shots.values() for pair in ps if not (src and pair.get("same"))
              for p in (pair.get("before"), pair.get("after"), pair.get("diff")) if p}
@@ -753,7 +806,7 @@ def _sample(out: str, before: str | None, shown: str) -> int:
         print(f"  {counts['seen']} changed what's drawn, {counts['code']} aren't drawn on the demo pages (judge by the code), "
               f"{counts['same']} drew exactly the same before and after.")
     else:
-        print("  No Before to compare with (dev/style-approved.zip is kept by approve; or give one: sample --before <folder>).")
+        print("  No Before to compare with (approve keeps the approved files in git; or give one: sample --before <folder>).")
     print("Open it in a browser. If they're right, the maintainer runs: python3 dev/style.py approve")
     return 0
 
@@ -899,8 +952,8 @@ _REVIEW_BAR = ('<div class="bar"><p class="offline">To approve on this page, run
                'terminal: it opens this page with Approve buttons. An approved change leaves the page.</p>'
                '<p class="online" hidden><span class="tally"><span class="pill good"></span><span class="pill left"></span></span>'
                '<button type="button" class="ok all">Approve all</button> <span class="msg" role="status"></span></p>'
-               '<div class="alldone" hidden role="status"><b></b><span>Commit <code>dev/style-guide.json</code> and '
-               '<code>dev/style-approved.zip</code>.</span></div></div>')
+               '<div class="alldone" hidden role="status"><b></b><span>Commit <code>dev/style-guide.json</code> with the '
+               'files as they were approved.</span></div></div>')
 
 
 def _swatch(v) -> str:
@@ -962,7 +1015,7 @@ def _page(out: str, items: list, shots: dict, fp: str, off: dict | None, compare
     note = ""
     if not compared:
         note = ('<p class="warn">There\'s no Before to compare with, so this shows each look as it is now. approve keeps '
-                'a copy of the approved app in dev/style-approved.zip for next time; for now one can be given with '
+                'the approved app\'s files in git for next time; for now one can be given with '
                 '<code>python3 dev/style.py sample --before &lt;folder&gt;</code>.</p>')
     elif off and any(off.values()):
         k = sum(len(v) for v in off.values())
@@ -1003,12 +1056,7 @@ def _page(out: str, items: list, shots: dict, fp: str, off: dict | None, compare
     return {"seen": seen_looks, "code": len(s["code"]), "same": len(s["same"])}
 
 
-_DARK = ("--bg:#161917;--card:#1f2321;--ink:#e6e9e7;--mute:#a3aca6;--line:#343a37;--code:#272c29;--before:#f3c58e;"
-         "--before-bg:#4a3213;--after:#9fdcb8;--after-bg:#173b28;--gone:#f2aaa3;--gone-bg:#4a1e1a;color-scheme:dark")
-_CSS = (":root{--bg:#f4f4f1;--card:#fff;--ink:#1b1f1d;--mute:#5a625d;--line:#dcdcd6;--code:#f6f7f5;--before:#7f4205;"
-        "--before-bg:#fbe8cf;--after:#155c37;--after-bg:#ddefe3;--gone:#8a1c14;--gone-bg:#f8d9d6}"
-        "@media (prefers-color-scheme:dark){:root:not([data-theme=light]){" + _DARK + "}}:root[data-theme=dark]{" + _DARK + "}"
-        "*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,sans-serif}"
+_CSS = (devpage.THEME + devpage.BASE +   # (the dev tools' pages' colours: dev/devpage.py)
         "main{max-width:1500px;margin:0 auto;padding:20px 16px 40px}h1{margin:0 0 6px;font-size:26px}"
         "h2{font-size:19px;margin:28px 0 10px}.lead{margin:0 0 14px;max-width:80ch}"
         ".sum{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 14px}.sum div{background:var(--card);border:1px solid var(--line);"
@@ -1123,7 +1171,7 @@ _JS = ("var R=window.REVIEW;if(R){document.querySelectorAll('.ok,.online').forEa
 def approve(out: str = SAMPLE, ask=input, terminal: bool | None = None, guide_path: str = GUIDE, now: dict | None = None,
             keep=None) -> int:
     """The sample's looks into the guide: only at a terminal, only for a sample of exactly what differs now, only when
-    the maintainer types approve. With the guide it keeps a copy of the approved app's look files (dev/style-approved.zip),
+    the maintainer types approve. With the guide it keeps the approved app's look files in git (the guide's ``files``),
     the next sample's Before."""
     terminal = (sys.stdin.isatty() and sys.stdout.isatty()) if terminal is None else terminal
     if not terminal:
@@ -1159,7 +1207,7 @@ def approve(out: str = SAMPLE, ask=input, terminal: bool | None = None, guide_pa
         keep = keep_approved
     if keep:
         keep()
-    print(f"Approved: dev/style-guide.json has {len(current)} looks. Commit it, and dev/style-approved.zip, with the change.")
+    print(f"Approved: dev/style-guide.json has {len(current)} looks. Commit it with the change, the files as they are now.")
     return 0
 
 
@@ -1242,6 +1290,7 @@ def review(out: str = SAMPLE, terminal: bool | None = None, open_browser: bool =
     if log is not None:   # (the terminal is the board's: say it to the file)
         sys.stdout = sys.stderr = open(log, "w", encoding="utf-8", buffering=1)  # noqa: SIM115 — (until it ends)
     token = secrets.token_urlsafe(24)
+    session = devpage.Session("review")   # (the page, and its token, for the browser that opened its address only)
     lock = threading.Lock()
     used = [time.time()]
     ended = threading.Event()
@@ -1252,22 +1301,21 @@ def review(out: str = SAMPLE, terminal: bool | None = None, open_browser: bool =
         def log_message(self, format, *args):   # noqa: A002  (quiet: the terminal says what's approved)
             pass
 
-        def _host_ok(self):   # (not a page of another site's name pointed at this computer)
-            return self.headers.get("Host") == f"127.0.0.1:{port}"
+        def _host_ok(self):   # (the page's browser: this computer's name, its cookie; dev/devpage.py)
+            return session.ok(self, port)
 
-        def _send(self, code, body: bytes, ctype):
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+        def _send(self, code, body: bytes, ctype, nonce: str = ""):
+            # (the sample's markup has style="..." of its own: its styles inline, its script only by this response's nonce)
+            devpage.send(self, code, body, ctype, nonce, img="'self'", inline_styles=True)
 
         def do_GET(self):
             used[0] = time.time()
+            where, _, query = self.path.partition("?")
+            if where == "/" and devpage.entry(self, session, port, query):
+                return None
             if not self._host_ok():
-                return self._send(403, b"", "text/plain")
-            name = self.path.split("?")[0].lstrip("/") or "index.html"
+                return self._send(403, devpage.REFUSED, "text/plain; charset=utf-8")
+            name = where.lstrip("/") or "index.html"
             if name == "index.html":
                 # the token the Approve buttons send, set before the page's own script reads it
                 # and the changes approved already (since the sample, here or before): left off the page
@@ -1280,7 +1328,8 @@ def review(out: str = SAMPLE, terminal: bool | None = None, open_browser: bool =
                         "addEventListener('pagehide',function(){navigator.sendBeacon('/bye'+q);});})();")
                 body = page.replace("<script>var R=window.REVIEW;",
                                     f"<script>window.REVIEW={{token:{json.dumps(token)},done:{json.dumps(done)}}};{beat}var R=window.REVIEW;", 1)
-                return self._send(200, body.encode(), "text/html; charset=utf-8")
+                nonce = secrets.token_urlsafe(18)
+                return self._send(200, devpage.nonced(body, nonce).encode(), "text/html; charset=utf-8", nonce)
             path = os.path.join(pictures, os.path.basename(name))
             if name != os.path.basename(name) or not name.endswith(".png") or not os.path.isfile(path):
                 return self._send(404, b"", "text/plain")
@@ -1322,7 +1371,7 @@ def review(out: str = SAMPLE, terminal: bool | None = None, open_browser: bool =
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_port
-    url = f"http://127.0.0.1:{port}/"
+    url = session.url(port)
     print(f"The review page: {url}  (Ctrl-C to stop)")
     if step:   # (a step of tnsync's board, its Style Approval block: the page's address its last line; Enter there
         # skips it, ending it as Ctrl-C would — its pictures' copy removed all the same)
@@ -1358,11 +1407,11 @@ def review(out: str = SAMPLE, terminal: bool | None = None, open_browser: bool =
         server.server_close()
         shutil.rmtree(pictures, ignore_errors=True)
     left = sum(len(v) for v in compare(load_guide(guide_path)["looks"], looks()).values())
-    print("Every look is in the style guide. Commit dev/style-guide.json and dev/style-approved.zip." if not left else
+    print("Every look is in the style guide. Commit dev/style-guide.json, and the files as they are now." if not left else
           f"{left} look{'s' if left != 1 else ''} still to approve. Commit dev/style-guide.json with what you approved.")
     if step and not left:   # (what the block says once its check again finds nothing waiting)
-        said(f"{approved[0]} approved just now · commit dev/style-guide.json and dev/style-approved.zip" if approved[0] else
-             "every look approved · commit dev/style-guide.json and dev/style-approved.zip")
+        said(f"{approved[0]} approved just now · commit dev/style-guide.json" if approved[0] else
+             "every look approved · commit dev/style-guide.json")
     if log is not None:
         sys.stdout.close()
         sys.stdout, sys.stderr = saved

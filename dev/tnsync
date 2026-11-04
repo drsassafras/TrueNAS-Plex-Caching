@@ -279,7 +279,15 @@ ensure_packages() {
 
 # ----------------------------------------------------------------- source
 TMP=""
-SSH_CTL="/tmp/tnsync-$(id -u)-%C"
+# The SSH connection's socket, shared by the run's sections: in a folder only you own and can open (0700), never a name
+# anyone could take first in the shared /tmp. Under the state folder; a shorter one of your own in /tmp when that path
+# is too long for a socket's name.
+SSH_CTL_DIR="$STATE_DIR/ssh"
+[ "${#SSH_CTL_DIR}" -le 60 ] || SSH_CTL_DIR="/tmp/tnsync-ssh-$(id -u)"
+mkdir -p "$SSH_CTL_DIR" 2>/dev/null && chmod 700 "$SSH_CTL_DIR" 2>/dev/null
+{ [ -d "$SSH_CTL_DIR" ] && [ ! -L "$SSH_CTL_DIR" ] && [ -O "$SSH_CTL_DIR" ]; } \
+    || die "can't keep the SSH connection's socket in $SSH_CTL_DIR (a folder of your own, only you can open): see that it's yours"
+SSH_CTL="$SSH_CTL_DIR/%C"
 BOARD_DIR=""   # the board's plan, results and logs (dev/board.py), while it's there
 # The last box: the dependencies (TN_UPKEEP), from your folder — where a version it moves belongs — not the copy. Once a
 # run, at its end, whatever the tests did; not when tnsync was interrupted (Ctrl-C) or stopped before it got going.
@@ -440,11 +448,12 @@ FUTURE_RESULT="none"   # pass | fail | none — what the state file keeps of the
 # The checks this run, as one line (the current ones: a change to any of them means testing again).
 # What the checks ran on: every file of the checkout git keeps or would (not what it ignores), so a change to the tests or
 # the dev tools — not copied to TrueNAS, so not among the changes the copy finds — tests again too. Empty when it can't be
-# worked out (not a git checkout): then only the copy's changes count, as before.
+# worked out (not a git checkout): then only the copy's changes count, as before. A file git keeps that's gone from the
+# folder (deleted, not yet committed) is left out of the sum, so its going counts as a change, and never stops the run.
 code_sig() {
     local sum=shasum; command -v shasum >/dev/null 2>&1 || sum=sha256sum
     command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 0
-    (cd "$ROOT" && git ls-files -z -co --exclude-standard | xargs -0 "$sum" 2>/dev/null | "$sum" | cut -d' ' -f1)
+    (cd "$ROOT" && git ls-files -z -co --exclude-standard | { xargs -0 "$sum" 2>/dev/null || true; } | "$sum" | cut -d' ' -f1)
 }
 CODE_SIG="$(code_sig)"
 TEST_SIG="$TN_TEST"
@@ -488,6 +497,9 @@ command -v rsync >/dev/null 2>&1 || die "rsync isn't installed (on a Mac: it nor
 set -f   # keep exclude patterns like *.pyc from expanding here
 RSYNC_BASE=(-a --delete -e "ssh $SSH_OPTS" --exclude node_modules)   # (installed packages: npm ci makes them where they're needed)
 for pat in $TN_EXCLUDE; do RSYNC_BASE+=(--exclude "$pat"); done
+# Links: never one that leads out of the copy (a link committed to /mnt/... would be the app's on the NAS): --safe-links
+# skips those; an rsync without it copies no links at all (-a less -l).
+if rsync --safe-links --version >/dev/null 2>&1; then RSYNC_BASE+=(--safe-links); else RSYNC_BASE=(-rptgoD "${RSYNC_BASE[@]:1}"); fi
 RSYNC_ARGS=("${RSYNC_BASE[@]}")
 [ "$DRY_RUN" = 1 ] && RSYNC_ARGS+=(-n -v) || RSYNC_ARGS+=(-v)
 PATHS_LIST=$TN_PATHS
@@ -667,6 +679,9 @@ told_section() {
 audit_section() {
     [ -n "$TN_AUDIT" ] || return 0
     local warn=", \"warn\": {\"rc\": 1, \"note\": \"code to audit\"}"
+    # a, once it says there's code to audit and while the board runs: the audits page (dev/auditgui.py), in your
+    # folder, where an audit can be started; it stays open after the board, until its page is closed
+    warn="$warn, \"key\": {\"key\": \"a\", \"cmd\": $(json_str "$TN_AUDIT gui"), \"cwd\": $(json_str "$ROOT"), \"does\": \"Open Audits\", \"opens\": \"the audits page\", \"line\": \"press a to open the audits page\"}"
     if [ "$RELEASE" = 1 ]; then warn=""; CHECK_IDS+=("audit"); fi
     plan_add "{\"id\": \"audit\", \"title\": \"Security Audit\", \"cmd\": $(json_str "$TN_AUDIT"), \"cwd\": $(json_str "$SRC"), \"stoppable\": true, \"env\": {$CHECK_ENV}$warn}"
 }

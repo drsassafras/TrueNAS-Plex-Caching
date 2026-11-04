@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security audits</title>
+<style>
+/*THEME*/
+main{max-width:1280px;margin:0 auto;padding:18px 16px 48px}
+header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin:0 0 4px}
+h1{margin:0;font-size:24px}
+.where{color:var(--mute);font-size:13px}
+nav{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin:12px 0 18px}
+nav button{font:inherit;font-size:14px;background:none;border:0;border-bottom:2px solid transparent;color:var(--mute);
+  padding:8px 12px;cursor:pointer;margin-bottom:-1px}
+nav button[aria-selected=true]{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+h2{font-size:17px;margin:22px 0 10px}
+.lead{margin:0 0 14px;max-width:80ch;color:var(--mute)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin:0 0 8px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+.tile b{display:block;font-size:22px;line-height:1.2}
+.tile span{color:var(--mute);font-size:13px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:0 0 14px}
+.badge{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:1px 9px;
+  border-radius:99px;background:var(--code);color:var(--mute);white-space:nowrap}
+.badge.good{background:var(--after-bg);color:var(--after)}
+.badge.warn{background:var(--before-bg);color:var(--before)}
+.badge.bad{background:var(--gone-bg);color:var(--gone)}
+code.bad{color:var(--gone);text-decoration:line-through}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;font-weight:600;color:var(--mute);font-size:12px;text-transform:uppercase;letter-spacing:.04em;
+  border-bottom:1px solid var(--line);padding:6px 8px}
+td{border-bottom:1px solid var(--line);padding:7px 8px;vertical-align:top}
+tr.pick{cursor:pointer}tr.pick:hover td{background:var(--code)}
+.wrap{overflow-x:auto}
+code,.mono{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+ul.plain{margin:0;padding-left:18px}
+button.go,button.quiet{font:inherit;font-size:14px;border-radius:8px;padding:6px 14px;cursor:pointer;border:1px solid var(--ink)}
+button.go{background:var(--ink);color:var(--card)}
+button.quiet{background:var(--card);color:var(--ink);border-color:var(--line)}
+button:disabled{opacity:.5;cursor:default}
+label.opt{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border:1px solid var(--line);border-radius:8px;
+  margin:0 0 6px;cursor:pointer;background:var(--card)}
+label.opt:has(input:checked){border-color:var(--ink)}
+label.opt small{display:block;color:var(--mute)}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+@media (max-width:820px){.grid2{grid-template-columns:1fr}}
+select,input[type=text],input[type=number],textarea{font:inherit;font-size:14px;color:var(--ink);background:var(--card);
+  border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+textarea{width:100%}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 10px}
+.mute{color:var(--mute)}
+.log{max-height:420px;overflow:auto;background:var(--code);border-radius:8px;padding:8px 10px}
+.log div{padding:2px 0;white-space:pre-wrap;word-break:break-word}
+.log .tool{color:var(--mute)}
+.bar{height:8px;border-radius:99px;background:var(--gone-bg);overflow:hidden;min-width:80px;display:flex}
+.bar i{display:block;height:100%}
+.bar .f{background:var(--after)}.bar .p{background:var(--before)}
+.code{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:auto;max-height:70vh}
+.code div{display:grid;grid-template-columns:4px 52px 1fr;white-space:pre;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.code div span:nth-child(2){color:var(--mute);text-align:right;padding-right:10px;user-select:none}
+.code .g{background:transparent}.code .seen-full .g{background:var(--after)}.code .seen-part .g{background:var(--before)}
+.code .unseen .g{background:var(--gone)}
+.empty{color:var(--mute);font-style:italic}
+.note{font-size:13px;color:var(--mute);margin:6px 0 0}
+h3.group{font-size:13px;font-weight:600;color:var(--mute);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 6px}
+.cvss{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px 10px;margin:8px 0}
+.cvss label{display:flex;flex-direction:column;gap:2px}.cvss code{word-break:break-all}.cvss small{color:var(--mute);font-size:12px}
+</style>
+</head>
+<body>
+<main>
+<header><h1>Security audits</h1><span class="where" id="where"></span></header>
+<nav id="tabs"></nav>
+<section id="view"></section>
+</main>
+<script>
+"use strict";
+const TOKEN = "__TOKEN__";
+const TABS = [["overview", "Overview"], ["start", "Start audit"], ["runs", "Runs"], ["findings", "Findings"],
+  ["explorer", "Explorer"], ["rules", "Rules"]];
+let tab = "overview", timer = 0, opts = null, checkedAt = 0;
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === false || v == null) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "class") el.className = v;
+    else if (k === "style") el.style.cssText = v;   // (not a style attribute: the page's CSP allows only its own <style>)
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
+  return el;
+}
+function put(el, ...kids) { el.replaceChildren(...kids.flat(Infinity).filter(k => k != null && k !== false)); }
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {headers: {"X-Audit-Token": TOKEN}} :
+    {method: "POST", headers: {"X-Audit-Token": TOKEN, "Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const got = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(got.error || r.statusText);
+  return got;
+}
+const pct = (n, of) => (of ? (100 * n / of).toFixed(1) : "100.0") + "%";
+const when = t => t ? new Date(t * 1000).toLocaleString([], {dateStyle: "medium", timeStyle: "short"}) : "";
+const took = (a, b) => { const s = Math.max(0, Math.round((b || Date.now() / 1000) - a)); return s < 60 ? s + " s" : Math.round(s / 60) + " min"; };
+const STATE = {done: "good", open: "warn", running: "warn", preparing: "warn", failed: "bad", cancelled: "", interrupted: "bad"};
+const SEV = {critical: "bad", high: "bad", medium: "warn", low: "", info: ""};
+const unpushed = f => f.status === "fixed" && (f.fix === "working copy" || f.fix === "committed" || (!f.fixed_in && f.fix !== "pushed"));
+const FIX = {"working copy": "The fix is only in your working copy: commit and push it.", committed: "The fix is committed, not pushed yet.",
+  pushed: "The fix is pushed.", "not fixed": "Its code is as it was: the fix is somewhere else, or it isn't fixed yet."};
+async function copyBrief(ids, btn) {
+  const was = btn.textContent;
+  try {
+    const got = await api("/api/brief", {ids});
+    try { await navigator.clipboard.writeText(got.text); btn.textContent = "Copied " + plural(got.count, "finding"); }
+    catch (e) {   // (no clipboard here: the text to copy by hand)
+      const t = h("textarea", {rows: 12, class: "mono"}, got.text);
+      btn.after(t); t.select(); btn.textContent = "Select and copy";
+    }
+  } catch (e) { btn.textContent = e.message; }
+  setTimeout(() => { btn.textContent = was; }, 2500);
+}
+const CODE = {there: ["", "code still there"], changed: ["warn", "code changed"], gone: ["", "code gone"], unknown: ["", "code: can't tell"]};
+const plural = (n, one, many) => n + " " + (n === 1 ? one : (many || one + "s"));
+
+function show(name) {
+  tab = name; clearTimeout(timer);
+  const nav = document.getElementById("tabs"); put(nav);
+  for (const [id, label] of TABS) nav.append(h("button", {"aria-selected": String(id === name), onclick: () => show(id)}, label));
+  const view = document.getElementById("view");
+  put(view, h("p", {class: "empty"}, "Loading…"));
+  ({overview, start, runs, findings, explorer, rules})[name](view).catch(e => put(view, h("p", {class: "empty"}, "Couldn't load it: " + e.message)));
+}
+
+// ---------------------------------------------------------------- Overview
+async function overview(view) {
+  const o = await api("/api/overview");
+  document.getElementById("where").textContent = o.private ? "with the private records" : "public records only";
+  const tiles = h("div", {class: "tiles"},
+    h("div", {class: "tile"}, h("b", {}, pct(o.seen, o.lines)), h("span", {}, "audited")),
+    h("div", {class: "tile"}, h("b", {}, pct(o.full, o.lines)), h("span", {}, "by a full audit")),
+    h("div", {class: "tile"}, h("b", {}, o.lines - o.seen), h("span", {}, "lines no audit has seen")),
+    h("div", {class: "tile"}, h("b", {}, o.push), h("span", {}, "to audit before a push")),
+    h("div", {class: "tile"}, h("b", {}, o.audits), h("span", {}, o.last ? "audits, the last " + o.last : "audits yet")));
+  const checks = o.checks.map(c => h("div", {class: "card"},
+    h("div", {class: "row"}, h("b", {}, c.tool), h("span", {class: "badge " + (c.bad ? "warn" : "good")}, c.bad ? "to do" : "fine"),
+      h("span", {class: "mute"}, c.facts.join(" · "))),
+    c.findings.length ? h("ul", {class: "plain"}, c.findings.slice(0, 12).map(f =>
+      h("li", {}, f.path && f.path !== "app code" ? h("code", {}, f.path) : null, f.path && f.path !== "app code" ? " " : null, f.message))) : null));
+  const commit = h("div", {class: "card"}, h("b", {}, "Waiting for you to commit"),
+    !o.commit.app.length && !o.commit.private.length ? h("p", {class: "empty"}, "Nothing: every audit record is committed.") :
+      h("div", {class: "grid2"},
+        h("div", {}, h("p", {class: "note"}, "This repo (security/audits/)"), h("ul", {class: "plain mono"}, o.commit.app.map(p => h("li", {}, p)))),
+        h("div", {}, h("p", {class: "note"}, "The private audits repo"), h("ul", {class: "plain mono"}, o.commit.private.map(p => h("li", {}, p))))),
+    h("p", {class: "note"}, "Nothing here is ever committed for you."));
+  put(view, tiles,
+    o.push ? h("p", {class: "lead"}, plural(o.push, "line") + " no audit has seen aren't pushed yet. ",
+      h("button", {class: "quiet", onclick: () => { pending = "unpushed"; show("start"); }}, "Audit them")) : null,
+    h("h2", {}, "Checks"), checks, commit,
+    o.problems.length ? h("div", {class: "card"}, h("b", {}, "Notes"), h("ul", {class: "plain"}, o.problems.map(p => h("li", {}, p)))) : null);
+}
+
+// ---------------------------------------------------------------- Start audit
+let pending = "";
+const SEVERITIES = ["critical", "high", "medium", "low", "info"], MAINS = ["affected", "not-affected", "fixed"];
+const store = {get: k => { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* (not kept: fine) */ } }};
+let marking = null;   // (the findings of a review being marked as audited, before it's recorded)
+async function start(view) {
+  opts = opts || await api("/api/options");
+  marking = null;
+  const form = h("div", {class: "grid2"});
+  const targets = h("div", {}, h("h2", {}, "What to audit"));
+  const want = pending || "uncommitted"; pending = "";
+  const groups = [["New and changed code", ["uncommitted", "unpushed", "since-audit", "branch"]], ["The whole app", ["full", "unaudited"]],
+    ["Findings: are they fixed?", ["open", "open-changed"]], ["Your choice", ["chosen"]]];
+  const hint = {open: "Each open finding is looked for again: in your working copy, the branch as pushed, and main.",
+    "open-changed": "The same, and a new audit of what's changed since the last one, in one go."};
+  for (const [title, ids] of groups) {
+    const here = ids.filter(id => opts.targets[id]);
+    if (!here.length) continue;
+    targets.append(h("h3", {class: "group"}, title));
+    for (const id of here)
+      targets.append(h("label", {class: "opt"}, h("input", {type: "radio", name: "target", value: id, checked: id === want, onchange: plan}),
+        h("span", {}, opts.targets[id], h("small", {id: "n-" + id}, hint[id] || ""))));
+  }
+  const chosen = h("textarea", {rows: 4, id: "paths", placeholder: "plexcache/auth.py\nplexcache/app.py:login", oninput: () => debounce(plan)});
+  targets.append(h("div", {id: "chosen", hidden: want !== "chosen"}, chosen,
+    h("p", {class: "note"}, "One per line: a file, or a function in it as path:function (Class.method).")));
+  const who = h("div", {}, h("label", {class: "opt"}, h("input", {type: "radio", name: "who", value: "", checked: true, onchange: pick}),
+    h("span", {}, "A person", h("small", {}, "You read the code and write down what you find."),
+      h("div", {class: "row", style: "margin:8px 0 0"},
+        h("input", {type: "text", id: "name", placeholder: "Your name", value: store.get("audit-name"), maxlength: 40, oninput: pick}),
+        h("select", {id: "closely", "aria-label": "How closely", onchange: pick}, Object.entries(opts.people).map(([k, v]) =>
+          h("option", {value: k, selected: k === "3"}, v)))))));
+  for (const p of opts.plugins)
+    who.append(h("label", {class: "opt"}, h("input", {type: "radio", name: "who", value: p.id, onchange: pick}),
+      h("span", {}, p.label, h("small", {}, "Installed on this computer: runs read-only, in a copy of the code as it is now."),
+        h("div", {class: "row", style: "margin:8px 0 0"},
+          h("select", {id: "auditor-" + p.id, "aria-label": "Auditor"}, p.auditors.map(a => h("option", {value: a}, a))),
+          h("select", {id: "effort-" + p.id, "aria-label": "Effort"}, Object.entries(p.efforts).map(([k, v]) =>
+            h("option", {value: k, selected: k === "3"}, k + " · " + v)))))));
+  const side = h("div", {}, h("h2", {}, "Auditor"), who,
+    h("p", {class: "note"}, "Who and how closely stay in the private repo. The public record says only that it was a full or partial audit, and of what."),
+    h("h2", {}, "This audit"), h("div", {class: "card", id: "plan"}, h("p", {class: "empty"}, "…")));
+  form.append(targets, side);
+  const bar = h("div", {class: "card"}, h("div", {class: "row", style: "margin:0"}, h("b", {id: "summary"}, "…"),
+      h("button", {class: "go", id: "go", disabled: true, onclick: go}, "Start audit"),
+      h("button", {class: "quiet", id: "mark", disabled: true, onclick: markForm}, "Already audited it"),
+      h("span", {class: "mute", id: "said"})),
+    h("p", {class: "note", id: "how"}));
+  put(view, bar, h("div", {id: "marking"}), form);
+  plan();
+}
+let debounceT = 0;
+function debounce(fn) { clearTimeout(debounceT); debounceT = setTimeout(fn, 400); }
+function choice() {
+  const target = (document.querySelector("input[name=target]:checked") || {}).value || "uncommitted";
+  const paths = (document.getElementById("paths").value || "").split("\n").map(s => s.trim()).filter(Boolean);
+  const plugin = (document.querySelector("input[name=who]:checked") || {}).value || "";
+  if (!plugin) return {target, paths, name: document.getElementById("name").value.trim(), thoroughness: +document.getElementById("closely").value};
+  return {target, paths, auditor: document.getElementById("auditor-" + plugin).value, thoroughness: +document.getElementById("effort-" + plugin).value};
+}
+let planned = false;
+function pick() {
+  const c = choice(), btn = document.getElementById("go"), mark = document.getElementById("mark");
+  const ready = planned && (c.auditor || c.name);
+  btn.disabled = !ready; mark.hidden = !!c.auditor; mark.disabled = !ready;
+  btn.title = !c.auditor && !c.name ? "Your name first" : "";
+  btn.textContent = c.auditor ? "Start audit" : "Start reading";
+  document.getElementById("how").textContent = c.auditor ? "It runs on this computer and records what it finds; follow it on Runs."
+    : (!c.name ? "Your name first (under Auditor). " : "") + "Start reading opens your audit on Runs: what to read, and your findings as you add them. " +
+      "It counts the code as it is when you start, so edits made meanwhile aren't taken as audited. Already audited it records a review you've done, with what you found, in one go.";
+  if (c.name) store.set("audit-name", c.name);
+  if (c.auditor && marking) { marking = null; put(document.getElementById("marking")); }
+}
+async function plan() {
+  const c = choice();
+  document.getElementById("chosen").hidden = c.target !== "chosen";
+  const box = document.getElementById("plan");
+  planned = false; pick();
+  try {
+    const p = await api("/api/plan", c);
+    const sum = document.getElementById("summary");
+    if (p.why) { put(box, h("p", {class: "empty"}, p.why)); sum.textContent = p.why; return; }
+    sum.textContent = (p.kind === "full" ? "A full audit" : "A partial audit") + " of " + plural(p.lines, "line");
+    put(box, h("div", {class: "row"}, h("span", {class: "badge " + (p.kind === "full" ? "good" : "")}, p.kind), h("b", {}, plural(p.lines, "line"))),
+      p.scope.length ? h("ul", {class: "plain mono"}, p.scope.slice(0, 30).map(s => h("li", {}, s)), p.scope.length > 30 ? h("li", {}, "… " + (p.scope.length - 30) + " more") : null)
+        : h("p", {class: "mute"}, "All the app code."),
+      h("details", {}, h("summary", {}, "The standard prompt (what to look for)"), h("pre", {class: "mono log"}, p.prompt)));
+    planned = true; pick();
+  } catch (e) { put(box, h("p", {class: "empty"}, e.message)); }
+}
+async function go() {
+  const btn = document.getElementById("go"), said = document.getElementById("said");
+  btn.disabled = true; said.textContent = "Starting…";
+  try { const r = await api("/api/start", choice()); openRun = r.id; show("runs"); }
+  catch (e) { said.textContent = e.message; btn.disabled = false; }
+}
+function markForm() {
+  marking = marking || [];
+  const box = document.getElementById("marking");
+  const said = h("span", {class: "mute"});
+  const record = h("button", {class: "go", onclick: async () => {
+    record.disabled = true; said.textContent = "Recording…";
+    try {
+      const r = await api("/api/mark", {...choice(), findings: marking});
+      if (r.state !== "done") throw new Error(r.error || "it wasn't recorded");
+      marking = null; openRun = r.id; show("runs");
+    } catch (e) { said.textContent = e.message; record.disabled = false; }
+  }}, "Record it");
+  put(box, h("h2", {}, "What you found"),
+    findingsEditor(marking, async f => { marking.push(f); markForm(); }, async i => { marking.splice(i, 1); markForm(); }),
+    h("div", {class: "row"}, record, said),
+    h("p", {class: "note"}, "Recorded as seen: the code as it is now, the scope above. Nothing found is worth recording too."));
+}
+
+// a CVSS 3.1 base vector, picked metric by metric, its score worked out as it changes
+const METRICS = [["AV", "Attack vector", [["N", "Network"], ["A", "Adjacent"], ["L", "Local"], ["P", "Physical"]]],
+  ["AC", "Attack complexity", [["L", "Low"], ["H", "High"]]], ["PR", "Privileges required", [["N", "None"], ["L", "Low"], ["H", "High"]]],
+  ["UI", "User interaction", [["N", "None"], ["R", "Required"]]], ["S", "Scope", [["U", "Unchanged"], ["C", "Changed"]]],
+  ["C", "Confidentiality", [["N", "None"], ["L", "Low"], ["H", "High"]]], ["I", "Integrity", [["N", "None"], ["L", "Low"], ["H", "High"]]],
+  ["A", "Availability", [["N", "None"], ["L", "Low"], ["H", "High"]]]];
+function cvssPicker(vector) {
+  const was = Object.fromEntries(String(vector || "").split("/").slice(1).map(p => p.split(":")));
+  const score = h("span", {class: "badge"}, "…");
+  const sel = {};
+  const value = () => "CVSS:3.1/" + METRICS.map(([k]) => k + ":" + sel[k].value).join("/");
+  const vec = h("code", {class: "note"});
+  const update = async () => {
+    vec.textContent = value();
+    try { const got = await api("/api/cvss", {vector: value()}); score.className = "badge " + (SEV[got.severity] || ""); score.textContent = got.score.toFixed(1) + " " + got.severity; }
+    catch (e) { score.textContent = e.message; }
+  };
+  const el = h("div", {class: "cvss"}, METRICS.map(([k, label, values]) => h("label", {}, h("small", {}, label),
+    sel[k] = h("select", {onchange: update}, values.map(([v, name]) => h("option", {value: v, selected: was[k] ? was[k] === v : v === values[0][0] && !["C", "I", "A"].includes(k) || (["C", "I", "A"].includes(k) && v === "N")}, name))))),
+    h("div", {class: "row", style: "margin:6px 0 0"}, h("span", {class: "mute"}, "CVSS 3.1"), score, vec));
+  update();
+  return {el, value};
+}
+
+// one finding's form, and the findings so far (each with Remove)
+function findingsEditor(list, add, remove) {
+  const title = h("input", {type: "text", placeholder: "What's wrong, in a line", style: "flex:1 1 280px"});
+  const pick = cvssPicker("");
+  const prio = h("select", {"aria-label": "Priority"}, ["high", "medium", "low"].map(p => h("option", {value: p, selected: p === "medium"}, "priority: " + p)));
+  const prioBox = h("div", {class: "row", hidden: true}, prio, h("span", {class: "note"}, "Not exploitable as it is, so no CVSS score; it never holds up a release."));
+  const kind = h("select", {"aria-label": "Kind", onchange: () => { pick.el.hidden = kind.value !== "vulnerability"; prioBox.hidden = kind.value === "vulnerability"; }},
+    h("option", {value: "vulnerability"}, "Vulnerability (exploitable)"), h("option", {value: "hardening"}, "Hardening (not exploitable)"));
+  const lines = h("input", {type: "text", placeholder: "plexcache/auth.py:40-52", style: "flex:1 1 220px"});
+  const main = h("select", {"aria-label": "On main"}, MAINS.map(s => h("option", {value: s}, "main: " + s)));
+  const detail = h("textarea", {rows: 3, placeholder: "What it is, and how it could be used"});
+  const said = h("span", {class: "note"});
+  const btn = h("button", {class: "quiet", onclick: async () => {
+    if (!title.value.trim()) { said.textContent = "A finding needs its title."; return; }
+    const got = lines.value.split(/[\s,]+/).filter(Boolean);
+    if (!got.length || got.some(x => !/^[^:\s]+:\d+(-\d+)?$/.test(x))) { said.textContent = "Lines as path:line or path:start-end."; return; }
+    const how = kind.value === "vulnerability" ? {type: "vulnerability", cvss: pick.value()} : {type: "hardening", severity: prio.value};
+    try { await add({title: title.value.trim(), ...how, lines: got, main: main.value, detail: detail.value.trim()}); }
+    catch (e) { said.textContent = e.message; }
+  }}, "Add finding");
+  return h("div", {},
+    list.length ? list.map((f, i) => h("div", {class: "card"},
+      h("div", {class: "row"}, h("span", {class: "badge " + (SEV[f.severity] || "")}, f.type === "hardening" ? "hardening · " + f.severity : f.severity || "scored when added"), h("b", {}, f.title),
+        h("span", {class: "note"}, (f.lines || []).join(", ") + " · main " + f.main),
+        h("button", {class: "quiet", onclick: () => remove(i)}, "Remove")),
+      f.detail ? h("p", {class: "note"}, f.detail) : null)) : h("p", {class: "empty"}, "No findings yet."),
+    h("div", {class: "card"}, h("div", {class: "row"}, title, kind), pick.el, prioBox, h("div", {class: "row"}, lines, main), detail,
+      h("div", {class: "row", style: "margin:8px 0 0"}, btn, said)));
+}
+
+// ---------------------------------------------------------------- Runs
+let openRun = "";
+const whoRan = r => r.plugin ? [r.auditor, h("div", {class: "note"}, r.by + " · " + r.how)]
+  : [r.auditor.replace(/^human:/, ""), h("div", {class: "note"}, r.how)];
+async function runs(view) {
+  const all = await api("/api/runs");
+  const table = h("table", {}, h("thead", {}, h("tr", {}, ["Started", "What", "Kind", "Auditor", "Lines", "State", "Took", "Result"].map(t => h("th", {}, t)))),
+    h("tbody", {}, all.map(r => h("tr", {class: "pick", onclick: () => { openRun = r.id; show("runs"); }},
+      h("td", {}, when(r.started)), h("td", {}, r.target_name, r.uncommitted ? h("div", {class: "note"}, "uncommitted code too") : null),
+      h("td", {}, r.kind), h("td", {}, whoRan(r)),
+      h("td", {}, r.lines), h("td", {}, h("span", {class: "badge " + (STATE[r.state] || "")}, r.state)),
+      h("td", {}, r.state === "open" ? "" : took(r.started, r.ended || null)),
+      h("td", {}, r.state === "done" ? [r.audit_id, h("div", {class: "note"}, plural(r.findings, "finding"))]
+        : r.state === "open" ? h("span", {class: "mute"}, plural(r.draft.length, "finding") + " so far") : h("span", {class: "mute"}, r.error))))));
+  put(view, all.length ? h("div", {class: "wrap"}, table) : h("p", {class: "empty"}, "No audit has been started from here yet."), h("div", {id: "run"}));
+  const live = all.some(r => r.plugin && (r.state === "running" || r.state === "preparing"));
+  const r = all.find(x => x.id === openRun);
+  if (r) await (r.plugin ? runDetail : personDetail)(r, document.getElementById("run"));
+  if (live && tab === "runs") timer = setTimeout(() => show("runs"), 4000);
+}
+function personDetail(r, box) {
+  const open = r.state === "open";
+  const said = h("span", {class: "mute"});
+  const head = h("div", {class: "card"}, h("div", {class: "row"}, h("span", {class: "badge " + (STATE[r.state] || "")}, r.state),
+      h("span", {class: "mute"}, r.target_name + " · " + r.kind + " · " + plural(r.lines, "line") + " · " + r.auditor.replace(/^human:/, "") + ", " + r.how)),
+    r.error && r.state !== "cancelled" ? h("p", {}, r.error) : null,
+    r.said.length ? h("ul", {class: "plain note"}, r.said.map(x => h("li", {}, x))) : null,
+    r.scope.length ? h("details", {open: open}, h("summary", {}, "What to read"), h("ul", {class: "plain mono"}, r.scope.map(s => h("li", {}, s))))
+      : h("p", {class: "mute"}, "All the app code."));
+  const draft = (f, i) => api("/api/draft", f ? {id: r.id, finding: f} : {id: r.id, remove: i}).then(() => show("runs"));
+  put(box, h("h2", {}, (open ? "Your audit " : "Audit ") + r.id), head,
+    open ? [h("h2", {}, "What you found"), findingsEditor(r.draft, f => draft(f), i => draft(null, i)),
+      h("div", {class: "row"},
+        h("button", {class: "go", onclick: async e => {
+          e.target.disabled = true; said.textContent = "Recording…";
+          try { const got = await api("/api/finish", {id: r.id}); if (got.state !== "done") throw new Error(got.error); show("runs"); }
+          catch (x) { said.textContent = x.message; e.target.disabled = false; }
+        }}, "Finish and record"),
+        h("button", {class: "quiet", onclick: async () => { await api("/api/cancel", {id: r.id}); show("runs"); }}, "Cancel"), said),
+      h("p", {class: "note"}, "It's recorded as the code was when you started it. Your findings are kept as you add them: you can close the page and come back.")]
+      : null);
+}
+const logs = {};
+async function runDetail(r, box) {
+  const seen = logs[r.id] || (logs[r.id] = {at: 0, events: [], prompt: ""});
+  const got = await api("/api/run?id=" + encodeURIComponent(r.id) + "&at=" + seen.at);
+  seen.at = got.at; seen.events.push(...got.events); seen.prompt = seen.prompt || got.prompt;
+  const live = r.state === "running" || r.state === "preparing";
+  put(box, h("h2", {}, "Run " + r.id),
+    h("div", {class: "card"}, h("div", {class: "row"}, h("span", {class: "badge " + (STATE[r.state] || "")}, r.state),
+      h("span", {class: "mute"}, r.target_name + " · " + r.kind + " · " + plural(r.lines, "line") + " · " + r.auditor + " (" + r.by + ") at " + r.how),
+      live ? h("button", {class: "quiet", onclick: async () => { await api("/api/cancel", {id: r.id}); show("runs"); }}, "Cancel") : null),
+      r.error ? h("p", {}, r.error) : null,
+      r.scope.length ? h("details", {}, h("summary", {}, "Scope"), h("ul", {class: "plain mono"}, r.scope.map(s => h("li", {}, s)))) : null,
+      seen.prompt ? h("details", {}, h("summary", {}, "The prompt"), h("pre", {class: "mono log"}, seen.prompt)) : null),
+    h("div", {class: "log"}, seen.events.length ? seen.events.slice(-400).map(e =>
+      h("div", {class: e.kind}, e.kind === "tool" ? e.tool + " " + e.text : e.text)) : h("div", {class: "empty"}, live ? "Waiting for the auditor…" : "Nothing was said.")));
+}
+
+// ---------------------------------------------------------------- Findings
+async function findings(view) {
+  const all = await api("/api/findings");
+  const again = h("button", {class: "quiet", onclick: async () => { await api("/api/refresh", {}).catch(() => {}); checkedAt = Date.now(); show("findings"); }}, "Re-check the code");
+  const copyAll = h("button", {class: "go", onclick: e => copyBrief("", e.target)}, "Copy open issues");
+  if (!all.length) { put(view, h("p", {class: "empty"}, "No findings yet.")); return; }
+  const status = ["open", "fixed", "accepted", "false-positive"], main = ["affected", "not-affected", "fixed"];
+  const rows = all.map(f => {
+    const st = h("select", {}, status.map(s => h("option", {value: s, selected: s === f.status}, s)));
+    const mn = h("select", {}, main.map(s => h("option", {value: s, selected: s === f.main}, s)));
+    const fix = h("input", {type: "text", size: 10, value: f.fixed_in || "", placeholder: "fix's commit"});
+    const note = h("input", {type: "text", value: f.note || "", placeholder: "a note"});
+    const cve = h("input", {type: "text", size: 15, value: f.cve || "", placeholder: "CVE-YYYY-NNNN", "aria-label": "CVE"});
+    const tests = h("input", {type: "text", size: 40, value: (f.tests || []).join(", "), placeholder: "TestClass.test_name, …", "aria-label": "Tests that guard it"});
+    const said = h("span", {class: "note"});
+    const quick = (label, body, cls) => h("button", {class: cls || "quiet", onclick: async () => {
+      try { const got = await api(body.confirm ? "/api/confirm" : "/api/finding", {audit: f.audit, id: f.id, ...body, note: note.value}); show("findings"); return got; }
+      catch (e) { said.textContent = e.message; }
+    }}, label);
+    let pick = null;
+    const scoreBox = h("div", {});
+    const showScore = () => put(scoreBox, f.cvss ? h("div", {class: "row"}, h("span", {class: "mute"}, "CVSS " + (f.score != null ? f.score.toFixed(1) : "?")), h("code", {class: "note"}, f.cvss),
+      h("button", {class: "quiet", onclick: () => { pick = cvssPicker(f.cvss); put(scoreBox, pick.el); }}, "Change"))
+      : h("div", {class: "row"}, h("span", {class: "mute"}, "No CVSS score yet."), h("button", {class: "quiet", onclick: () => { pick = cvssPicker(""); put(scoreBox, pick.el); }}, "Score it")));
+    const kind = h("select", {"aria-label": "Kind"}, h("option", {value: "vulnerability"}, "vulnerability"), h("option", {value: "hardening", selected: f.type === "hardening"}, "hardening"));
+    const prio = h("select", {"aria-label": "Priority"}, ["high", "medium", "low"].map(p => h("option", {value: p, selected: p === f.severity}, "priority: " + p)));
+    const showKind = () => { if (kind.value === "hardening") { pick = null; put(scoreBox, h("div", {class: "row"}, prio, h("span", {class: "note"}, "No CVSS score: it never holds up a release."))); } else showScore(); };
+    kind.addEventListener("change", showKind);
+    showKind();
+    const save = h("button", {class: "quiet", onclick: async () => {
+      try {
+        await api("/api/finding", {audit: f.audit, id: f.id, status: st.value, main: mn.value, fixed_in: fix.value, note: note.value, cve: cve.value.trim(), type: kind.value, tests: tests.value,
+          ...(kind.value === "hardening" ? {priority: prio.value} : pick ? {cvss: pick.value()} : {})});
+        show("findings");
+      } catch (e) { said.textContent = e.message; }
+    }}, "Save");
+    return h("div", {class: "card"},
+      h("div", {class: "row"}, h("b", {}, f.id), f.type === "hardening" ? h("span", {class: "badge"}, "hardening · " + f.severity)
+        : h("span", {class: "badge " + (SEV[f.severity] || "")}, f.severity + (f.score != null ? " " + f.score.toFixed(1) : "")),
+        h("span", {}, f.title), f.cve ? h("code", {class: "badge"}, f.cve) : null, f.status === "open" ? h("span", {class: "badge " + (CODE[f.code] || ["", ""])[0]}, (CODE[f.code] || ["", f.code])[1]) : null,
+        unpushed(f) ? h("span", {class: "badge warn"}, f.fix === "committed" ? "fixed, committed, not pushed" : "fixed, not pushed yet") : null,
+        f.status === "open" && f.reported ? h("span", {class: "badge"}, "fix reported: " + f.reported) : null),
+      h("div", {class: "note"}, (f.now && f.now.length && [...f.now].sort().join() !== [...(f.lines || [])].sort().join() ? "now at " + f.now.join(", ") + " · found at " : "") + (f.lines || []).join(", ") + " · audit " + f.audit + " (" + String(f.auditor || "").replace(/^human:/, "") + " at " + f.thoroughness + (f.author ? ", the author's own" : "") + ")"),
+      f.status === "open" && f.code === "gone" ? h("p", {class: "note"}, "None of its lines are in the code any more. If that change is the fix, Mark as fixed (or have an AI auditor re-check it); the next audit of the change says whether it's right.") : null,
+      f.status === "open" && f.code === "changed" ? h("p", {class: "note"}, "Some of its lines have changed since it was found.") : null,
+      f.status === "fixed" && FIX[f.fix] ? h("p", {class: "note"}, unpushed(f) && f.fix === "not fixed" ? "Fixed, but not pushed yet: commit and push the fix. (Its lines look as they did, so the fix is elsewhere in the code.)" : FIX[f.fix]) : null,
+      (f.checks || []).length ? h("p", {class: "note"}, "Last check: " + f.checks[f.checks.length - 1].split("\n")[0].slice(0, 240)) : null,
+      h("p", {class: "note"}, (f.tests || []).length ? ["Tests that guard it: ", ...f.tests.flatMap((t, i) => [i ? ", " : "", h("code", {class: (f.lost || []).includes(t) ? "bad" : ""}, t)]),
+        (f.lost || []).length ? " (" + f.lost.join(", ") + (f.lost.length > 1 ? " are" : " is") + " gone from tests/)" : ""] : "No test guards it yet."),
+      scoreBox,
+      h("details", {}, h("summary", {}, "Detail"), h("pre", {class: "mono log"}, f.detail || "")),
+      (f.checks || []).length ? h("details", {}, h("summary", {}, "Checks (" + f.checks.length + ")"), h("ul", {class: "plain note"}, f.checks.map(c => h("li", {}, c)))) : null,
+      h("div", {class: "row"}, h("button", {class: "quiet", onclick: e => copyBrief(f.id, e.target)}, "Copy issue"),
+        f.status === "open" ? quick("Mark as fixed", {confirm: true}) : null,
+        f.status === "open" ? quick("False positive", {status: "false-positive"}) : null,
+        f.status !== "open" ? quick("Reopen", {status: "open"}) : null),
+      h("div", {class: "row"}, "Kind", kind, "Status", st, h("span", {title: f.main_by === "hand" ? "Set by hand on this page" : "The answer of " + (f.main_by && f.main_by !== "audit" ? f.main_by : "the audit that found it") + ": it checked main"}, "Main", h("small", {class: "mute"}, f.main_by === "hand" ? " (by hand)" : " (audit's answer)")), mn, fix, "CVE", cve, note, save, said),
+      h("div", {class: "row"}, "Tests", tests));
+  });
+  const open = all.filter(f => f.status === "open"), gone = open.filter(f => f.code === "gone").length;
+  const fp = all.filter(f => f.status === "false-positive").length;
+  const waiting = all.filter(unpushed).length;
+  const part = f => f.status !== "open" ? (unpushed(f) ? 2 : 3) : f.code === "gone" ? 1 : 0;
+  const order = all.map((f, i) => [part(f), i]).sort((x, y) => x[0] - y[0] || x[1] - y[1]).map(([, i]) => i);
+  const heads = ["Open", "Code gone: confirm they're fixed", "Fixed, not pushed yet: commit and push the fixes", "Closed"];
+  const sorted = [];
+  let last = -1;
+  for (const i of order) {
+    const p = part(all[i]);
+    if (p !== last) { sorted.push(h("h2", {}, heads[p])); last = p; }
+    sorted.push(rows[i]);
+  }
+  put(view, h("div", {class: "row"}, h("p", {class: "lead", style: "margin:0"}, plural(open.length - gone, "open finding") + " of " + all.length +
+    (gone ? ", " + gone + " to confirm fixed" : "") + (waiting ? ", " + waiting + " fixed but not pushed yet" : "") + (fp ? ", " + fp + " false positive" + (fp === 1 ? "" : "s") : "") +
+    ". Each one's code is checked against your working copy, uncommitted changes too" +
+    (checkedAt ? " (checked " + new Date(checkedAt).toLocaleTimeString([], {timeStyle: "short"}) + ")." : ".")), again, open.length ? copyAll : null),
+    reportBox(),
+    h("p", {class: "note"}, "Mark as fixed is your word for it: where the fix is, and its commit, come from git. To have the fixes checked, ",
+      h("button", {class: "quiet", onclick: () => { pending = "open"; show("start"); }}, "Re-check the open findings"),
+      " with an auditor: it reads your working copy, the branch as pushed and main, and closes each one it finds fixed. One fixed only in your working copy is closed too, and listed as fixed, not pushed yet, until you push it."),
+    sorted);
+}
+
+function reportBox() {   // (Copy issue asks whoever fixes it for a report: pasted here, each finding keeps its tests)
+  const text = h("textarea", {rows: 8, class: "mono", placeholder: "[[fix]]\nid = \"F-YYYY-NNN\"\nstatus = \"fixed\"\ntests = [\"TestClass.test_name\"]\ndetail = \"…\""});
+  const said = h("p", {class: "note"});
+  const go = h("button", {class: "quiet", onclick: async () => {
+    try {
+      const got = await api("/api/report", {text: text.value});
+      said.textContent = "Kept with " + plural(got.done.length, "finding") + (got.done.length ? " (" + got.done.join(", ") + ")" : "") +
+        (got.unknown.length ? ". No such finding: " + got.unknown.join(", ") : "") + (got.missing.length ? ". Not in tests/: " + got.missing.join(", ") : "") +
+        ". Their status is as it was: Mark as fixed, or re-check them.";
+      if (got.done.length) setTimeout(() => show("findings"), 2500);
+    } catch (e) { said.textContent = e.message; }
+  }}, "Keep the report");
+  return h("details", {}, h("summary", {}, "Paste a fix report"),
+    h("p", {class: "note"}, "Copy issue asks whoever fixes it to end with a report: what it did, and the tests that would fail if it came back. Paste it here and each finding keeps its tests; a re-check then reads them, and tnsync's block says if one is ever removed."),
+    text, h("div", {class: "row"}, go), said);
+}
+
+// ---------------------------------------------------------------- Explorer
+const filt = {kinds: "full,partial", author: "1", auditors: "", thoroughness: "5", age: ""};
+async function explorer(view) {
+  const q = new URLSearchParams(filt).toString();
+  const got = await api("/api/explorer?" + q);
+  const box = (label, on, flip) => h("label", {class: "row", style: "margin:0"}, h("input", {type: "checkbox", checked: on, onchange: flip}), label);
+  const kinds = new Set(filt.kinds.split(","));
+  const flipKind = k => () => { kinds.has(k) ? kinds.delete(k) : kinds.add(k); filt.kinds = [...kinds].join(","); show("explorer"); };
+  const who = h("select", {onchange: e => { filt.auditors = e.target.value; show("explorer"); }},
+    h("option", {value: ""}, "every auditor"), got.auditors.map(a => h("option", {value: a, selected: a === filt.auditors}, a)));
+  const how = h("select", {onchange: e => { filt.thoroughness = e.target.value; show("explorer"); }},
+    ["1", "2", "3", "4", "5"].map(k => h("option", {value: k, selected: k === filt.thoroughness}, k === "5" ? "any thoroughness" : "thoroughness " + k + " or more")));
+  const age = h("input", {type: "number", min: 0, style: "width:6em", value: filt.age, placeholder: "any age", onchange: e => { filt.age = e.target.value; show("explorer"); }});
+  const bar = h("div", {class: "row card"}, box("Full", kinds.has("full"), flipKind("full")), box("Partial", kinds.has("partial"), flipKind("partial")),
+    box("The author's own", filt.author === "1", () => { filt.author = filt.author === "1" ? "0" : "1"; show("explorer"); }), who, how, age, h("span", {class: "mute"}, "days"),
+    h("span", {class: "mute"}, plural(got.audits, "audit") + " counted"));
+  const files = got.files.sort((a, b) => (a.seen / a.lines) - (b.seen / b.lines) || b.lines - a.lines);
+  const tot = files.reduce((s, f) => s + f.lines, 0), seen = files.reduce((s, f) => s + f.seen, 0);
+  const table = h("table", {}, h("thead", {}, h("tr", {}, ["File", "Lines", "Audited", "", "Before a push"].map(t => h("th", {}, t)))),
+    h("tbody", {}, files.map(f => h("tr", {class: "pick", onclick: () => openFile(f.path)},
+      h("td", {class: "mono"}, f.path), h("td", {}, f.lines), h("td", {}, pct(f.seen, f.lines)),
+      h("td", {style: "width:30%"}, h("div", {class: "bar"}, h("i", {class: "f", style: "width:" + pct(f.full, f.lines)}), h("i", {class: "p", style: "width:" + pct(f.seen - f.full, f.lines)}))),
+      h("td", {}, f.push || "")))));
+  put(view, bar, h("p", {class: "lead"}, pct(seen, tot) + " of the app code audited, as counted here. Green: by a full audit; orange: by partial audits only."),
+    h("div", {class: "wrap"}, table), h("div", {id: "file"}));
+}
+async function openFile(path) {
+  const got = await api("/api/file?" + new URLSearchParams({...filt, path}).toString());
+  const code = h("div", {class: "code"}, got.rows.map(r => {
+    const cls = !r.counts ? "" : !r.seen.length ? "unseen" : r.seen.some(a => a.kind === "full") ? "seen-full" : "seen-part";
+    const tip = r.seen.map(a => a.id + " " + a.kind + (a.auditor ? " · " + a.auditor + " at " + a.thoroughness : "") + (a.author ? " · author" : "")).join("\n")
+      || (r.counts ? (r.uncommitted ? "not committed yet; no audit has seen it" : "no audit has seen it") : "");
+    return h("div", {class: cls, title: tip}, h("span", {class: "g"}), h("span", {}, r.n), h("span", {}, r.text));
+  }));
+  const box = document.getElementById("file");
+  put(box, h("h2", {class: "mono"}, got.path), code);
+  box.scrollIntoView({behavior: "smooth"});
+}
+
+// ---------------------------------------------------------------- Rules
+async function rules(view) {
+  const got = await api("/api/rules");
+  const text = h("textarea", {rows: 22, class: "mono", spellcheck: "false"}, got.text);
+  const said = h("div", {});
+  const tell = p => put(said, p.length ? h("ul", {class: "plain"}, p.map(x => h("li", {}, x))) : h("p", {class: "note"}, "No problems."));
+  tell(got.problems);
+  put(view, h("p", {class: "lead"}, "The release rules and sensitive paths, from ", h("code", {}, got.path), ". They name auditors, so they stay in the private repo."),
+    text, h("div", {class: "row", style: "margin-top:10px"}, h("button", {class: "go", onclick: async () => {
+      try { const r = await api("/api/rules", {text: text.value}); tell(r.ok ? ["Saved. Commit rules.toml in the private repo."] : r.problems); }
+      catch (e) { tell([e.message]); }
+    }}, "Check and save")), said,
+    h("h2", {}, "The dev rule"), h("p", {class: "mute"}, "From dev/audit.toml (public): code no audit has seen may wait " + (got.dev.grace_days ?? 7) +
+      " days, or until it's " + (got.dev.grace_share ?? 10) + "% of the app code."));
+}
+
+// ---------------------------------------------------------------- open while the page is
+(function () {
+  const id = Math.random().toString(36).slice(2), q = "?tab=" + id + "&t=" + encodeURIComponent(TOKEN);
+  const beat = () => fetch("/alive" + q, {method: "POST"}).catch(() => {});
+  beat(); setInterval(beat, 5000);
+  addEventListener("pagehide", () => navigator.sendBeacon("/bye" + q));
+})();
+show("overview");
+</script>
+</body>
+</html>

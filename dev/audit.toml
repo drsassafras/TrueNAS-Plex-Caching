@@ -5,7 +5,8 @@
 # Each audit's public half is security/audits/<id>.toml (date, commit, full or partial, scope); its private half (auditor,
 # thoroughness, findings) is <private>/audits/<id>.toml. Either way, dev/audit.py record writes them.
 
-# The app code an audit covers, as globs from the project's root (** any folders). Tests, i18n and docs aren't in it.
+# The code an audit covers, as globs from the project's root (** any folders). Tests, i18n, docs and the other dev tools
+# aren't in it.
 code = [
     "plexcache/**/*.py",
     "plexcache/web/*.js",
@@ -15,6 +16,13 @@ code = [
     "compose.yaml",
     ".github/workflows/*.yml",
     "dev/tnsync",
+    # the dev tools that serve a page on this computer or run commands on it
+    "dev/auditgui.py",
+    "dev/auditgui.html",
+    "dev/auditrun.py",
+    "dev/auditor_*.py",
+    "dev/style.py",
+    "dev/board.py",
 ]
 exclude = []
 
@@ -26,3 +34,7 @@ private = "../TrueNAS-Plex-Caching-audits"
 [dev]
 grace_days = 7
 grace_share = 10
+
+# Audits are a person's by default (the audits page). An AI auditor plugin (dev/auditor_*.py) is offered too when it's
+# installed on this computer; its settings, if it needs any, are [auditors.<its id>], here or in the private rules.toml.
+# Where its command is (command) is the private rules.toml's alone: one set here, in the repo, is never run.

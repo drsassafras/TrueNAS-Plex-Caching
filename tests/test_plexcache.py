@@ -4821,11 +4821,23 @@ class TestRunnerTests(unittest.TestCase):
                     if urls:
                         break
                     time.sleep(0.05)
-                page = urllib.request.urlopen(urls[0]).read().decode()
+                base = urls[0].split("/?")[0]
+                with self.assertRaises(urllib.error.HTTPError) as cm:   # (the page, and its token: not without the address's code)
+                    urllib.request.urlopen(base + "/")
+                self.assertNotIn(b"token:", cm.exception.read())
+                cm.exception.close()
+                browser = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
+                with browser.open(urls[0]) as res:   # (the code, swapped for the cookie, then the page)
+                    page = res.read().decode()
+                    csp = res.headers["Content-Security-Policy"]
+                    self.assertEqual((res.headers["X-Frame-Options"], res.headers["X-Content-Type-Options"]), ("DENY", "nosniff"))
+                self.assertIn("frame-ancestors 'none'", csp)       # (its Approve buttons never under another site's page)
+                self.assertIn("default-src 'none'", csp)
+                self.assertIn(f'<script nonce="{_re.search(r"script-src .nonce-([^\']+)", csp).group(1)}">', page)
                 self.assertIn("sendBeacon('/bye'", page)
                 token = _re.search(r'token:"([^"]+)"', page).group(1)
                 q = f"?tab=one&t={urllib.parse.quote(token)}"
-                post = lambda path, urls=urls: urllib.request.urlopen(urllib.request.Request(urls[0].rstrip("/") + path, data=b"", method="POST")).status
+                post = lambda path, base=base, browser=browser: browser.open(urllib.request.Request(base + path, data=b"", method="POST")).status
                 self.assertEqual(post("/alive" + q), 204)
                 with self.assertRaises(urllib.error.HTTPError) as cm:   # (not without the token)
                     post("/alive?tab=one&t=wrong")
@@ -5069,6 +5081,51 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn("LOOKS WAITING", drawn[0])
         self.assertIn("6 looks need your approval", drawn[2])
         self.assertFalse(b.finale_due(s))   # (skipped: not again)
+
+    @unittest.skipUnless(shutil.which("rsync") and shutil.which("bash"), "no rsync here (tnsync copies with it)")
+    def test_tnsync_copies_no_link_out_and_keeps_its_socket_private(self):
+        """tnsync's copy never puts a link that leads out of the copy on the NAS (one committed to /mnt/..., say, would
+        be the running app's), and its SSH connection's socket is in a folder only you can open, not a name anyone could
+        take first in the shared /tmp."""
+        import stat
+        import subprocess
+        folder = tempfile.mkdtemp(dir=TMP)
+        project, nas, fake = (os.path.join(folder, d) for d in ("project", "nas", "bin"))
+        for d in (os.path.join(project, "app"), nas, fake):
+            os.makedirs(d)
+        with open(os.path.join(fake, "ssh"), "w", encoding="utf-8") as fh:   # (the NAS: this machine, a folder of it)
+            fh.write(f'#!/bin/bash\nprintf "%s\\n" "$*" >> {folder}/ssh-args\n'
+                     'while [ $# -gt 0 ]; do case "$1" in -o|-p|-l) shift 2 ;; -O) exit 0 ;; -*) shift ;; *) break ;; esac; done\n'
+                     'shift; [ $# -eq 0 ] && exit 0; exec bash -c "$*"\n')
+        with open(os.path.join(fake, "midclt"), "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/bash\n")
+        for name in ("ssh", "midclt"):
+            os.chmod(os.path.join(fake, name), 0o755)
+        with open(os.path.join(project, "app", "code.py"), "w", encoding="utf-8") as fh:
+            fh.write("one\n")
+        with open(os.path.join(folder, "secret"), "w", encoding="utf-8") as fh:
+            fh.write("not the app's\n")
+        os.symlink(os.path.join(folder, "secret"), os.path.join(project, "app", "out"))   # (out of the copy)
+        os.symlink("/etc", os.path.join(project, "app", "etc"))
+        with open(os.path.join(folder, "config"), "w", encoding="utf-8") as fh:
+            fh.write("TN_HOST=nas.example\nTN_USER=me\n")
+        with open(os.path.join(project, ".tnsync"), "w", encoding="utf-8") as fh:
+            fh.write(f"TN_APP=myapp\nTN_DEST={nas}\nTN_PATHS=app\n")
+        state = os.path.join(folder, "state")
+        env = dict(os.environ, PATH=fake + os.pathsep + os.environ.get("PATH", ""), TNSYNC_CONFIG=os.path.join(folder, "config"),
+                   XDG_STATE_HOME=state, TMPDIR=folder)
+        env.pop("PLEXCACHE_PROGRESS", None)
+        got = subprocess.run([os.path.join(ROOT, "dev", "tnsync"), "local", "-y"], cwd=project, env=env, capture_output=True,
+                             text=True, timeout=120, stdin=subprocess.DEVNULL)
+        out = got.stdout + got.stderr
+        self.assertEqual(_read(os.path.join(nas, "app", "code.py"), encoding="utf-8"), "one\n", out)
+        self.assertFalse(os.path.lexists(os.path.join(nas, "app", "out")), out)
+        self.assertFalse(os.path.lexists(os.path.join(nas, "app", "etc")), out)
+        args = _read(os.path.join(folder, "ssh-args"), encoding="utf-8")
+        sock = os.path.dirname(re.search(r"ControlPath=(\S+)", args).group(1))
+        # (the state folder's; one of your own in /tmp only when that path is too long for a socket's name, as here maybe)
+        self.assertIn(sock, (os.path.join(state, "tnsync", "ssh"), f"/tmp/tnsync-ssh-{os.getuid()}"))
+        self.assertEqual((stat.S_IMODE(os.lstat(sock).st_mode), os.lstat(sock).st_uid), (0o700, os.getuid()))
 
     def test_tnsync_runs_its_steps_at_once(self):
         """tnsync local -y: the copy (and restart) and every check .tnsync sets run at the same time, each a section of
@@ -15582,25 +15639,76 @@ class StyleGuideTests(unittest.TestCase):
         self.assertEqual(s._overlap(None, groups[0]["pairs"][0]["clip"]), 0.0)
         self.assertEqual(len(s.one_spot([{**g, "pairs": [{**p, "clip": None} for p in g["pairs"]]} for g in groups])), 3)   # (no spot: as they were)
 
+    def test_a_look_file_is_the_apps_own(self):
+        """A look file that's a link (or in a folder that is) is refused: its target, somewhere else on this computer,
+        would be read into the looks, the guide and the approved copy. And another tree's themes are read in an isolated
+        Python (-I), so nothing in the folder it's started from comes before the standard library."""
+        s = self.style
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = os.path.join(tmp, "tree")
+            os.makedirs(os.path.join(tree, "plexcache", "web"))
+            with open(os.path.join(tmp, "secret.css"), "w", encoding="utf-8") as f:
+                f.write(".secret{gap:1px}")
+            os.symlink(os.path.join(tmp, "secret.css"), os.path.join(tree, "plexcache", "web", "app.css"))
+            with self.assertRaisesRegex(RuntimeError, "app.css is a link"):
+                s.look_files(tree)
+            with self.assertRaisesRegex(RuntimeError, "app.css is a link"):
+                s.looks(tree)
+            os.makedirs(os.path.join(tmp, "elsewhere"))
+            os.symlink(os.path.join(tmp, "elsewhere"), os.path.join(tree, "plexcache", "web", "fonts"))
+            with open(os.path.join(tmp, "elsewhere", "x.woff2"), "wb") as f:
+                f.write(b"x")
+            with self.assertRaisesRegex(RuntimeError, "is a link"):
+                s.own_file(tree, "plexcache/web/fonts/x.woff2")
+            # the themes of another tree, from a folder with a json.py of its own: the standard library's all the same
+            other = os.path.join(tmp, "other")
+            shutil.copytree(os.path.join(ROOT, "plexcache"), os.path.join(other, "plexcache"),
+                            ignore=shutil.ignore_patterns("__pycache__", "web"))
+            here = os.path.join(tmp, "here")
+            os.makedirs(here)
+            with open(os.path.join(here, "json.py"), "w", encoding="utf-8") as f:
+                f.write("raise SystemExit('the folder it was started from came first')\n")
+            was = os.getcwd()
+            os.chdir(here)
+            try:
+                got = s.theme_looks(other)
+            finally:
+                os.chdir(was)
+            self.assertEqual({k: v for k, v in got.items() if k.startswith("theme ")},
+                             {k: v for k, v in self.now.items() if k.startswith("theme ")})
+
     def test_the_before_is_the_app_as_approved(self):
-        """approve keeps a copy of the approved app's look files (dev/style-approved.zip); the sample's Before is today's
-        app with those put back, and checked against the guide."""
-        import zipfile
+        """approve keeps the approved app's look files in git (each a blob, its id in the guide's files): never a copy
+        nobody can read in a diff (a zip of code the sample would run). The sample's Before is today's app with those
+        put back out of git, and checked against the guide."""
+        import subprocess
         s = self.style
         self.assertIn("plexcache/web/app.css", s.look_files())
         self.assertIn("plexcache/themes.py", s.look_files())
         self.assertIn("plexcache/web/theatre.svg", s.look_files())
+        self.assertFalse(hasattr(s, "APPROVED"))   # (no zip of the approved app: its files are git's)
         with tempfile.TemporaryDirectory() as tmp:
-            zipped = os.path.join(tmp, "kept.zip")
-            s.keep_approved(ROOT, zipped)
-            with zipfile.ZipFile(zipped) as z:
-                self.assertEqual(sorted(z.namelist()), s.look_files())
-                kept = os.path.join(tmp, "kept")
-                z.extractall(kept)
-            s.keep_approved(ROOT, zipped + "2")
-            self.assertEqual(_read_bytes(zipped), _read_bytes(zipped + "2"))   # the same files, the same bytes
-            self.assertEqual(_read_bytes(os.path.join(s.before_tree(zipped, os.path.join(tmp, "z")), "plexcache", "web", "app.css")),
+            repo, guide = os.path.join(tmp, "repo"), os.path.join(tmp, "guide.json")
+            subprocess.run(["git", "init", "-q", repo], check=True)
+            with open(guide, "w", encoding="utf-8") as f:
+                json.dump({"about": "a", "format": s.FORMAT, "approvals": [], "seal": s.seal({}), "looks": {}}, f)
+            files = s.keep_approved(ROOT, guide, repo)
+            self.assertEqual(sorted(files), s.look_files())
+            self.assertEqual(s.load_guide(guide)["files"], files)
+            self.assertEqual(s.keep_approved(ROOT, guide, repo), files)   # the same files, the same ids
+            shown = subprocess.run(["git", "-C", repo, "cat-file", "blob", files["plexcache/web/app.css"]], capture_output=True, check=True).stdout
+            self.assertEqual(shown, _read_bytes(os.path.join(ROOT, "plexcache", "web", "app.css")))   # (readable: git show <id>)
+            self.assertEqual(_read_bytes(os.path.join(s.before_tree(files, os.path.join(tmp, "z"), repo=repo), "plexcache", "web", "app.css")),
                              _read_bytes(os.path.join(ROOT, "plexcache", "web", "app.css")))
+            s.write_guide({}, {"date": "d", "sample": "f", "looks": 0}, guide)
+            self.assertEqual(s.load_guide(guide)["files"], files)   # (an approval of some looks keeps them)
+            with self.assertRaisesRegex(RuntimeError, "doesn't have the approved plexcache/web/app.css"):
+                s.before_tree({"plexcache/web/app.css": "0" * 40}, os.path.join(tmp, "n"), repo=repo)   # (not in git here)
+            for bad in ({"../../.ssh/config": files["plexcache/web/app.css"]}, {"plexcache/web/app.css": "HEAD"}):
+                with self.assertRaisesRegex(RuntimeError, "isn't a look file's blob id"):
+                    s.before_tree(bad, os.path.join(tmp, "b"), repo=repo)
+            kept = os.path.join(tmp, "kept")
+            self.assertEqual(s.approved_files(files, kept, repo), [])
             with open(os.path.join(kept, "plexcache", "web", "app.css"), "a", encoding="utf-8") as f:
                 f.write("\n.sample-before-only{gap:3px}\n")
             os.remove(os.path.join(kept, "plexcache", "web", "theatre.svg"))
@@ -15618,6 +15726,7 @@ class StyleGuideTests(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(tree2, "plexcache", "web", "theatre.svg")))
         # approve keeps the copy only when it writes the real guide, and only on a yes
         src = _read(os.path.join(ROOT, "dev", "style.py"), encoding="utf-8")
+        self.assertNotIn("style-approved.zip", src)
         self.assertIn("if keep is None and guide_path == GUIDE:", src)
         js = _read(os.path.join(ROOT, "dev", "style-sample.js"), encoding="utf-8")
         self.assertIn("setFixedTime", js)                     # both sides see the same moment
@@ -16645,24 +16754,24 @@ class AuditTests(unittest.TestCase):
 
     def test_who_a_rule_accepts(self):
         from dev import audit
-        self.assertTrue(audit.accepts("opus>=5.5 thoroughness<=3", "opus-5.5", 3))
-        self.assertTrue(audit.accepts("opus>=5.5 thoroughness<=3", "opus-5.6", 1))
-        self.assertFalse(audit.accepts("opus>=5.5 thoroughness<=3", "opus-5.5", 4))     # (not thorough enough)
-        self.assertFalse(audit.accepts("opus>=5.5 thoroughness<=3", "opus-5.4", 1))     # (an older version)
-        self.assertFalse(audit.accepts("opus>=5.5", "fable-5.1", 1))                    # (families aren't ranked)
-        self.assertTrue(audit.accepts("fable", "fable-5.1", 5))
+        self.assertTrue(audit.accepts("alpha>=5.5 thoroughness<=3", "alpha-5.5", 3))
+        self.assertTrue(audit.accepts("alpha>=5.5 thoroughness<=3", "alpha-5.6", 1))
+        self.assertFalse(audit.accepts("alpha>=5.5 thoroughness<=3", "alpha-5.5", 4))     # (not thorough enough)
+        self.assertFalse(audit.accepts("alpha>=5.5 thoroughness<=3", "alpha-5.4", 1))     # (an older version)
+        self.assertFalse(audit.accepts("alpha>=5.5", "beta-5.1", 1))                    # (families aren't ranked)
+        self.assertTrue(audit.accepts("beta", "beta-5.1", 5))
         self.assertTrue(audit.accepts("human", "human:sam", 2))
         self.assertTrue(audit.accepts("human:sam", "human:sam", 2))
         self.assertFalse(audit.accepts("human:sam", "human:alex", 2))
-        self.assertTrue(audit.accepts("any", "haiku-5.5", 5))
-        self.assertFalse(audit.accepts("any effort>=high", "opus-5.5", 1))   # (a word it doesn't know never passes)
+        self.assertTrue(audit.accepts("any", "gamma-5.5", 5))
+        self.assertFalse(audit.accepts("any effort>=high", "alpha-5.5", 1))   # (a word it doesn't know never passes)
 
     def test_what_a_record_needs(self):
         from dev import audit
         ok = {"id": "2026-11-10-1", "date": dt.date(2026, 11, 10), "commit": "abc", "kind": "full",
-              "auditor": "fable-5.1", "thoroughness": 4}
+              "auditor": "beta-5.1", "thoroughness": 4}
         self.assertEqual(audit.problems(ok, "both"), [])
-        self.assertIn("id 'fable-5.1-full' isn't YYYY-MM-DD-N", audit.problems({**ok, "id": "fable-5.1-full"}, "public"))
+        self.assertIn("id 'beta-5.1-full' isn't YYYY-MM-DD-N", audit.problems({**ok, "id": "beta-5.1-full"}, "public"))
         self.assertIn("a partial audit needs its scope", audit.problems({**ok, "kind": "partial"}, "public"))
         self.assertIn("thoroughness 0 isn't 1 to 5", audit.problems({**ok, "thoroughness": 0}, "private"))
         bad = {**ok, "finding": [{"id": "F-2026-001", "title": "t", "lines": ["a.py:3"], "detail": "d",
@@ -16709,7 +16818,7 @@ class AuditTests(unittest.TestCase):
         with open(os.path.join(folder, name), "w") as fh:
             fh.write(text)
 
-    def audit_files(self, repo, private, aid, date, commit, kind, scope=None, auditor="fable-5.1", thoroughness=4, extra=""):
+    def audit_files(self, repo, private, aid, date, commit, kind, scope=None, auditor="beta-5.1", thoroughness=4, extra=""):
         self.write(os.path.join(repo, "security", "audits"), f"{aid}.toml", f'id = "{aid}"\ndate = {date}\ncommit = "{commit}"\nkind = "{kind}"\n'
                    + (f"scope = {json.dumps(scope)}\n" if scope else ""))
         self.write(os.path.join(private, "audits"), f"{aid}.toml",
@@ -16725,7 +16834,7 @@ class AuditTests(unittest.TestCase):
             fh.write("def login(user):\n    return user.strip()\n\n\ndef other():\n    return 2\n")
         git("commit", "-qam", "change")
         audits, have_private, bad = audit.load()
-        self.assertEqual((have_private, bad, [a.auditor for a in audits]), (True, [], ["fable-5.1"]))
+        self.assertEqual((have_private, bad, [a.auditor for a in audits]), (True, [], ["beta-5.1"]))
         m = audit.measure(audits)
         waiting = sorted((rel, n) for rel, n, ln in m.all() if not ln.seen)
         self.assertEqual(waiting, [("a.py", 2)])   # (changed since the full audit: no longer seen)
@@ -16733,7 +16842,7 @@ class AuditTests(unittest.TestCase):
 
         # a partial of just that function, at the new commit, sees it again
         self.audit_files(repo, private, "2026-11-02-1", "2026-11-02", git("rev-parse", "HEAD"), "partial", ["a.py:login"],
-                         auditor="haiku-5.5", thoroughness=5)
+                         auditor="gamma-5.5", thoroughness=5)
         m = audit.measure(audit.load()[0])
         self.assertEqual([(rel, n) for rel, n, ln in m.all() if not ln.seen], [])
         self.assertEqual([a.id for a in m.lines["a.py"][2].seen], ["2026-11-02-1"])
@@ -16753,7 +16862,7 @@ class AuditTests(unittest.TestCase):
         audits = audit.load()[0]
         got = audit.coverage_check(audit.measure(audits), audits, time.time(), [])
         self.assertEqual((got.findings or []), [])   # (inside the window: fine)
-        self.assertEqual(got.said(), ["audited 96.0%", "full 96.0%", "last full 2026-11-01"])
+        self.assertEqual(got.said(), ["audited 96.0%", "full 96.0%", "last full 2026-11-01", "1 line to audit before a push"])
         git("commit", "-qam", "more", when="2001-06-01T00:00:00Z")
         got = audit.coverage_check(audit.measure(audits), audits, time.time(), [])
         self.assertIn("the oldest has waited", (got.findings or [])[0].message)   # (committed long ago, still unaudited: orange)
@@ -16769,21 +16878,21 @@ class AuditTests(unittest.TestCase):
     def test_the_release_rules(self):
         from dev import audit
         repo, private, git = self.project()
-        rule = {"accept": ["opus>=5.5 thoroughness<=3", "fable>=5.1 thoroughness<=4"], "max_age_days": 180, "soak_days": 7,
+        rule = {"accept": ["alpha>=5.5 thoroughness<=3", "beta>=5.1 thoroughness<=4"], "max_age_days": 180, "soak_days": 7,
                 "block_open": "high"}
         head, now = git("rev-parse", "HEAD"), time.time()
         today = dt.date.fromtimestamp(now).isoformat()
-        self.audit_files(repo, private, f"{today}-1", today, head, "full", auditor="haiku-5.5", thoroughness=1)
+        self.audit_files(repo, private, f"{today}-1", today, head, "full", auditor="gamma-5.5", thoroughness=1)
         audits = audit.load()[0]
         got = audit.release_check(audit.measure(audits), audits, True, rule, now, release=True)
         msgs = [f.message for f in (got.findings or [])]
-        self.assertIn("no full audit the release rules accept in the last 180 days", msgs)   # (haiku isn't on the list)
+        self.assertIn("no full audit the release rules accept in the last 180 days", msgs)   # (gamma isn't on the list)
         self.assertIn("no release candidate tagged (vX.Y.Z-rc.N) on this code", msgs)
         self.assertEqual({f.severity for f in (got.findings or [])}, {"error"})
 
         finding = ('[[finding]]\nid = "F-2026-001"\ntitle = "Token compared with =="\nseverity = "high"\nlines = ["a.py:1-2"]\n'
                    'detail = "d"\nstatus = "open"\nmain = "affected"\n')
-        self.audit_files(repo, private, f"{today}-2", today, head, "full", auditor="fable-5.1", thoroughness=4, extra=finding)
+        self.audit_files(repo, private, f"{today}-2", today, head, "full", auditor="beta-5.1", thoroughness=4, extra=finding)
         git("tag", "-a", "-m", "rc", "v1.0.0-rc.1")   # (annotated: it carries when it was made)
         audits = audit.load()[0]
         got = audit.release_check(audit.measure(audits), audits, True, rule, now + 8 * audit.DAY, release=True)
@@ -16800,15 +16909,15 @@ class AuditTests(unittest.TestCase):
         self.assertIn("auditor and thoroughness requirements", (public.findings or [])[0].message)
         self.assertFalse(public.bad())
         self.assertEqual(public.said(), ["public records only"])
-        ours = audit.config_check(True, {"release": {"accept": ["opus>=5.5 thoroughness<=3"]}}, release=False)
+        ours = audit.config_check(True, {"release": {"accept": ["alpha>=5.5 thoroughness<=3"]}}, release=False)
         self.assertEqual((ours.findings, ours.said()), ([], ["auditor requirements set"]))
         unset = audit.config_check(True, {}, release=False)   # (the private repo, but no requirement in it: orange)
         self.assertEqual([(f.severity, f.message) for f in unset.findings or []],
                          [("warning", "the private rules.toml has no [release] accept: no auditor is required")])
         self.assertTrue(unset.bad())
-        typo = audit.config_check(True, {"release": {"accept": ["opus>=5.5 effort>=high"]}}, release=True)
+        typo = audit.config_check(True, {"release": {"accept": ["alpha>=5.5 effort>=high"]}}, release=True)
         self.assertEqual([(f.severity, f.message) for f in typo.findings or []],
-                         [("error", "the private rules.toml's accept entry 'opus>=5.5 effort>=high' can't be read")])
+                         [("error", "the private rules.toml's accept entry 'alpha>=5.5 effort>=high' can't be read")])
 
     @unittest.skipUnless(shutil.which("git"), "no git here")
     def test_the_public_half_alone(self):
@@ -16824,7 +16933,7 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("audited 83.3%", out.getvalue().lower())
         self.assertIn("public records only", out.getvalue())
-        self.assertNotIn("fable", out.getvalue())   # (who did it stays private)
+        self.assertNotIn("beta", out.getvalue())   # (who did it stays private)
 
     @unittest.skipUnless(shutil.which("git"), "no git here")
     def test_record_splits_a_template_into_its_halves(self):
@@ -16833,24 +16942,629 @@ class AuditTests(unittest.TestCase):
         from dev import audit
         repo, private, git = self.project()
         old = git("rev-parse", "HEAD")
-        self.audit_files(repo, private, "2026-10-01-1", "2026-10-01", old, "full", auditor="opus-5.5", thoroughness=3)
+        self.audit_files(repo, private, "2026-10-01-1", "2026-10-01", old, "full", auditor="alpha-5.5", thoroughness=3)
         filled = os.path.join(repo, "filled.toml")
         self.write(repo, "filled.toml", f'id = "2026-11-10-1"\ndate = 2026-11-10\ncommit = "{old}"\nkind = "partial"\n'
-                   'scope = ["a.py:login"]\nauditor = "fable-5.1"\nthoroughness = 4\nmain_commit = "m"\nprompt = "PROMPT.md@x"\n'
+                   'scope = ["a.py:login"]\nauditor = "beta-5.1"\nthoroughness = 4\nmain_commit = "m"\nprompt = "PROMPT.md@x"\n'
                    '[[finding]]\nid = "F-2026-002"\ntitle = "Login trusts its input"\nseverity = "medium"\nlines = ["a.py:1-2"]\n'
                    'detail = """\nTwo lines\nof detail.\n"""\nstatus = "open"\nmain = "affected"\n')
         rc, said = audit.record(filled)
         self.assertEqual(rc, 0, said)
         with open(os.path.join(repo, "security", "audits", "2026-11-10-1.toml"), "rb") as fh:
             pub = tomllib.load(fh)
-        self.assertEqual(sorted(pub), ["commit", "date", "id", "kind", "scope"])   # (nothing of who, nor what was found)
+        self.assertEqual(sorted(pub), ["commit", "date", "id", "kind", "prints", "scope"])   # (nothing of who, nor what was found)
+        self.assertEqual(len(pub["prints"]), 2)   # (login()'s two lines, as they were at that commit)
         with open(os.path.join(private, "audits", "2026-11-10-1.toml"), "rb") as fh:
             sec = tomllib.load(fh)
-        self.assertEqual((sec["auditor"], sec["thoroughness"]), ("fable-5.1", 4))
+        self.assertEqual((sec["auditor"], sec["thoroughness"]), ("beta-5.1", 4))
         f = sec["finding"][0]
         self.assertEqual((f["introduced_in"], f["missed_by"], f["detail"]), (old, ["2026-10-01-1"], "Two lines\nof detail.\n"))
         self.assertEqual(audit.record(filled)[0], 1)   # (already recorded: --force to replace it)
         self.assertEqual(audit.load()[2], [])
+
+    def test_a_fingerprint_is_a_line_and_its_neighbours(self):
+        from dev import audit
+        base = tempfile.mkdtemp(dir=TMP)
+        body = "def check(token):\n    if not token:\n        return False\n    return token == SECRET\n"
+        self.write(base, "a.py", "x = 1\n\n\n" + body + "\n\ny = 2\n")
+        self.write(base, "b.py", "y = 2\n\n\n" + body + "\n\nx = 1\n")   # (the same function, moved: and to another file)
+        edited = tempfile.mkdtemp(dir=TMP)
+        self.write(edited, "a.py", "x = 1   \n" + body.replace("False", "True") + "y = 2\n")   # (a.py, edited)
+        a, b, c = audit.fingerprints("a.py", base), audit.fingerprints("b.py", base), audit.fingerprints("a.py", edited)
+        self.assertEqual(sorted(a), [1, 4, 5, 6, 7, 10])   # (blank lines have none)
+        self.assertTrue(all(audit.PRINT.match(p) for p in a.values()))
+        self.assertEqual(set(a.values()) & set(b.values()), set())   # (another file: none of it counts as seen)
+        os.rename(os.path.join(base, "b.py"), os.path.join(base, "a.py"))
+        moved = audit.fingerprints("a.py", base)
+        self.assertEqual({moved[5], moved[6]}, {a[5], a[6]})   # (moved within its file: all but its edges)
+        self.assertNotIn(moved[4], a.values())
+        self.assertEqual((c[1], c[2]), (a[1], a[4]))   # (trailing spaces and blank lines don't matter)
+        self.assertNotIn(c[3], a.values())   # (a changed line, and the lines next to it, need an audit again)
+        self.assertNotIn(c[4], a.values())
+        self.assertNotIn(c[5], a.values())
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_an_audit_of_uncommitted_code_counts_once_it_is_committed(self):
+        import tomllib
+
+        from dev import audit
+        repo, private, git = self.project()
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return user.strip()\n\n\ndef other():\n    return 2\n")   # (not committed)
+        audits = audit.load()[0]
+        got = audit.coverage_check(audit.measure(audits), audits, time.time(), [])
+        self.assertIn("1 line to audit before a push", got.said())
+        self.write(repo, "filled.toml", f'id = "2026-11-10-1"\ndate = 2026-11-10\ncommit = "{git("rev-parse", "HEAD")}"\n'
+                   'kind = "partial"\nscope = ["a.py:login"]\nauditor = "alpha-5.5"\nthoroughness = 2\n')
+        rc, said = audit.record(os.path.join(repo, "filled.toml"))
+        self.assertEqual(rc, 0, said)
+        with open(os.path.join(repo, "security", "audits", "2026-11-10-1.toml"), "rb") as fh:
+            pub = tomllib.load(fh)
+        self.assertEqual((pub["uncommitted"], len(pub["prints"])), (True, 2))
+
+        def waiting():
+            m = audit.measure(audit.load()[0])
+            return [(rel, n) for rel, n, ln in m.all() if not ln.seen and rel == "a.py"], m
+        self.assertEqual(waiting()[0], [("a.py", 5), ("a.py", 6)])   # (login() is seen before it's committed; other() never was)
+        git("commit", "-qam", "strip it")
+        git("commit", "-q", "--amend", "-m", "strip the user")   # (rewritten: a commit the audit never knew)
+        self.assertEqual(waiting()[0], [("a.py", 5), ("a.py", 6)])
+        git("reset", "-q", "--soft", "HEAD~1")
+        git("commit", "-qm", "squashed")
+        self.assertEqual(waiting()[0], [("a.py", 5), ("a.py", 6)])
+
+        # a commit git no longer knows (another clone, a branch gone): the fingerprints still place it, quietly
+        with open(os.path.join(repo, "security", "audits", "2026-11-10-1.toml")) as fh:
+            text = fh.read()
+        self.write(os.path.join(repo, "security", "audits"), "2026-11-10-1.toml", text.replace(pub["commit"], "0" * 40))
+        left, m = waiting()
+        self.assertEqual((left, m.notes), ([("a.py", 5), ("a.py", 6)], []))
+
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return user.strip().lower()\n\n\ndef other():\n    return 2\n")
+        self.assertEqual(waiting()[0], [("a.py", 1), ("a.py", 2), ("a.py", 5), ("a.py", 6)])   # (changed: and its neighbour)
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_what_to_audit_as_a_scope(self):
+        from dev import audit
+        repo, private, git = self.project()
+        self.assertEqual(audit.target_scope("uncommitted", [], [])[2], "no uncommitted changes to the app code")
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return user.strip()\n\n\ndef other():\n    return 2\n")
+        self.write(repo, "c.py", "class C:\n    def m(self):\n        def inner():\n            return 1\n        return inner\n")
+        self.assertEqual(audit.target_scope("uncommitted", [], []), ("partial", ["a.py:login", "c.py"], ""))   # (a new file: whole)
+        self.assertEqual(audit.scope_of({"c.py": {4}}), ["c.py:C.m.inner"])
+        self.assertEqual(audit.scope_of({"c.py": {2, 4}}), ["c.py:C.m"])   # (the outer one takes the inner in)
+        self.assertEqual(audit.scope_of({"b.py": {3}}), ["b.py"])   # (outside any function: the file)
+        self.assertEqual(audit.target_scope("full", [], [])[:2], ("full", []))
+        self.assertEqual(audit.target_scope("chosen", ["a.py:nope"], [])[2], "not in the app code: a.py:nope")
+        self.assertEqual(audit.target_scope("since-audit", [], [])[2], "there's no audit yet: start with a full one")
+        self.assertEqual(audit.target_scope("unpushed", [], [])[2], "this branch has no upstream to compare with")
+        self.assertEqual(audit.target_scope("unaudited", [], [])[1], ["a.py", "b.py", "c.py"])
+        self.assertEqual(audit.scope_size("partial", ["a.py:login"]), 2)
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_an_author_audit_never_counts_at_release(self):
+        from dev import audit
+        repo, private, git = self.project()
+        rule = {"accept": ["alpha>=5.5 thoroughness<=3"], "max_age_days": 180, "soak_days": 0, "block_open": "high"}
+        today = dt.date.today().isoformat()
+        self.audit_files(repo, private, f"{today}-1", today, git("rev-parse", "HEAD"), "full", auditor="alpha-5.5", thoroughness=1,
+                         extra="author = true\n")
+        audits = audit.load()[0]
+        self.assertTrue(audits[0].author)
+        m = audit.measure(audits)
+        self.assertEqual([(rel, n) for rel, n, ln in m.all() if not ln.seen], [])   # (on dev: it counts)
+        got = audit.release_check(m, audits, True, rule, time.time(), release=False)
+        self.assertIn("no full audit the release rules accept in the last 180 days", [f.message for f in got.findings or []])
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_a_persons_audit_is_open_until_they_finish_it_then_recorded(self):
+        import tomllib
+
+        from dev import audit, auditrun
+        repo, private, git = self.project()
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return user.strip()\n\n\ndef other():\n    return 2\n")   # (not committed)
+        self.assertEqual(auditrun.person("  Dr  Sass "), "human:dr-sass")
+        with self.assertRaises(ValueError):
+            auditrun.person("<script>")
+        run = auditrun.Runner()
+        r = run.start("uncommitted", [], auditrun.person("Dr Sass"), 2)
+        got = auditrun.load_run(r.id)
+        self.assertEqual((got.state, got.plugin, got.kind, got.scope, got.uncommitted), ("open", "", "partial", ["a.py:login"], True))
+        self.assertTrue(os.path.exists(os.path.join(private, "runs", r.id, "prints.json")))
+        run.write_finding(r.id, {"title": "Login trusts its input", "severity": "high", "lines": ["a.py:1-2"], "detail": "No check.", "main": "affected"})
+        run.write_finding(r.id, {"title": "A slip", "severity": "low", "lines": ["a.py:2"], "main": "affected"})
+        run.write_finding(r.id, None, remove=1)
+        with self.assertRaises(ValueError):
+            run.write_finding(r.id, {"title": " "})   # (a finding needs its title)
+        self.assertEqual([f["title"] for f in auditrun.load_run(r.id).draft], ["Login trusts its input"])
+        self.assertEqual(auditrun.load_runs()[0].state, "open")   # (a person's stays open: nothing runs it)
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return user.lower()\n\n\ndef other():\n    return 2\n")   # (changed while it was audited)
+        done = run.finish(r.id)
+        self.assertEqual((done.state, done.findings), ("done", 1), done.error)
+        self.assertIn("the code changed while it was audited", " ".join(done.said))
+        with self.assertRaises(ValueError):
+            run.finish(r.id)   # (only once)
+        with open(os.path.join(repo, "security", "audits", f"{done.audit_id}.toml"), "rb") as fh:
+            pub = tomllib.load(fh)
+        self.assertEqual((pub["kind"], pub["uncommitted"], len(pub["prints"])), ("partial", True, 2))
+        with open(os.path.join(repo, "security", "audits", f"{done.audit_id}.toml")) as fh:
+            self.assertNotIn("sass", fh.read().lower())   # (who, and how closely, stay private)
+        with open(os.path.join(private, "audits", f"{done.audit_id}.toml"), "rb") as fh:
+            sec = tomllib.load(fh)
+        self.assertEqual((sec["auditor"], sec["thoroughness"], sec["run"], "prompt" in sec), ("human:dr-sass", 2, r.id, False))
+        self.assertEqual((sec["finding"][0]["id"], sec["finding"][0]["severity"]), (f"F-{dt.date.today().year}-001", "high"))
+        seen = lambda: [n for rel, n, ln in audit.measure(audit.load()[0]).all() if rel == "a.py" and ln.seen]
+        self.assertEqual(seen(), [1])   # (line 2 changed since: not what it read; line 1 is as committed)
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return user.strip()\n\n\ndef other():\n    return 2\n")
+        self.assertEqual(seen(), [1, 2])   # (as it was when it started)
+        marked = run.mark("chosen", ["b.py"], auditrun.person("Sam"), 4, [])
+        self.assertEqual((marked.state, marked.findings, marked.kind), ("done", 0, "partial"), marked.error)   # (a review already done)
+        c = auditrun.Runner().start("full", [], auditrun.person("Sam"), 5)
+        self.assertTrue(run.cancel(c.id))
+        self.assertEqual(auditrun.load_run(c.id).state, "cancelled")
+        with self.assertRaises(ValueError):
+            run.start("full", [], auditrun.person("Sam"), 6)
+
+    def fake_claude(self, answer, rc=0):
+        """A stand-in for the Claude Code plugin's command: what it was asked, kept beside it; a stream as its, then its answer."""
+        d = tempfile.mkdtemp(dir=TMP)
+        script = os.path.join(d, "claude.py")
+        self.write(d, "claude.py", "import json, os, sys\n"
+                   f"open({os.path.join(d, 'asked.json')!r}, 'w').write(json.dumps({{'args': sys.argv[1:], 'cwd': os.getcwd(), 'prompt': sys.stdin.read(), "
+                   "'files': sorted(os.listdir('.'))}))\n"
+                   "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'Read', 'input': {'file_path': 'a.py'}}]}}))\n"
+                   f"print(json.dumps({{'type': 'result', 'is_error': False, 'result': {answer!r}}}))\n"
+                   f"sys.exit({rc})\n")
+        patch = mock.patch.dict(os.environ, {"PLEXCACHE_AUDIT_CLAUDE": f"{sys.executable} {script}"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return os.path.join(d, "asked.json")
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_an_ai_auditor_is_read_only_logged_and_recorded(self):
+        import tomllib
+
+        from dev import audit, auditrun
+        repo, private, git = self.project()
+        self.write(private, "PROMPT.md", "# the prompt\n\n---\n\nAudit <commit>, <full | partial>:\n<scope list, for a partial audit>\n")
+        asked = self.fake_claude('Done.\n```toml\n[[finding]]\ntitle = "Login trusts its input"\nseverity = "severe"\n'
+                                 'lines = ["a.py:1-2", "somewhere"]\ndetail = """\nNo check.\n"""\nmain = "affected"\n```\n')
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return user.strip()\n\n\ndef other():\n    return 2\n")   # (not committed)
+        r = auditrun.Runner().start("uncommitted", [], "opus-5.5", 3, wait=True)
+        got = {x.id: x for x in auditrun.load_runs()}[r.id]
+        self.assertEqual((got.state, got.plugin, got.kind, got.scope, got.uncommitted, got.findings, got.error),
+                         ("done", "claude-code", "partial", ["a.py:login"], True, 1, ""))
+        with open(asked) as fh:
+            call = json.load(fh)
+        args = call["args"]
+        self.assertEqual((args[args.index("--model") + 1], args[args.index("--effort") + 1], args[args.index("--tools") + 1]),
+                         ("claude-opus-5-5", "high", "Read,Grep,Glob"))
+        self.assertIn("--restricted", args)
+        self.assertNotIn("audits", call["cwd"])   # (a copy of the code: never the private repo)
+        allowed = args[args.index("--allowedTools") + 1:args.index("--disallowedTools")]
+        denied = args[args.index("--disallowedTools") + 1:args.index("--permission-mode")]
+        self.assertTrue(allowed and all(a.startswith("Read(//") and a.endswith("/**)") for a in allowed), allowed)   # (never a bare Read: any file)
+        self.assertNotIn("Read", allowed)
+        self.assertIn(f"Read(/{os.path.realpath(call['cwd'])}/**)", allowed)   # (its working folder, the copy)
+        self.assertIn(f"Read(/{os.path.realpath(repo)}/**)", denied)           # (never the project's own folder)
+        self.assertIn(f"Read(/{os.path.realpath(private)}/**)", denied)        # (nor the private repo)
+        self.assertIn("a.py", call["files"])
+        self.assertIn("- `a.py:login`", call["prompt"])
+        with open(os.path.join(repo, "security", "audits", f"{got.audit_id}.toml"), "rb") as fh:
+            pub = tomllib.load(fh)
+        self.assertEqual((pub["kind"], pub["uncommitted"], len(pub["prints"])), ("partial", True, 2))
+        with open(os.path.join(private, "audits", f"{got.audit_id}.toml"), "rb") as fh:
+            sec = tomllib.load(fh)
+        f = sec["finding"][0]
+        self.assertEqual((sec["auditor"], sec["thoroughness"], sec["run"]), ("opus-5.5", 3, r.id))
+        self.assertEqual((f["id"], f["status"], f["severity"], f["lines"]), (f"F-{dt.date.today().year}-001", "open", "medium", ["a.py:1-2"]))
+        self.assertIn("(the severity given: 'severe')", f["detail"])   # (kept, never dropped)
+        for name in ("run.json", "prompt.md", "output.jsonl", "result.md"):
+            self.assertTrue(os.path.exists(os.path.join(private, "runs", r.id, name)), name)
+        evs, _ = auditrun.events(r.id)
+        self.assertEqual([(e["kind"], e.get("tool"), e["text"]) for e in evs], [("tool", "Read", "a.py"), ("result", None, "finished")])
+        m = audit.measure(audit.load()[0])
+        self.assertEqual([n for rel, n, ln in m.all() if rel == "a.py" and ln.seen], [1, 2])   # (seen before it's committed)
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_an_ai_auditor_run_that_goes_wrong_is_logged_and_records_nothing(self):
+        from dev import auditgui, auditor_claude, auditrun
+        repo, private, git = self.project()
+        self.write(private, "PROMPT.md", "---\nAudit.\n")
+        self.fake_claude("I looked, and here are some thoughts.")
+        r = auditrun.Runner().start("full", [], "fable-5.1", 4, wait=True)
+        got = {x.id: x for x in auditrun.load_runs()}[r.id]
+        self.assertEqual(got.state, "failed")
+        self.assertIn("isn't the TOML the prompt asks for", got.error)
+        with open(os.path.join(private, "runs", r.id, "result.md")) as fh:
+            self.assertIn("some thoughts", fh.read())   # (its answer, kept all the same)
+        self.assertFalse(os.path.isdir(os.path.join(repo, "security", "audits")))
+        self.fake_claude("No findings.")
+        r = auditrun.Runner().start("full", [], "fable-5.1", 4, wait=True)
+        self.assertEqual({x.id: x for x in auditrun.load_runs()}[r.id].state, "done")   # (an audit that found nothing: recorded)
+        with self.assertRaises(ValueError):
+            auditrun.Runner().start("full", [], "gpt-5", 4)   # (no plugin here runs it)
+        self.assertEqual([p["id"] for p in auditgui.Data().options()["plugins"]], ["claude-code"])
+        with mock.patch.dict(os.environ, {"PLEXCACHE_AUDIT_CLAUDE": "no-such-claude"}), mock.patch.object(auditor_claude, "PLACES", ()), \
+                mock.patch.object(auditor_claude, "_from_shell", lambda name: ""):
+            with self.assertRaisesRegex(ValueError, "not found on this computer"):
+                auditrun.Runner().start("full", [], "fable-5.1", 4)   # (said before a run is logged)
+            self.assertEqual(auditgui.Data().options()["plugins"], [])   # (not installed: never offered, never named)
+        self.assertEqual(auditrun.answer("```toml\n[[finding]]\ntitle = 1\n```")[1], "")
+
+    def test_an_ai_auditors_reads_and_command_are_its_own(self):
+        """The Claude Code auditor reads only in its copies: Read rules by path (never a bare Read, which allows any
+        file), this project's folder and the private repo refused, and the home folder when the copies aren't in it.
+        Its command is never the committed dev/audit.toml's (a commit could run anything on Start audit): the private
+        rules.toml's, claude or an absolute path, or PLEXCACHE_AUDIT_CLAUDE."""
+        from dev import auditor_claude
+        repo, private, git = self.project()
+        with tempfile.TemporaryDirectory() as tmp:
+            code, main = os.path.join(tmp, "code"), os.path.join(tmp, "main")
+            allowed, denied = auditor_claude.reads([code, main], [repo, private])
+            # (each folder as given and as its real path: on a Mac the temporary folder's /var is /private/var)
+            named = {f"Read(/{x}/**)" for p in (code, main) for x in (os.path.abspath(p), os.path.realpath(p))}
+            self.assertEqual(set(allowed), named)
+            self.assertIn(f"Read(/{os.path.realpath(private)}/**)", denied)
+            home = os.path.realpath(os.path.expanduser("~"))
+            self.assertEqual("Read(~/**)" in denied, not os.path.realpath(tmp).startswith(home + os.sep))
+            with self.assertRaises(ValueError):
+                auditor_claude.reads([os.path.join(tmp, "a b")], [])   # (a folder a rule can't name: refused, not run)
+        p = auditor_claude.ClaudeCode()
+        with mock.patch.dict(os.environ, {"PLEXCACHE_AUDIT_CLAUDE": ""}):
+            with open(os.path.join(repo, "dev", "audit.toml"), "a") as fh:
+                fh.write('[auditors.claude-code]\ncommand = "sh -c touch-pwned"\n')
+            self.assertEqual(p.given(), ("claude", ""))   # (the repo's own command: never taken)
+            self.write(private, "rules.toml", '[auditors.claude-code]\ncommand = "sh -c touch-pwned"\n')
+            self.assertEqual(p.command(), [])
+            self.assertIn("isn't claude or an absolute path", p.found())
+            self.write(private, "rules.toml", f'[auditors.claude-code]\ncommand = "{sys.executable}"\n')
+            self.assertEqual(p.command(), [sys.executable])   # (an absolute path in the private rules: as given)
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_an_ai_auditors_copies_of_git_have_no_links(self):
+        """main's copy (and what's pushed) comes from git archive: a link committed there (to ~/.ssh, say) is left out,
+        as the working copy leaves links out, so nothing the auditor reads leads outside its copies."""
+        from dev import auditrun
+        repo, private, git = self.project()
+        os.symlink(os.path.expanduser("~"), os.path.join(repo, "home"))
+        os.symlink("/etc/hosts", os.path.join(repo, "hosts"))
+        git("add", "home", "hosts")
+        git("commit", "-qm", "links")
+        with tempfile.TemporaryDirectory() as into:
+            auditrun.extract(git("rev-parse", "HEAD"), into)
+            self.assertEqual(sorted(os.listdir(into)), ["a.py", "b.py"])
+            with tempfile.TemporaryDirectory() as code:
+                auditrun.snapshot(code)
+                self.assertNotIn("hosts", os.listdir(code))
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_the_audits_page_is_this_computers_alone(self):
+        import http.client
+        import threading
+
+        from dev import auditgui
+        repo, private, git = self.project()
+        self.audit_files(repo, private, "2026-11-01-1", "2026-11-01", git("rev-parse", "HEAD"), "full",
+                         extra='[[finding]]\nid = "F-2026-001"\ntitle = "t"\nseverity = "high"\nlines = ["a.py:1"]\ndetail = "d"\n'
+                               'status = "open"\nmain = "affected"\n')
+        self.write(private, "rules.toml", '[release]\naccept = ["human thoroughness<=3"]\n')
+        up = threading.Event()
+        box = {}
+
+        def ready(server, url, token):
+            box.update(server=server, port=server.server_port, token=token, url=url)
+            up.set()
+        t = threading.Thread(target=auditgui.serve, args=(auditgui.Data(),), kwargs={"open_browser": False, "ready": ready}, daemon=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            t.start()
+            self.assertTrue(up.wait(10))
+            try:
+                def ask(method, path, body=None, host=None, token=None, cookie=None, more=None):
+                    c = http.client.HTTPConnection("127.0.0.1", box["port"], timeout=30)
+                    c.request(method, path, body=json.dumps(body) if body is not None else None,
+                              headers={"Host": host or f"127.0.0.1:{box['port']}", "X-Audit-Token": box["token"] if token is None else token,
+                                       "Cookie": box.get("cookie", "") if cookie is None else cookie, **(more or {})})
+                    res = c.getresponse()
+                    box["headers"] = dict(res.getheaders())
+                    return res.status, res.read()
+                # the page and its token: for the browser that opened the address it printed (its one-time code) only
+                status, page = ask("GET", "/")
+                self.assertEqual(status, 403)   # (any other program that asks with the right Host: no page, no token)
+                self.assertNotIn(box["token"].encode(), page)
+                entry = "/?" + box["url"].split("?", 1)[1]
+                self.assertEqual(ask("GET", entry, host="evil.example:80")[0], 403)
+                status, _ = ask("GET", entry)
+                self.assertEqual((status, box["headers"]["Location"]), (303, "/"))
+                set_cookie = box["headers"]["Set-Cookie"]
+                self.assertIn("HttpOnly", set_cookie)
+                self.assertIn("SameSite=Strict", set_cookie)
+                box["cookie"] = set_cookie.split(";")[0]
+                self.assertEqual(ask("GET", entry, cookie="")[0], 403)   # (the code works once: not for another program after)
+                self.assertEqual(ask("GET", entry)[0], 303)              # (but the page's own browser, again, is let in)
+                status, page = ask("GET", "/")
+                self.assertEqual(status, 200)
+                self.assertIn(box["token"].encode(), page)
+                self.assertNotIn(b"/*THEME*/", page)
+                csp = box["headers"]["Content-Security-Policy"]
+                self.assertNotIn("unsafe-inline", csp)   # (only the page's own script and style: this response's nonce)
+                nonce = re.search(r"script-src 'nonce-([^']+)'", csp).group(1)
+                self.assertIn(f'<script nonce="{nonce}">'.encode(), page)
+                self.assertIn(f'<style nonce="{nonce}">'.encode(), page)
+                self.assertNotIn(b"<script>", page)
+                self.assertIn("frame-ancestors 'none'", csp)
+                self.assertEqual((box["headers"]["X-Frame-Options"], box["headers"]["X-Content-Type-Options"]), ("DENY", "nosniff"))
+                self.assertEqual(ask("GET", "/api/overview", cookie="")[0], 403)   # (the token alone isn't enough)
+                self.assertEqual(ask("GET", "/api/overview", more={"Sec-Fetch-Site": "same-site"})[0], 403)   # (another port's page)
+                self.assertEqual(ask("GET", "/", host="evil.example:80")[0], 403)   # (another site's name pointed here)
+                self.assertEqual(ask("GET", "/api/overview", token="wrong")[0], 403)
+                self.assertEqual(ask("POST", "/api/start", {"target": "full"}, token="")[0], 403)
+                status, body = ask("GET", "/api/overview")
+                got = json.loads(body)
+                self.assertEqual((status, got["audits"], got["private"]), (200, 1, True))
+                self.assertEqual(got["commit"]["app"], ["security/audits/2026-11-01-1.toml"])   # (waiting for you to commit)
+                status, body = ask("POST", "/api/finding", {"audit": "2026-11-01-1", "id": "F-2026-001", "status": "fixed", "fixed_in": "abc"})
+                self.assertEqual(status, 200, body)
+                self.assertEqual(ask("POST", "/api/finding", {"audit": "2026-11-01-1", "id": "F-2026-001", "status": "gone"})[0], 400)
+                findings = json.loads(ask("GET", "/api/findings")[1])
+                self.assertEqual((findings[0]["status"], findings[0]["fixed_in"]), ("fixed", "abc"))
+                bad = json.loads(ask("POST", "/api/rules", {"text": '[release]\naccept = ["human effort>=high"]\n'})[1])
+                self.assertEqual((bad["ok"], bad["problems"]), (False, ["accept entry 'human effort>=high' can't be read"]))
+                with open(os.path.join(private, "rules.toml")) as fh:
+                    self.assertIn("thoroughness<=3", fh.read())   # (refused: left as it was)
+                files = json.loads(ask("GET", "/api/explorer?kinds=partial")[1])["files"]
+                self.assertEqual({f["path"]: f["seen"] for f in files}, {"a.py": 0, "b.py": 0})   # (full audits toggled off)
+                rows = json.loads(ask("GET", "/api/file?path=a.py")[1])["rows"]
+                self.assertEqual([x["id"] for x in rows[0]["seen"]], ["2026-11-01-1"])
+                self.assertEqual(ask("GET", "/api/file?path=../secret")[0], 400)
+                opts = json.loads(ask("GET", "/api/options")[1])
+                self.assertEqual(opts["people"]["1"], "every line traced")
+                self.assertEqual(ask("POST", "/api/start", {"target": "chosen", "paths": ["b.py"], "name": "", "thoroughness": 3})[0], 400)
+                status, body = ask("POST", "/api/start", {"target": "chosen", "paths": ["b.py"], "name": "Dr Sass", "thoroughness": 3})
+                self.assertEqual(status, 200, body)
+                rid = json.loads(body)["id"]
+                status, body = ask("POST", "/api/draft", {"id": rid, "finding": {"title": "x", "severity": "low", "lines": ["b.py:1"], "main": "affected"}})
+                self.assertEqual((status, len(json.loads(body)["draft"])), (200, 1), body)
+                runs = json.loads(ask("GET", "/api/runs")[1])
+                self.assertEqual((runs[0]["state"], runs[0]["how"], runs[0]["auditor"]), ("open", "read closely", "human:dr-sass"))
+                done = json.loads(ask("POST", "/api/finish", {"id": rid})[1])
+                self.assertEqual(done["state"], "done", done)
+                marked = json.loads(ask("POST", "/api/mark", {"target": "chosen", "paths": ["a.py"], "name": "Sam", "thoroughness": 5, "findings": []})[1])
+                self.assertEqual(marked["state"], "done", marked)
+            finally:
+                box["server"].shutdown()
+                t.join(30)
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_the_public_repo_alone_names_no_auditor(self):
+        import tomllib
+
+        from dev import audit, auditgui, auditrun
+        repo, private, git = self.project()
+        self.audit_files(repo, private, "2026-11-01-1", "2026-11-01", git("rev-parse", "HEAD"), "partial", ["b.py"], auditor="human:sam")
+        self.write(private, "rules.toml", '[auditors.claude-code]\nmodels = ["opus-5.5"]\n')
+        self.fake_claude("No findings.")
+        self.assertEqual(auditgui.Data().options()["plugins"][0]["auditors"], ["opus-5.5"])   # (offered from the private rules)
+        with open(audit.CONFIG, "rb") as fh:
+            self.assertNotIn("auditors", tomllib.load(fh))
+        with mock.patch.dict(os.environ, {"PLEXCACHE_AUDITS": os.path.join(repo, "nowhere")}):
+            got = auditgui.Data().overview()   # (anyone's clone: coverage all the same)
+            self.assertEqual((got["private"], got["audits"], got["seen"], got["lines"]), (False, 1, 20, 24))
+            with self.assertRaises(ValueError):
+                auditrun.Runner().start("full", [], auditrun.person("Sam"), 3)   # (audits need the private repo)
+        for name in os.listdir(os.path.join(repo, "security", "audits")):
+            with open(os.path.join(repo, "security", "audits", name)) as fh:
+                self.assertNotIn("sam", fh.read())
+
+    def test_cvss_scores_as_the_specification_does(self):
+        from dev import audit
+        for vector, want in [("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", (9.8, "critical")),
+                             ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", (10.0, "critical")),
+                             ("CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N", (5.5, "medium")),
+                             ("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N", (3.1, "low")),
+                             ("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N", (6.4, "medium")),
+                             ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", (7.5, "high")),
+                             ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N", (0.0, "info"))]:
+            self.assertEqual(audit.cvss(vector), want, vector)
+        for bad in ("AV:N/AC:L", "CVSS:3.1/AV:X/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H"):
+            with self.assertRaises(ValueError):
+                audit.cvss(bad)
+        f = {"id": "F-2026-001", "title": "t", "lines": ["a.py:1"], "detail": "d", "status": "open", "main": "affected",
+             "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N", "severity": "low"}
+        rec = {"id": "2026-11-01-1", "auditor": "human:sam", "thoroughness": 3, "finding": [f]}
+        self.assertIn("F-2026-001: severity 'low' isn't its CVSS vector's (high)", audit.problems(rec, "private"))
+        audit.scored(f)
+        self.assertEqual((f["severity"], audit.problems(rec, "private")), ("high", []))
+        hard = {**f, "type": "hardening"}
+        rec["finding"] = [hard]
+        self.assertIn("F-2026-001: a hardening finding has no CVSS vector (it isn't exploitable as it is)", audit.problems(rec, "private"))
+        hard.pop("cvss")
+        self.assertEqual(audit.problems(rec, "private"), [])
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_a_findings_code_is_followed_and_hardening_never_blocks(self):
+        from dev import audit, auditgui, auditrun
+        repo, private, git = self.project()
+        run = auditrun.Runner()
+        r = run.start("full", [], auditrun.person("Sam"), 2)
+        run.write_finding(r.id, {"title": "Login trusts its input", "type": "vulnerability", "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+                                 "lines": ["a.py:1-2"], "main": "affected"})
+        run.write_finding(r.id, {"title": "Compare in constant time", "type": "hardening", "severity": "high", "lines": ["b.py:3-4"], "main": "affected"})
+        with self.assertRaises(ValueError):
+            run.write_finding(r.id, {"title": "bad", "cvss": "CVSS:3.1/AV:Q", "lines": ["a.py:1"]})
+        done = run.finish(r.id)
+        self.assertEqual(done.state, "done", done.error)
+        audits = audit.load()[0]
+        vuln, hard = audits[0].findings
+        self.assertEqual((vuln["severity"], vuln["type"], hard["severity"], len(vuln["prints"]), len(hard["prints"])), ("critical", "vulnerability", "high", 2, 2))
+        state = lambda: [audit.code_state(f, audits[0]) for f in audit.load()[0][0].findings]
+        self.assertEqual(state(), ["there", "there"])
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return check(user)\n\n\ndef other():\n    return 2\n")   # (the fix, not committed)
+        self.assertEqual(state(), ["gone", "there"])   # (both its lines changed: line 1's neighbour did)
+        with open(os.path.join(repo, "b.py"), "w") as fh:
+            fh.write("".join(f"x{i} = {i}\n" for i in range(20)).replace("x4 = 4", "x4 = 5"))
+        self.assertEqual(state(), ["gone", "changed"])
+        got = {f["id"]: f for f in auditgui.Data().findings()}
+        self.assertEqual(sorted((f["code"], f["score"]) for f in got.values()), [("changed", None), ("gone", 9.1)])
+        check = audit.findings_check(audit.load()[0])
+        self.assertEqual(check.said()[:2], ["1 open finding", "1 to confirm fixed (their code is gone)"])
+        rule = {"accept": ["human"], "max_age_days": 180, "soak_days": 0, "block_open": "high"}
+        rel = audit.release_check(audit.measure(audit.load()[0]), audit.load()[0], True, rule, time.time(), release=False)
+        msgs = [x.message for x in rel.findings or []]
+        self.assertTrue(any("is open at critical 9.1" in m for m in msgs), msgs)
+        self.assertFalse(any("hardening" in m for m in msgs), msgs)   # (a hardening finding never holds up a release)
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return user\n\n\ndef other():\n    return 2\n")   # (undone: there again)
+        self.assertEqual(state()[0], "there")
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_a_finding_keeps_the_tests_that_guard_it(self):
+        """Copy issue asks whoever fixes it for a report; pasted back, each finding keeps the tests that would fail if it
+        came back (only tests the project has), its status as it was; and the block says if one of them is removed."""
+        from dev import audit, auditgui
+        repo, private, git = self.project()
+        self.write(os.path.join(repo, "tests"), "test_app.py", "import unittest\n\n\nclass LoginTests(unittest.TestCase):\n"
+                   "    def test_login_checks(self):\n        pass\n")
+        self.audit_files(repo, private, "2026-11-01-1", "2026-11-01", git("rev-parse", "HEAD"), "full",
+                         extra='[[finding]]\nid = "F-2026-001"\ntitle = "Login trusts its input"\nseverity = "high"\nlines = ["a.py:1"]\n'
+                               'detail = "d"\nstatus = "open"\nmain = "affected"\n')
+        self.assertEqual(audit.test_names(), {"LoginTests.test_login_checks"})
+        data = auditgui.Data()
+        text = data.brief({"ids": "F-2026-001"})["text"]
+        self.assertIn("[[fix]]", text)   # (the fixer is asked for its report)
+        with self.assertRaises(ValueError):
+            data.report({"text": "nothing to see"})
+        got = data.report({"text": "Done.\n```toml\n[[fix]]\nid = \"F-2026-001\"\nstatus = \"fixed\"\n"
+                                   "tests = [\"tests/test_app.py::LoginTests.test_login_checks\", \"LoginTests.test_nope\"]\ndetail = \"checks it\"\n"
+                                   "\n[[fix]]\nid = \"F-2026-999\"\n```\n"})
+        self.assertEqual(got, {"done": ["F-2026-001"], "unknown": ["F-2026-999"], "missing": ["F-2026-001: LoginTests.test_nope"]})
+        f = data.findings()[0]
+        self.assertEqual((f["status"], f["tests"], f["reported"], f["lost"]), ("open", ["LoginTests.test_login_checks"], "fixed", []))
+        self.assertIn("fix reported (fixed), guarded by LoginTests.test_login_checks: checks it", f["checks"][-1])
+        self.assertIn("- Tests that guard it: LoginTests.test_login_checks", data.brief({"ids": "F-2026-001"})["text"])
+        self.assertEqual(audit.problems({"id": "2026-11-01-1", "auditor": "a", "thoroughness": 3, "finding": [
+            {"id": "F-2026-001", "title": "t", "lines": ["a.py:1"], "detail": "d", "severity": "low", "status": "open", "main": "affected",
+             "tests": ["not a test"]}]}, "private"), ["F-2026-001: tests aren't a list of Class.test_name"])
+        data.finding({"audit": "2026-11-01-1", "id": "F-2026-001", "tests": "LoginTests.test_login_checks, LoginTests.test_gone"})
+        self.write(os.path.join(repo, "tests"), "test_app.py", "import unittest\n")   # (both removed)
+        said = [x.message for x in audit.findings_check(audit.load()[0]).findings or []]
+        self.assertIn("F-2026-001's guarding tests LoginTests.test_login_checks, LoginTests.test_gone are gone from tests/", said)
+        self.assertEqual(data.findings()[0]["lost"], ["LoginTests.test_login_checks", "LoginTests.test_gone"])
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_a_fix_is_found_in_git_and_open_findings_can_be_rechecked_or_copied(self):
+
+        from dev import audit, auditgui, auditrun
+        repo, private, git = self.project()
+        git("branch", "up")
+        git("branch", "--set-upstream-to=up")   # (an upstream to push to: a branch here)
+        run = auditrun.Runner()
+        r = run.start("full", [], auditrun.person("Sam"), 2)
+        run.write_finding(r.id, {"title": "Login trusts its input", "cvss": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+                                 "lines": ["a.py:1-2"], "main": "affected", "detail": "No check."})
+        run.write_finding(r.id, {"title": "Not real", "type": "hardening", "severity": "low", "lines": ["b.py:5"], "main": "affected"})
+        self.assertEqual(run.finish(r.id).state, "done")
+        first = lambda: audit.load()[0][0]
+        self.assertEqual(audit.target_scope("open", [], audit.load()[0])[1], ["a.py:login", "b.py"])
+        text = audit.brief([(first(), first().findings[0])])
+        for want in ("## F-", "Login trusts its input", "CVSS 3.1 9.1 (critical)", "Where it is now: a.py:1-2", "No check."):
+            self.assertIn(want, text)
+        self.assertEqual(audit.fix_where(first().findings[0], first()), ("not fixed", ""))
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("\n\ndef login(user):\n    return user\n\n\ndef other():\n    return 2\n")   # (moved down: not changed)
+        self.assertEqual(audit.locate(first().findings[0], first()), ["a.py:3-4"])
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return check(user)\n\n\ndef other():\n    return 2\n")
+        self.assertEqual(audit.fix_where(first().findings[0], first()), ("working copy", ""))
+        git("commit", "-qam", "the fix")
+        fixed = git("rev-parse", "HEAD")
+        self.assertEqual(audit.fix_where(first().findings[0], first()), ("committed", fixed))
+        data = auditgui.Data()
+        got = data.confirm({"audit": first().id, "id": first().findings[0]["id"]})
+        self.assertEqual(got, {"where": "committed", "commit": fixed})
+        f = first().findings[0]
+        self.assertEqual((f["status"], f["fixed_in"]), ("fixed", fixed))
+        self.assertIn("marked fixed by hand (committed)", f["checks"][0])
+        self.assertIn("is fixed in a commit that isn't pushed yet", " ".join(x.message for x in audit.findings_check(audit.load()[0]).findings or []))
+        git("branch", "-f", "up", "HEAD")   # (pushed)
+        self.assertEqual(audit.fix_where(f, first())[0], "pushed")
+        data.finding({"audit": first().id, "id": first().findings[1]["id"], "status": "false-positive", "note": "checked: fine"})
+        data.finding({"audit": first().id, "id": first().findings[0]["id"], "cve": "cve-2026-12345"})
+        self.assertEqual(first().findings[0]["cve"], "CVE-2026-12345")
+        self.assertIn("CVE-2026-12345", audit.brief([(first(), first().findings[0])]))
+        with self.assertRaises(ValueError):
+            data.finding({"audit": first().id, "id": first().findings[0]["id"], "cve": "CVE-26-1"})
+        self.assertEqual(sorted(x["status"] for x in data.findings()), ["false-positive", "fixed"])
+        with self.assertRaises(ValueError):
+            data.brief({"ids": "F-1999-999"})
+
+    @unittest.skipUnless(shutil.which("git"), "no git here")
+    def test_an_ai_auditor_rechecks_the_open_findings(self):
+        import tomllib
+
+        from dev import audit, auditrun
+        repo, private, git = self.project()
+        self.write(private, "PROMPT.md", "---\nAudit <commit>, <full | partial>:\n<scope list, for a partial audit>\n")
+        git("branch", "up")
+        git("branch", "--set-upstream-to=up")
+        run = auditrun.Runner()
+        r = run.start("full", [], auditrun.person("Sam"), 2)
+        run.write_finding(r.id, {"title": "Login trusts its input", "severity": "high", "lines": ["a.py:1-2"], "main": "affected"})
+        run.write_finding(r.id, {"title": "Other", "severity": "low", "lines": ["b.py:5"], "main": "affected"})
+        self.assertEqual(run.finish(r.id).state, "done")
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("def login(user):\n    return check(user)\n\n\ndef other():\n    return 2\n")
+        git("commit", "-qam", "the fix")
+        git("branch", "-f", "up", "HEAD")
+        ids = [f["id"] for f in audit.load()[0][0].findings]
+        asked = self.fake_claude("```toml\n[[recheck]]\nid = \"%s\"\nworking = \"fixed\"\npushed = \"fixed\"\nmain = \"affected\"\n"
+                                 "detail = \"login checks now\"\n\n[[recheck]]\nid = \"%s\"\nworking = \"present\"\npushed = \"present\"\ncvss = \"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N\"\n```\n" % tuple(ids))
+        got = run.start("open", [], "opus-5.5", 3, wait=True)
+        got = auditrun.load_run(got.id)
+        self.assertEqual(got.state, "done", got.error)
+        self.assertEqual(got.recheck, ids)
+        with open(asked) as fh:
+            call = json.load(fh)
+        self.assertIn("## Re-check the open findings", call["prompt"])
+        self.assertIn(ids[0], call["prompt"])
+        self.assertEqual(call["args"].count("--add-dir"), 2)   # (main's, and the branch as pushed)
+        with open(os.path.join(private, "audits", f"{audit.load()[0][0].id}.toml"), "rb") as fh:
+            f1, f2 = tomllib.load(fh)["finding"]
+        self.assertEqual((f1["status"], f1["fixed_in"]), ("fixed", git("rev-parse", "HEAD")))
+        self.assertIn("fixed and pushed: login checks now", f1["checks"][-1])
+        self.assertEqual(f2["status"], "open")
+        self.assertIn("still present", f2["checks"][-1])
+        self.assertEqual((f2["cvss"], f2["severity"], f1["main_by"]), ("CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N", "medium", f"audit {got.audit_id}"))
+        # (one fixed only in the working copy is closed too, as fixed and not pushed yet: no commit until it's pushed)
+        with open(os.path.join(repo, "b.py"), "w") as fh:
+            fh.write("".join(f"x{i} = {i if i != 4 else 'fixed'}\n" for i in range(20)))
+        self.write(os.path.join(repo, "tests"), "test_b.py", "import unittest\n\n\nclass BTests(unittest.TestCase):\n    def test_x4(self):\n        pass\n")
+        self.fake_claude("```toml\n[[recheck]]\nid = \"%s\"\nworking = \"fixed\"\npushed = \"present\"\nmain = \"affected\"\n"
+                         "tests = [\"BTests.test_x4\", \"BTests.test_made_up\"]\n```\n" % ids[1])
+        again = auditrun.load_run(run.start("open", [], "opus-5.5", 3, wait=True).id)
+        self.assertEqual(again.state, "done", again.error)
+        self.assertEqual(again.recheck, [ids[1]])
+        with open(os.path.join(private, "audits", f"{audit.load()[0][0].id}.toml"), "rb") as fh:
+            f2 = tomllib.load(fh)["finding"][1]
+        self.assertEqual((f2["status"], f2.get("fixed_in", "")), ("fixed", ""))
+        self.assertIn("fixed in the working copy, not pushed yet: closed", f2["checks"][-1])
+        self.assertEqual(f2["tests"], ["BTests.test_x4"])   # (the auditor's, that the project has)
+        self.assertEqual(audit.fix_where(f2, audit.load()[0][0])[0], "working copy")
+
+    def test_only_an_ai_auditors_own_plugin_names_it(self):
+        """The audit tools are a person's by default: an AI auditor is a plugin (dev/auditor_*.py), named nowhere else."""
+        words = re.compile(r"claude|anthropic|opus|fable|sonnet|haiku|\bAI-?(run|done|audit)", re.I)
+        for rel in ("dev/audit.py", "dev/auditrun.py", "dev/auditgui.py", "dev/auditgui.html", "dev/audit.toml"):
+            with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+                hits = [n for n, line in enumerate(fh, 1) if words.search(line)]
+            self.assertEqual(hits, [], rel)
 
 class ToolsTests(unittest.TestCase):
     """The Tools pages' tools (tools/): Merge Duplicates, Duplicate Versions, Organize Folders — and
@@ -20408,11 +21122,8 @@ class PeerLinkEdgeTests(unittest.TestCase):
         with mock.patch("plexcache.peers.read", return_value={"only": {"marker": {"name": "Only", "at": 3, "plex": "plexB"}, "by_library": {"1": {"folders": None}}}}):
             self.assertEqual(link._facts_marker()["name"], "Only")                                   # (the marker of the one whose Plex is this mirror)
         link.paired["instance"] = b.mirror_link.instance()
-        # this side's files of a library, for the other; not ready yet: asked for first (not read here: a read in the background
-        # would land on the data set below)
-        with mock.patch.object(a.libdata, "fast_track") as ft:
-            self.assertEqual(a.peerlinks.local_files("1"), {"ready": False, "files": []})
-        ft.assert_called_once_with("1")
+        # this side's files of a library, for the other
+        self.assertEqual(a.peerlinks.local_files("1"), {"ready": False, "files": []})
         d = a.libdata.data("1")
         d.records_at = d.files_at = 1.0
         d.roots, d.files, d.unlisted = [("/plex/Movies", "/local/Movies")], [{"local": "/local/Movies/a.mkv", "size": 1, "mtime": 2}], [{"local": "/elsewhere/x.mkv"}, {"local": "/local/Movies/gone.mkv", "missing": True}]
