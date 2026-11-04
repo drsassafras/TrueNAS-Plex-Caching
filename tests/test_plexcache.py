@@ -20408,8 +20408,11 @@ class PeerLinkEdgeTests(unittest.TestCase):
         with mock.patch("plexcache.peers.read", return_value={"only": {"marker": {"name": "Only", "at": 3, "plex": "plexB"}, "by_library": {"1": {"folders": None}}}}):
             self.assertEqual(link._facts_marker()["name"], "Only")                                   # (the marker of the one whose Plex is this mirror)
         link.paired["instance"] = b.mirror_link.instance()
-        # this side's files of a library, for the other
-        self.assertEqual(a.peerlinks.local_files("1"), {"ready": False, "files": []})
+        # this side's files of a library, for the other; not ready yet: asked for first (not read here: a read in the background
+        # would land on the data set below)
+        with mock.patch.object(a.libdata, "fast_track") as ft:
+            self.assertEqual(a.peerlinks.local_files("1"), {"ready": False, "files": []})
+        ft.assert_called_once_with("1")
         d = a.libdata.data("1")
         d.records_at = d.files_at = 1.0
         d.roots, d.files, d.unlisted = [("/plex/Movies", "/local/Movies")], [{"local": "/local/Movies/a.mkv", "size": 1, "mtime": 2}], [{"local": "/elsewhere/x.mkv"}, {"local": "/local/Movies/gone.mkv", "missing": True}]
